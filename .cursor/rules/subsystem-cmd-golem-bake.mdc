@@ -1,0 +1,9 @@
+---
+description: golem CLI — thin entrypoint for `golem-bake`.
+globs: cmd/golem-bake/**/*.go
+alwaysApply: false
+---
+
+# `cmd/golem-bake`
+
+The **`golem` binary**: parses args and calls `codegen.Bake` with the current working directory as the project root. No schema logic, templates, or runtime code—keep it minimal. New commands belong here with a small `main` and delegation to the right package.

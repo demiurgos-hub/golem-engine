@@ -1,0 +1,24 @@
+{
+  "name": "golem-engine",
+  "version": "0.2.0",
+  "description": "JavaScript/TypeScript client runtime for Golem Engine: GameClient, protobuf codec, and helpers",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && node --test"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}

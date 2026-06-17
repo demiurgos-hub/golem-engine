@@ -1,0 +1,30 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build Bake Tool",
+      "type": "shell",
+      "command": "go build -o golem-bake.exe ./cmd/golem-bake",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared"
+      },
+      "problemMatcher": "$go"
+    },
+    {
+      "label": "Build Unity Package",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File scripts/package-golem-unity-upm.ps1",
+      "group": "build",
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

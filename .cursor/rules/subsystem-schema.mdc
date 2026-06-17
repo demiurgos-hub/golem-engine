@@ -1,0 +1,9 @@
+---
+description: schema — golem.yaml and entity YAML loading, template DTOs, naming helpers.
+globs: schema/**/*.go
+alwaysApply: false
+---
+
+# `schema`
+
+**Config, entity, command, and world data definitions:** reads `golem.yaml` (`LoadConfig`), per-entity `.yaml` under the configured `entity_schema` dir (`LoadSchemas`), per-command `.yaml` under the configured `command_schema` dir (`LoadCommands`), and per-world-type `.yaml` under the configured world dir (`LoadWorldSchemas`). Builds `EntityData`, `VarInfo`, `CommandData`, `CommandFieldInfo`, `WorldTypeData`, `WorldFieldInfo`, `WorldUpdateField`, `ProtoTemplateData`, and `SharedData` for generators. Holds **naming helpers** (`ToSnakeCase`, etc.) and **type maps** (proto → Go/TS). Does **not** embed templates, write generated files, or register integrations—that is `codegen/`. Depends only on stdlib + YAML.

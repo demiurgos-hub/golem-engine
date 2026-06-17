@@ -1,0 +1,20 @@
+---
+description: bake pipeline — schema/codegen handoff and generator parity checks.
+globs:
+  - schema/**/*.go
+  - codegen/**/*.go
+  - codegen/**/*.tmpl
+alwaysApply: false
+---
+
+# `bake` pipeline
+
+When a schema-driven feature changes, trace it through schema loading, validation, template DTOs, proto generation, Go generation, JS generation, and any affected templates.
+
+If a new field, target, branch, helper, import, or generated method is added in one target, check the parallel Go, JS, proto, and template paths for the same behavior.
+
+Prefer focused regression tests that inspect generated output for emitted names, imports, helper functions, method shapes, tags, and format strings; do not rely only on helper-level logic tests.
+
+Be careful with nested formatting in generators: code that emits `fmt` strings or TS/Go source can need a different level of escaping than normal application code.
+
+After schema or codegen changes that affect bake output, verify `go build ./cmd/golem-bake` and targeted generator tests. For cross-target changes, confirm both Go and JS generated outputs still compile.

@@ -1,0 +1,56 @@
+# Binaries and build output
+/bin/
+/dist/
+/build/
+/out/
+/artifacts/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.a
+
+# Go tooling
+/vendor/
+coverage.*
+*.coverprofile
+cpu.prof
+mem.prof
+*.pprof
+go.work
+go.work.sum
+
+# Logs and runtime
+*.log
+logs/
+
+# Editors and IDEs
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+*.swp
+*.swo
+*~
+
+# OS junk
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+
+# Node (golem-js)
+node_modules/
+
+# Local documentation (e.g. Docusaurus under docs/public)
+docs/
+
+# Debug and misc
+*.tmp
+*.temp
+.cache/

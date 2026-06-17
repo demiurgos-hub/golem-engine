@@ -1,0 +1,15 @@
+---
+description: golem/interest — Spatial hash grid and field-of-interest manager.
+globs: golem/interest/**/*.go
+alwaysApply: false
+---
+
+# `golem/interest`
+
+**Spatial interest management:** a `Grid` (spatial hash with configurable cell size, Insert/Remove/Move/Query) and a `Manager` that tracks per-session fields of interest. `FOI` describes a circular area anchored to an entity with a radius and hysteresis margin. `Diff` holds per-session enter/stay/exit entity ID lists computed each tick.
+
+**`Manager`** owns the `Grid` and per-session known sets. Key methods: `AssignFOI(sessionID, entityID, radius, margin)` / `RemoveFOI(sessionID)` for lifecycle; `UpdateGrid(registry)` synchronises the grid with all live entities (inserts new, removes stale, moves changed); `ComputeDiffs()` returns a `map[sessionID]*Diff` by querying each session's FOI against the grid, applying hysteresis (enter at `Radius`, exit at `Radius+Margin`), and diffing against the previous known set. Global entities (`IsGlobal() == true`) bypass spatial checks and are always included in every session's known set.
+
+**Not thread-safe.** All methods are called exclusively from the game tick goroutine (single-writer). The parent **`golem`** package creates and drives the Manager inside `runLoop`; consumers interact via `Server.AssignFOI` / `Server.RemoveFOI`.
+
+Depends on **`golem/registry`** for the `Entity` interface and `Registry.All()`. Does **not** import `golem`, `golem/net`, or `golem/world`.

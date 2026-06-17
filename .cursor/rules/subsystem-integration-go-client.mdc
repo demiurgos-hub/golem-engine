@@ -1,0 +1,24 @@
+---
+description: integration/go-client - Go client runtime and generated client protocol.
+globs:
+  - golem-go-client/**/*.go
+  - codegen/templates/go_client/**/*.tmpl
+  - codegen/go_client*.go
+alwaysApply: false
+---
+
+# `integration/go-client`
+
+`golem-go-client` publishes the native Go client runtime: `GameClient`, WebSocket/WebTransport channels, generated-manager contracts, and the protobuf helper package that generated Go clients import. It is a client runtime and must not import or duplicate the `golem.Server` game loop.
+
+The `go-client` codegen integration emits generated Go in consumer projects from `codegen/templates/go_client/` plus lightweight protobuf codecs from `codegen/go_proto.go`. Generated files are gofmt'd; there is no compile finalizer like `js-client`.
+
+Keep transport constants and framing aligned with `golem/net` and `golem-js`: reliable frame cap `32000`, WebTransport datagram cap `1200`, datagram header/ACK mask sizes, lane IDs (`1` unreliable, `2` reliable-unordered, `3` reliable-ordered, `4` state-aware datagram delivery), and control frames `0x00 'OGS' 0x01/0x02`.
+
+Public state update modes are only `stream` and `datagram`. Treat server names such as `datagramLaneEventualState`, `SendEventualState`, and `EventualStateDatagramPayloads` as internal wire/protocol details of the datagram mode, not a third public lane.
+
+`GameClient` treats stream `ServerMessage` frames as wrapped protobuf payloads, while compact state datagrams are framed state records and go directly through `EntityManager.ApplyCompactUpdate`. Keep world updates and server events on the reliable stream path.
+
+Generated managers own client-side state: revisions reject stale updates; full state spawns/registers lifecycle hooks; deltas update existing entities only; collection/map deltas use nil as absent and non-nil empty values as explicit clears.
+
+When changing Go client generated shapes, update `codegen` tests and runtime tests under `golem-go-client/`; generated protocol changes should stay conceptually parallel with JS and C# client paths.

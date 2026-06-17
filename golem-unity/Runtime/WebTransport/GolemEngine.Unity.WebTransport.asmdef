@@ -1,0 +1,17 @@
+{
+  "name": "GolemEngine.Unity.WebTransport",
+  "rootNamespace": "GolemEngine.Unity",
+  "references": [
+    "GolemEngine.Unity",
+    "Demiurgos.WebTransport.Client.Unity"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

@@ -1,0 +1,13 @@
+---
+description: golem/host — optional process, sidecar HTTP, and browser SPA hosting helpers.
+globs: golem/host/**/*.go
+alwaysApply: false
+---
+
+# `golem/host`
+
+**Hosting helpers:** `Run` is optional scaffolding for binaries that run a `golem.Server` plus a caller-owned sidecar `net/http.Server`. It owns signal cancellation, `Server.WaitReady`, first-error propagation, graceful sidecar shutdown, and HTTP TLS cert/key pair validation. It must not own app policy such as DB setup, auth, route definitions, gameplay systems, collision/nav configuration, or entity spawning.
+
+**Static SPA serving:** `SPAHandler` serves a configured API prefix first, then static assets from either disk or an `fs.FS`, with `index.html` fallback for browser client routes. Disk assets can override embedded assets for local iteration.
+
+**Boundaries:** `golem/host` may import `golem` and standard-library HTTP/FS/process packages. Keep simulation, networking protocols, generated-schema knowledge, and debug/profiling helpers out of this package.

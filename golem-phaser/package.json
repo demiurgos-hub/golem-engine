@@ -1,0 +1,29 @@
+{
+  "name": "golem-phaser",
+  "version": "0.1.0",
+  "description": "Phaser 3 integration for Golem Engine: GameScene base class and Tiled tilemap helpers",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "peerDependencies": {
+    "golem-engine": ">=0.2.0",
+    "phaser": ">=3.60.0"
+  },
+  "devDependencies": {
+    "golem-engine": "file:../golem-js",
+    "phaser": "^3.88.2",
+    "typescript": "^5.8.0"
+  }
+}

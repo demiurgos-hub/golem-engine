@@ -1,0 +1,21 @@
+export { PbWriter, PbReader } from "./codec.js";
+export {
+  GameClient,
+  createChannel,
+  unwrapServerMessage,
+  type GameClientOptions,
+  type ConnectOptions,
+  type DisconnectInfo,
+  type EntityManagerLike,
+  type EntityLifecycle,
+  type WorldManagerLike,
+  type EventManagerLike,
+  type ReliableMessageChannel,
+  type ReliableOrderedMessageChannel,
+  type ReliableUnorderedMessageChannel,
+  type ServerMessage,
+  type TransportKind,
+  type UnreliableMessageChannel,
+  type WebTransportCertificateHash,
+  type WebTransportConnectOptions,
+} from "./client.js";

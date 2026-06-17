@@ -1,0 +1,19 @@
+---
+description: golem/snapshot — non-blocking entity snapshot save/load with binary-compatibility fingerprint validation.
+globs: golem/snapshot/**/*.go, golem/snapshot_api.go
+alwaysApply: false
+---
+
+# `golem/snapshot`
+
+**Non-blocking entity snapshot save and load.** `Save(entities []registry.Entity, fingerprint, path string) <-chan error` iterates entities, skips those where `IsPersistent()` returns false (via the `Persister` interface), calls `FullUpdate()` on each survivor, encodes a binary file in memory, then writes atomically via a `.tmp` rename—all in a background goroutine; the channel receives exactly one value (nil or error). `Load(path, expectedFingerprint string) ([]Record, error)` validates magic bytes (`Golem\x01`), file format version (`uint32 = 1`), and the stored schema fingerprint; returns `ErrFingerprintMismatch` (sentinel error) when the fingerprint differs so callers can fail fast before touching entity state. `Record` holds `EntityID int64`, `TypeName string`, and `StateData []byte` (raw `FullUpdate()` bytes, proto-encoded `*XState`).
+
+**File format** (sequential, no padding): 4-byte magic `O G S 0x01` · `uint32` version · `int64` Unix nanosecond timestamp (informational) · length-prefixed `string` fingerprint · `uint32` record count · per record: `int64` entity ID · length-prefixed `string` type name · length-prefixed `bytes` state data. All multi-byte integers use the `golem/pb` wire helpers (`Writer`/`Reader`).
+
+**`Persister` interface** (`IsPersistent() bool`): implemented by generated `Synced*` types when `persistent:` is set in the entity schema. Entities not implementing `Persister` default to persistent (safe). `IsPersistent()` is generated in `server.go.tmpl`.
+
+**Integration with codegen:** `codegen.ComputeSchemaFingerprint` produces the SHA-256 fingerprint wired into `SharedData.Fingerprint` and emitted as `const SchemaFingerprint` in `shared.go.tmpl`. The fingerprint encodes only **entity type names** and the **(tag → protoType) mapping** per variable—variable names and sync modes are excluded. This means renaming a variable, adding/removing variables, or changing sync/persistent settings does NOT change the fingerprint; only reassigning a tag number, changing a variable's type, or renaming an entity type will. The generated `RestoreEntity(rec snapshot.Record) (golem.Entity, error)` in `shared.go.tmpl` switches on `rec.TypeName`, constructs a zero entity, calls the generated `ApplyState(*XState)` method (symmetric inverse of `FullUpdate`), and returns the live entity. Generated `Register{Name}Wrapper(func(*Synced{Name}) golem.Entity)` hooks can override restore-time return values per entity type; wrappers should be registered during startup or `init`, before `LoadSnapshot` runs. `ApplyState` sets all fields from the state proto and clears dirty bits. Pass `synced.SchemaFingerprint` to both `SaveSnapshot` and `Load`.
+
+**Convenience methods on `golem.Server`:** `Server.SaveSnapshot(fingerprint, path string) <-chan error` (in `golem/snapshot_api.go`) delegates to `snapshot.Save(s.reg.All(), fingerprint, path)`. `Server.LoadSnapshot(path, fingerprint string, restore func(snapshot.Record) (Entity, error)) error` calls `snapshot.Load`, iterates records, calls the provided restore function (pass the generated `synced.RestoreEntity`), calls `s.CreateEntity` for each, silently skips records whose type the restore function does not recognise, and advances `s.SetEntityIDCounter` to the highest restored entity ID.
+
+**Boundaries:** `golem/snapshot` imports `golem/registry` (for `Entity`) and `golem/pb` (for encoding). It does **not** import `golem` (loop/API)—that import lives only in `golem/snapshot_api.go`. `golem/snapshot` does **not** import `codegen` or `schema`; fingerprint and `RestoreEntity` belong to generated code in the consumer package.

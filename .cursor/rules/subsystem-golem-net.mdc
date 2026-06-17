@@ -1,0 +1,30 @@
+---
+description: golem/net — integrated WebSocket/WebTransport networking, session management, batching, snapshots, and datagrams.
+globs: golem/net/**/*.go
+alwaysApply: false
+---
+
+# `golem/net`
+
+**Networking:** `Listener` owns the active integrated transport selected by `Config.Transport`: WebSocket (`/ws` by default) or WebTransport (`/wt` by default). It manages per-client `Session`s, snapshots, direct sends, broadcast helpers, optional static/map file serving, and WebTransport datagrams. Imports **`golem/registry`** for entity snapshots; does **not** import `golem/` (loop/Server). The parent **`golem`** package normally creates and owns the `Listener`, but callers can mount it on custom servers.
+
+**Transport boundary:** `reliableMessageChannel` is the transport-neutral reliable stream lane used by `Session.writeBatch`. `datagramChannel` is the raw WebTransport datagram substrate. `Session` owns the datagram reliability protocol on top of that substrate, including ACK packets, resend state, and ordered delivery for reliable datagram lanes. The datagram protocol header now includes a fixed 128-bit selective-ACK field, so payload budgets in `payload.go` and `golem-js/src/client.ts` must stay aligned with the shared header size.
+
+**Reliable batching:** `SendBatch` / `BroadcastBatch` queue one reliable batch per session, which keeps channel pressure low even when many entities update in one tick. WebSocket coalesces raw logical frames into ordered binary messages targeting `32000` bytes each. WebTransport coalesces length-prefixed logical frames into ordered writes on one reliable stream using the same chunk target. `maxReliableMessageBytes` applies per logical frame, not per transport write.
+
+**Datagram lanes:** WebTransport now has three logical datagram lanes:
+- raw `unreliable` datagrams exposed through `OnDatagram` and `SendUnreliable`
+- `reliable-unordered` datagrams exposed through dedicated listener/server hooks and send APIs
+- `reliable-ordered` datagrams exposed through dedicated listener/server hooks and send APIs
+
+Reliable datagrams are for small discrete messages such as explicit command/custom payloads. Automatic incremental entity replication uses the parent `golem.Server` `StateUpdateLaneDatagram` path by default, which sends compact state records on eventual-state datagrams. Snapshots, world data, server events, spawn/removal traffic, and oversized or full-state payloads remain on the reliable stream path. `StateUpdateLaneStream` keeps incremental entity replication on the reliable stream instead.
+
+**Scheduling and slow clients:** `Session` no longer multiplexes all outbound work through one FIFO. It keeps separate stream/unreliable/reliable-datagram queues, prioritizes ACK control work first, then fresh unreliable datagrams, then reliable ordered/unordered datagrams, and finally stream writes. Reliable datagrams now drain in guarded bulk passes instead of the old small fixed burst: each pass prefers fresh reliable datagrams ahead of retries, stops only when work runs out or the per-pass send/time guardrails hit, and otherwise resumes remaining work on the next wake or `datagramSchedulerInterval` tick. Queue overflow still logs and forcibly closes the slow session. Once a session is closing, later sends are silently dropped.
+
+**Backlog inspection:** `Session.OutboundSnapshot` and `Listener.OutboundBacklogForLog` report stream and unreliable channel depths, reliable datagram pending vs in-flight counts, the age of the head of each reliable queue, and per-interval `d_1s` (successful `WriteDatagram` calls) / `st_1s` (successful reliable stream `WriteBatch` invocations) since the last `OutboundBacklogForLog` call. With `LogReplicationStats`, `golem.Server` prints an additional `golem: net outbound backlog` line each second after the replication line; the first line after connect has zero deltas.
+
+**Snapshots and wrappers:** `messageWrapper` wraps reliable stream entity frames (`WrapEntityUpdate` from `golem`), while compact state datagram records bypass `ServerMessage` / `EntityUpdate` wrappers. World snapshot frames are already fully wrapped and bypass the wrapper. `sendSnapshot` sends world data before entity snapshots and skips entity snapshots entirely when `interestEnabled` is true.
+
+**Hooks and data:** `OnUpgrade(func(*http.Request) (any, error))` runs synchronously before transport acceptance and seeds `Session.Data`. `Session.RemoteAddr` and `Session.Transport` are populated from the upgrade request before `OnConnect` fires. `OnConnect`, `OnMessage`, `OnDatagram`, `OnReliableUnordered`, `OnReliableOrdered`, and `OnDisconnect` are listener hooks that the parent `golem.Server` usually replaces with enqueue proxies so gameplay callbacks run on the tick goroutine instead of connection goroutines. `OnDatagram` must keep its existing meaning: raw unreliable application payloads only; protocol ACK/control packets and reliable datagrams are decoded before hooks fire.
+
+**WebTransport-specific pieces:** `Handler()` returns the active endpoint handler; for WebTransport, pair it with `WebTransportServer` on a caller-owned HTTP/3 server. `SetWebTransportCheckOrigin`, TLS helpers, certificate hashes, and datagram support all live here.

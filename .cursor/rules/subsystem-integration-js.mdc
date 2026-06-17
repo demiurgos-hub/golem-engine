@@ -1,0 +1,25 @@
+---
+description: integration/js - JavaScript client runtime and generated TypeScript client.
+globs:
+  - golem-js/package.json
+  - golem-js/tsconfig.json
+  - golem-js/src/**/*.ts
+  - golem-js/test/**/*.js
+  - codegen/js_*.go
+  - codegen/templates/js/**/*.tmpl
+alwaysApply: false
+---
+
+# `integration/js`
+
+`golem-js` publishes `golem-engine`: the browser ESM runtime (`GameClient`, `createChannel`, `PbWriter`/`PbReader`) that generated JS clients import. Source lives in `golem-js/src/`; `dist/` is build output and should be regenerated with `npm run build` instead of hand-edited.
+
+The `js-client` integration emits generated TypeScript in consumer projects from `codegen/templates/js/` plus codec files from `codegen/js_proto.go`. `compileJSIntegration` runs `tsc` in the output dir and removes intermediate `.ts` so consumer output is `.js` plus `.d.ts`.
+
+Transport constants and framing must stay in sync with `golem/net`: reliable frame cap `32000`, WebTransport datagram cap `1200`, datagram header/ACK mask sizes, lane IDs (`1` unreliable, `2` reliable-unordered, `3` reliable-ordered, `4` eventual-state), and control frames `0x00 'OGS' 0x01/0x02`.
+
+`GameClient` treats stream `ServerMessage` frames as wrapped protobuf payloads, while compact state datagrams are framed state records and go directly through `EntityManager.applyCompactUpdate`. Keep world updates and server events on the reliable stream path.
+
+Generated managers own client-side state: entity revisions reject stale updates; full state spawns/registers lifecycle hooks; deltas update existing entities only; collection/map deltas use `undefined` as absent and empty values as explicit clears.
+
+When changing JS generated shapes, update `codegen` tests covering emitted TypeScript and runtime tests under `golem-js/test/`; generated protocol changes should stay conceptually parallel with Go proto/runtime paths.

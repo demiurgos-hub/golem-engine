@@ -1,0 +1,136 @@
+import Phaser from "phaser";
+/**
+ * GameScene is a Phaser.Scene base class that owns the Golem Engine client
+ * lifecycle: it connects on create(), reconnects with exponential backoff after
+ * unexpected drops, and disconnects cleanly on shutdown or destroy.
+ *
+ * Subclass and implement buildClient() plus either serverUrl() or connectionOptions().
+ * Override the optional
+ * hook methods to react to connection events.
+ *
+ * @example
+ * class BattleScene extends GameScene<Client> {
+ *   protected buildClient() { return createClient(); }
+ *   protected serverUrl() { return 'ws://localhost:8080/ws'; }
+ *   create() {
+ *     super.create(); // wires and connects
+ *     this.client.entities.registerPlayer(MyPlayer);
+ *   }
+ * }
+ */
+export class GameScene extends Phaser.Scene {
+    constructor() {
+        super(...arguments);
+        /**
+         * Maximum number of reconnect attempts before onReconnectFailed() is called.
+         * Set to 0 for infinite retries.
+         */
+        this.maxReconnectAttempts = 5;
+        /** Base reconnect delay in milliseconds. Doubles with each attempt. */
+        this.reconnectBaseDelay = 1500;
+        this._attempts = 0;
+        this._cleaningUp = false;
+        this._reconnectTimer = null;
+    }
+    /**
+     * Return a legacy WebSocket URL to connect to.
+     * Deprecated: override connectionOptions() for transport-aware connections.
+     */
+    serverUrl() {
+        throw new Error("golem-phaser: override serverUrl() or connectionOptions()");
+    }
+    /** Return the connection options to use on each connection attempt. */
+    connectionOptions() {
+        return this.serverUrl();
+    }
+    /** Called when the connection is established (or re-established). */
+    onConnect() { }
+    /** Called when the connection closes for any reason. */
+    onDisconnect(_ev) { }
+    /** Called when all reconnect attempts have been exhausted. */
+    onReconnectFailed() { }
+    /**
+     * Show a connection status overlay. The default implementation creates a
+     * centered semi-transparent panel using Phaser game objects. Override to
+     * replace with your own UI.
+     */
+    showConnectionOverlay(message) {
+        const cam = this.cameras.main;
+        if (!this._overlayBg) {
+            this._overlayBg = this.add
+                .rectangle(cam.width / 2, cam.height / 2, 320, 72, 0x000000, 0.72)
+                .setScrollFactor(0)
+                .setDepth(1000);
+        }
+        if (!this._overlayText) {
+            this._overlayText = this.add
+                .text(cam.width / 2, cam.height / 2, "", {
+                fontSize: "18px",
+                color: "#ffffff",
+                align: "center",
+            })
+                .setOrigin(0.5)
+                .setScrollFactor(0)
+                .setDepth(1001);
+        }
+        this._overlayBg.setVisible(true);
+        this._overlayText.setText(message).setVisible(true);
+    }
+    /** Hide the connection overlay. Override if you replaced showConnectionOverlay. */
+    hideConnectionOverlay() {
+        this._overlayBg?.setVisible(false);
+        this._overlayText?.setVisible(false);
+    }
+    /**
+     * Wire the client and open the transport connection. Subclasses must call
+     * super.create() before accessing this.client.
+     */
+    create() {
+        this._attempts = 0;
+        this._cleaningUp = false;
+        this.client = this.buildClient();
+        this.client.onConnect(() => {
+            this._attempts = 0;
+            this._cancelReconnectTimer();
+            this.hideConnectionOverlay();
+            this.onConnect();
+        });
+        this.client.onDisconnect((ev) => {
+            this.onDisconnect(ev);
+            if (!this._cleaningUp && !ev.wasClean) {
+                this._scheduleReconnect();
+            }
+        });
+        // Use once() so re-entrant create() calls (scene restart) re-register cleanly.
+        this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => this._cleanup());
+        this.events.once(Phaser.Scenes.Events.DESTROY, () => this._cleanup());
+        this.client.connect(this.connectionOptions());
+    }
+    _scheduleReconnect() {
+        if (this.maxReconnectAttempts > 0 && this._attempts >= this.maxReconnectAttempts) {
+            this.onReconnectFailed();
+            return;
+        }
+        this._attempts++;
+        const delay = this.reconnectBaseDelay * Math.pow(2, this._attempts - 1);
+        const label = this.maxReconnectAttempts > 0
+            ? `Connecting… (${this._attempts} / ${this.maxReconnectAttempts})`
+            : `Connecting… (attempt ${this._attempts})`;
+        this.showConnectionOverlay(label);
+        // Use Phaser's timer so reconnect respects scene pause/resume.
+        this._reconnectTimer = this.time.delayedCall(delay, () => {
+            this.client.connect(this.connectionOptions());
+        });
+    }
+    _cancelReconnectTimer() {
+        if (this._reconnectTimer) {
+            this._reconnectTimer.destroy();
+            this._reconnectTimer = null;
+        }
+    }
+    _cleanup() {
+        this._cleaningUp = true;
+        this._cancelReconnectTimer();
+        this.client?.disconnect();
+    }
+}

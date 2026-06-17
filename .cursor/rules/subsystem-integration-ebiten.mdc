@@ -1,0 +1,21 @@
+---
+description: integration/ebiten - Ebiten package and generated entity bridge scaffolds.
+globs:
+  - golem-ebiten/**/*.go
+  - codegen/templates/ebiten/**/*.tmpl
+alwaysApply: false
+---
+
+# `integration/ebiten`
+
+`golem-ebiten` publishes Ebiten helpers for Golem Engine clients. It depends on `golem-go-client` as the protocol/client runtime and should not duplicate Go transport, protobuf, or generated-manager behavior.
+
+The `ebiten` codegen integration emits raw `.go` bridge scaffolds from `codegen/templates/ebiten/`. There is intentionally no compile finalizer here; the consumer game module compiles bridge files alongside game code.
+
+`Game` owns client lifecycle for Ebiten loops: connect during setup, reconnect unexpected drops with backoff from `Update`, and disconnect on shutdown. Keep the helper independent of a specific generated package so games can embed it in their own `ebiten.Game`.
+
+Generated bridges embed `Synced<Name>` from the `go-client` protocol output. Preserve the hook contract: `OnSpawn` creates drawables, `OnRemove` destroys the optional drawable, `ApplyState`/`ApplyDelta` call the embedded synced state before `SyncToDrawable`, and entity event hooks are named `On<Name>`.
+
+Rendering helpers should stay thin and optional. Generated views may expose a `Drawable` and `Positioned` contract, but game-specific animation, camera logic, and asset ownership should remain in the consumer game unless a helper is broadly reusable.
+
+When changing Ebiten bridge shapes, update codegen template tests and runtime tests under `golem-ebiten/`.
