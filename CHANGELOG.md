@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- `golem-phaser` now includes a `createTiledLayer` helper for creating Phaser 4 GPU tilemap layers with CPU fallback for unsupported maps.
+
 ### Changed
 
 - **Breaking:** `golem-phaser` now targets Phaser 4 and requires `phaser >=4.0.0`. Phaser 3 projects must upgrade their Phaser dependency before using the package.

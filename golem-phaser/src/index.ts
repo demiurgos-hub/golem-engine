@@ -1,2 +1,8 @@
 export { GameScene } from "./scene.js";
-export { loadTiledMap } from "./tiled.js";
+export { createTiledLayer, loadTiledMap } from "./tiled.js";
+export type {
+  CreateTiledLayerOptions,
+  TiledLayer,
+  TiledLayerRenderMode,
+  TiledLayerTilesets,
+} from "./tiled.js";
