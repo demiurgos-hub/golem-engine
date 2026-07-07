@@ -25,6 +25,103 @@
         "panel": "shared"
       },
       "problemMatcher": []
+    },
+    {
+      "label": "Build JS Runtime",
+      "type": "shell",
+      "command": "npm run build",
+      "windows": {
+        "command": "npm.cmd run build"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}/golem-js"
+      },
+      "group": "build",
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Test JS Runtime",
+      "type": "shell",
+      "command": "npm test",
+      "windows": {
+        "command": "npm.cmd test"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}/golem-js"
+      },
+      "group": "test",
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build Phaser Package",
+      "type": "shell",
+      "command": "npm run build",
+      "windows": {
+        "command": "npm.cmd run build"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}/golem-phaser"
+      },
+      "group": "build",
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Dry Run JS npm Pack",
+      "type": "shell",
+      "command": "npm pack --dry-run",
+      "windows": {
+        "command": "npm.cmd pack --dry-run"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}/golem-js"
+      },
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Dry Run Phaser npm Pack",
+      "type": "shell",
+      "command": "npm pack --dry-run",
+      "windows": {
+        "command": "npm.cmd pack --dry-run"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}/golem-phaser"
+      },
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Prepare npm Packages",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "Test JS Runtime",
+        "Build Phaser Package",
+        "Dry Run JS npm Pack",
+        "Dry Run Phaser npm Pack"
+      ],
+      "group": "build",
+      "problemMatcher": []
     }
   ]
 }
