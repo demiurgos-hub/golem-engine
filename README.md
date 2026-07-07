@@ -1,8 +1,6 @@
-# Golem Engine
+![Golem Engine](.github/images/golem-logo-small.png)
 
-**Multiplayer, done right.**
-
-Golem Engine lets you build server-authoritative multiplayer backends in Go, and generate type-safe clients for multiple languages and engines from one shared protocol. It is built for worlds with high player and entity density, where the server owns the truth and clients just send input.
+Golem Engine lets you build server-authoritative multiplayer backends in Go, and generate type-safe clients for multiple languages and engines from one shared protocol. It's a full tick-based engine with physics, navigation, and interest management, designed to support worlds with high player and entity density.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Go Reference](https://pkg.go.dev/badge/github.com/demiurgos-hub/golem-engine.svg)](https://pkg.go.dev/github.com/demiurgos-hub/golem-engine)
@@ -10,23 +8,7 @@ Golem Engine lets you build server-authoritative multiplayer backends in Go, and
 [![npm](https://img.shields.io/npm/v/golem-engine.svg)](https://www.npmjs.com/package/golem-engine)
 [![Release](https://img.shields.io/badge/release-v0.2.1-orange.svg)](CHANGELOG.md)
 
-[Website](https://golemengine.dev/) · [Documentation](https://golemengine.dev/docs/) · [Changelog](CHANGELOG.md) · [License](LICENSE)
-
----
-
-## What is Golem?
-
-Clients send input. The Go server runs the authoritative simulation and decides what is true. Interest management (field-of-interest) streams each player only what is near them, and per-session ownership lets a client drive its own entity.
-
-```
- clients                      authoritative Go server                filtered updates
- ─────────                    ───────────────────────                ────────────────
- MoveCommand  ─commands─▶     validate → simulate → diff  ─state─▶   player.position
- CastCommand                  ( physics · nav · interest )           nearby entities
- AimCommand                   tick 12842                             ( hidden entities )
-```
-
-You describe your entities, commands, and events in YAML. `golem-bake` generates the server scaffolding, an `entities.proto` reference, and type-safe client classes for every target you enable.
+[Website](https://golemengine.dev/) · [Documentation](https://golemengine.dev/docs/) · [Changelog](CHANGELOG.md)
 
 ## Features
 
@@ -163,4 +145,6 @@ Licensed under the [Apache License 2.0](LICENSE).
 
 ---
 
-Golem Engine is a property of Demiurgos B.V.
+**Golem Engine** is developed and maintained by Demiurgos B.V.
+
+[Website](https://demiurgos.io) · [contact@demiurgos.io](mailto:contact@demiurgos.io)

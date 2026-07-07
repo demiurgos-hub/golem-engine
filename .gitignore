@@ -48,9 +48,6 @@ Desktop.ini
 # Node (golem-js)
 node_modules/
 
-# Local documentation (e.g. Docusaurus under docs/public)
-docs/
-
 # Debug and misc
 *.tmp
 *.temp
