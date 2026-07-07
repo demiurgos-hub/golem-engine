@@ -12,7 +12,7 @@ import (
 
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
-	"golem-engine/golem/registry"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
 func decodeReliableBatchPayload(t *testing.T, payload []byte) [][]byte {

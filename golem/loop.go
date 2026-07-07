@@ -14,14 +14,14 @@ import (
 
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
-	"golem-engine/golem/collision3d"
-	"golem-engine/golem/interest"
-	golemnet "golem-engine/golem/net"
-	"golem-engine/golem/registry"
-	"golem-engine/golem/world"
+	"github.com/demiurgos-hub/golem-engine/golem/collision3d"
+	"github.com/demiurgos-hub/golem-engine/golem/interest"
+	golemnet "github.com/demiurgos-hub/golem-engine/golem/net"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
+	"github.com/demiurgos-hub/golem-engine/golem/world"
 
-	"golem.collision"
-	"golem.nav"
+	"github.com/demiurgos-hub/golem-engine/golem/collision"
+	"github.com/demiurgos-hub/golem-engine/golem/nav"
 )
 
 // msgKind identifies the type of a queued session event.

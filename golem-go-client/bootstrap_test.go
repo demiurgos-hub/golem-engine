@@ -25,8 +25,8 @@ import (
 
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
-	golemnet "golem-engine/golem/net"
-	"golem-engine/golem/registry"
+	golemnet "github.com/demiurgos-hub/golem-engine/golem/net"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
 func TestFetchRealtimeConfigDecodesJSON(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"golem-engine/schema"
+	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
 var protoCSDefault = map[string]string{

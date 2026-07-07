@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"golem-engine/golem/tiled"
+	"github.com/demiurgos-hub/golem-engine/golem/tiled"
 )
 
 func tiledJSON(m map[string]any) []byte {

@@ -3,7 +3,7 @@ package collisionresolv
 import (
 	"math"
 
-	"golem.collision"
+	"github.com/demiurgos-hub/golem-engine/golem/collision"
 
 	"github.com/solarlune/resolv"
 )

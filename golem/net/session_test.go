@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"golem-engine/golem/registry"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
 // testWSPair creates a WebSocket connection pair via httptest. The returned

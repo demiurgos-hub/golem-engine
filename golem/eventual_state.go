@@ -3,8 +3,8 @@ package golem
 import (
 	"fmt"
 
-	golemnet "golem-engine/golem/net"
-	"golem-engine/golem/registry"
+	golemnet "github.com/demiurgos-hub/golem-engine/golem/net"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
 type eventualStateChange struct {

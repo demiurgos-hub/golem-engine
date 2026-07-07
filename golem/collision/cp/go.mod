@@ -1,10 +1,10 @@
-module golem.collision/cp
+module github.com/demiurgos-hub/golem-engine/golem/collision/cp
 
 go 1.25
 
-replace golem.collision => ../
+replace github.com/demiurgos-hub/golem-engine/golem/collision => ../
 
 require (
 	github.com/jakecoffman/cp/v2 v2.4.0
-	golem.collision v0.0.0
+	github.com/demiurgos-hub/golem-engine/golem/collision v0.0.0
 )

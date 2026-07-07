@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"golem-engine/schema"
+	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
 // TestGenerateGoSharedTemplateIncludesRestoreWrappers verifies that the shared
@@ -17,7 +17,7 @@ func TestGenerateGoSharedTemplateIncludesRestoreWrappers(t *testing.T) {
 	}
 
 	data := schema.SharedData{
-		GolemImport: "golem-engine/golem",
+		GolemImport: "github.com/demiurgos-hub/golem-engine/golem",
 		GoPackage:   "generated",
 		Fingerprint: "test-fingerprint",
 		Entities: []schema.EntityData{
@@ -55,7 +55,7 @@ func TestGenerateGoSharedTemplateIncludesDispatchPacket(t *testing.T) {
 	}
 
 	data := schema.SharedData{
-		GolemImport: "golem-engine/golem",
+		GolemImport: "github.com/demiurgos-hub/golem-engine/golem",
 		GoPackage:   "generated",
 		Fingerprint: "test-fingerprint",
 		Commands: []schema.CommandData{
@@ -104,7 +104,7 @@ func TestGenerateGoSharedTemplateIncludesRuntimeHelper(t *testing.T) {
 	}
 
 	data := schema.SharedData{
-		GolemImport: "golem-engine/golem",
+		GolemImport: "github.com/demiurgos-hub/golem-engine/golem",
 		GoPackage:   "generated",
 		Fingerprint: "test-fingerprint",
 		Commands: []schema.CommandData{
@@ -148,7 +148,7 @@ func TestGenerateGoSharedTemplateMarshalEntityRemovedIncludesRevision(t *testing
 	}
 
 	data := schema.SharedData{
-		GolemImport: "golem-engine/golem",
+		GolemImport: "github.com/demiurgos-hub/golem-engine/golem",
 		GoPackage:   "generated",
 		Fingerprint: "test-fingerprint",
 	}
@@ -348,7 +348,7 @@ func TestGenerateGoSharedTemplateSkipsSessionNotFoundDuringFOIEventFanout(t *tes
 	}
 
 	data := schema.SharedData{
-		GolemImport: "golem-engine/golem",
+		GolemImport: "github.com/demiurgos-hub/golem-engine/golem",
 		GoPackage:   "generated",
 		Fingerprint: "test-fingerprint",
 		Events: []schema.EventData{

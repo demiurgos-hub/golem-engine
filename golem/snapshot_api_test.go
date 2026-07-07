@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"golem-engine/golem/registry"
-	"golem-engine/golem/snapshot"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
+	"github.com/demiurgos-hub/golem-engine/golem/snapshot"
 )
 
 // snapshotTestEntity is a minimal entity used by snapshot API tests.

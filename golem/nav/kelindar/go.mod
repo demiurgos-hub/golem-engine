@@ -1,10 +1,10 @@
-module golem.nav/kelindar
+module github.com/demiurgos-hub/golem-engine/golem/nav/kelindar
 
 go 1.25
 
 require (
 	github.com/kelindar/tile v1.7.0
-	golem.nav v0.0.0
+	github.com/demiurgos-hub/golem-engine/golem/nav v0.0.0
 )
 
 require (
@@ -12,4 +12,4 @@ require (
 	github.com/kelindar/iostream v1.4.0 // indirect
 )
 
-replace golem.nav => ../
+replace github.com/demiurgos-hub/golem-engine/golem/nav => ../

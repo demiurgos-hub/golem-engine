@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"golem-engine/golem"
+	"github.com/demiurgos-hub/golem-engine/golem"
 )
 
 func TestAttachSlowTickLoggerLogsRollingAverage(t *testing.T) {

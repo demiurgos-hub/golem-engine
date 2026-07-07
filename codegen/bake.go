@@ -8,7 +8,7 @@ import (
 	"strings"
 	"text/template"
 
-	"golem-engine/schema"
+	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
 //go:embed templates/*/*.tmpl
@@ -117,9 +117,9 @@ func Bake(projectRoot string) error {
 		if golemImport == "" {
 			switch integName {
 			case "go-server":
-				golemImport = "golem-engine/golem"
+				golemImport = "github.com/demiurgos-hub/golem-engine/golem"
 			case "go-client":
-				golemImport = "golem-engine/golem-go-client"
+				golemImport = "github.com/demiurgos-hub/golem-engine/golem-go-client"
 			case "js-client":
 				golemImport = "golem-engine"
 			case "csharp-client":
@@ -129,7 +129,7 @@ func Bake(projectRoot string) error {
 			case "unity":
 				golemImport = "GolemEngine.Unity"
 			case "ebiten":
-				golemImport = "golem-engine/golem-ebiten"
+				golemImport = "github.com/demiurgos-hub/golem-engine/golem-ebiten"
 			}
 		}
 

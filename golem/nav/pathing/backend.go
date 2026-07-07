@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/quasilyte/pathing"
-	"golem.nav"
+	"github.com/demiurgos-hub/golem-engine/golem/nav"
 )
 
 // Backend wraps quasilyte/pathing's AStar to implement nav.Backend.

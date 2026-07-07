@@ -1,6 +1,6 @@
 package golem
 
-import "golem.nav"
+import "github.com/demiurgos-hub/golem-engine/golem/nav"
 
 // SetNavBackend registers a nav backend for use by Server.FindPath and
 // Server.SetNavWalkable. Call this at startup after building your grid from

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"golem-engine/golem/ldtk"
+	"github.com/demiurgos-hub/golem-engine/golem/ldtk"
 )
 
 func ldtkJSON(m map[string]any) []byte {

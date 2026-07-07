@@ -1,6 +1,6 @@
 package golem
 
-import "golem.collision"
+import "github.com/demiurgos-hub/golem-engine/golem/collision"
 
 // TriggerEnter is optionally implemented by entities that want to be notified
 // when another entity's trigger shape begins overlapping their shape.

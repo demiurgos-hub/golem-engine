@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"golem-engine/schema"
+	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
 const entityRevisionProtoTag = 1000

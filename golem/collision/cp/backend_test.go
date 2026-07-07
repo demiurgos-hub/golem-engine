@@ -4,8 +4,8 @@ import (
 	"math"
 	"testing"
 
-	collision "golem.collision"
-	collisioncp "golem.collision/cp"
+	collision "github.com/demiurgos-hub/golem-engine/golem/collision"
+	collisioncp "github.com/demiurgos-hub/golem-engine/golem/collision/cp"
 )
 
 func newBackend(t *testing.T) *collisioncp.CpBackend {

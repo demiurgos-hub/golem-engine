@@ -1,10 +1,10 @@
-module golem.collision/resolv
+module github.com/demiurgos-hub/golem-engine/golem/collision/resolv
 
 go 1.25
 
 require (
 	github.com/solarlune/resolv v0.8.1
-	golem.collision v0.0.0
+	github.com/demiurgos-hub/golem-engine/golem/collision v0.0.0
 )
 
-replace golem.collision => ../
+replace github.com/demiurgos-hub/golem-engine/golem/collision => ../

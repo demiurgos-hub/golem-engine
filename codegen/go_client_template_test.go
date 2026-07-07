@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"golem-engine/schema"
+	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
 func TestGenerateGoClientManagerTemplateWiresCompactUpdatesAndCommands(t *testing.T) {
@@ -14,7 +14,7 @@ func TestGenerateGoClientManagerTemplateWiresCompactUpdatesAndCommands(t *testin
 		t.Fatalf("loadEmbeddedTemplate: %v", err)
 	}
 	data := schema.SharedData{
-		GolemImport: "golem-engine/golem-go-client",
+		GolemImport: "github.com/demiurgos-hub/golem-engine/golem-go-client",
 		GoPackage:   "client",
 		Entities: []schema.EntityData{{
 			Name:      "Player",
@@ -37,8 +37,8 @@ func TestGenerateGoClientManagerTemplateWiresCompactUpdatesAndCommands(t *testin
 	}
 	content := out.String()
 	for _, want := range []string{
-		`golemclient "golem-engine/golem-go-client"`,
-		`"golem-engine/golem-go-client/pb"`,
+		`golemclient "github.com/demiurgos-hub/golem-engine/golem-go-client"`,
+		`"github.com/demiurgos-hub/golem-engine/golem-go-client/pb"`,
 		"lastRevisions map[int64]uint64",
 		"func (m *EntityManager) ApplyCompactUpdate(frame []byte)",
 		"revision := r.Uint64()",
@@ -60,7 +60,7 @@ func TestGenerateGoClientCreateClientTemplateWiresGeneratedCodecs(t *testing.T) 
 		t.Fatalf("loadEmbeddedTemplate: %v", err)
 	}
 	data := schema.SharedData{
-		GolemImport: "golem-engine/golem-go-client",
+		GolemImport: "github.com/demiurgos-hub/golem-engine/golem-go-client",
 		GoPackage:   "client",
 		Commands:    []schema.CommandData{{Name: "Move", Target: "entity"}},
 		WorldTypes:  []schema.WorldTypeData{{Name: "Zone", DataName: "ZoneData"}},
@@ -72,7 +72,7 @@ func TestGenerateGoClientCreateClientTemplateWiresGeneratedCodecs(t *testing.T) 
 	}
 	content := out.String()
 	for _, want := range []string{
-		`import golemclient "golem-engine/golem-go-client"`,
+		`import golemclient "github.com/demiurgos-hub/golem-engine/golem-go-client"`,
 		"entities := NewEntityManager()",
 		"world := NewWorldManager()",
 		"events := NewEventManager(entities)",
@@ -95,7 +95,7 @@ func TestGenerateEbitenBridgeTemplateSyncsDrawable(t *testing.T) {
 	data := schema.EntityData{
 		Name:           "Player",
 		GoPackage:      "views",
-		GolemImport:    "golem-engine/golem-ebiten",
+		GolemImport:    "github.com/demiurgos-hub/golem-engine/golem-ebiten",
 		ProtocolImport: "example.com/game/generated",
 		Events:         []schema.EventData{{Name: "Hit", Target: "entity"}},
 	}
@@ -105,7 +105,7 @@ func TestGenerateEbitenBridgeTemplateSyncsDrawable(t *testing.T) {
 	}
 	content := out.String()
 	for _, want := range []string{
-		`golemebiten "golem-engine/golem-ebiten"`,
+		`golemebiten "github.com/demiurgos-hub/golem-engine/golem-ebiten"`,
 		`protocol "example.com/game/generated"`,
 		"type PlayerView struct {",
 		"*protocol.SyncedPlayer",

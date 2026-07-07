@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/coder/websocket"
-	golemnet "golem-engine/golem/net"
+	golemnet "github.com/demiurgos-hub/golem-engine/golem/net"
 )
 
 // WebSocketChannel implements ReliableMessageChannel over WebSocket.

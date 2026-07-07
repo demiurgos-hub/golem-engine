@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	"golem-engine/golem/pb"
-	"golem-engine/golem/registry"
+	"github.com/demiurgos-hub/golem-engine/golem/pb"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
 // Persister is an optional interface implemented by generated Synced* types.

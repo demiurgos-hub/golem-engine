@@ -1,7 +1,7 @@
 // Package pb re-exports the lightweight protobuf helpers used by generated Go clients.
 package pb
 
-import serverpb "golem-engine/golem/pb"
+import serverpb "github.com/demiurgos-hub/golem-engine/golem/pb"
 
 // Reader is a minimal protobuf wire-format decoder.
 type Reader = serverpb.Reader

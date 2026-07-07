@@ -13,8 +13,8 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/quic-go/webtransport-go"
-	golemnet "golem-engine/golem/net"
-	"golem-engine/golem/pb"
+	golemnet "github.com/demiurgos-hub/golem-engine/golem/net"
+	"github.com/demiurgos-hub/golem-engine/golem/pb"
 )
 
 type interestTickEntity struct {

@@ -3,8 +3,8 @@ package golem
 import (
 	"testing"
 
-	"golem-engine/golem/registry"
-	"golem.collision"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
+	"github.com/demiurgos-hub/golem-engine/golem/collision"
 )
 
 // stubEntity is a minimal Entity for collision event tests.

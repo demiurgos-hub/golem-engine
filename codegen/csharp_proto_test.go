@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"golem-engine/schema"
+	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
 func TestGenerateCSharpProtoIncludesClientPacket(t *testing.T) {

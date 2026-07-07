@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 
-	"golem-engine/schema"
+	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
 // SharedTemplateEntry pairs an embedded template path with its output filename.

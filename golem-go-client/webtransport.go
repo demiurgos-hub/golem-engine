@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/quic-go/webtransport-go"
-	golemnet "golem-engine/golem/net"
+	golemnet "github.com/demiurgos-hub/golem-engine/golem/net"
 )
 
 const (

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"golem-engine/schema"
+	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
 func TestGenerateJSManagerTemplateUsesRevisionChecksForAllEntityUpdates(t *testing.T) {

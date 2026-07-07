@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/kelindar/tile"
-	"golem.nav"
+	"github.com/demiurgos-hub/golem-engine/golem/nav"
 )
 
 // Backend wraps kelindar/tile's Grid to implement nav.Backend and nav.DynamicBackend.

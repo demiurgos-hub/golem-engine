@@ -3,7 +3,7 @@ package golem
 import (
 	"fmt"
 
-	"golem-engine/golem/snapshot"
+	"github.com/demiurgos-hub/golem-engine/golem/snapshot"
 )
 
 // SaveSnapshot collects the full state of all persistent entities and writes an

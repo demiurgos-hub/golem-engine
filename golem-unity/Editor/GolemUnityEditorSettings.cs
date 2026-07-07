@@ -16,7 +16,7 @@ namespace GolemEngine.Unity.Editor
     [FilePath("ProjectSettings/GolemEngineUnitySettings.asset", FilePathAttribute.Location.ProjectFolder)]
     public sealed class GolemUnityEditorSettings : ScriptableSingleton<GolemUnityEditorSettings>
     {
-        public const string GoBakeCommand = "go run golem-engine/cmd/golem-bake";
+        public const string GoBakeCommand = "go run github.com/demiurgos-hub/golem-engine/cmd/golem-bake";
         public const string PathBakeCommand = "golem-bake";
 
         [SerializeField] private string projectRoot;

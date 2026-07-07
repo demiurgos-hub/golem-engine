@@ -18,7 +18,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
-	"golem-engine/golem/registry"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
 // Listener manages client sessions and bridges the game-loop deltas to the

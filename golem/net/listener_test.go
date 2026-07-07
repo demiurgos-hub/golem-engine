@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/quic-go/quic-go/http3"
-	"golem-engine/golem/registry"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
 func TestPrepareWebTransportTLSWithDevSelfSignedCert(t *testing.T) {

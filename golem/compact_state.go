@@ -3,7 +3,7 @@ package golem
 import (
 	"fmt"
 
-	"golem-engine/golem/registry"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
 // compactDeltaForMask returns a compact record for the current values in mask.

@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"golem-engine/schema"
+	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
 // ComputeSchemaFingerprint returns a lowercase hex SHA-256 that covers only

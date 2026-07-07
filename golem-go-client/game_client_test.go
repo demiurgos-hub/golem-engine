@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"golem-engine/golem-go-client/pb"
+	"github.com/demiurgos-hub/golem-engine/golem-go-client/pb"
 )
 
 type recordingEntities struct {

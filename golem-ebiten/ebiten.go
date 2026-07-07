@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
-	golemclient "golem-engine/golem-go-client"
+	golemclient "github.com/demiurgos-hub/golem-engine/golem-go-client"
 )
 
 // Screen is the Ebiten render target type used by generated views.

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"golem-engine/golem/registry"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
 func BenchmarkManagerComputeDiffs(b *testing.B) {

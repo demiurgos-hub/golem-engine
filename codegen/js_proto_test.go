@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"golem-engine/schema"
+	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
 func TestGenerateJSWorldProtoIncludesCustomTypeHelpers(t *testing.T) {
@@ -111,7 +111,7 @@ func TestGenerateGoEventProtoUsesRealFormatVerbInErrors(t *testing.T) {
 		},
 	}
 
-	if err := generateGoEventProto(outDir, "golem-engine/golem", "synced", proto); err != nil {
+	if err := generateGoEventProto(outDir, "github.com/demiurgos-hub/golem-engine/golem", "synced", proto); err != nil {
 		t.Fatalf("generateGoEventProto: %v", err)
 	}
 

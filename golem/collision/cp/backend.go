@@ -3,7 +3,7 @@ package collisioncp
 import (
 	"math"
 
-	"golem.collision"
+	"github.com/demiurgos-hub/golem-engine/golem/collision"
 
 	cp "github.com/jakecoffman/cp/v2"
 )

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"golem-engine/golem/pb"
+	"github.com/demiurgos-hub/golem-engine/golem/pb"
 )
 
 func TestWrapEntityUpdate(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"golem-engine/schema"
+	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
 // protoWireType maps protobuf scalar type names to their wire type numbers.

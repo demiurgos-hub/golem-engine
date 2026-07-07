@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"golem-engine/schema"
+	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
 func TestGenerateGoProtoIncludesClientPacket(t *testing.T) {
@@ -28,7 +28,7 @@ func TestGenerateGoProtoIncludesClientPacket(t *testing.T) {
 		},
 	}
 
-	if err := generateGoProto(outDir, "golem-engine/golem", "generated", nil, commands, nil, nil, proto); err != nil {
+	if err := generateGoProto(outDir, "github.com/demiurgos-hub/golem-engine/golem", "generated", nil, commands, nil, nil, proto); err != nil {
 		t.Fatalf("generateGoProto: %v", err)
 	}
 
@@ -70,7 +70,7 @@ func TestGenerateGoProtoIncludesEntityRevisions(t *testing.T) {
 		EntityRemovedTag: 3,
 	}
 
-	if err := generateGoProto(outDir, "golem-engine/golem", "generated", entities, nil, nil, nil, proto); err != nil {
+	if err := generateGoProto(outDir, "github.com/demiurgos-hub/golem-engine/golem", "generated", entities, nil, nil, nil, proto); err != nil {
 		t.Fatalf("generateGoProto: %v", err)
 	}
 
@@ -103,7 +103,7 @@ func TestGenerateGoProtoUsesFloat32EntityPositions(t *testing.T) {
 		EntityRemovedTag: 3,
 	}
 
-	if err := generateGoProto(outDir, "golem-engine/golem", "generated", entities, nil, nil, nil, proto); err != nil {
+	if err := generateGoProto(outDir, "github.com/demiurgos-hub/golem-engine/golem", "generated", entities, nil, nil, nil, proto); err != nil {
 		t.Fatalf("generateGoProto: %v", err)
 	}
 
@@ -140,7 +140,7 @@ func TestGenerateGoProtoIncludes3DEntityPositions(t *testing.T) {
 		EntityRemovedTag: 3,
 	}
 
-	if err := generateGoProto(outDir, "golem-engine/golem", "generated", entities, nil, nil, nil, proto); err != nil {
+	if err := generateGoProto(outDir, "github.com/demiurgos-hub/golem-engine/golem", "generated", entities, nil, nil, nil, proto); err != nil {
 		t.Fatalf("generateGoProto: %v", err)
 	}
 

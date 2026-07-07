@@ -1,6 +1,6 @@
 package golem
 
-import "golem.collision"
+import "github.com/demiurgos-hub/golem-engine/golem/collision"
 
 // NewCollisionLayers creates an empty CollisionLayers registry.
 // Call Bind to attach a backend, then Define to register named layers, then

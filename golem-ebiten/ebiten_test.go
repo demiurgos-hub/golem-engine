@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	golemclient "golem-engine/golem-go-client"
+	golemclient "github.com/demiurgos-hub/golem-engine/golem-go-client"
 )
 
 type fakeClient struct {

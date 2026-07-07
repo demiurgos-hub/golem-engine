@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"golem-engine/golem-go-client/pb"
+	"github.com/demiurgos-hub/golem-engine/golem-go-client/pb"
 )
 
 const (

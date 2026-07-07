@@ -1,7 +1,7 @@
 package interest
 
 import (
-	"golem-engine/golem/registry"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
 // FOI describes a circular field of interest anchored to an entity. 2D

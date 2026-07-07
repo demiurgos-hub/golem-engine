@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 
-	"golem-engine/codegen"
+	"github.com/demiurgos-hub/golem-engine/codegen"
 )
 
 func main() {

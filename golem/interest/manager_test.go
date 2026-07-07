@@ -5,7 +5,7 @@ import (
 	"sort"
 	"testing"
 
-	"golem-engine/golem/registry"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
 type testEntity struct {

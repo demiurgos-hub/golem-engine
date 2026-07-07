@@ -1,6 +1,6 @@
 package golem
 
-import "golem-engine/golem/pb"
+import "github.com/demiurgos-hub/golem-engine/golem/pb"
 
 // WrapEntityUpdate wraps serialized EntityUpdate bytes in a ServerMessage
 // envelope (proto field 1, length-delimited). The Listener applies this

@@ -1,9 +1,9 @@
 package golem
 
 import (
-	"golem-engine/golem/collision3d"
+	"github.com/demiurgos-hub/golem-engine/golem/collision3d"
 
-	"golem.collision"
+	"github.com/demiurgos-hub/golem-engine/golem/collision"
 )
 
 // OverlapBox returns the IDs of all registered entities whose collision shapes

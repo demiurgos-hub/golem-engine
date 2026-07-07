@@ -1,15 +1,15 @@
 package golem
 
 import (
-	"golem-engine/golem/collision3d"
-	"golem-engine/golem/interest"
-	golemnet "golem-engine/golem/net"
-	"golem-engine/golem/registry"
-	"golem-engine/golem/snapshot"
-	"golem-engine/golem/world"
+	"github.com/demiurgos-hub/golem-engine/golem/collision3d"
+	"github.com/demiurgos-hub/golem-engine/golem/interest"
+	golemnet "github.com/demiurgos-hub/golem-engine/golem/net"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
+	"github.com/demiurgos-hub/golem-engine/golem/snapshot"
+	"github.com/demiurgos-hub/golem-engine/golem/world"
 
-	"golem.collision"
-	"golem.nav"
+	"github.com/demiurgos-hub/golem-engine/golem/collision"
+	"github.com/demiurgos-hub/golem-engine/golem/nav"
 )
 
 // Re-export registry entity interfaces, net, interest, and world types so

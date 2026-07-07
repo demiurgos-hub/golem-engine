@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	golemnet "golem-engine/golem/net"
+	golemnet "github.com/demiurgos-hub/golem-engine/golem/net"
 )
 
 // TestDrainMessages_Ordering verifies that events queued via the internal

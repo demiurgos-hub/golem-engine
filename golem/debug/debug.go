@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"time"
 
-	"golem-engine/golem"
+	"github.com/demiurgos-hub/golem-engine/golem"
 )
 
 // StartPprof starts a pprof debug HTTP server on addr (e.g. "127.0.0.1:6060").

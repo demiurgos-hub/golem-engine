@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"golem-engine/golem"
+	"github.com/demiurgos-hub/golem-engine/golem"
 )
 
 // RunOptions configures Run.

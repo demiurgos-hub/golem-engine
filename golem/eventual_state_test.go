@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	golemnet "golem-engine/golem/net"
+	golemnet "github.com/demiurgos-hub/golem-engine/golem/net"
 )
 
 type maskAwareEventualEntity struct {
