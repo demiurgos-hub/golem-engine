@@ -10,6 +10,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Changed
 
+- **Breaking:** `golem-phaser` now targets Phaser 4 and requires `phaser >=4.0.0`. Phaser 3 projects must upgrade their Phaser dependency before using the package.
+
 ### Deprecated
 
 ### Removed

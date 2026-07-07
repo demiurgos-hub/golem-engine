@@ -53,7 +53,7 @@ You describe your entities, commands, and events in YAML. `golem-bake` generates
 | `golem-go-client/` | Native Go client runtime. |
 | `golem-ebiten/` | Ebiten client lifecycle and generated bridge helpers. |
 | `golem-js/` | JS/TS runtime, published to npm as `golem-engine`. |
-| `golem-phaser/` | Phaser 3 helper package built on `golem-engine`. |
+| `golem-phaser/` | Phaser 4 helper package built on `golem-engine`. |
 | `golem-unity/` | Unity client package. |
 
 > **Note:** `golem/collision/` and `golem/nav/` (and their backends) are nested Go modules resolved by a local `go.work` during development. Consumers building outside a workspace need published versions of these modules.
@@ -118,7 +118,7 @@ This emits the `entities.proto` reference, server scaffolding, and typed clients
 | Stack | Package | Install |
 | --- | --- | --- |
 | JavaScript / TypeScript | `golem-engine` | `npm install golem-engine` |
-| Phaser 3 | `golem-phaser` | `npm install golem-phaser` |
+| Phaser 4 | `golem-phaser` | `npm install golem-phaser` |
 | Go / Ebiten | `golem-ebiten` | `go get github.com/demiurgos-hub/golem-engine/golem-ebiten` |
 | Unity (C#) | `io.demiurgos.golemengine` | via Unity Package Manager |
 

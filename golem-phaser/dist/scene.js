@@ -1,4 +1,17 @@
 import Phaser from "phaser";
+function redactConnectionUrl(url) {
+    const raw = typeof url === "string" ? url : url.url;
+    try {
+        const parsed = new URL(raw);
+        return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+    }
+    catch {
+        return raw;
+    }
+}
+function connectionTransport(url) {
+    return typeof url === "string" ? "websocket" : url.transport;
+}
 /**
  * GameScene is a Phaser.Scene base class that owns the Golem Engine client
  * lifecycle: it connects on create(), reconnects with exponential backoff after
@@ -96,6 +109,15 @@ export class GameScene extends Phaser.Scene {
             this.onConnect();
         });
         this.client.onDisconnect((ev) => {
+            if (ev.wasClean) {
+                console.warn("golem-phaser: disconnected was_clean=true");
+            }
+            else {
+                const code = ev.code != null ? ` code=${ev.code}` : "";
+                const reason = ev.reason ? ` reason=${ev.reason}` : "";
+                const error = ev.error instanceof Error ? ev.error.message : String(ev.error ?? "");
+                console.error(`golem-phaser: disconnected was_clean=false${code}${reason} error=${error}`);
+            }
             this.onDisconnect(ev);
             if (!this._cleaningUp && !ev.wasClean) {
                 this._scheduleReconnect();
@@ -104,15 +126,19 @@ export class GameScene extends Phaser.Scene {
         // Use once() so re-entrant create() calls (scene restart) re-register cleanly.
         this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => this._cleanup());
         this.events.once(Phaser.Scenes.Events.DESTROY, () => this._cleanup());
-        this.client.connect(this.connectionOptions());
+        const options = this.connectionOptions();
+        console.warn(`golem-phaser: connecting attempt=1 transport=${connectionTransport(options)} url=${redactConnectionUrl(options)}`);
+        this.client.connect(options);
     }
     _scheduleReconnect() {
         if (this.maxReconnectAttempts > 0 && this._attempts >= this.maxReconnectAttempts) {
+            console.error(`golem-phaser: reconnect failed attempts=${this._attempts}`);
             this.onReconnectFailed();
             return;
         }
         this._attempts++;
         const delay = this.reconnectBaseDelay * Math.pow(2, this._attempts - 1);
+        console.warn(`golem-phaser: reconnect scheduled attempt=${this._attempts} delay_ms=${delay}`);
         const label = this.maxReconnectAttempts > 0
             ? `Connecting… (${this._attempts} / ${this.maxReconnectAttempts})`
             : `Connecting… (attempt ${this._attempts})`;
@@ -131,6 +157,7 @@ export class GameScene extends Phaser.Scene {
     _cleanup() {
         this._cleaningUp = true;
         this._cancelReconnectTimer();
+        console.warn("golem-phaser: disconnecting (scene shutdown)");
         this.client?.disconnect();
     }
 }
