@@ -34,6 +34,7 @@ logs/
 !.vscode/settings.json
 !.vscode/launch.json
 !.vscode/tasks.json
+.cursor/rules/*.local.mdc
 *.swp
 *.swo
 *~
