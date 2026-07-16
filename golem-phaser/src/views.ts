@@ -46,6 +46,12 @@ export interface SpriteViewConfig<B extends SpriteEntityBridge> {
   position?: (entity: B) => EntityViewPosition;
   /** Smooth position changes over a duration, or false for immediate updates. */
   interpolation?: number | EntityViewInterpolation | false;
+  /**
+   * Skip automatic position updates for entities whose transforms are owned by
+   * another system, such as local-player prediction. The initial authoritative
+   * spawn position is still applied.
+   */
+  externalPosition?: EntityValue<B, boolean>;
   /** Apply additional entity fields after each state or delta. */
   sync?: (sprite: Phaser.GameObjects.Sprite, entity: B) => void;
   /** Called after the sprite is created and initially synchronized. */
@@ -108,6 +114,12 @@ class SpriteViewBinding<B extends SpriteEntityBridge> {
   }
 
   sync(): void {
+    if (this.hasExternalPosition()) {
+      this.cancelInterpolation();
+      this.syncView();
+      return;
+    }
+
     const position = this.position();
     if (
       position.x !== this.targetX ||
@@ -131,6 +143,10 @@ class SpriteViewBinding<B extends SpriteEntityBridge> {
   }
 
   update(delta: number): void {
+    if (this.hasExternalPosition()) {
+      this.cancelInterpolation();
+      return;
+    }
     if (
       !this.interpolation ||
       (this.sprite.x === this.targetX && this.sprite.y === this.targetY)
@@ -155,6 +171,20 @@ class SpriteViewBinding<B extends SpriteEntityBridge> {
       x: this.entity.posX,
       y: this.entity.posY,
     };
+  }
+
+  private hasExternalPosition(): boolean {
+    return this.config.externalPosition === undefined
+      ? false
+      : resolveValue(this.config.externalPosition, this.entity);
+  }
+
+  private cancelInterpolation(): void {
+    this.startX = this.sprite.x;
+    this.startY = this.sprite.y;
+    this.targetX = this.sprite.x;
+    this.targetY = this.sprite.y;
+    this.elapsed = 0;
   }
 
   private syncView(): void {

@@ -11,6 +11,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 - `golem-phaser` now includes a `createTiledLayer` helper for creating Phaser 4 GPU tilemap layers with CPU fallback for unsupported maps.
 - `golem-phaser` includes `loadTiledWorld` for mounting generated `mapUrl` or embedded `tileData` world updates, loading tilesets, creating layers with automatic GPU selection, replacing prior zone mounts, and refreshing edited GPU layers.
 - `golem-phaser` includes `createSpriteView` for declarative entity sprite creation, automatic field synchronization, and optional render-frame position interpolation.
+- `createSpriteView` accepts an `externalPosition` predicate so client prediction can own selected entity transforms while Golem continues synchronizing remote entities and non-position fields.
 - `golem-phaser` includes an opt-in `SpriteGpuEntityPool` and `createGpuEntityView` bridge for rendering high-count replicated entities through Phaser 4 `SpriteGPULayer` with stable, reusable member slots.
 
 ### Changed
