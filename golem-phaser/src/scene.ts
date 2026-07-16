@@ -26,11 +26,14 @@ function connectionTransport(url: string | ConnectOptions): string {
  *
  * @example
  * class BattleScene extends GameScene<Client> {
- *   protected buildClient() { return createClient(); }
+ *   protected buildClient() {
+ *     const client = createClient();
+ *     client.entities.registerPlayer(MyPlayer);
+ *     return client;
+ *   }
  *   protected serverUrl() { return 'ws://localhost:8080/ws'; }
  *   create() {
  *     super.create(); // wires and connects
- *     this.client.entities.registerPlayer(MyPlayer);
  *   }
  * }
  */

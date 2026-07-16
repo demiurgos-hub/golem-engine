@@ -16,6 +16,6 @@ The `phaser` codegen integration emits raw `.ts` bridge scaffolds from `codegen/
 
 `GameScene` owns client lifecycle for Phaser scenes: `create()` builds and connects the client, reconnects unexpected drops with Phaser timers, and disconnects on scene shutdown/destroy. Subclasses should call `super.create()` before using `this.client`.
 
-Generated bridges extend `Synced<Name>` from the `js-client` protocol output. Preserve the hook contract: `onSpawn` creates game objects, `onRemove` destroys the optional sprite, `applyState`/`applyDelta` call `super` before `syncToSprite`, and entity event hooks are named `on<Name>`.
+Generated bridges extend `Synced<Name>` from the `js-client` protocol output. Preserve the hook contract: initial state is applied before `onSpawn`, `onSpawn` creates game objects from that state, `onRemove` destroys the optional sprite, `applyState`/`applyDelta` call `super` and only sync an existing sprite, and entity event hooks are named `on<Name>`.
 
 `loadTiledMap` is a scene loader helper for server-provided Tiled map URLs. Keep cache checks and Phaser loader event handling explicit so callers can use it from world update callbacks without managing loader state themselves.

@@ -20,6 +20,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Generated Phaser entity bridges no longer try to synchronize a sprite before `onSpawn` has created it.
+
 ### Security
 
 ## [0.2.1] - 2026-07-07

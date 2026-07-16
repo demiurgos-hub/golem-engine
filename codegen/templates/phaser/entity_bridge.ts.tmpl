@@ -10,6 +10,7 @@ import type { {{range $i, $e := .Events}}{{if $i}}, {{end}}{{$e.Name}}Event{{end
  *
  * Register it with EntityManager and override onSpawn to create your sprite:
  *
+ *   const client = createClient();
  *   client.entities.register{{.Name}}(class extends {{.Name}}Bridge {
  *     onSpawn() {
  *       this.sprite = scene.add.sprite(this.posX, this.posY, 'texture-key');
@@ -19,6 +20,7 @@ import type { {{range $i, $e := .Events}}{{if $i}}, {{end}}{{$e.Name}}Event{{end
  *       this.sprite!.y = this.posY;
  *     }
  *   });
+ *   return client;
  */
 export class {{.Name}}Bridge extends Synced{{.Name}} {
   /** The Phaser game object representing this entity. Set in onSpawn(). */
@@ -42,13 +44,17 @@ export class {{.Name}}Bridge extends Synced{{.Name}} {
   /** @internal */
   applyState(s: {{.Name}}State): void {
     super.applyState(s);
-    this.syncToSprite();
+    if (this.sprite) {
+      this.syncToSprite();
+    }
   }
 
   /** @internal */
   applyDelta(d: {{.Name}}Delta): void {
     super.applyDelta(d);
-    this.syncToSprite();
+    if (this.sprite) {
+      this.syncToSprite();
+    }
   }
 
   /**

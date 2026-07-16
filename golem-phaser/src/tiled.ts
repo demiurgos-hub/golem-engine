@@ -74,13 +74,13 @@ function gpuCompatibilityReasons(
  * delivers a mapUrl:
  *
  * @example
- * client.world.onZoneUpdate = async (d) => {
+ * client.world.onZoneUpdate(async (d) => {
  *   const map = await loadTiledMap(this, 'zone', d.mapUrl, {
  *     tiles: '/assets/tiles.png',
  *   });
  *   const tileset = map.addTilesetImage('tiles', 'tiles');
  *   createTiledLayer(map, 'Ground', tileset!, { mode: 'auto' });
- * };
+ * });
  *
  * @param scene    - The Phaser scene to load into.
  * @param key      - Cache key for the tilemap.
