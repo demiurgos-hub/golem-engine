@@ -17,6 +17,10 @@ func TestGeneratePhaserBridgeGuardsInitialSpriteSync(t *testing.T) {
 	data := schema.EntityData{
 		Name:           "Player",
 		ProtocolImport: "../",
+		Events: []schema.EventData{{
+			Name:    "Hit",
+			FOIOnly: true,
+		}},
 	}
 	var out bytes.Buffer
 	if err := tmpl.Execute(&out, data); err != nil {
@@ -35,5 +39,8 @@ func TestGeneratePhaserBridgeGuardsInitialSpriteSync(t *testing.T) {
 	}
 	if !strings.Contains(content, "createSpriteView(scene, PlayerBridge") {
 		t.Fatalf("generated bridge does not document declarative sprite views\n%s", content)
+	}
+	if !strings.Contains(content, "this entity is guaranteed to have spawned") {
+		t.Fatalf("generated bridge FOI event comment assumes a sprite view\n%s", content)
 	}
 }

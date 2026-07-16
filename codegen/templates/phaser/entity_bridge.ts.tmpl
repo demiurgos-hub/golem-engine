@@ -35,7 +35,7 @@ export class {{.Name}}Bridge extends Synced{{.Name}} {
 {{range .Events}}
   /**
    * Called when a {{.Name}} event is received for this entity.{{if .FOIOnly}}
-   * FOI-filtered: this.sprite is guaranteed to exist when this fires.{{end}}
+   * FOI-filtered: this entity is guaranteed to have spawned when this fires.{{end}}
    */
   on{{.Name}}(e: {{.Name}}Event): void {}
 {{end}}
