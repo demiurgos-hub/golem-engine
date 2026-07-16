@@ -42,14 +42,17 @@ export class {{.Name}}Bridge extends Synced{{.Name}} {
   /** @internal */
   applyState(s: {{.Name}}State): void {
     super.applyState(s);
-    if (this.sprite) {
-      this.syncToSprite();
-    }
+    this.syncToView();
   }
 
   /** @internal */
   applyDelta(d: {{.Name}}Delta): void {
     super.applyDelta(d);
+    this.syncToView();
+  }
+
+  /** Synchronizes the configured Phaser view after state changes. */
+  protected syncToView(): void {
     if (this.sprite) {
       this.syncToSprite();
     }

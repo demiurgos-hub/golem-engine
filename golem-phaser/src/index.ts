@@ -1,4 +1,14 @@
 export { GameScene } from "./scene.js";
+export {
+  createGpuEntityView,
+  SpriteGpuEntityPool,
+} from "./gpu-views.js";
+export type {
+  GpuEntityBridge,
+  GpuEntityBridgeConstructor,
+  SpriteGpuEntityPoolConfig,
+  SpriteGpuMember,
+} from "./gpu-views.js";
 export { createSpriteView } from "./views.js";
 export type {
   EntityViewInterpolation,
