@@ -9,6 +9,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 ### Added
 
 - `golem-phaser` now includes a `createTiledLayer` helper for creating Phaser 4 GPU tilemap layers with CPU fallback for unsupported maps.
+- `golem-phaser` includes `loadTiledWorld` for mounting generated `mapUrl` or embedded `tileData` world updates, loading tilesets, creating layers with automatic GPU selection, replacing prior zone mounts, and refreshing edited GPU layers.
 
 ### Changed
 
