@@ -1,4 +1,13 @@
 export { GameScene } from "./scene.js";
+export { createSpriteView } from "./views.js";
+export type {
+  EntityViewInterpolation,
+  EntityViewPosition,
+  SpriteEntityBridge,
+  SpriteEntityBridgeConstructor,
+  SpriteViewConfig,
+  SyncedPositionEntity,
+} from "./views.js";
 export {
   createTiledLayer,
   loadTiledMap,

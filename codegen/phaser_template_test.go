@@ -27,4 +27,10 @@ func TestGeneratePhaserBridgeGuardsInitialSpriteSync(t *testing.T) {
 	if got := strings.Count(content, "if (this.sprite) {\n      this.syncToSprite();\n    }"); got != 2 {
 		t.Fatalf("guarded sprite sync count = %d, want 2\n%s", got, content)
 	}
+	if !strings.Contains(content, "this.sprite?.setPosition(this.posX, this.posY);") {
+		t.Fatalf("generated bridge does not synchronize position by default\n%s", content)
+	}
+	if !strings.Contains(content, "createSpriteView(scene, PlayerBridge") {
+		t.Fatalf("generated bridge does not document declarative sprite views\n%s", content)
+	}
 }

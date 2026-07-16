@@ -1,7 +1,7 @@
 {
   "name": "golem-phaser",
   "version": "0.1.0",
-  "description": "Phaser 4 integration for Golem Engine: GameScene base class and Tiled tilemap helpers",
+  "description": "Phaser 4 integration for Golem Engine: client lifecycle, entity views, and Tiled world helpers",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
