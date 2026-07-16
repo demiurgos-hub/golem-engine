@@ -56,3 +56,26 @@ func TestCreateClientTemplateIncludesDatagramCommandHelpers(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateClientTemplateExposesConcreteGeneratedManagers(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/js/create_client.ts.tmpl")
+	if err != nil {
+		t.Fatalf("loadEmbeddedTemplate: %v", err)
+	}
+
+	data := schema.SharedData{
+		GolemImport: "golem-engine",
+		WorldTypes:  []schema.WorldTypeData{{Name: "Zone"}},
+		Events:      []schema.EventData{{Name: "Toast"}},
+	}
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, data); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := out.String()
+
+	want := "export type Client = GameClient & { readonly entities: EntityManager; readonly world: WorldManager; readonly events: EventManager };"
+	if !strings.Contains(content, want) {
+		t.Fatalf("generated Client type missing concrete managers %q\n%s", want, content)
+	}
+}

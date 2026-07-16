@@ -20,8 +20,8 @@ export { WorldManager } from "./WorldManager.js";
 export { EventManager } from "./EventManager.js";
 {{- end}}
 
-/** GameClient with the concrete EntityManager{{if .Events}} and EventManager{{end}} exposed. */
-export type Client = GameClient & { readonly entities: EntityManager{{if .Events}}; readonly events: EventManager{{end}} };
+/** GameClient with the generated managers exposed as concrete types. */
+export type Client = GameClient & { readonly entities: EntityManager{{if .WorldTypes}}; readonly world: WorldManager{{end}}{{if .Events}}; readonly events: EventManager{{end}} };
 
 {{- if .Commands}}
 // --- Datagram command helpers ---

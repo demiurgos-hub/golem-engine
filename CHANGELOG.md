@@ -25,6 +25,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 ### Fixed
 
 - Generated Phaser entity bridges no longer try to synchronize a sprite before `onSpawn` has created it.
+- Generated JavaScript `Client` types expose configured world managers directly, so typed world callbacks no longer require optional-manager checks or casts.
 
 ### Security
 
