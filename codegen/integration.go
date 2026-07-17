@@ -16,7 +16,7 @@ type SharedTemplateEntry struct {
 // Integration describes a built-in code generation target (e.g. Go server, JS client).
 type Integration struct {
 	Name            string
-	Template        string // path inside the embedded templates/ FS, e.g. "go_server/server.go.tmpl"
+	Template        string // optional per-entity template path inside the embedded templates/ FS
 	FileNamer       func(entityName string) string
 	PostProcess     func(path string) error
 	SharedTemplates []SharedTemplateEntry
@@ -85,13 +85,15 @@ var builtinIntegrations = map[string]Integration{
 			return generateCSharpProto(outDir, golemImport, goPackage, entities, commands, worldTypes, events, proto)
 		},
 	},
-	// phaser emits raw .ts bridge scaffolds per entity (no tsc step — the
-	// consumer's own bundler compiles them alongside game code).
+	// phaser emits one raw TypeScript registry module. The consumer's own
+	// bundler compiles it alongside game code.
 	"phaser": {
-		Name:     "phaser",
-		Template: "phaser/entity_bridge.ts.tmpl",
-		FileNamer: func(name string) string {
-			return name + "Bridge.ts"
+		Name: "phaser",
+		SharedTemplates: []SharedTemplateEntry{
+			{
+				Template: "phaser/golem_phaser.ts.tmpl",
+				File:     "GolemPhaser.ts",
+			},
 		},
 	},
 	"unity": {

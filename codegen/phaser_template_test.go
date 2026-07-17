@@ -8,39 +8,78 @@ import (
 	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
-func TestGeneratePhaserBridgeGuardsInitialSpriteSync(t *testing.T) {
-	tmpl, err := loadEmbeddedTemplate("templates/phaser/entity_bridge.ts.tmpl")
+func TestGeneratePhaserRegistryIncludesTypedCompleteDefinitions(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/phaser/golem_phaser.ts.tmpl")
 	if err != nil {
 		t.Fatalf("loadEmbeddedTemplate: %v", err)
 	}
 
-	data := schema.EntityData{
-		Name:           "Player",
-		ProtocolImport: "../",
-		Events: []schema.EventData{{
-			Name:    "Hit",
-			FOIOnly: true,
-		}},
+	hit := schema.EventData{
+		Name:       "Hit",
+		LowerName:  "hit",
+		Target:     "entity",
+		EntityType: "Player",
+		FOIOnly:    true,
 	}
+	data := schema.SharedData{
+		GolemImport:    "golem-phaser",
+		ProtocolImport: "../protocol/",
+		Entities: []schema.EntityData{
+			{Name: "Player", Events: []schema.EventData{hit}},
+			{Name: "Enemy"},
+		},
+		Events: []schema.EventData{hit},
+	}
+
 	var out bytes.Buffer
 	if err := tmpl.Execute(&out, data); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	content := out.String()
 
-	if got := strings.Count(content, "if (this.sprite) {\n      this.syncToSprite();\n    }"); got != 1 {
-		t.Fatalf("guarded sprite sync count = %d, want 1\n%s", got, content)
+	for _, want := range []string{
+		`import { SyncedPlayer } from "../protocol/PlayerSynced.js";`,
+		`import { SyncedEnemy } from "../protocol/EnemySynced.js";`,
+		"Player: EntityViewBuilder<",
+		"Hit: HitEvent;",
+		"Enemy: EntityViewBuilder<",
+		"Player: EntityViewDefinition<SyncedPlayer>;",
+		"Enemy: EntityViewDefinition<SyncedEnemy>;",
+		"build: (views: EntityViewBuilders) => EntityViewDefinitions",
+		"Player: createEntityViewBuilder<",
+		"Enemy: createEntityViewBuilder<",
+		"entity instanceof SyncedPlayer",
+		"client.entities.getAll().values()",
+		"client.entities.onSpawn",
+		"client.events.onHit",
+		`dispatch(entity, "Hit", event)`,
+		"golem: GolemPlugin<Client>;",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("generated Phaser registry missing %q\n%s", want, content)
+		}
 	}
-	if got := strings.Count(content, "this.syncToView();"); got != 2 {
-		t.Fatalf("view sync count = %d, want 2\n%s", got, content)
+	if strings.Contains(content, "Bridge") {
+		t.Fatalf("generated Phaser registry still references bridges\n%s", content)
 	}
-	if !strings.Contains(content, "this.sprite?.setPosition(this.posX, this.posY);") {
-		t.Fatalf("generated bridge does not synchronize position by default\n%s", content)
+}
+
+func TestPhaserIntegrationUsesOnlySharedRegistryTemplate(t *testing.T) {
+	integ, err := GetIntegration("phaser")
+	if err != nil {
+		t.Fatalf("GetIntegration: %v", err)
 	}
-	if !strings.Contains(content, "createSpriteView(scene, PlayerBridge") {
-		t.Fatalf("generated bridge does not document declarative sprite views\n%s", content)
+	if integ.Template != "" || integ.FileNamer != nil {
+		t.Fatalf(
+			"phaser integration should be shared-only, got template %q and file namer %v",
+			integ.Template,
+			integ.FileNamer != nil,
+		)
 	}
-	if !strings.Contains(content, "this entity is guaranteed to have spawned") {
-		t.Fatalf("generated bridge FOI event comment assumes a sprite view\n%s", content)
+	if len(integ.SharedTemplates) != 1 {
+		t.Fatalf("shared template count = %d, want 1", len(integ.SharedTemplates))
+	}
+	if got := integ.SharedTemplates[0].File; got != "GolemPhaser.ts" {
+		t.Fatalf("shared template file = %q, want GolemPhaser.ts", got)
 	}
 }

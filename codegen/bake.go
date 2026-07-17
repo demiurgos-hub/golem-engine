@@ -149,8 +149,10 @@ func Bake(projectRoot string) error {
 			} else {
 				entities[i].GoPackage = ""
 			}
-			if err := generateIntegration(projectRoot, integCfg, integ, entities[i]); err != nil {
-				return err
+			if integ.Template != "" && integ.FileNamer != nil {
+				if err := generateIntegration(projectRoot, integCfg, integ, entities[i]); err != nil {
+					return err
+				}
 			}
 		}
 
