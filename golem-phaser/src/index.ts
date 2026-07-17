@@ -1,23 +1,50 @@
-export { GameScene } from "./scene.js";
 export {
-  createGpuEntityView,
-  SpriteGpuEntityPool,
-} from "./gpu-views.js";
+  GOLEM_PLUGIN_KEY,
+  GOLEM_PLUGIN_MAPPING,
+  GolemPlugin,
+} from "./plugin.js";
 export type {
-  GpuEntityBridge,
-  GpuEntityBridgeConstructor,
-  SpriteGpuEntityPoolConfig,
-  SpriteGpuMember,
-} from "./gpu-views.js";
-export { createSpriteView } from "./views.js";
+  GolemConnectionStatus,
+  GolemPluginConfig,
+} from "./plugin.js";
+export { EntityViewMount } from "./view-mount.js";
+export {
+  combineUnsubscribers,
+  createEntityViewRegistry,
+} from "./view-registry.js";
 export type {
+  EntityViewEventDispatch,
+  EntityViewObserver,
+  EntityViewRegistration,
+  EntityViewRegistry,
+  Unsubscribe,
+} from "./view-registry.js";
+export {
+  createEntityViewBuilder,
+  gpuView,
+  headlessView,
+  prefabView,
+  spriteView,
+} from "./views.js";
+export type {
+  EntityViewBuilder,
+  EntityViewDefinition,
+  EntityViewEventHandlers,
+  EntityViewFactory,
   EntityViewInterpolation,
   EntityViewPosition,
-  SpriteEntityBridge,
-  SpriteEntityBridgeConstructor,
+  GpuViewConfig,
+  HeadlessViewConfig,
+  MountedEntityView,
+  PrefabViewConfig,
   SpriteViewConfig,
   SyncedPositionEntity,
 } from "./views.js";
+export { SpriteGpuEntityPool } from "./gpu-views.js";
+export type {
+  SpriteGpuEntityPoolConfig,
+  SpriteGpuMember,
+} from "./gpu-views.js";
 export {
   createTiledLayer,
   loadTiledMap,

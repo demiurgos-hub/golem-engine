@@ -1,63 +1,298 @@
-import Phaser from "phaser";
+import type Phaser from "phaser";
+import type { SpriteGpuEntityPool } from "./gpu-views.js";
 
+/** Minimal generated entity shape needed by Phaser views. */
 export interface SyncedPositionEntity {
   readonly entityId: number;
   readonly posX: number;
   readonly posY: number;
 }
 
-export interface SpriteEntityBridge extends SyncedPositionEntity {
-  sprite?: Phaser.GameObjects.Sprite;
-  onSpawn(): void;
-  onRemove(): void;
-}
-
-export type SpriteEntityBridgeConstructor<B extends SpriteEntityBridge> = new (
-  entityId: number,
-) => B;
-
+/** A resolved 2D position for a sprite view. */
 export interface EntityViewPosition {
   x: number;
   y: number;
 }
 
+/** Duration-based interpolation applied in the Phaser scene update loop. */
 export interface EntityViewInterpolation {
-  /** Time in milliseconds to move from the displayed position to a new state. */
   duration: number;
-  /** Optional normalized easing function. Defaults to linear interpolation. */
   ease?: (amount: number) => number;
 }
 
 type EntityValue<E, V> = V | ((entity: E) => V);
 
-export interface SpriteViewConfig<B extends SpriteEntityBridge> {
-  /** Texture key used by the default sprite factory. */
-  texture: EntityValue<B, string>;
-  /** Optional initial and synchronized texture frame. */
-  frame?: EntityValue<B, string | number>;
-  /** Override default scene.add.sprite creation. */
-  create?: (
+/** Typed handlers for entity-targeted server events. */
+export type EntityViewEventHandlers<
+  E,
+  V,
+  Events extends object,
+> = Partial<{
+  [K in keyof Events]: (view: V, entity: E, event: Events[K]) => void;
+}>;
+
+/** A mounted presentation for one synchronized entity. */
+export interface MountedEntityView<E extends SyncedPositionEntity> {
+  sync(entity: E): void;
+  update?(deltaMs: number): void;
+  event?(name: string, entity: E, event: unknown): void;
+  destroy(entity: E): void;
+}
+
+/** A per-scene factory created once for one schema entity type. */
+export interface EntityViewFactory<E extends SyncedPositionEntity> {
+  spawn(entity: E): MountedEntityView<E>;
+  destroy(): void;
+}
+
+/** Scene-independent entity presentation definition stored in a registry. */
+export interface EntityViewDefinition<E extends SyncedPositionEntity> {
+  createFactory(scene: Phaser.Scene): EntityViewFactory<E>;
+}
+
+/** Configuration for an arbitrary Phaser GameObject or Editor prefab. */
+export interface PrefabViewConfig<
+  E extends SyncedPositionEntity,
+  V extends Phaser.GameObjects.GameObject,
+  Events extends object = Record<never, never>,
+> {
+  create(scene: Phaser.Scene, entity: E): V;
+  /**
+   * Add the returned object through `scene.add.existing`. Defaults to true.
+   * Set false when `create` already adds the object.
+   */
+  addToScene?: boolean;
+  sync?(view: V, entity: E): void;
+  onSpawn?(view: V, entity: E): void;
+  onRemove?(view: V, entity: E): void;
+  destroy?(view: V, entity: E): void;
+  events?: EntityViewEventHandlers<E, V, Events>;
+}
+
+/** Declarative sprite presentation configuration. */
+export interface SpriteViewConfig<
+  E extends SyncedPositionEntity,
+  Events extends object = Record<never, never>,
+> {
+  texture: EntityValue<E, string>;
+  frame?: EntityValue<E, string | number>;
+  create?(
     scene: Phaser.Scene,
-    entity: B,
+    entity: E,
     texture: string,
     frame?: string | number,
-  ) => Phaser.GameObjects.Sprite;
-  /** Override the default posX/posY mapping. */
-  position?: (entity: B) => EntityViewPosition;
-  /** Smooth position changes over a duration, or false for immediate updates. */
+  ): Phaser.GameObjects.Sprite;
+  position?(entity: E): EntityViewPosition;
   interpolation?: number | EntityViewInterpolation | false;
   /**
-   * Skip automatic position updates for entities whose transforms are owned by
-   * another system, such as local-player prediction. The initial authoritative
-   * spawn position is still applied.
+   * Skip authoritative position writes after spawn, allowing prediction to own
+   * selected entity transforms while other fields continue to synchronize.
    */
-  externalPosition?: EntityValue<B, boolean>;
-  /** Apply additional entity fields after each state or delta. */
-  sync?: (sprite: Phaser.GameObjects.Sprite, entity: B) => void;
-  /** Called after the sprite is created and initially synchronized. */
-  onSpawn?: (sprite: Phaser.GameObjects.Sprite, entity: B) => void;
-  /** Called immediately before the sprite is destroyed. */
-  onRemove?: (sprite: Phaser.GameObjects.Sprite, entity: B) => void;
+  externalPosition?: EntityValue<E, boolean>;
+  sync?(sprite: Phaser.GameObjects.Sprite, entity: E): void;
+  onSpawn?(sprite: Phaser.GameObjects.Sprite, entity: E): void;
+  onRemove?(sprite: Phaser.GameObjects.Sprite, entity: E): void;
+  events?: EntityViewEventHandlers<
+    E,
+    Phaser.GameObjects.Sprite,
+    Events
+  >;
+}
+
+/** Configuration for a per-scene GPU entity pool. */
+export interface GpuViewConfig<
+  E extends SyncedPositionEntity,
+  Events extends object = Record<never, never>,
+> {
+  createPool(scene: Phaser.Scene): SpriteGpuEntityPool<E>;
+  events?: EntityViewEventHandlers<E, number, Events>;
+}
+
+/** Event configuration for a synchronized entity with no Phaser view. */
+export interface HeadlessViewConfig<
+  E extends SyncedPositionEntity,
+  Events extends object = Record<never, never>,
+> {
+  events?: Partial<{
+    [K in keyof Events]: (entity: E, event: Events[K]) => void;
+  }>;
+}
+
+/** Generated per-entity helper exposed by `defineEntityViews`. */
+export interface EntityViewBuilder<
+  E extends SyncedPositionEntity,
+  Events extends object = Record<never, never>,
+> {
+  prefab<V extends Phaser.GameObjects.GameObject>(
+    config: PrefabViewConfig<E, V, Events>,
+  ): EntityViewDefinition<E>;
+  sprite(config: SpriteViewConfig<E, Events>): EntityViewDefinition<E>;
+  gpu(config: GpuViewConfig<E, Events>): EntityViewDefinition<E>;
+  headless(config?: HeadlessViewConfig<E, Events>): EntityViewDefinition<E>;
+}
+
+function resolveValue<E, V>(value: EntityValue<E, V>, entity: E): V {
+  return typeof value === "function"
+    ? (value as (entity: E) => V)(entity)
+    : value;
+}
+
+function dispatchViewEvent<E, V>(
+  handlers: EntityViewEventHandlers<E, V, object> | undefined,
+  name: string,
+  view: V,
+  entity: E,
+  event: unknown,
+): void {
+  const handler = (
+    handlers as Record<
+      string,
+      ((view: V, entity: E, event: unknown) => void) | undefined
+    >
+  )?.[name];
+  handler?.(view, entity, event);
+}
+
+/** Create the runtime helper used by generated entity-view registries. */
+export function createEntityViewBuilder<
+  E extends SyncedPositionEntity,
+  Events extends object = Record<never, never>,
+>(): EntityViewBuilder<E, Events> {
+  return {
+    prefab: (config) => prefabView(config),
+    sprite: (config) => spriteView(config),
+    gpu: (config) => gpuView(config),
+    headless: (config) => headlessView(config),
+  };
+}
+
+/** Define an arbitrary typed Phaser GameObject / Editor prefab view. */
+export function prefabView<
+  E extends SyncedPositionEntity,
+  V extends Phaser.GameObjects.GameObject,
+  Events extends object = Record<never, never>,
+>(config: PrefabViewConfig<E, V, Events>): EntityViewDefinition<E> {
+  return {
+    createFactory(scene) {
+      return {
+        spawn(entity) {
+          const view = config.create(scene, entity);
+          if (config.addToScene !== false) {
+            scene.add.existing(view);
+          }
+          config.sync?.(view, entity);
+          config.onSpawn?.(view, entity);
+          return {
+            sync: (next) => config.sync?.(view, next),
+            event: (name, next, event) =>
+              dispatchViewEvent(config.events, name, view, next, event),
+            destroy: (last) => {
+              config.onRemove?.(view, last);
+              if (config.destroy) {
+                config.destroy(view, last);
+              } else {
+                view.destroy();
+              }
+            },
+          };
+        },
+        destroy() {},
+      };
+    },
+  };
+}
+
+/** Define a declarative Phaser Sprite view. */
+export function spriteView<
+  E extends SyncedPositionEntity,
+  Events extends object = Record<never, never>,
+>(config: SpriteViewConfig<E, Events>): EntityViewDefinition<E> {
+  return {
+    createFactory(scene) {
+      return {
+        spawn(entity) {
+          const texture = resolveValue(config.texture, entity);
+          const frame =
+            config.frame === undefined
+              ? undefined
+              : resolveValue(config.frame, entity);
+          const sprite = config.create
+            ? config.create(scene, entity, texture, frame)
+            : scene.add.sprite(entity.posX, entity.posY, texture, frame);
+          const binding = new SpriteBinding(entity, sprite, config);
+          config.onSpawn?.(sprite, entity);
+          return {
+            sync: (next) => binding.sync(next),
+            update: (deltaMs) => binding.update(deltaMs),
+            event: (name, next, event) =>
+              dispatchViewEvent(config.events, name, sprite, next, event),
+            destroy: (last) => {
+              config.onRemove?.(sprite, last);
+              sprite.destroy();
+            },
+          };
+        },
+        destroy() {},
+      };
+    },
+  };
+}
+
+/** Define a view backed by a scene-local SpriteGpuEntityPool. */
+export function gpuView<
+  E extends SyncedPositionEntity,
+  Events extends object = Record<never, never>,
+>(config: GpuViewConfig<E, Events>): EntityViewDefinition<E> {
+  return {
+    createFactory(scene) {
+      const pool = config.createPool(scene);
+      return {
+        spawn(entity) {
+          const slot = pool.spawn(entity);
+          return {
+            sync: (next) => pool.update(next),
+            event: (name, next, event) =>
+              dispatchViewEvent(config.events, name, slot, next, event),
+            destroy: (last) => {
+              pool.remove(last.entityId);
+            },
+          };
+        },
+        destroy() {
+          pool.destroy();
+        },
+      };
+    },
+  };
+}
+
+/** Explicitly define an entity type that has no Phaser presentation. */
+export function headlessView<
+  E extends SyncedPositionEntity,
+  Events extends object = Record<never, never>,
+>(config: HeadlessViewConfig<E, Events> = {}): EntityViewDefinition<E> {
+  return {
+    createFactory() {
+      return {
+        spawn() {
+          return {
+            sync() {},
+            event(name, entity, event) {
+              const handler = (
+                config.events as Record<
+                  string,
+                  ((entity: E, event: unknown) => void) | undefined
+                >
+              )?.[name];
+              handler?.(entity, event);
+            },
+            destroy() {},
+          };
+        },
+        destroy() {},
+      };
+    },
+  };
 }
 
 interface NormalizedInterpolation {
@@ -65,10 +300,112 @@ interface NormalizedInterpolation {
   ease: (amount: number) => number;
 }
 
-function resolveValue<E, V>(value: EntityValue<E, V>, entity: E): V {
-  return typeof value === "function"
-    ? (value as (entity: E) => V)(entity)
-    : value;
+class SpriteBinding<E extends SyncedPositionEntity> {
+  private entity: E;
+  private readonly interpolation?: NormalizedInterpolation;
+  private startX: number;
+  private startY: number;
+  private targetX: number;
+  private targetY: number;
+  private elapsed = 0;
+
+  constructor(
+    entity: E,
+    private readonly sprite: Phaser.GameObjects.Sprite,
+    private readonly config: SpriteViewConfig<E, object>,
+  ) {
+    this.entity = entity;
+    this.interpolation = normalizeInterpolation(config.interpolation);
+    const position = this.position();
+    this.startX = position.x;
+    this.startY = position.y;
+    this.targetX = position.x;
+    this.targetY = position.y;
+    this.sprite.setPosition(position.x, position.y);
+    this.syncFields();
+  }
+
+  sync(entity: E): void {
+    this.entity = entity;
+    if (this.hasExternalPosition()) {
+      this.cancelInterpolation();
+      this.syncFields();
+      return;
+    }
+
+    const position = this.position();
+    if (position.x !== this.targetX || position.y !== this.targetY) {
+      if (this.interpolation) {
+        this.startX = this.sprite.x;
+        this.startY = this.sprite.y;
+        this.targetX = position.x;
+        this.targetY = position.y;
+        this.elapsed = 0;
+      } else {
+        this.startX = position.x;
+        this.startY = position.y;
+        this.targetX = position.x;
+        this.targetY = position.y;
+        this.sprite.setPosition(position.x, position.y);
+      }
+    }
+    this.syncFields();
+  }
+
+  update(deltaMs: number): void {
+    if (this.hasExternalPosition()) {
+      this.cancelInterpolation();
+      return;
+    }
+    if (
+      !this.interpolation ||
+      (this.sprite.x === this.targetX && this.sprite.y === this.targetY)
+    ) {
+      return;
+    }
+
+    this.elapsed = Math.min(
+      this.elapsed + deltaMs,
+      this.interpolation.duration,
+    );
+    const amount = this.interpolation.ease(
+      this.elapsed / this.interpolation.duration,
+    );
+    this.sprite.setPosition(
+      this.startX + (this.targetX - this.startX) * amount,
+      this.startY + (this.targetY - this.startY) * amount,
+    );
+  }
+
+  private position(): EntityViewPosition {
+    return (
+      this.config.position?.(this.entity) ?? {
+        x: this.entity.posX,
+        y: this.entity.posY,
+      }
+    );
+  }
+
+  private hasExternalPosition(): boolean {
+    return this.config.externalPosition === undefined
+      ? false
+      : resolveValue(this.config.externalPosition, this.entity);
+  }
+
+  private cancelInterpolation(): void {
+    this.startX = this.sprite.x;
+    this.startY = this.sprite.y;
+    this.targetX = this.sprite.x;
+    this.targetY = this.sprite.y;
+    this.elapsed = 0;
+  }
+
+  private syncFields(): void {
+    if (this.config.frame !== undefined) {
+      this.sprite.setFrame(resolveValue(this.config.frame, this.entity));
+    }
+    this.config.sync?.(this.sprite, this.entity);
+  }
 }
 
 function normalizeInterpolation(
@@ -88,217 +425,4 @@ function normalizeInterpolation(
         ease: interpolation.ease ?? ((amount) => amount),
       }
     : undefined;
-}
-
-class SpriteViewBinding<B extends SpriteEntityBridge> {
-  private readonly interpolation?: NormalizedInterpolation;
-  private startX = 0;
-  private startY = 0;
-  private targetX = 0;
-  private targetY = 0;
-  private elapsed = 0;
-
-  constructor(
-    private readonly entity: B,
-    private readonly sprite: Phaser.GameObjects.Sprite,
-    private readonly config: SpriteViewConfig<B>,
-  ) {
-    this.interpolation = normalizeInterpolation(config.interpolation);
-    const position = this.position();
-    this.startX = position.x;
-    this.startY = position.y;
-    this.targetX = position.x;
-    this.targetY = position.y;
-    this.sprite.setPosition(position.x, position.y);
-    this.syncView();
-  }
-
-  sync(): void {
-    if (this.hasExternalPosition()) {
-      this.cancelInterpolation();
-      this.syncView();
-      return;
-    }
-
-    const position = this.position();
-    if (
-      position.x !== this.targetX ||
-      position.y !== this.targetY
-    ) {
-      if (this.interpolation) {
-        this.startX = this.sprite.x;
-        this.startY = this.sprite.y;
-        this.targetX = position.x;
-        this.targetY = position.y;
-        this.elapsed = 0;
-      } else {
-        this.startX = position.x;
-        this.startY = position.y;
-        this.targetX = position.x;
-        this.targetY = position.y;
-        this.sprite.setPosition(position.x, position.y);
-      }
-    }
-    this.syncView();
-  }
-
-  update(delta: number): void {
-    if (this.hasExternalPosition()) {
-      this.cancelInterpolation();
-      return;
-    }
-    if (
-      !this.interpolation ||
-      (this.sprite.x === this.targetX && this.sprite.y === this.targetY)
-    ) {
-      return;
-    }
-    this.elapsed = Math.min(
-      this.elapsed + delta,
-      this.interpolation.duration,
-    );
-    const amount = this.interpolation.ease(
-      this.elapsed / this.interpolation.duration,
-    );
-    this.sprite.setPosition(
-      Phaser.Math.Linear(this.startX, this.targetX, amount),
-      Phaser.Math.Linear(this.startY, this.targetY, amount),
-    );
-  }
-
-  private position(): EntityViewPosition {
-    return this.config.position?.(this.entity) ?? {
-      x: this.entity.posX,
-      y: this.entity.posY,
-    };
-  }
-
-  private hasExternalPosition(): boolean {
-    return this.config.externalPosition === undefined
-      ? false
-      : resolveValue(this.config.externalPosition, this.entity);
-  }
-
-  private cancelInterpolation(): void {
-    this.startX = this.sprite.x;
-    this.startY = this.sprite.y;
-    this.targetX = this.sprite.x;
-    this.targetY = this.sprite.y;
-    this.elapsed = 0;
-  }
-
-  private syncView(): void {
-    if (this.config.frame !== undefined) {
-      this.sprite.setFrame(resolveValue(this.config.frame, this.entity));
-    }
-    this.config.sync?.(this.sprite, this.entity);
-  }
-}
-
-interface UpdatableViewBinding {
-  update(delta: number): void;
-}
-
-class EntityViewSystem {
-  private readonly bindings = new Set<UpdatableViewBinding>();
-
-  constructor(private readonly scene: Phaser.Scene) {
-    scene.events.on(Phaser.Scenes.Events.UPDATE, this.update, this);
-    scene.events.once(Phaser.Scenes.Events.SHUTDOWN, this.shutdown, this);
-  }
-
-  add(binding: UpdatableViewBinding): void {
-    this.bindings.add(binding);
-  }
-
-  remove(binding: UpdatableViewBinding): void {
-    this.bindings.delete(binding);
-  }
-
-  private update(_time: number, delta: number): void {
-    for (const binding of this.bindings) {
-      binding.update(delta);
-    }
-  }
-
-  private shutdown(): void {
-    this.scene.events.off(Phaser.Scenes.Events.UPDATE, this.update, this);
-    this.bindings.clear();
-    viewSystems.delete(this.scene);
-  }
-}
-
-const viewSystems = new WeakMap<Phaser.Scene, EntityViewSystem>();
-
-function viewSystemFor(scene: Phaser.Scene): EntityViewSystem {
-  let system = viewSystems.get(scene);
-  if (!system) {
-    system = new EntityViewSystem(scene);
-    viewSystems.set(scene, system);
-  }
-  return system;
-}
-
-/**
- * createSpriteView returns an entity constructor for a generated registerXxx
- * method. It creates, synchronizes, interpolates, and destroys Phaser sprites.
- *
- * @example
- * client.entities.registerPlayer(createSpriteView(scene, PlayerBridge, {
- *   texture: 'player',
- *   frame: (player) => player.animationFrame,
- *   interpolation: 75,
- * }));
- */
-export function createSpriteView<B extends SpriteEntityBridge>(
-  scene: Phaser.Scene,
-  Bridge: SpriteEntityBridgeConstructor<B>,
-  config: SpriteViewConfig<B>,
-): SpriteEntityBridgeConstructor<B> {
-  const system = viewSystemFor(scene);
-  const Base = Bridge as SpriteEntityBridgeConstructor<SpriteEntityBridge>;
-
-  class ConfiguredSpriteView extends Base {
-    private _golemViewBinding?: SpriteViewBinding<B>;
-
-    onSpawn(): void {
-      super.onSpawn();
-      const entity = this as unknown as B;
-      if (!this.sprite) {
-        const texture = resolveValue(config.texture, entity);
-        const frame =
-          config.frame === undefined
-            ? undefined
-            : resolveValue(config.frame, entity);
-        this.sprite = config.create
-          ? config.create(scene, entity, texture, frame)
-          : scene.add.sprite(this.posX, this.posY, texture, frame);
-      }
-      this._golemViewBinding = new SpriteViewBinding(
-        entity,
-        this.sprite,
-        config,
-      );
-      system.add(this._golemViewBinding);
-      config.onSpawn?.(this.sprite, entity);
-    }
-
-    onRemove(): void {
-      const entity = this as unknown as B;
-      if (this._golemViewBinding) {
-        system.remove(this._golemViewBinding);
-        this._golemViewBinding = undefined;
-      }
-      if (this.sprite) {
-        config.onRemove?.(this.sprite, entity);
-      }
-      super.onRemove();
-    }
-
-    protected syncToSprite(): void {
-      this._golemViewBinding?.sync();
-    }
-  }
-
-  return ConfiguredSpriteView as unknown as SpriteEntityBridgeConstructor<B>;
 }

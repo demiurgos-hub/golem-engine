@@ -1,7 +1,7 @@
 {
   "name": "golem-phaser",
   "version": "0.1.0",
-  "description": "Phaser 4 integration for Golem Engine: client lifecycle, entity views, and Tiled world helpers",
+  "description": "Phaser 4 integration for Golem Engine: persistent client plugin, entity-view registries, and Tiled world helpers",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -19,7 +19,7 @@
     "prebuild": "npm --prefix ../golem-js run build",
     "build": "npm run clean && tsc",
     "prepack": "npm run build",
-    "test": "npm run build"
+    "test": "npm run build && tsc -p tsconfig.type-tests.json && node --test test/*.test.js"
   },
   "peerDependencies": {
     "golem-engine": ">=0.2.0",

@@ -1,58 +1,39 @@
 import Phaser from "phaser";
-import type {
-  SpriteEntityBridgeConstructor,
-  SyncedPositionEntity,
-} from "./views.js";
-
-export interface GpuEntityBridge extends SyncedPositionEntity {
-  onSpawn(): void;
-  onRemove(): void;
-}
-
-export type GpuEntityBridgeConstructor<B extends GpuEntityBridge> = new (
-  entityId: number,
-) => B;
+import type { SyncedPositionEntity } from "./views.js";
 
 export type SpriteGpuMember =
   Partial<Phaser.Types.GameObjects.SpriteGPULayer.Member>;
 
-export interface SpriteGpuEntityPoolConfig<B extends GpuEntityBridge> {
-  /** Single-image texture or texture key shared by every pooled member. */
+export interface SpriteGpuEntityPoolConfig<
+  E extends SyncedPositionEntity,
+> {
   texture: string | Phaser.Textures.Texture;
-  /** Number of stable member slots reserved when the pool is created. */
   capacity: number;
-  /** Extra slots to allocate when full. Defaults to false, which throws. */
   growBy?: number | false;
-  /** Map synchronized entity state to Phaser GPU member data. */
-  member?: (entity: B) => SpriteGpuMember;
-  /** GPU-driven frame animations available to members. */
+  member?: (entity: E) => SpriteGpuMember;
   animations?:
     | Phaser.Animations.Animation[]
     | Phaser.Types.GameObjects.SpriteGPULayer.SetAnimation[];
-  /** Configure depth, blend mode, lighting, or other layer-wide properties. */
   configureLayer?: (layer: Phaser.GameObjects.SpriteGPULayer) => void;
-  /** Called after an entity receives a stable member slot. */
-  onSpawn?: (slot: number, entity: B) => void;
-  /** Called before an entity's member slot is hidden and released. */
+  onSpawn?: (slot: number, entity: E) => void;
   onRemove?: (slot: number, entityId: number) => void;
 }
 
 /**
- * SpriteGpuEntityPool maps replicated entity IDs to stable SpriteGPULayer
- * member slots. Removed entities are hidden and their slots are reused instead
- * of splicing Phaser's GPU buffer.
+ * SpriteGpuEntityPool maps synchronized entity IDs to stable SpriteGPULayer
+ * slots. A registry's `gpu` definition creates one pool per mounted scene.
  */
-export class SpriteGpuEntityPool<B extends GpuEntityBridge> {
+export class SpriteGpuEntityPool<E extends SyncedPositionEntity> {
   readonly layer: Phaser.GameObjects.SpriteGPULayer;
 
   private readonly entitySlots = new Map<number, number>();
   private readonly freeSlots: number[] = [];
-  private readonly pending = new Map<number, B>();
+  private readonly pending = new Map<number, E>();
   private destroyed = false;
 
   constructor(
     private readonly scene: Phaser.Scene,
-    private readonly config: SpriteGpuEntityPoolConfig<B>,
+    private readonly config: SpriteGpuEntityPoolConfig<E>,
   ) {
     if (scene.sys.game.renderer.type !== Phaser.WEBGL) {
       throw new Error(
@@ -93,13 +74,13 @@ export class SpriteGpuEntityPool<B extends GpuEntityBridge> {
     return this.entitySlots.size;
   }
 
-  /** Return the stable member slot assigned to an entity, if it is active. */
+  /** Return the stable member slot assigned to an entity, if active. */
   slotFor(entityId: number): number | undefined {
     return this.entitySlots.get(entityId);
   }
 
   /** Assign or immediately refresh a pooled member for an entity. */
-  spawn(entity: B): number {
+  spawn(entity: E): number {
     this.assertActive();
     const existing = this.entitySlots.get(entity.entityId);
     if (existing !== undefined) {
@@ -124,7 +105,7 @@ export class SpriteGpuEntityPool<B extends GpuEntityBridge> {
   }
 
   /** Queue the latest entity state for one batched pre-render update. */
-  update(entity: B): void {
+  update(entity: E): void {
     if (this.destroyed) {
       return;
     }
@@ -151,7 +132,7 @@ export class SpriteGpuEntityPool<B extends GpuEntityBridge> {
     return true;
   }
 
-  /** Apply all queued entity changes to Phaser's segmented GPU buffer. */
+  /** Apply queued entity changes to Phaser's segmented GPU buffer. */
   flush(): void {
     if (this.destroyed || this.pending.size === 0) {
       return;
@@ -169,7 +150,7 @@ export class SpriteGpuEntityPool<B extends GpuEntityBridge> {
     this.cleanup(true);
   }
 
-  private memberFor(entity: B): SpriteGpuMember {
+  private memberFor(entity: E): SpriteGpuMember {
     return {
       x: entity.posX,
       y: entity.posY,
@@ -238,43 +219,4 @@ export class SpriteGpuEntityPool<B extends GpuEntityBridge> {
       this.layer.destroy();
     }
   }
-}
-
-/**
- * createGpuEntityView returns an entity constructor that connects a generated
- * Phaser bridge to a pooled SpriteGPULayer member.
- *
- * @example
- * const projectiles = new SpriteGpuEntityPool<ProjectileBridge>(scene, {
- *   texture: 'projectiles',
- *   capacity: 4096,
- *   member: (entity) => ({ frame: entity.kind }),
- * });
- * client.entities.registerProjectile(
- *   createGpuEntityView(projectiles, ProjectileBridge),
- * );
- */
-export function createGpuEntityView<B extends GpuEntityBridge>(
-  pool: SpriteGpuEntityPool<B>,
-  Bridge: GpuEntityBridgeConstructor<B>,
-): GpuEntityBridgeConstructor<B> {
-  const Base = Bridge as GpuEntityBridgeConstructor<GpuEntityBridge>;
-
-  class ConfiguredGpuEntityView extends Base {
-    onSpawn(): void {
-      super.onSpawn();
-      pool.spawn(this as unknown as B);
-    }
-
-    onRemove(): void {
-      pool.remove(this.entityId);
-      super.onRemove();
-    }
-
-    protected syncToView(): void {
-      pool.update(this as unknown as B);
-    }
-  }
-
-  return ConfiguredGpuEntityView as unknown as GpuEntityBridgeConstructor<B>;
 }
