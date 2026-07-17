@@ -79,3 +79,40 @@ func TestGenerateJSManagerTemplateIncludesCompactUpdateDispatch(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateJSManagerTemplateUsesMulticastSubscriptions(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/js/manager.ts.tmpl")
+	if err != nil {
+		t.Fatalf("loadEmbeddedTemplate: %v", err)
+	}
+
+	data := schema.SharedData{
+		GolemImport: "golem-engine",
+		Entities: []schema.EntityData{
+			{Name: "Player", LowerName: "player"},
+		},
+	}
+
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, data); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := out.String()
+
+	for _, want := range []string{
+		"private _onSpawn = new Set<(entity: SyncedEntity) => void>();",
+		"private _onUpdate = new Set<(entity: SyncedEntity) => void>();",
+		"private _onRemove = new Set<(entityId: number) => void>();",
+		"getPlayer(entityId: number): SyncedPlayer | undefined",
+		"onSpawn(fn: (entity: SyncedEntity) => void): () => void",
+		"return () => { this._onSpawn.delete(fn); };",
+		"for (const fn of this._onSpawn) fn(e!);",
+		"for (const fn of this._onUpdate) fn(e);",
+		"for (const fn of this._onRemove) fn(id);",
+		"Phaser presentation should use an entity-view registry instead.",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("generated EntityManager missing %q\n%s", want, content)
+		}
+	}
+}

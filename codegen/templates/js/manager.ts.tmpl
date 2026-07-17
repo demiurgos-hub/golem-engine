@@ -12,9 +12,9 @@ export type SyncedEntity = {{range $i, $e := .Entities}}{{if $i}} | {{end}}Synce
 export class EntityManager {
   private _entities = new Map<number, SyncedEntity>();
   private _lastRevisions = new Map<number, number>();
-  private _onSpawn?: (entity: SyncedEntity) => void;
-  private _onUpdate?: (entity: SyncedEntity) => void;
-  private _onRemove?: (entityId: number) => void;
+  private _onSpawn = new Set<(entity: SyncedEntity) => void>();
+  private _onUpdate = new Set<(entity: SyncedEntity) => void>();
+  private _onRemove = new Set<(entityId: number) => void>();
 {{- range .Entities}}
   private _{{.LowerName}}Ctor: new (entityId: number) => Synced{{.Name}} = Synced{{.Name}};
 {{- end}}
@@ -26,12 +26,36 @@ export class EntityManager {
   getAll(): ReadonlyMap<number, SyncedEntity> {
     return this._entities;
   }
-
-  onSpawn(fn: (entity: SyncedEntity) => void) { this._onSpawn = fn; }
-  onUpdate(fn: (entity: SyncedEntity) => void) { this._onUpdate = fn; }
-  onRemove(fn: (entityId: number) => void) { this._onRemove = fn; }
 {{range .Entities}}
-  /** Register a custom subclass for {{.Name}} entities. */
+  /** Return the {{.Name}} entity with the given id, if present. */
+  get{{.Name}}(entityId: number): Synced{{.Name}} | undefined {
+    const entity = this._entities.get(entityId);
+    return entity instanceof Synced{{.Name}} ? entity : undefined;
+  }
+{{- end}}
+
+  /** Register a spawn listener. Returns an unsubscribe function. */
+  onSpawn(fn: (entity: SyncedEntity) => void): () => void {
+    this._onSpawn.add(fn);
+    return () => { this._onSpawn.delete(fn); };
+  }
+
+  /** Register an update listener. Returns an unsubscribe function. */
+  onUpdate(fn: (entity: SyncedEntity) => void): () => void {
+    this._onUpdate.add(fn);
+    return () => { this._onUpdate.delete(fn); };
+  }
+
+  /** Register a removal listener. Returns an unsubscribe function. */
+  onRemove(fn: (entityId: number) => void): () => void {
+    this._onRemove.add(fn);
+    return () => { this._onRemove.delete(fn); };
+  }
+{{range .Entities}}
+  /**
+   * Register a custom subclass for {{.Name}} entity logic.
+   * Phaser presentation should use an entity-view registry instead.
+   */
   register{{.Name}}(ctor: new (entityId: number) => Synced{{.Name}}) { this._{{.LowerName}}Ctor = ctor; }
 {{- end}}
 
@@ -58,7 +82,7 @@ export class EntityManager {
       const removed = this._entities.get(id);
       if (removed && this._entities.delete(id)) {
         (removed as EntityLifecycle).onRemove?.();
-        this._onRemove?.(id);
+        for (const fn of this._onRemove) fn(id);
       }
     }
   }
@@ -103,9 +127,9 @@ export class EntityManager {
     this._lastRevisions.set(id, revision);
     if (isNew) {
       (e as EntityLifecycle).onSpawn?.();
-      this._onSpawn?.(e!);
+      for (const fn of this._onSpawn) fn(e!);
     } else {
-      this._onUpdate?.(e!);
+      for (const fn of this._onUpdate) fn(e!);
     }
   }
 
@@ -117,7 +141,7 @@ export class EntityManager {
     if (e) {
       e.applyDelta(d);
       this._lastRevisions.set(id, revision);
-      this._onUpdate?.(e);
+      for (const fn of this._onUpdate) fn(e);
     }
   }
 {{- end}}

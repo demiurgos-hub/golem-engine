@@ -8,14 +8,18 @@ import type { {{range $i, $t := .WorldCatalogCustomTypes}}{{if $i}}, {{end}}{{$t
 export class WorldManager {
 {{- range .WorldTypes}}
   private _{{.LowerName}}?: {{.DataName}};
-  private _on{{.Name}}Update?: (data: {{.DataName}}) => void;
+  private _on{{.Name}}Update = new Set<(data: {{.DataName}}) => void>();
 {{- end}}
 {{range .WorldTypes}}
   get {{.LowerName}}(): {{.DataName}} | undefined {
     return this._{{.LowerName}};
   }
 
-  on{{.Name}}Update(fn: (data: {{.DataName}}) => void) { this._on{{.Name}}Update = fn; }
+  /** Register a {{.Name}} update listener. Returns an unsubscribe function. */
+  on{{.Name}}Update(fn: (data: {{.DataName}}) => void): () => void {
+    this._on{{.Name}}Update.add(fn);
+    return () => { this._on{{.Name}}Update.delete(fn); };
+  }
 {{if and .IsCatalog .CatalogKeyField}}
   /** Returns the {{.CatalogItemType}} with the given key, or undefined if not loaded or not found. */
   get{{.Name}}ById(id: {{.CatalogKeyTSType}}): {{.CatalogItemType}} | undefined {
@@ -27,7 +31,7 @@ export class WorldManager {
 {{- range .WorldTypes}}
     if (update.{{.LowerName}}Data) {
       this._{{.LowerName}} = update.{{.LowerName}}Data;
-      this._on{{.Name}}Update?.(update.{{.LowerName}}Data);
+      for (const fn of this._on{{.Name}}Update) fn(update.{{.LowerName}}Data);
       return;
     }
 {{- end}}

@@ -2,19 +2,37 @@
 import type { EntityManagerLike } from "{{.GolemImport}}";
 import type { {{range $i, $e := .Events}}{{if $i}}, {{end}}{{$e.Name}}Event{{end}} } from "./events_pb.js";
 import { ServerEvent } from "./events_pb.js";
+{{- range .Entities}}
+import { Synced{{.Name}} } from "./{{.Name}}Synced.js";
+{{- end}}
 
 /** Manages server-to-client events and dispatches incoming ServerEvent messages. */
 export class EventManager {
   private _entities: EntityManagerLike;
-{{range .Events}}{{if ne .Target "entity"}}
-  private _on{{.Name}}?: (e: {{.Name}}Event) => void;
+{{range .Events}}{{if eq .Target "entity"}}
+  private _on{{.Name}} = new Set<(entity: Synced{{.EntityType}}, e: {{.Name}}Event) => void>();
+{{else}}
+  private _on{{.Name}} = new Set<(e: {{.Name}}Event) => void>();
 {{end}}{{end}}
   constructor(entities: EntityManagerLike) {
     this._entities = entities;
   }
-{{range .Events}}{{if ne .Target "entity"}}
-  /** Register a handler for the {{.Target}} {{.Name}} event. */
-  on{{.Name}}(fn: (e: {{.Name}}Event) => void): void { this._on{{.Name}} = fn; }
+{{range .Events}}{{if eq .Target "entity"}}
+  /**
+   * Register a handler for the entity-targeted {{.Name}} event.{{if .FOIOnly}}
+   * FOI-filtered: the target entity is guaranteed to have spawned when this fires.{{end}}
+   * Returns an unsubscribe function.
+   */
+  on{{.Name}}(fn: (entity: Synced{{.EntityType}}, e: {{.Name}}Event) => void): () => void {
+    this._on{{.Name}}.add(fn);
+    return () => { this._on{{.Name}}.delete(fn); };
+  }
+{{else}}
+  /** Register a handler for the {{.Target}} {{.Name}} event. Returns an unsubscribe function. */
+  on{{.Name}}(fn: (e: {{.Name}}Event) => void): () => void {
+    this._on{{.Name}}.add(fn);
+    return () => { this._on{{.Name}}.delete(fn); };
+  }
 {{end}}{{end}}
   /** Process a decoded ServerEvent from the server. */
   applyUpdate(update: ServerEvent): void {
@@ -22,12 +40,15 @@ export class EventManager {
 {{- if eq .Target "entity"}}
     if (update.{{.LowerName}}) {
       const entity = this._entities.get(Number(update.{{.LowerName}}.entityId));
-      (entity as any)?.on{{.Name}}?.(update.{{.LowerName}});
+      if (entity instanceof Synced{{.EntityType}}) {
+        (entity as { on{{.Name}}?(e: {{.Name}}Event): void }).on{{.Name}}?.(update.{{.LowerName}});
+        for (const fn of this._on{{.Name}}) fn(entity, update.{{.LowerName}});
+      }
       return;
     }
 {{- else}}
     if (update.{{.LowerName}}) {
-      this._on{{.Name}}?.(update.{{.LowerName}});
+      for (const fn of this._on{{.Name}}) fn(update.{{.LowerName}});
       return;
     }
 {{- end}}
