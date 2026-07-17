@@ -18,4 +18,4 @@ Templates live under `codegen/templates/` and are embedded with `go:embed`.
 
 `codegen/` imports config and template data from `schema`; it should not define YAML schema structs or reimplement schema loading.
 
-When adding an integration, register it in `integration.go` and add its templates and any `GenerateExtra` or `Finalize` hooks here. Full clients (`go-client`, `js-client`, `csharp-client`) own generated managers/codecs; engine bridges (`phaser`, `unity`, `ebiten`) should stay thin and depend on the matching full client output.
+When adding an integration, register it in `integration.go` and add its templates and any `GenerateExtra` or `Finalize` hooks here. Integrations may be shared-only by omitting `Template`/`FileNamer` and emitting only `SharedTemplates`. Full clients (`go-client`, `js-client`, `csharp-client`) own generated managers/codecs; engine integrations (`phaser`, `unity`, `ebiten`) should stay thin and depend on the matching full client output.
