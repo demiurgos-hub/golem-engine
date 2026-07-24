@@ -93,6 +93,20 @@ func TestLayers_MaskFor_combinesBits(t *testing.T) {
 	}
 }
 
+func TestLayers_Lookup(t *testing.T) {
+	l := NewLayers().Define("Player", "Wall").SetCollides("Player", "Wall")
+	layer, mask, ok := l.Lookup("Player")
+	if !ok || layer != l.Layer("Player") || mask != l.Mask("Player") {
+		t.Fatalf("Lookup(Player) = %d,%d,%v", layer, mask, ok)
+	}
+	if _, _, ok := l.Lookup("Missing"); ok {
+		t.Fatal("Lookup(Missing) should fail")
+	}
+	if _, _, ok := (*Layers)(nil).Lookup("Player"); ok {
+		t.Fatal("nil Layers Lookup should fail")
+	}
+}
+
 func TestLayers_MaskFor_singleName(t *testing.T) {
 	l := NewLayers().Define("X")
 	if got := l.MaskFor("X"); got != l.Layer("X") {

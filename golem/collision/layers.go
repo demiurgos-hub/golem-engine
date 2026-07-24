@@ -112,6 +112,19 @@ func (l *Layers) Mask(name string) uint32 {
 	return l.matrix[l.mustIndex(name)]
 }
 
+// Lookup returns the layer bit and collision mask for name.
+// ok is false when name has not been registered with Define.
+func (l *Layers) Lookup(name string) (layer, mask uint32, ok bool) {
+	if l == nil {
+		return 0, 0, false
+	}
+	idx, ok := l.indices[name]
+	if !ok {
+		return 0, 0, false
+	}
+	return 1 << idx, l.matrix[idx], true
+}
+
 // MaskFor returns the OR of the Layer bits for each of the given names. Use
 // this to build layerMask arguments for spatial queries such as OverlapBox or
 // Raycast. Panics if any name has not been registered with Define.

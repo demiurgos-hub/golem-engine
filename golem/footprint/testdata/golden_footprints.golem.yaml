@@ -1,0 +1,35 @@
+version: 1
+dimensions: 2
+footprints:
+  0123456789abcdef0123456789abcdef:
+    name: Wall
+    asset_path: Assets/Prefabs/Environment/Wall.prefab
+    alias: wall
+    shapes:
+      - type: aabb
+        w: 2
+        h: 1
+        offset:
+          x: 0
+          y: 0.5
+        trigger: false
+        layer: Default
+      - type: circle
+        r: 0.25
+        offset:
+          x: 1
+          y: 0
+        trigger: true
+        layer: Trigger
+  fedcba9876543210fedcba9876543210:
+    name: Wall
+    asset_path: Assets/Prefabs/Environment/WallCap.prefab
+    shapes:
+      - type: aabb
+        w: 1
+        h: 1
+        offset:
+          x: -0.5
+          y: 0
+        trigger: false
+        layer: Default

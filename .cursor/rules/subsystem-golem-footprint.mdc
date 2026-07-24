@@ -1,0 +1,15 @@
+---
+description: golem/footprint — versioned collision footprint YAML loader and 2D/3D placers.
+globs: golem/footprint/**/*
+alwaysApply: false
+---
+
+# `golem/footprint`
+
+**Collision-only footprints:** load `footprints.golem.yaml` (version 1, `dimensions` 2 or 3) and place shapes on `collision.Backend` / `collision3d.Backend`. No dependency on the `golem` runtime, registry, or navigation.
+
+**Format:** entries keyed by canonical Unity GUID (32 hex); optional unique `alias`; diagnostic `name` / `asset_path` need not be unique. Root-local shapes: 2D `circle{r}` / `aabb{w,h}`; 3D `sphere{r}` / `aabb{w,h,d}`. AABB values are full extents. Each shape has root-local center `offset`, `trigger`, and Unity `layer` label. Unknown YAML fields and unsupported versions/dimensions are rejected.
+
+**API:** `Load` / `Parse` → `Set` with `LookupGUID` / `LookupAlias`. Each `Footprint` carries `Dimensions` (2 or 3); placers reject cross-dimension placement. Separate `Placer2D` / `Placer3D` accept translation, positive uniform scale, and exact quarter-turn rotation (2D around Z; 3D yaw around Y). `LayerResolver` returns `(layer, mask uint32, ok bool)`; `LayersResolver` adapts `collision.Layers` for 2D. Synthetic negative IDs come from a shared or caller-supplied `IDAllocator` (negative namespace reserved; do not overlap caller-registered IDs). Placement calls `Add` then `Update` per shape; `Handle.Remove` is nil-safe, idempotent, and concurrency-safe.
+
+**IDs / contacts:** default Golem entity IDs stay positive; negative IDs are collision-only and may appear in contact callbacks without a registry entity. Golden fixtures under `golem/footprint/testdata/` are the Phase 4 Unity exporter contract.

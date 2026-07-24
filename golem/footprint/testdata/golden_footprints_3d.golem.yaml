@@ -1,0 +1,26 @@
+version: 1
+dimensions: 3
+footprints:
+  aabbccddeeff00112233445566778899:
+    name: Crate
+    asset_path: Assets/Prefabs/Props/Crate.prefab
+    alias: crate
+    shapes:
+      - type: aabb
+        w: 2
+        h: 1
+        d: 3
+        offset:
+          x: 0
+          y: 0.5
+          z: 0
+        trigger: false
+        layer: Default
+      - type: sphere
+        r: 0.5
+        offset:
+          x: 0
+          y: 1
+          z: 0.25
+        trigger: true
+        layer: Trigger
