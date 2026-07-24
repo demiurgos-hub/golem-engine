@@ -24,11 +24,19 @@ namespace GolemEngine.Unity.Editor
         [SerializeField] private string bakeCommand = GoBakeCommand;
         [SerializeField] private string serverCommand = "go run ./cmd/server";
         [SerializeField] private string assetFolder = "Assets/Golem";
+        [SerializeField] private bool autoBakeOnExport = true;
 
         public string ProjectRoot
         {
             get => string.IsNullOrWhiteSpace(projectRoot) ? DefaultProjectRoot : projectRoot;
             set => projectRoot = NormalizePath(value);
+        }
+
+        /// <summary>When true, Scribe queues golem-bake after entity schema bytes change.</summary>
+        public bool AutoBakeOnExport
+        {
+            get => autoBakeOnExport;
+            set => autoBakeOnExport = value;
         }
 
         public GolemBakeCommandMode BakeCommandMode
@@ -137,6 +145,31 @@ namespace GolemEngine.Unity.Editor
             EditorGUILayout.HelpBox(
                 "Golem > Run Server opens this command in an external terminal at Project Root. Unity does not own, stop, or restart that process.",
                 MessageType.None);
+
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Golem Scribe", EditorStyles.boldLabel);
+            var nextAutoBake = EditorGUILayout.Toggle("Auto Bake On Export", AutoBakeOnExport);
+            if (nextAutoBake != autoBakeOnExport)
+            {
+                AutoBakeOnExport = nextAutoBake;
+            }
+            EditorGUILayout.HelpBox(
+                "When enabled, Golem Scribe runs golem-bake only after entity schema bytes change. Generated C# refreshes do not recursively re-export.",
+                MessageType.None);
+            if (GolemYamlConfig.TryGetProjectSchema(ProjectRoot, out var schema, out _))
+            {
+                using (new EditorGUI.DisabledScope(true))
+                {
+                    EditorGUILayout.TextField("Entity Schema", schema.EntitySchema);
+                    EditorGUILayout.TextField("Types Schema", schema.TypesSchema);
+                    EditorGUILayout.TextField("World Schema", schema.WorldSchema);
+                    EditorGUILayout.IntField("Dimensions", schema.Dimensions);
+                }
+            }
+            else
+            {
+                EditorGUILayout.HelpBox("Could not read schema paths from golem.yaml.", MessageType.Warning);
+            }
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Scene Setup", EditorStyles.boldLabel);

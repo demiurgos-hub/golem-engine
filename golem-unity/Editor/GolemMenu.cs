@@ -11,6 +11,12 @@ namespace GolemEngine.Unity.Editor
             GolemCodegenRunner.GenerateCode();
         }
 
+        [MenuItem("Golem/Scribe/Export All", priority = 5)]
+        public static void ScribeExportAll()
+        {
+            GolemScribeScheduler.RequestExportAll();
+        }
+
         [MenuItem("Golem/Run Server", priority = 10)]
         public static void RunServer()
         {

@@ -8,6 +8,9 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Golem Scribe (Unity) Phase 1: author entity schemas from prefabs with `[GolemEntity]` / `[GolemVar]` / `GolemSync`, export deterministic YAML under `entity_schema`, upsert the prefab registry, and track ownership in `scribe.golem.yaml` so handwritten files are never overwritten or deleted.
+- Golem Scribe schedules coalesced, reentrancy-safe exports from asset changes (`Golem/Scribe/Export All`), and can auto-run `golem-bake` when entity schema bytes change (`Auto Bake On Export` in Project Settings > Golem).
+- Website docs need a future “Author in Unity with Golem Scribe” guide covering source-of-truth rules, ignored prefab field values, and managed artifact ownership.
 - `golem-phaser` now includes a `createTiledLayer` helper for creating Phaser 4 GPU tilemap layers with CPU fallback for unsupported maps.
 - `golem-phaser` includes `loadTiledWorld` for mounting generated `mapUrl` or embedded `tileData` world updates, loading tilesets, creating layers with automatic GPU selection, replacing prior zone mounts, and refreshing edited GPU layers.
 - `golem-phaser` includes a global `GolemPlugin` that owns one persistent generated client, reconnects unexpected drops, and exposes typed connection status subscriptions for game-owned UI.
@@ -37,6 +40,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Golem Scribe now rejects absolute/`..` artifact paths, rolls back partial artifact mutations, keeps registry removals pending when registry updates fail, continues orphan cleanup when unrelated prefabs are invalid, and preserves external asset notifications while an export is running.
 - Generated JavaScript `Client` types expose configured world managers directly, so typed world callbacks no longer require optional-manager checks or casts.
 
 ### Security
