@@ -9,8 +9,10 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 ### Added
 
 - Golem Scribe (Unity) Phase 1: author entity schemas from prefabs with `[GolemEntity]` / `[GolemVar]` / `GolemSync`, export deterministic YAML under `entity_schema`, upsert the prefab registry, and track ownership in `scribe.golem.yaml` so handwritten files are never overwritten or deleted.
-- Golem Scribe schedules coalesced, reentrancy-safe exports from asset changes (`Golem/Scribe/Export All`), and can auto-run `golem-bake` when entity schema bytes change (`Auto Bake On Export` in Project Settings > Golem).
-- Website docs need a future “Author in Unity with Golem Scribe” guide covering source-of-truth rules, ignored prefab field values, and managed artifact ownership.
+- Golem Scribe schedules coalesced, reentrancy-safe exports from asset changes (`Golem/Scribe/Export All`), and can auto-run `golem-bake` when entity or catalog type/world schema bytes change (`Auto Bake On Export` in Project Settings > Golem).
+- Golem Scribe (Unity) Phase 2: author ScriptableObject catalogs with `[GolemCatalog]` / `[GolemField]` / `[GolemAssetRef]`, exporting a custom type schema, catalog world schema, and project-root `catalogs/{name}.golem.yaml` data file (sequence of maps, snake_case keys, GUID asset refs). Custom-type tags are direct protobuf field numbers (no entity offset). Catalog class deletion removes all three managed artifacts via the Scribe manifest; data-only edits do not trigger auto-bake.
+- Catalog server boundary: `golem-bake` generates `Load{Name}Data`; application code must still load the catalog and store/publish the resulting world data explicitly.
+- Website docs need a future “Author in Unity with Golem Scribe” guide covering source-of-truth rules, ignored prefab field values, managed artifact ownership, and catalog loading/publishing.
 - `golem-phaser` now includes a `createTiledLayer` helper for creating Phaser 4 GPU tilemap layers with CPU fallback for unsupported maps.
 - `golem-phaser` includes `loadTiledWorld` for mounting generated `mapUrl` or embedded `tileData` world updates, loading tilesets, creating layers with automatic GPU selection, replacing prior zone mounts, and refreshing edited GPU layers.
 - `golem-phaser` includes a global `GolemPlugin` that owns one persistent generated client, reconnects unexpected drops, and exposes typed connection status subscriptions for game-owned UI.
@@ -40,6 +42,9 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Golem Scribe catalog export preserves previously committed type/world/data artifacts when a catalog class is temporarily invalid (errors are reported; bake is skipped only for that exporter); only truly removed or renamed catalog type names orphan-delete their managed files. Invalid catalog rows no longer reserve keys that would block a later valid asset with the same key.
+- Golem Scribe auto-bake is decoupled per exporter: catalog collect/reconcile errors no longer suppress a required entity-schema bake, and entity errors no longer suppress a required valid catalog-schema bake.
+- Golem Scribe YAML scalars now quote/escape newlines, carriage returns, tabs, and other C0 control characters.
 - Golem Scribe now rejects absolute/`..` artifact paths, rolls back partial artifact mutations, keeps registry removals pending when registry updates fail, continues orphan cleanup when unrelated prefabs are invalid, and preserves external asset notifications while an export is running.
 - Generated JavaScript `Client` types expose configured world managers directly, so typed world callbacks no longer require optional-manager checks or casts.
 

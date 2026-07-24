@@ -27,5 +27,14 @@ namespace GolemEngine.Unity.Editor.Tests
         {
             Assert.That(GolemScribeNaming.EntitySchemaFileName("Player"), Is.EqualTo("player.yaml"));
         }
+
+        [Test]
+        public void CatalogFileNames_UseSnakeCaseYamlAndGolemYaml()
+        {
+            Assert.That(GolemScribeNaming.CatalogSchemaFileName("MonsterDefinition"),
+                Is.EqualTo("monster_definition.yaml"));
+            Assert.That(GolemScribeNaming.CatalogDataFileName("MonsterDefinition"),
+                Is.EqualTo("monster_definition.golem.yaml"));
+        }
     }
 }

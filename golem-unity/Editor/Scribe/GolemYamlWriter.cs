@@ -35,6 +35,42 @@ namespace GolemEngine.Unity.Editor
             return value.ToString(CultureInfo.InvariantCulture);
         }
 
+        /// <summary>Formats an unsigned integer scalar.</summary>
+        public static string FormatUInt(uint value)
+        {
+            return value.ToString(CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>Formats a 64-bit integer scalar.</summary>
+        public static string FormatLong(long value)
+        {
+            return value.ToString(CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>Formats an unsigned 64-bit integer scalar.</summary>
+        public static string FormatULong(ulong value)
+        {
+            return value.ToString(CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>Formats a float scalar with invariant culture.</summary>
+        public static string FormatFloat(float value)
+        {
+            return value.ToString("G9", CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>Formats a double scalar with invariant culture.</summary>
+        public static string FormatDouble(double value)
+        {
+            return value.ToString("G17", CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>Formats a boolean scalar as lowercase YAML true/false.</summary>
+        public static string FormatBool(bool value)
+        {
+            return value ? "true" : "false";
+        }
+
         /// <summary>Builds a document that starts with the Scribe marker line.</summary>
         public static string BuildDocument(IEnumerable<string> bodyLines)
         {
@@ -101,7 +137,38 @@ namespace GolemEngine.Unity.Editor
                         {
                             return false;
                         }
-                        builder.Append(raw[++i]);
+
+                        var next = raw[++i];
+                        switch (next)
+                        {
+                            case 'n':
+                                builder.Append('\n');
+                                break;
+                            case 'r':
+                                builder.Append('\r');
+                                break;
+                            case 't':
+                                builder.Append('\t');
+                                break;
+                            case 'x':
+                                if (i + 2 >= raw.Length)
+                                {
+                                    return false;
+                                }
+
+                                var hex = raw.Substring(i + 1, 2);
+                                if (!byte.TryParse(hex, NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var b))
+                                {
+                                    return false;
+                                }
+
+                                builder.Append((char)b);
+                                i += 2;
+                                break;
+                            default:
+                                builder.Append(next);
+                                break;
+                        }
                         continue;
                     }
 
@@ -139,7 +206,40 @@ namespace GolemEngine.Unity.Editor
 
         private static string EscapeDoubleQuoted(string value)
         {
-            return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
+            var builder = new StringBuilder(value.Length + 8);
+            foreach (var c in value)
+            {
+                switch (c)
+                {
+                    case '\\':
+                        builder.Append("\\\\");
+                        break;
+                    case '"':
+                        builder.Append("\\\"");
+                        break;
+                    case '\n':
+                        builder.Append("\\n");
+                        break;
+                    case '\r':
+                        builder.Append("\\r");
+                        break;
+                    case '\t':
+                        builder.Append("\\t");
+                        break;
+                    default:
+                        if (c < 0x20)
+                        {
+                            builder.Append("\\x");
+                            builder.Append(((int)c).ToString("x2", CultureInfo.InvariantCulture));
+                        }
+                        else
+                        {
+                            builder.Append(c);
+                        }
+                        break;
+                }
+            }
+            return builder.ToString();
         }
 
         /// <summary>
@@ -198,11 +298,6 @@ namespace GolemEngine.Unity.Editor
 
         private static bool NeedsQuotes(string value)
         {
-            if (char.IsWhiteSpace(value[0]) || char.IsWhiteSpace(value[value.Length - 1]))
-            {
-                return true;
-            }
-
             if (value == "true" || value == "false" || value == "null" || value == "yes" || value == "no")
             {
                 return true;
@@ -215,6 +310,12 @@ namespace GolemEngine.Unity.Editor
 
             foreach (var c in value)
             {
+                // Quote whitespace (including space/newline/tab) and C0 controls.
+                if (c <= 0x20)
+                {
+                    return true;
+                }
+
                 if (c == ':' || c == '#' || c == '{' || c == '}' || c == '[' || c == ']' ||
                     c == ',' || c == '&' || c == '*' || c == '!' || c == '|' || c == '>' ||
                     c == '\'' || c == '"' || c == '%' || c == '@' || c == '`')

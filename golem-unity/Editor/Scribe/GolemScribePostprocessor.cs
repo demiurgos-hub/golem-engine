@@ -3,7 +3,7 @@ using UnityEditor;
 namespace GolemEngine.Unity.Editor
 {
     /// <summary>
-    /// Records prefab/script asset changes for deferred Scribe reconciliation.
+    /// Records prefab/ScriptableObject/script asset changes for deferred Scribe reconciliation.
     /// Performs no export, bake, or AssetDatabase.Refresh work synchronously.
     /// </summary>
     public sealed class GolemScribePostprocessor : AssetPostprocessor

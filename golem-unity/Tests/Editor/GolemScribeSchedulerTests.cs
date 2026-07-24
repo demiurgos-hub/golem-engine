@@ -39,6 +39,14 @@ namespace GolemEngine.Unity.Editor.Tests
         }
 
         [Test]
+        public void NotifyImported_AcceptsScriptableObjectAssets()
+        {
+            GolemScribeScheduler.NotifyImportedOrMoved(new[] { "Assets/Data/Monster.asset" });
+            Assert.That(GolemScribeScheduler.IsScheduledForTests, Is.True);
+            Assert.That(GolemScribeScheduler.DirtyPathCountForTests, Is.EqualTo(1));
+        }
+
+        [Test]
         public void RunSuppressed_BlocksPostprocessorNotifications()
         {
             GolemScribeScheduler.RunSuppressed(() =>
@@ -78,6 +86,53 @@ namespace GolemEngine.Unity.Editor.Tests
             GolemScribeScheduler.NotifyImportedOrMoved(new[] { "Assets/A.prefab" });
             Assert.That(GolemScribeScheduler.DirtyPathCountForTests, Is.EqualTo(1));
             Assert.That(GolemScribeScheduler.IsScheduledForTests, Is.True);
+        }
+
+        [Test]
+        public void ShouldAutoBake_DecouplesEntityAndCatalogErrors()
+        {
+            // Catalog errors must not suppress a required entity-schema bake.
+            Assert.That(
+                GolemScribeScheduler.ShouldAutoBake(
+                    entityHasErrors: false,
+                    entitySchemaBytesChanged: true,
+                    catalogHasErrors: true,
+                    catalogSchemaBytesChanged: true),
+                Is.True);
+
+            // Entity errors must not suppress a required valid catalog-schema bake.
+            Assert.That(
+                GolemScribeScheduler.ShouldAutoBake(
+                    entityHasErrors: true,
+                    entitySchemaBytesChanged: true,
+                    catalogHasErrors: false,
+                    catalogSchemaBytesChanged: true),
+                Is.True);
+
+            // An invalid exporter's schema-change flag must not bake by itself.
+            Assert.That(
+                GolemScribeScheduler.ShouldAutoBake(
+                    entityHasErrors: true,
+                    entitySchemaBytesChanged: true,
+                    catalogHasErrors: true,
+                    catalogSchemaBytesChanged: true),
+                Is.False);
+
+            Assert.That(
+                GolemScribeScheduler.ShouldAutoBake(
+                    entityHasErrors: false,
+                    entitySchemaBytesChanged: false,
+                    catalogHasErrors: false,
+                    catalogSchemaBytesChanged: false),
+                Is.False);
+
+            Assert.That(
+                GolemScribeScheduler.ShouldAutoBake(
+                    entityHasErrors: false,
+                    entitySchemaBytesChanged: true,
+                    catalogHasErrors: false,
+                    catalogSchemaBytesChanged: true),
+                Is.True);
         }
     }
 }

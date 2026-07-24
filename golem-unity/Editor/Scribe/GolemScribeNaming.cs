@@ -49,5 +49,17 @@ namespace GolemEngine.Unity.Editor
         {
             return ToSnakeCase(entityName) + ".yaml";
         }
+
+        /// <summary>Returns the type/world schema file name for a PascalCase catalog type name.</summary>
+        public static string CatalogSchemaFileName(string typeName)
+        {
+            return ToSnakeCase(typeName) + ".yaml";
+        }
+
+        /// <summary>Returns the project-root-relative catalog data file name for a type.</summary>
+        public static string CatalogDataFileName(string typeName)
+        {
+            return ToSnakeCase(typeName) + ".golem.yaml";
+        }
     }
 }
