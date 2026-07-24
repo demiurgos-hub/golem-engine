@@ -9,7 +9,12 @@ namespace GolemEngine.Unity.Editor
         public const string ArtifactKindTypeSchema = "type_schema";
         public const string ArtifactKindWorldSchema = "world_schema";
         public const string ArtifactKindCatalogData = "catalog_data";
+        public const string ArtifactKindFootprint = "footprint";
         public const string CatalogDataDirectory = "catalogs";
+        public const string DefaultFootprintsPath = "footprints.golem.yaml";
+        /// <summary>Synthetic manifest source_guid for the aggregate footprints artifact.</summary>
+        public const string FootprintAggregateSourceGuid = "ffffffffffffffffffffffffffffffff";
+        public const int FootprintFormatVersion = 1;
         public const int ManifestVersion = 1;
         public const int ReservedRevisionProtoField = 1000;
     }

@@ -27,7 +27,7 @@ namespace GolemEngine.Unity.Editor
         public static bool IsSuppressed =>
             SessionState.GetBool(SuppressKey, false) || GolemScribeSession.SuppressCount > 0;
 
-        /// <summary>Queues a full Scribe reconcile (entities + catalogs; same work as Export All).</summary>
+        /// <summary>Queues a full Scribe reconcile (entities + catalogs + footprints; same work as Export All).</summary>
         public static void RequestExportAll()
         {
             SessionState.SetBool(PendingKey, true);
@@ -100,7 +100,7 @@ namespace GolemEngine.Unity.Editor
 
         /// <summary>
         /// Called after script reload to resume a pending coalesce across domain reloads.
-        /// Catalog/entity attribute changes are reflected only after reload completes — never during
+        /// Catalog/entity/footprint source changes are reflected only after reload completes — never during
         /// the import that triggered compilation.
         /// </summary>
         public static void HandleScriptsReloaded()
@@ -212,13 +212,18 @@ namespace GolemEngine.Unity.Editor
             {
                 var entityExport = GolemEntityExporter.ExportAll();
                 var catalogExport = GolemCatalogExporter.ExportAll();
+                var footprintExport = GolemFootprintExporter.ExportAll();
 
-                foreach (var warning in entityExport.Warnings.Concat(catalogExport.Warnings))
+                foreach (var warning in entityExport.Warnings
+                             .Concat(catalogExport.Warnings)
+                             .Concat(footprintExport.Warnings))
                 {
                     Debug.LogWarning("Golem Scribe: " + warning);
                 }
 
-                foreach (var error in entityExport.Errors.Concat(catalogExport.Errors))
+                foreach (var error in entityExport.Errors
+                             .Concat(catalogExport.Errors)
+                             .Concat(footprintExport.Errors))
                 {
                     Debug.LogError("Golem Scribe: " + error);
                 }
@@ -233,8 +238,14 @@ namespace GolemEngine.Unity.Editor
                     Debug.Log($"Golem Scribe: exported {catalogExport.CatalogCount} catalog(s).");
                 }
 
+                if (footprintExport.Errors.Count == 0)
+                {
+                    Debug.Log($"Golem Scribe: exported {footprintExport.FootprintCount} footprint prefab(s).");
+                }
+
                 // Bake per successful exporter only: catalog errors must not suppress an entity-schema
                 // bake, and entity errors must not suppress a valid catalog-schema bake.
+                // Footprint byte changes never invoke golem-bake.
                 var shouldBake = ShouldAutoBake(
                     entityExport.Errors.Count > 0,
                     entityExport.EntitySchemaBytesChanged,
