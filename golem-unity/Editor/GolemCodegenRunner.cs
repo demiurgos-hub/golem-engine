@@ -13,6 +13,12 @@ namespace GolemEngine.Unity.Editor
     {
         public static void GenerateCode()
         {
+            // Suppress Scribe auto-export around bake + Refresh so generated C# cannot recurse.
+            GolemScribeScheduler.RunSuppressed(GenerateCodeCore);
+        }
+
+        private static void GenerateCodeCore()
+        {
             var settings = GolemUnityEditorSettings.instance;
             var projectRoot = settings.ProjectRoot;
             if (string.IsNullOrWhiteSpace(projectRoot) || !Directory.Exists(projectRoot))
