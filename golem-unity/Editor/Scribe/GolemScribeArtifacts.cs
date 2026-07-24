@@ -22,6 +22,7 @@ namespace GolemEngine.Unity.Editor
             public bool TypeSchemaBytesChanged;
             public bool WorldSchemaBytesChanged;
             public bool CatalogDataBytesChanged;
+            public bool FootprintBytesChanged;
             public bool AnyBytesChanged;
 
             /// <summary>True when type or world schema bytes changed (catalog data alone does not count).</summary>
@@ -313,6 +314,7 @@ namespace GolemEngine.Unity.Editor
                 result.TypeSchemaBytesChanged = false;
                 result.WorldSchemaBytesChanged = false;
                 result.CatalogDataBytesChanged = false;
+                result.FootprintBytesChanged = false;
                 result.AnyBytesChanged = false;
                 return result;
             }
@@ -335,6 +337,10 @@ namespace GolemEngine.Unity.Editor
             else if (kind == GolemScribeConstants.ArtifactKindCatalogData)
             {
                 result.CatalogDataBytesChanged = true;
+            }
+            else if (kind == GolemScribeConstants.ArtifactKindFootprint)
+            {
+                result.FootprintBytesChanged = true;
             }
         }
 
@@ -385,7 +391,7 @@ namespace GolemEngine.Unity.Editor
 
         /// <summary>
         /// Resolves a project-relative path that is strictly contained under <paramref name="projectRoot"/>.
-        /// Rejects absolute paths, empty paths, and <c>..</c> escapes.
+        /// Collapses <c>.</c> segments and repeated separators; rejects absolute paths, empty paths, and <c>..</c> escapes.
         /// </summary>
         public static bool TryResolveContainedPath(
             string projectRoot,
@@ -425,20 +431,28 @@ namespace GolemEngine.Unity.Editor
                 return false;
             }
 
-            var parts = raw.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length == 0)
+            var rawParts = raw.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+            var parts = new List<string>(rawParts.Length);
+            foreach (var part in rawParts)
             {
-                error = $"Artifact path is empty: '{relativePath}'.";
-                return false;
-            }
+                if (part == ".")
+                {
+                    continue;
+                }
 
-            foreach (var part in parts)
-            {
-                if (part == "." || part == "..")
+                if (part == "..")
                 {
                     error = $"Artifact path escapes the project root: '{relativePath}'.";
                     return false;
                 }
+
+                parts.Add(part);
+            }
+
+            if (parts.Count == 0)
+            {
+                error = $"Artifact path is empty: '{relativePath}'.";
+                return false;
             }
 
             normalizedRelative = string.Join("/", parts);

@@ -25,6 +25,7 @@ namespace GolemEngine.Unity.Editor
         [SerializeField] private string serverCommand = "go run ./cmd/server";
         [SerializeField] private string assetFolder = "Assets/Golem";
         [SerializeField] private bool autoBakeOnExport = true;
+        [SerializeField] private string footprintsPath = GolemScribeConstants.DefaultFootprintsPath;
 
         public string ProjectRoot
         {
@@ -32,11 +33,25 @@ namespace GolemEngine.Unity.Editor
             set => projectRoot = NormalizePath(value);
         }
 
-        /// <summary>When true, Scribe queues golem-bake after entity schema bytes change.</summary>
+        /// <summary>When true, Scribe queues golem-bake after entity or catalog schema bytes change.</summary>
         public bool AutoBakeOnExport
         {
             get => autoBakeOnExport;
             set => autoBakeOnExport = value;
+        }
+
+        /// <summary>
+        /// Project-root-relative path for the Scribe-managed footprints.golem.yaml artifact.
+        /// Footprint changes never trigger golem-bake.
+        /// </summary>
+        public string FootprintsPath
+        {
+            get => string.IsNullOrWhiteSpace(footprintsPath)
+                ? GolemScribeConstants.DefaultFootprintsPath
+                : footprintsPath.Replace('\\', '/').Trim();
+            set => footprintsPath = string.IsNullOrWhiteSpace(value)
+                ? GolemScribeConstants.DefaultFootprintsPath
+                : value.Replace('\\', '/').Trim();
         }
 
         public GolemBakeCommandMode BakeCommandMode
@@ -153,8 +168,9 @@ namespace GolemEngine.Unity.Editor
             {
                 AutoBakeOnExport = nextAutoBake;
             }
+            footprintsPath = EditorGUILayout.TextField("Footprints Path", FootprintsPath);
             EditorGUILayout.HelpBox(
-                "When enabled, Golem Scribe runs golem-bake only after entity schema bytes change. Generated C# refreshes do not recursively re-export.",
+                "When enabled, Golem Scribe runs golem-bake only after entity or catalog type/world schema bytes change. Footprint changes never invoke bake. Generated C# refreshes do not recursively re-export.",
                 MessageType.None);
             if (GolemYamlConfig.TryGetProjectSchema(ProjectRoot, out var schema, out _))
             {
@@ -182,6 +198,7 @@ namespace GolemEngine.Unity.Editor
                 BakeCommand = bakeCommand;
                 ServerCommand = serverCommand;
                 AssetFolder = assetFolder;
+                FootprintsPath = footprintsPath;
                 Save();
             }
         }
