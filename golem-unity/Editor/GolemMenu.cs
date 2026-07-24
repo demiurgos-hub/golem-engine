@@ -17,6 +17,12 @@ namespace GolemEngine.Unity.Editor
             GolemScribeScheduler.RequestExportAll();
         }
 
+        [MenuItem("Golem/Scribe/Validate", priority = 6)]
+        public static void ScribeValidate()
+        {
+            GolemSetupValidator.ValidateScribe();
+        }
+
         [MenuItem("Golem/Run Server", priority = 10)]
         public static void RunServer()
         {

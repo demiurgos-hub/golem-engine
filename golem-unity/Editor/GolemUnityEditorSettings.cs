@@ -24,6 +24,7 @@ namespace GolemEngine.Unity.Editor
         [SerializeField] private string bakeCommand = GoBakeCommand;
         [SerializeField] private string serverCommand = "go run ./cmd/server";
         [SerializeField] private string assetFolder = "Assets/Golem";
+        [SerializeField] private bool autoExportOnAssetChange = true;
         [SerializeField] private bool autoBakeOnExport = true;
         [SerializeField] private string footprintsPath = GolemScribeConstants.DefaultFootprintsPath;
 
@@ -31,6 +32,16 @@ namespace GolemEngine.Unity.Editor
         {
             get => string.IsNullOrWhiteSpace(projectRoot) ? DefaultProjectRoot : projectRoot;
             set => projectRoot = NormalizePath(value);
+        }
+
+        /// <summary>
+        /// When true, prefab/ScriptableObject/script asset changes schedule a coalesced Scribe export.
+        /// Manual <c>Golem/Scribe/Export All</c> always runs regardless of this setting.
+        /// </summary>
+        public bool AutoExportOnAssetChange
+        {
+            get => autoExportOnAssetChange;
+            set => autoExportOnAssetChange = value;
         }
 
         /// <summary>When true, Scribe queues golem-bake after entity or catalog schema bytes change.</summary>
@@ -163,6 +174,11 @@ namespace GolemEngine.Unity.Editor
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Golem Scribe", EditorStyles.boldLabel);
+            var nextAutoExport = EditorGUILayout.Toggle("Auto Export On Asset Change", AutoExportOnAssetChange);
+            if (nextAutoExport != autoExportOnAssetChange)
+            {
+                AutoExportOnAssetChange = nextAutoExport;
+            }
             var nextAutoBake = EditorGUILayout.Toggle("Auto Bake On Export", AutoBakeOnExport);
             if (nextAutoBake != autoBakeOnExport)
             {
@@ -170,9 +186,15 @@ namespace GolemEngine.Unity.Editor
             }
             footprintsPath = EditorGUILayout.TextField("Footprints Path", FootprintsPath);
             EditorGUILayout.HelpBox(
-                "When enabled, Golem Scribe runs golem-bake only after entity or catalog type/world schema bytes change. Footprint changes never invoke bake. Generated C# refreshes do not recursively re-export.",
+                "Menus: Golem/Scribe/Export All, Golem/Scribe/Validate (dry-run), Golem/Validate Setup (setup + Scribe). " +
+                "CI: -executeMethod GolemEngine.Unity.Editor.GolemScribeCI.ExportAllAndValidate",
                 MessageType.None);
-            if (GolemYamlConfig.TryGetProjectSchema(ProjectRoot, out var schema, out _))
+            EditorGUILayout.HelpBox(
+                "Auto Export schedules coalesced reconciles after prefab/catalog/script imports. " +
+                "Auto Bake runs golem-bake only after entity or catalog type/world schema bytes change. " +
+                "Footprint changes never invoke bake. Generated C# refreshes do not recursively re-export.",
+                MessageType.None);
+            if (GolemYamlConfig.TryGetProjectSchema(ProjectRoot, out var schema, out var schemaError))
             {
                 using (new EditorGUI.DisabledScope(true))
                 {
@@ -180,11 +202,19 @@ namespace GolemEngine.Unity.Editor
                     EditorGUILayout.TextField("Types Schema", schema.TypesSchema);
                     EditorGUILayout.TextField("World Schema", schema.WorldSchema);
                     EditorGUILayout.IntField("Dimensions", schema.Dimensions);
+                    EditorGUILayout.TextField(
+                        "Manifest",
+                        System.IO.Path.Combine(ProjectRoot, GolemScribeConstants.ManifestFileName).Replace('\\', '/'));
+                    EditorGUILayout.TextField(
+                        "Footprints (resolved)",
+                        System.IO.Path.Combine(ProjectRoot, FootprintsPath).Replace('\\', '/'));
                 }
             }
             else
             {
-                EditorGUILayout.HelpBox("Could not read schema paths from golem.yaml.", MessageType.Warning);
+                EditorGUILayout.HelpBox(
+                    "Could not read schema paths from golem.yaml: " + (schemaError ?? "unknown error"),
+                    MessageType.Warning);
             }
 
             EditorGUILayout.Space();
@@ -198,6 +228,8 @@ namespace GolemEngine.Unity.Editor
                 BakeCommand = bakeCommand;
                 ServerCommand = serverCommand;
                 AssetFolder = assetFolder;
+                AutoExportOnAssetChange = autoExportOnAssetChange;
+                AutoBakeOnExport = autoBakeOnExport;
                 FootprintsPath = footprintsPath;
                 Save();
             }
