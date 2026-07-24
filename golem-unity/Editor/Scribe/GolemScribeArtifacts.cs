@@ -19,7 +19,13 @@ namespace GolemEngine.Unity.Editor
             public readonly List<string> Warnings = new List<string>();
             public readonly List<GolemScribeArtifactRecord> ManifestRecords = new List<GolemScribeArtifactRecord>();
             public bool EntitySchemaBytesChanged;
+            public bool TypeSchemaBytesChanged;
+            public bool WorldSchemaBytesChanged;
+            public bool CatalogDataBytesChanged;
             public bool AnyBytesChanged;
+
+            /// <summary>True when type or world schema bytes changed (catalog data alone does not count).</summary>
+            public bool CatalogSchemaBytesChanged => TypeSchemaBytesChanged || WorldSchemaBytesChanged;
         }
 
         private sealed class PathMutation
@@ -42,9 +48,30 @@ namespace GolemEngine.Unity.Editor
             IReadOnlyList<GolemScribeArtifactRecord> previous,
             IReadOnlyList<GolemScribeArtifactRecord> desiredForKind)
         {
+            return ReconcileKinds(projectRoot, new[] { kind }, previous, desiredForKind);
+        }
+
+        /// <summary>
+        /// Reconciles one or more artifact kinds in a single transactional pass, preserving
+        /// manifest records whose kind is outside <paramref name="kinds"/>.
+        /// </summary>
+        public static ReconcileResult ReconcileKinds(
+            string projectRoot,
+            IReadOnlyCollection<string> kinds,
+            IReadOnlyList<GolemScribeArtifactRecord> previous,
+            IReadOnlyList<GolemScribeArtifactRecord> desiredForKinds)
+        {
             var result = new ReconcileResult();
             previous = previous ?? Array.Empty<GolemScribeArtifactRecord>();
-            desiredForKind = desiredForKind ?? Array.Empty<GolemScribeArtifactRecord>();
+            desiredForKinds = desiredForKinds ?? Array.Empty<GolemScribeArtifactRecord>();
+            var kindSet = new HashSet<string>(
+                (kinds ?? Array.Empty<string>()).Where(k => !string.IsNullOrEmpty(k)),
+                StringComparer.Ordinal);
+            if (kindSet.Count == 0)
+            {
+                result.Errors.Add("Scribe reconcile requires at least one artifact kind.");
+                return result;
+            }
 
             if (!TryNormalizeProjectRoot(projectRoot, out var rootFull, out var rootError))
             {
@@ -53,7 +80,7 @@ namespace GolemEngine.Unity.Editor
             }
 
             var desiredByPath = new Dictionary<string, GolemScribeArtifactRecord>(StringComparer.Ordinal);
-            foreach (var record in desiredForKind)
+            foreach (var record in desiredForKinds)
             {
                 if (record == null || string.IsNullOrEmpty(record.Path))
                 {
@@ -61,9 +88,10 @@ namespace GolemEngine.Unity.Editor
                     continue;
                 }
 
-                if (!string.Equals(record.Kind, kind, StringComparison.Ordinal))
+                if (string.IsNullOrEmpty(record.Kind) || !kindSet.Contains(record.Kind))
                 {
-                    result.Errors.Add($"Scribe artifact '{record.Path}' has kind '{record.Kind}', expected '{kind}'.");
+                    result.Errors.Add(
+                        $"Scribe artifact '{record.Path}' has kind '{record.Kind}', expected one of: {string.Join(", ", kindSet.OrderBy(k => k, StringComparer.Ordinal))}.");
                     continue;
                 }
 
@@ -116,12 +144,12 @@ namespace GolemEngine.Unity.Editor
                 }
             }
 
-            var previousOfKind = previous
-                .Where(r => r != null && string.Equals(r.Kind, kind, StringComparison.Ordinal))
+            var previousOfKinds = previous
+                .Where(r => r != null && !string.IsNullOrEmpty(r.Kind) && kindSet.Contains(r.Kind))
                 .ToList();
             var desiredPaths = new HashSet<string>(desiredByPath.Keys, StringComparer.Ordinal);
-            var orphans = new List<(string relative, string absolute)>();
-            foreach (var prior in previousOfKind)
+            var orphans = new List<(string relative, string absolute, string kind)>();
+            foreach (var prior in previousOfKinds)
             {
                 if (string.IsNullOrEmpty(prior.Path))
                 {
@@ -153,7 +181,7 @@ namespace GolemEngine.Unity.Editor
                     continue;
                 }
 
-                orphans.Add((relative, absolute));
+                orphans.Add((relative, absolute, prior.Kind));
             }
 
             if (result.Errors.Count > 0)
@@ -164,7 +192,7 @@ namespace GolemEngine.Unity.Editor
             var preserved = new List<GolemScribeArtifactRecord>();
             foreach (var prior in previous)
             {
-                if (prior == null || string.Equals(prior.Kind, kind, StringComparison.Ordinal))
+                if (prior == null || (!string.IsNullOrEmpty(prior.Kind) && kindSet.Contains(prior.Kind)))
                 {
                     continue;
                 }
@@ -244,10 +272,7 @@ namespace GolemEngine.Unity.Editor
                     AfterWriteHookForTests?.Invoke(absolute);
 
                     result.AnyBytesChanged = true;
-                    if (kind == GolemScribeConstants.ArtifactKindEntitySchema)
-                    {
-                        result.EntitySchemaBytesChanged = true;
-                    }
+                    MarkSchemaBytesChanged(result, record.Kind);
                     result.ManifestRecords.Add(StripPending(record));
                 }
 
@@ -263,10 +288,7 @@ namespace GolemEngine.Unity.Editor
                     });
                     File.Delete(orphan.absolute);
                     result.AnyBytesChanged = true;
-                    if (kind == GolemScribeConstants.ArtifactKindEntitySchema)
-                    {
-                        result.EntitySchemaBytesChanged = true;
-                    }
+                    MarkSchemaBytesChanged(result, orphan.kind);
                 }
 
                 var manifestRecords = preserved.Concat(result.ManifestRecords)
@@ -288,8 +310,31 @@ namespace GolemEngine.Unity.Editor
                 result.Errors.Add(ex.Message);
                 result.ManifestRecords.Clear();
                 result.EntitySchemaBytesChanged = false;
+                result.TypeSchemaBytesChanged = false;
+                result.WorldSchemaBytesChanged = false;
+                result.CatalogDataBytesChanged = false;
                 result.AnyBytesChanged = false;
                 return result;
+            }
+        }
+
+        private static void MarkSchemaBytesChanged(ReconcileResult result, string kind)
+        {
+            if (kind == GolemScribeConstants.ArtifactKindEntitySchema)
+            {
+                result.EntitySchemaBytesChanged = true;
+            }
+            else if (kind == GolemScribeConstants.ArtifactKindTypeSchema)
+            {
+                result.TypeSchemaBytesChanged = true;
+            }
+            else if (kind == GolemScribeConstants.ArtifactKindWorldSchema)
+            {
+                result.WorldSchemaBytesChanged = true;
+            }
+            else if (kind == GolemScribeConstants.ArtifactKindCatalogData)
+            {
+                result.CatalogDataBytesChanged = true;
             }
         }
 

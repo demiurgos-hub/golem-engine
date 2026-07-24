@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using UnityEditor;
 using UnityEngine;
 
@@ -26,7 +27,7 @@ namespace GolemEngine.Unity.Editor
         public static bool IsSuppressed =>
             SessionState.GetBool(SuppressKey, false) || GolemScribeSession.SuppressCount > 0;
 
-        /// <summary>Queues a full entity-category reconcile (same work as Export All for Phase 1).</summary>
+        /// <summary>Queues a full Scribe reconcile (entities + catalogs; same work as Export All).</summary>
         public static void RequestExportAll()
         {
             SessionState.SetBool(PendingKey, true);
@@ -97,7 +98,11 @@ namespace GolemEngine.Unity.Editor
             }
         }
 
-        /// <summary>Called after script reload to resume a pending coalesce across domain reloads.</summary>
+        /// <summary>
+        /// Called after script reload to resume a pending coalesce across domain reloads.
+        /// Catalog/entity attribute changes are reflected only after reload completes — never during
+        /// the import that triggered compilation.
+        /// </summary>
         public static void HandleScriptsReloaded()
         {
             _scheduled = false;
@@ -158,6 +163,21 @@ namespace GolemEngine.Unity.Editor
         /// <summary>Exposed for editor tests: pending dirty path count.</summary>
         internal static int DirtyPathCountForTests => DirtyPaths.Count + DeletedPaths.Count;
 
+        /// <summary>
+        /// Decoupled auto-bake gate: bake when a successful exporter changed schema bytes.
+        /// An exporter with errors never contributes its schema-change flag.
+        /// </summary>
+        internal static bool ShouldAutoBake(
+            bool entityHasErrors,
+            bool entitySchemaBytesChanged,
+            bool catalogHasErrors,
+            bool catalogSchemaBytesChanged)
+        {
+            var entityNeedsBake = !entityHasErrors && entitySchemaBytesChanged;
+            var catalogNeedsBake = !catalogHasErrors && catalogSchemaBytesChanged;
+            return entityNeedsBake || catalogNeedsBake;
+        }
+
         private static void Schedule()
         {
             if (_scheduled)
@@ -190,24 +210,37 @@ namespace GolemEngine.Unity.Editor
 
             try
             {
-                var export = GolemEntityExporter.ExportAll();
-                foreach (var warning in export.Warnings)
+                var entityExport = GolemEntityExporter.ExportAll();
+                var catalogExport = GolemCatalogExporter.ExportAll();
+
+                foreach (var warning in entityExport.Warnings.Concat(catalogExport.Warnings))
                 {
                     Debug.LogWarning("Golem Scribe: " + warning);
                 }
 
-                if (export.Errors.Count > 0)
+                foreach (var error in entityExport.Errors.Concat(catalogExport.Errors))
                 {
-                    foreach (var error in export.Errors)
-                    {
-                        Debug.LogError("Golem Scribe: " + error);
-                    }
-                    return;
+                    Debug.LogError("Golem Scribe: " + error);
                 }
 
-                Debug.Log($"Golem Scribe: exported {export.EntityCount} entity schema(s).");
+                if (entityExport.Errors.Count == 0)
+                {
+                    Debug.Log($"Golem Scribe: exported {entityExport.EntityCount} entity schema(s).");
+                }
 
-                if (export.EntitySchemaBytesChanged && GolemUnityEditorSettings.instance.AutoBakeOnExport)
+                if (catalogExport.Errors.Count == 0)
+                {
+                    Debug.Log($"Golem Scribe: exported {catalogExport.CatalogCount} catalog(s).");
+                }
+
+                // Bake per successful exporter only: catalog errors must not suppress an entity-schema
+                // bake, and entity errors must not suppress a valid catalog-schema bake.
+                var shouldBake = ShouldAutoBake(
+                    entityExport.Errors.Count > 0,
+                    entityExport.EntitySchemaBytesChanged,
+                    catalogExport.Errors.Count > 0,
+                    catalogExport.SchemaBytesChanged);
+                if (shouldBake && GolemUnityEditorSettings.instance.AutoBakeOnExport)
                 {
                     RunSuppressed(() => GolemCodegenRunner.GenerateCode());
                 }
@@ -233,12 +266,13 @@ namespace GolemEngine.Unity.Editor
                 return false;
             }
 
-            if (path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
+            if (path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase) ||
+                path.EndsWith(".asset", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }
 
-            // Script changes may alter [GolemEntity]/[GolemVar]; survive domain reload via SessionState.
+            // Script changes may alter entity/catalog attributes; survive domain reload via SessionState.
             return path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase);
         }
     }
