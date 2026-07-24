@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using UnityEditor;
 using UnityEngine;
 
@@ -34,10 +33,114 @@ namespace GolemEngine.Unity.Editor
             Schedule();
         }
 
+        /// <summary>Outcome of a synchronous full Scribe export (entities + catalogs + footprints).</summary>
+        public sealed class ImmediateExportResult
+        {
+            public readonly List<string> Errors = new List<string>();
+            public readonly List<string> Warnings = new List<string>();
+            public bool EntitySchemaBytesChanged;
+            public bool CatalogSchemaBytesChanged;
+            public bool FootprintBytesChanged;
+            public bool AnyBytesChanged;
+            public int EntityCount;
+            public int CatalogCount;
+            public int FootprintCount;
+            public bool EntityHasErrors;
+            public bool CatalogHasErrors;
+            public bool FootprintHasErrors;
+
+            /// <summary>True when any exporter reported errors.</summary>
+            public bool HasErrors => Errors.Count > 0;
+        }
+
+        /// <summary>
+        /// Runs Export All synchronously (no <see cref="EditorApplication.delayCall"/>).
+        /// Safe for batch-mode CI. When <paramref name="runBake"/> is true and auto-bake is enabled,
+        /// queues bake only for successful schema byte changes (footprints never bake).
+        /// </summary>
+        public static ImmediateExportResult ExportAllImmediate(bool runBake = true)
+        {
+            return ExportAllImmediate(runBake, assumeRunning: false);
+        }
+
+        /// <summary>
+        /// Runs Export All synchronously. When <paramref name="assumeRunning"/> is true, the caller
+        /// already owns <c>_running</c> (used by the deferred scheduler tick).
+        /// </summary>
+        internal static ImmediateExportResult ExportAllImmediate(bool runBake, bool assumeRunning)
+        {
+            var result = new ImmediateExportResult();
+            if (!assumeRunning)
+            {
+                if (_running)
+                {
+                    result.Errors.Add("Golem Scribe export is already running; cannot start a synchronous Export All.");
+                    return result;
+                }
+
+                _running = true;
+            }
+
+            try
+            {
+                var entityExport = GolemEntityExporter.ExportAll();
+                var catalogExport = GolemCatalogExporter.ExportAll();
+                var footprintExport = GolemFootprintExporter.ExportAll();
+
+                result.Warnings.AddRange(entityExport.Warnings);
+                result.Warnings.AddRange(catalogExport.Warnings);
+                result.Warnings.AddRange(footprintExport.Warnings);
+                result.Errors.AddRange(entityExport.Errors);
+                result.Errors.AddRange(catalogExport.Errors);
+                result.Errors.AddRange(footprintExport.Errors);
+
+                result.EntityCount = entityExport.EntityCount;
+                result.CatalogCount = catalogExport.CatalogCount;
+                result.FootprintCount = footprintExport.FootprintCount;
+                result.EntityHasErrors = entityExport.Errors.Count > 0;
+                result.CatalogHasErrors = catalogExport.Errors.Count > 0;
+                result.FootprintHasErrors = footprintExport.Errors.Count > 0;
+                result.EntitySchemaBytesChanged = entityExport.EntitySchemaBytesChanged;
+                result.CatalogSchemaBytesChanged = catalogExport.SchemaBytesChanged;
+                result.FootprintBytesChanged = footprintExport.FootprintBytesChanged;
+                result.AnyBytesChanged =
+                    entityExport.EntitySchemaBytesChanged ||
+                    catalogExport.SchemaBytesChanged ||
+                    catalogExport.CatalogDataBytesChanged ||
+                    footprintExport.FootprintBytesChanged;
+
+                if (runBake)
+                {
+                    var shouldBake = ShouldAutoBake(
+                        entityExport.Errors.Count > 0,
+                        entityExport.EntitySchemaBytesChanged,
+                        catalogExport.Errors.Count > 0,
+                        catalogExport.SchemaBytesChanged);
+                    if (shouldBake && GolemUnityEditorSettings.instance.AutoBakeOnExport)
+                    {
+                        RunSuppressed(() => GolemCodegenRunner.GenerateCode());
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                result.Errors.Add(ex.Message);
+            }
+            finally
+            {
+                if (!assumeRunning)
+                {
+                    _running = false;
+                }
+            }
+
+            return result;
+        }
+
         /// <summary>Records imported/moved asset paths and schedules a coalesced reconcile.</summary>
         public static void NotifyImportedOrMoved(IEnumerable<string> paths)
         {
-            if (IsSuppressed)
+            if (IsSuppressed || !GolemUnityEditorSettings.instance.AutoExportOnAssetChange)
             {
                 return;
             }
@@ -69,7 +172,7 @@ namespace GolemEngine.Unity.Editor
         /// <summary>Records deleted asset paths and schedules a coalesced reconcile.</summary>
         public static void NotifyDeleted(IEnumerable<string> paths)
         {
-            if (IsSuppressed)
+            if (IsSuppressed || !GolemUnityEditorSettings.instance.AutoExportOnAssetChange)
             {
                 return;
             }
@@ -203,6 +306,8 @@ namespace GolemEngine.Unity.Editor
                 return;
             }
 
+            // Hold the running flag across the whole deferred tick so overlapping delayCalls
+            // reschedule instead of nesting; ExportAllImmediate is invoked with ownership borrowed.
             _running = true;
             SessionState.SetBool(PendingKey, false);
             DirtyPaths.Clear();
@@ -210,50 +315,32 @@ namespace GolemEngine.Unity.Editor
 
             try
             {
-                var entityExport = GolemEntityExporter.ExportAll();
-                var catalogExport = GolemCatalogExporter.ExportAll();
-                var footprintExport = GolemFootprintExporter.ExportAll();
+                var export = ExportAllImmediate(runBake: true, assumeRunning: true);
 
-                foreach (var warning in entityExport.Warnings
-                             .Concat(catalogExport.Warnings)
-                             .Concat(footprintExport.Warnings))
+                foreach (var warning in export.Warnings)
                 {
                     Debug.LogWarning("Golem Scribe: " + warning);
                 }
 
-                foreach (var error in entityExport.Errors
-                             .Concat(catalogExport.Errors)
-                             .Concat(footprintExport.Errors))
+                foreach (var error in export.Errors)
                 {
                     Debug.LogError("Golem Scribe: " + error);
                 }
 
-                if (entityExport.Errors.Count == 0)
+                // Per-exporter partial success: a failed category must not hide successful peers.
+                if (!export.EntityHasErrors)
                 {
-                    Debug.Log($"Golem Scribe: exported {entityExport.EntityCount} entity schema(s).");
+                    Debug.Log($"Golem Scribe: exported {export.EntityCount} entity schema(s).");
                 }
 
-                if (catalogExport.Errors.Count == 0)
+                if (!export.CatalogHasErrors)
                 {
-                    Debug.Log($"Golem Scribe: exported {catalogExport.CatalogCount} catalog(s).");
+                    Debug.Log($"Golem Scribe: exported {export.CatalogCount} catalog(s).");
                 }
 
-                if (footprintExport.Errors.Count == 0)
+                if (!export.FootprintHasErrors)
                 {
-                    Debug.Log($"Golem Scribe: exported {footprintExport.FootprintCount} footprint prefab(s).");
-                }
-
-                // Bake per successful exporter only: catalog errors must not suppress an entity-schema
-                // bake, and entity errors must not suppress a valid catalog-schema bake.
-                // Footprint byte changes never invoke golem-bake.
-                var shouldBake = ShouldAutoBake(
-                    entityExport.Errors.Count > 0,
-                    entityExport.EntitySchemaBytesChanged,
-                    catalogExport.Errors.Count > 0,
-                    catalogExport.SchemaBytesChanged);
-                if (shouldBake && GolemUnityEditorSettings.instance.AutoBakeOnExport)
-                {
-                    RunSuppressed(() => GolemCodegenRunner.GenerateCode());
+                    Debug.Log($"Golem Scribe: exported {export.FootprintCount} footprint prefab(s).");
                 }
             }
             catch (Exception ex)

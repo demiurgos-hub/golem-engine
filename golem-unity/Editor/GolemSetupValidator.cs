@@ -4,9 +4,13 @@ using UnityEngine;
 
 namespace GolemEngine.Unity.Editor
 {
-    /// <summary>Checks common Golem Unity editor setup requirements.</summary>
+    /// <summary>Checks common Golem Unity editor setup requirements and Scribe artifact health.</summary>
     public static class GolemSetupValidator
     {
+        /// <summary>
+        /// Validates project setup and runs a side-effect-free Scribe dry-run.
+        /// Never writes Scribe artifacts, never mutates the prefab registry, and never invokes bake.
+        /// </summary>
         public static void ValidateSetup()
         {
             var settings = GolemUnityEditorSettings.instance;
@@ -18,6 +22,18 @@ namespace GolemEngine.Unity.Editor
             CheckGeneratedOutput(settings, ref warnings);
             CheckPrefabRegistry(ref warnings);
             CheckEntitySpawner(ref warnings);
+            CheckScribePaths(settings, ref warnings);
+
+            var scribe = GolemScribeValidator.Validate();
+            GolemScribeValidator.LogResult(scribe);
+            if (scribe.HasFailures)
+            {
+                issues += scribe.Errors.Count +
+                          scribe.Missing.Count +
+                          scribe.Stale.Count +
+                          scribe.Orphaned.Count +
+                          scribe.ManuallyModified.Count;
+            }
 
             if (issues == 0 && warnings == 0)
             {
@@ -27,6 +43,13 @@ namespace GolemEngine.Unity.Editor
             {
                 Debug.Log($"Golem setup validation completed with {issues} error(s) and {warnings} warning(s).");
             }
+        }
+
+        /// <summary>Scribe-only dry-run validation (no setup bake/registry soft checks beyond Scribe parity).</summary>
+        public static void ValidateScribe()
+        {
+            var result = GolemScribeValidator.Validate();
+            GolemScribeValidator.LogResult(result);
         }
 
         private static void CheckProjectRoot(GolemUnityEditorSettings settings, ref int issues)
@@ -148,6 +171,24 @@ namespace GolemEngine.Unity.Editor
             }
 
             Debug.Log($"Golem entity spawner OK: {spawner.gameObject.name}");
+        }
+
+        private static void CheckScribePaths(GolemUnityEditorSettings settings, ref int warnings)
+        {
+            if (!GolemYamlConfig.TryGetProjectSchema(settings.ProjectRoot, out var schema, out var error))
+            {
+                warnings++;
+                Debug.LogWarning("Golem Scribe path diagnostics: " + error);
+                return;
+            }
+
+            var footprints = settings.FootprintsPath;
+            Debug.Log(
+                "Golem Scribe paths: " +
+                $"entity_schema={schema.EntitySchema}, types_schema={schema.TypesSchema}, " +
+                $"world_schema={schema.WorldSchema}, dimensions={schema.Dimensions}, " +
+                $"footprints={footprints}, auto_export={settings.AutoExportOnAssetChange}, " +
+                $"auto_bake={settings.AutoBakeOnExport}");
         }
 
         private static bool TryGetExecutable(string command, out string executable)

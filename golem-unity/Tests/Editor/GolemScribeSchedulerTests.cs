@@ -6,15 +6,29 @@ namespace GolemEngine.Unity.Editor.Tests
 {
     public sealed class GolemScribeSchedulerTests
     {
+        private bool _previousAutoExport;
+        private bool _previousAutoBake;
+
         [SetUp]
         public void SetUp()
         {
+            var settings = GolemUnityEditorSettings.instance;
+            _previousAutoExport = settings.AutoExportOnAssetChange;
+            _previousAutoBake = settings.AutoBakeOnExport;
+            // Known baseline so notify tests do not depend on ambient project settings.
+            settings.AutoExportOnAssetChange = true;
+            GolemUnityEditorSettings.Save();
             GolemScribeScheduler.ResetForTests();
         }
 
         [TearDown]
         public void TearDown()
         {
+            // Always restore persisted settings so a failed AutoExport assertion cannot leak.
+            var settings = GolemUnityEditorSettings.instance;
+            settings.AutoExportOnAssetChange = _previousAutoExport;
+            settings.AutoBakeOnExport = _previousAutoBake;
+            GolemUnityEditorSettings.Save();
             GolemScribeScheduler.ResetForTests();
         }
 
@@ -89,9 +103,25 @@ namespace GolemEngine.Unity.Editor.Tests
         }
 
         [Test]
+        public void NotifyImported_RespectsAutoExportSetting()
+        {
+            var settings = GolemUnityEditorSettings.instance;
+            settings.AutoExportOnAssetChange = false;
+            GolemUnityEditorSettings.Save();
+            GolemScribeScheduler.ResetForTests();
+
+            GolemScribeScheduler.NotifyImportedOrMoved(new[] { "Assets/A.prefab" });
+            Assert.That(GolemScribeScheduler.IsScheduledForTests, Is.False);
+            Assert.That(GolemScribeScheduler.DirtyPathCountForTests, Is.EqualTo(0));
+
+            // Manual Export All still queues while auto-export is off.
+            GolemScribeScheduler.RequestExportAll();
+            Assert.That(GolemScribeScheduler.IsScheduledForTests, Is.True);
+        }
+
+        [Test]
         public void ShouldAutoBake_DecouplesEntityAndCatalogErrors()
         {
-            // Catalog errors must not suppress a required entity-schema bake.
             Assert.That(
                 GolemScribeScheduler.ShouldAutoBake(
                     entityHasErrors: false,
@@ -100,7 +130,6 @@ namespace GolemEngine.Unity.Editor.Tests
                     catalogSchemaBytesChanged: true),
                 Is.True);
 
-            // Entity errors must not suppress a required valid catalog-schema bake.
             Assert.That(
                 GolemScribeScheduler.ShouldAutoBake(
                     entityHasErrors: true,
@@ -109,7 +138,6 @@ namespace GolemEngine.Unity.Editor.Tests
                     catalogSchemaBytesChanged: true),
                 Is.True);
 
-            // An invalid exporter's schema-change flag must not bake by itself.
             Assert.That(
                 GolemScribeScheduler.ShouldAutoBake(
                     entityHasErrors: true,
