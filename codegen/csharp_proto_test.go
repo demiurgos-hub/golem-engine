@@ -91,7 +91,7 @@ func TestGenerateCSharpWorldProtoIncludesMapCustomTypes(t *testing.T) {
 			{
 				Name: "ItemType",
 				Fields: []schema.CustomFieldInfo{
-					{SnakeName: "id", ProtoType: "int32", ProtoTag: 1},
+					{SnakeName: "id", ProtoType: "uint32", ProtoTag: 1},
 					{SnakeName: "name", ProtoType: "string", ProtoTag: 2},
 				},
 			},
@@ -105,8 +105,8 @@ func TestGenerateCSharpWorldProtoIncludesMapCustomTypes(t *testing.T) {
 						CSProtoField:    "Items",
 						ProtoTag:        1,
 						IsMap:           true,
-						MapKeyProtoType: "int32",
-						MapKeyCSType:    "int",
+						MapKeyProtoType: "uint32",
+						MapKeyCSType:    "uint",
 						ElemProtoType:   "ItemType",
 						ElemIsCustom:    true,
 						ElemCSType:      "ItemType",
@@ -129,7 +129,9 @@ func TestGenerateCSharpWorldProtoIncludesMapCustomTypes(t *testing.T) {
 	}
 	content := string(data)
 	for _, want := range []string{
-		"public Dictionary<int, ItemType> Items { get; set; } = new Dictionary<int, ItemType>();",
+		"public Dictionary<uint, ItemType> Items { get; set; } = new Dictionary<uint, ItemType>();",
+		"uint key = 0;",
+		"case 1: key = itemReader.Uint32(); break;",
 		"kv.Tag(2, 2).Bytes(ItemType.Encode(pair.Value));",
 		"case 1: m.ItemListData = ItemListData.Decode(r.Bytes()); break;",
 	} {

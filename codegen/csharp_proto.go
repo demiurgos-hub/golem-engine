@@ -459,7 +459,7 @@ func writeCSMapDecode(b *strings.Builder, f msgField) {
 	w("                        if (payload.Length > 0)")
 	w("                        {")
 	w("                            var itemReader = new PbReader(payload);")
-	w("                            var key = %s;", protoCSDefault[f.MapKeyProtoType])
+	w("                            %s key = %s;", csType(f.MapKeyProtoType), protoCSDefault[f.MapKeyProtoType])
 	w("                            var value = %s;", csCollectionValDefault(f))
 	w("                            while (!itemReader.Done)")
 	w("                            {")

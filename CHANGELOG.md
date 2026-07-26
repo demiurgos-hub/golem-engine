@@ -44,6 +44,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Generated C# protobuf decoders now compile for maps and catalogs keyed by unsigned integers.
 - Golem Scribe catalog export preserves previously committed type/world/data artifacts when a catalog class is temporarily invalid (errors are reported; bake is skipped only for that exporter); only truly removed or renamed catalog type names orphan-delete their managed files. Invalid catalog rows no longer reserve keys that would block a later valid asset with the same key.
 - Golem Scribe auto-bake is decoupled per exporter: catalog collect/reconcile errors no longer suppress a required entity-schema bake, and entity errors no longer suppress a required valid catalog-schema bake.
 - Golem Scribe YAML scalars now quote/escape newlines, carriage returns, tabs, and other C0 control characters.
