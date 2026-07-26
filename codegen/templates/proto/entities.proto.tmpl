@@ -91,7 +91,13 @@ message ClientPacket {
 
 message {{.DataName}} {
 {{- range .Fields}}
+{{- if .IsRepeated}}
+  repeated {{.ElemProtoType}} {{.SnakeName}} = {{.ProtoTag}};
+{{- else if .IsMap}}
+  map<{{.MapKeyProtoType}}, {{.ElemProtoType}}> {{.SnakeName}} = {{.ProtoTag}};
+{{- else}}
   {{.ProtoType}} {{.SnakeName}} = {{.ProtoTag}};
+{{- end}}
 {{- end}}
 }
 {{- end}}
