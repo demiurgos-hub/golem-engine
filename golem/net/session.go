@@ -137,7 +137,11 @@ func (s *Session) writePump(ctx context.Context) {
 }
 
 func (s *Session) isExpectedSessionCloseError(err error) bool {
-	return s.closed.Load() || errors.Is(err, context.Canceled) || errors.Is(err, errEventualStateDatagramStalled)
+	// errEventualStateDatagramStalled is deliberately not treated as expected:
+	// a stalled eventual-state lane means the peer stopped acking datagrams,
+	// which is a real failure that must be visible in the logs
+	// (reason=eventual_state_stalled), not a silent close.
+	return s.closed.Load() || errors.Is(err, context.Canceled)
 }
 
 func stopTimer(timer *time.Timer) {

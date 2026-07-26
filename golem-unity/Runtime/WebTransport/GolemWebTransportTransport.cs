@@ -18,6 +18,7 @@ namespace GolemEngine.Unity
         private CancellationTokenSource _cts;
         private string _url;
         private bool _connected;
+        private bool _datagramSendFailureLogged;
 
         public GolemWebTransportTransport()
             : this(new WebTransportClientOptions())
@@ -49,6 +50,7 @@ namespace GolemEngine.Unity
         {
             Close();
             _url = url;
+            _datagramSendFailureLogged = false;
             _cts = new CancellationTokenSource();
             var redactedUrl = GolemUnityLog.RedactUrl(url);
             var phase = GolemDisconnectPhase.Connect;
@@ -56,23 +58,37 @@ namespace GolemEngine.Unity
 
             try
             {
+                // ConfigureAwait(false) is load-bearing on this whole chain: the
+                // server starts its eventual-state TTL clock the moment it
+                // accepts the CONNECT, so the rest of the bring-up (stream open,
+                // registration write, IO loop start) must not queue behind the
+                // Unity main thread, which can stall for seconds during play
+                // mode startup.
                 _client = new WebTransportClient(_options);
-                _session = await _client.ConnectAsync(new Uri(url), _cts.Token);
+                _session = await _client.ConnectAsync(new Uri(url), _cts.Token).ConfigureAwait(false);
                 phase = GolemDisconnectPhase.OpenStream;
-                _stream = await _session.OpenBidirectionalStreamAsync(_cts.Token);
+                _stream = await _session.OpenBidirectionalStreamAsync(_cts.Token).ConfigureAwait(false);
                 phase = GolemDisconnectPhase.StreamHeaderWrite;
                 _protocol = new GolemDatagramProtocol(WriteDatagram, _eventualAckIntervalMilliseconds);
 
                 // Golem accepts the client-opened WebTransport stream after the
                 // first write, even when the write has no payload.
-                await _stream.WriteAsync(Array.Empty<byte>(), _cts.Token);
+                await _stream.WriteAsync(Array.Empty<byte>(), _cts.Token).ConfigureAwait(false);
 
                 _connected = true;
                 GolemUnityLog.Info($"connected transport={TransportName} url={redactedUrl}");
                 ConnectedEvent?.Invoke();
-                _ = ReceiveLoop(_cts.Token);
-                _ = DatagramLoop(_cts.Token);
-                _ = SchedulerLoop(_cts.Token);
+
+                // The IO loops must not run on the Unity main thread either:
+                // without Task.Run and ConfigureAwait(false) inside the loops,
+                // every await would resume through UnitySynchronizationContext,
+                // so a main-thread stall would starve datagram processing and
+                // delay the eventual-state acks past the server's stall TTL.
+                // Consumers are already marshaled via GolemMainThreadDispatcher.
+                var token = _cts.Token;
+                _ = Task.Run(() => ReceiveLoop(token));
+                _ = Task.Run(() => DatagramLoop(token));
+                _ = Task.Run(() => SchedulerLoop(token));
             }
             catch (Exception ex)
             {
@@ -81,7 +97,7 @@ namespace GolemEngine.Unity
                 GolemUnityLog.Error(
                     $"connect failed transport={TransportName} url={redactedUrl} phase={GolemUnityLog.PhaseName(phase)} category={GolemUnityLog.CategoryName(info.Category)} {GolemUnityLog.FormatError(ex)}");
                 DisconnectedEvent?.Invoke(info);
-                await DisposeTransportAsync();
+                await DisposeTransportAsync().ConfigureAwait(false);
             }
         }
 
@@ -160,7 +176,7 @@ namespace GolemEngine.Unity
             {
                 while (!token.IsCancellationRequested && _stream != null)
                 {
-                    var message = await ReadFrameAsync(token);
+                    var message = await ReadFrameAsync(token).ConfigureAwait(false);
                     MessageEvent?.Invoke(message);
                 }
                 if (!token.IsCancellationRequested)
@@ -205,7 +221,7 @@ namespace GolemEngine.Unity
             {
                 while (!token.IsCancellationRequested && _session != null)
                 {
-                    var datagram = await _session.ReceiveDatagramAsync(token);
+                    var datagram = await _session.ReceiveDatagramAsync(token).ConfigureAwait(false);
                     _protocol?.Receive(datagram.Payload, DeliverDatagram);
                 }
             }
@@ -228,7 +244,7 @@ namespace GolemEngine.Unity
             {
                 while (!token.IsCancellationRequested)
                 {
-                    await Task.Delay(GolemDatagramProtocol.SchedulerIntervalMilliseconds, token);
+                    await Task.Delay(GolemDatagramProtocol.SchedulerIntervalMilliseconds, token).ConfigureAwait(false);
                     var now = DateTime.UtcNow;
                     _protocol?.SendDueAck(now);
                     _protocol?.DrainRetries(now);
@@ -269,14 +285,42 @@ namespace GolemEngine.Unity
             {
                 return;
             }
-            _ = _session.SendDatagramAsync(data, _cts.Token);
+            _ = ObserveDatagramSendAsync(_session.SendDatagramAsync(data, _cts.Token));
+        }
+
+        private async Task ObserveDatagramSendAsync(ValueTask send)
+        {
+            try
+            {
+                await send.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                // Datagram sends are best-effort, so a failure does not tear the
+                // transport down, but it must not vanish either: log the first
+                // failure per connection loudly, later ones only in debug mode.
+                if (!_datagramSendFailureLogged)
+                {
+                    _datagramSendFailureLogged = true;
+                    GolemUnityLog.Error(
+                        $"datagram send failed transport={TransportName} url={GolemUnityLog.RedactUrl(_url)} category={GolemUnityLog.CategoryName(GolemUnityLog.ClassifyError(ex))} {GolemUnityLog.FormatError(ex)}");
+                }
+                else if (GolemUnityLog.DebugEnabled)
+                {
+                    GolemUnityLog.Warn(
+                        $"datagram send failed transport={TransportName} url={GolemUnityLog.RedactUrl(_url)} {GolemUnityLog.FormatError(ex)}");
+                }
+            }
         }
 
         private async Task<byte[]> ReadFrameAsync(CancellationToken token)
         {
-            var header = await ReadExactlyAsync(GolemReliableFrameCodec.HeaderBytes, token);
+            var header = await ReadExactlyAsync(GolemReliableFrameCodec.HeaderBytes, token).ConfigureAwait(false);
             var length = GolemReliableFrameCodec.DecodeLength(header, MaxMessageBytes);
-            return await ReadExactlyAsync(length, token);
+            return await ReadExactlyAsync(length, token).ConfigureAwait(false);
         }
 
         private async Task<byte[]> ReadExactlyAsync(int length, CancellationToken token)
@@ -285,7 +329,7 @@ namespace GolemEngine.Unity
             var offset = 0;
             while (offset < length)
             {
-                var bytesRead = await _stream.ReadAsync(buffer.AsMemory(offset, length - offset), token);
+                var bytesRead = await _stream.ReadAsync(buffer.AsMemory(offset, length - offset), token).ConfigureAwait(false);
                 if (bytesRead == 0)
                 {
                     throw new InvalidOperationException("golem-unity: webtransport stream closed before reliable frame completed");

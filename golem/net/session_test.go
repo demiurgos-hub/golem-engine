@@ -236,7 +236,7 @@ func TestSessionReadPumpAppliesReliableAckControlFrame(t *testing.T) {
 	}
 }
 
-func TestSessionWritePumpSuppressesEventualStateStallLog(t *testing.T) {
+func TestSessionWritePumpLogsEventualStateStall(t *testing.T) {
 	reliable := &captureReliableChannel{}
 	datagrams := &captureDatagramChannel{}
 	sess := newSession(10, reliable, datagrams, reliable.Close)
@@ -255,8 +255,15 @@ func TestSessionWritePumpSuppressesEventualStateStallLog(t *testing.T) {
 
 	sess.writePump(context.Background())
 
-	if got := logBuf.String(); strings.Contains(got, "eventual state datagram delivery stalled") {
-		t.Fatalf("log output = %q, want no eventual-state stall log", got)
+	// A stalled eventual-state lane means the peer stopped acking datagrams.
+	// That is a real failure and must show up in the logs instead of being
+	// classified as an expected close.
+	got := logBuf.String()
+	if !strings.Contains(got, "eventual state datagram delivery stalled") {
+		t.Fatalf("log output = %q, want eventual-state stall log", got)
+	}
+	if !strings.Contains(got, "reason=eventual_state_stalled") {
+		t.Fatalf("log output = %q, want reason=eventual_state_stalled", got)
 	}
 }
 
