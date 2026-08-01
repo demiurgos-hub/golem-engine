@@ -188,6 +188,18 @@ type Server struct {
 	eventualTrackers     map[int64]*eventualStateTracker
 	nextEventualToken    uint64
 
+	// Avatar indexes (session ↔ entity). Protected by avatarMu; never hold
+	// avatarMu while calling registry hooks or interest AssignFOI/RemoveFOI.
+	avatarMu      sync.Mutex
+	sessionAvatar map[int64]int64 // sessionID → entityID (or avatarSpawnPending)
+	avatarSession map[int64]int64 // entityID → sessionID
+
+	// interestMu guards all accesses to interest.Manager through Server APIs
+	// (AssignFOI, RemoveFOI, SessionsKnowing, UpdateGrid+ComputeDiffs).
+	// Lock order with avatarMu: interestMu before avatarMu when both are needed.
+	// Never hold interestMu across network sends or registry hooks.
+	interestMu sync.Mutex
+
 	replStatsMu         sync.Mutex
 	replLastTick        uint64
 	replDeltasFlushed   int
@@ -217,10 +229,12 @@ func NewServer(cfg ServerConfig) *Server {
 	cfg.StateUpdateLane = normalizeStateUpdateLane(cfg.StateUpdateLane)
 	validateStateUpdateLane(cfg)
 	s := &Server{
-		reg:      registry.NewRegistry(),
-		World:    world.NewStore(),
-		config:   cfg,
-		msgQueue: make(chan pendingMsg, msgQueueCap),
+		reg:           registry.NewRegistry(),
+		World:         world.NewStore(),
+		config:        cfg,
+		msgQueue:      make(chan pendingMsg, msgQueueCap),
+		sessionAvatar: make(map[int64]int64),
+		avatarSession: make(map[int64]int64),
 	}
 	if cfg.CellSize > 0 {
 		s.interest = interest.NewManager(cfg.CellSize)
@@ -353,7 +367,13 @@ func (s *Server) CreateEntity(e Entity, owner ...int64) error {
 }
 
 // DeleteEntity unregisters an entity by ID and queues a removal for clients.
-func (s *Server) DeleteEntity(id int64) { s.reg.DeleteEntity(id) }
+// If the entity is a session avatar, both avatar indexes are cleared in O(1)
+// before registry deletion. Safe to call repeatedly; does not hold the avatar
+// mutex while invoking registry hooks (OnRemove) or interest operations.
+func (s *Server) DeleteEntity(id int64) {
+	s.clearAvatarByEntity(id)
+	s.reg.DeleteEntity(id)
+}
 
 // Get returns the entity with the given ID, or (nil, false) if not found.
 func (s *Server) Get(id int64) (Entity, bool) { return s.reg.Get(id) }
@@ -363,8 +383,14 @@ func (s *Server) Owner(entityID int64) (sessionID int64, owned bool) {
 	return s.reg.Owner(entityID)
 }
 
-// SetOwner updates the owning session of an existing entity.
-func (s *Server) SetOwner(entityID, sessionID int64) bool { return s.reg.SetOwner(entityID, sessionID) }
+// SetOwner updates the owning session of an existing entity for command
+// authority (e.g. reconnect with a new session ID). Ownership transfer does
+// not transfer avatar identity: session↔avatar indexes from SpawnAvatar are
+// unchanged. Re-bind avatars explicitly with SpawnAvatar after disconnect
+// cleanup (or after DeleteEntity) rather than via SetOwner.
+func (s *Server) SetOwner(entityID, sessionID int64) bool {
+	return s.reg.SetOwner(entityID, sessionID)
+}
 
 // All returns a snapshot of every registered entity.
 func (s *Server) All() []Entity { return s.reg.All() }
@@ -514,8 +540,13 @@ func (s *Server) OnReliableOrdered(fn func(*Session, []byte)) {
 }
 
 // OnDisconnect registers a hook called when a client disconnects.
-// The hook fires on the tick goroutine, so it is safe to call DeleteEntity
-// and other Server methods directly.
+// The hook fires on the tick goroutine before automatic avatar cleanup, so
+// Avatar / AvatarOf still resolve during the callback. After the hook returns,
+// the server RemoveFOI (when interest is enabled), deletes any avatar still
+// bound to the session (including a replacement spawned inside the callback),
+// and clears avatar indexes — replacements are reaped so they cannot leak past
+// disconnect. It is safe to call DeleteEntity and other Server methods from the
+// hook. Disconnect events from the listener always carry a non-nil *Session.
 func (s *Server) OnDisconnect(fn func(*Session)) {
 	s.onDisconnect = fn
 }
@@ -589,12 +620,15 @@ func (s *Server) WaitReady(ctx context.Context) error {
 // SessionsKnowing returns the IDs of all sessions that currently have
 // entityID in their known FOI set. When interest management is not enabled,
 // returns all connected session IDs (every entity is visible to every session).
-// Must be called from the game tick goroutine when interest management is active.
+// Safe to call concurrently with AssignFOI / RemoveFOI / SpawnAvatar; the
+// interest manager is guarded by interestMu.
 func (s *Server) SessionsKnowing(entityID int64) []int64 {
 	allSessions := s.listener.SessionIDs()
 	if s.interest == nil {
 		return allSessions
 	}
+	s.interestMu.Lock()
+	defer s.interestMu.Unlock()
 	var result []int64
 	for _, sid := range allSessions {
 		known := s.interest.Known(sid)
@@ -607,20 +641,37 @@ func (s *Server) SessionsKnowing(entityID int64) []int64 {
 
 // AssignFOI associates a session with a circular field of interest centred
 // on the given entity. Panics if interest management is not enabled (CellSize <= 0).
+// Concurrency-safe with other Server FOI APIs via interestMu.
 func (s *Server) AssignFOI(sessionID, entityID int64, radius, margin float64) {
 	if s.interest == nil {
 		panic("golem: AssignFOI called but interest management is not enabled (CellSize <= 0)")
 	}
+	s.interestMu.Lock()
+	defer s.interestMu.Unlock()
 	s.interest.AssignFOI(sessionID, entityID, radius, margin)
 }
 
 // RemoveFOI removes a session's field of interest and clears its known set.
 // Panics if interest management is not enabled.
+// Concurrency-safe with other Server FOI APIs via interestMu.
 func (s *Server) RemoveFOI(sessionID int64) {
 	if s.interest == nil {
 		panic("golem: RemoveFOI called but interest management is not enabled (CellSize <= 0)")
 	}
+	s.interestMu.Lock()
+	defer s.interestMu.Unlock()
 	s.interest.RemoveFOI(sessionID)
+}
+
+// hasFOI reports whether sessionID currently has an assigned FOI.
+// Returns false when interest management is disabled.
+func (s *Server) hasFOI(sessionID int64) bool {
+	if s.interest == nil {
+		return false
+	}
+	s.interestMu.Lock()
+	defer s.interestMu.Unlock()
+	return s.interest.HasFOI(sessionID)
 }
 
 // PushWorldData broadcasts the current value of a single world data type to
@@ -702,7 +753,8 @@ func (s *Server) enqueueEventualStateFeedback(sess *Session, feedback []golemnet
 
 // enqueueDisconnect is installed on the Listener as the OnDisconnect hook. It
 // runs on the connection goroutine and pushes a disconnect event for tick-time
-// dispatch.
+// dispatch. The listener always passes a non-nil *Session (see
+// Listener.serveAcceptedSession); drainMessages relies on that invariant.
 func (s *Server) enqueueDisconnect(sess *Session) {
 	s.enqueue(pendingMsg{kind: msgDisconnect, sess: sess})
 }
@@ -738,12 +790,17 @@ func (s *Server) drainMessages() {
 			case msgEventualFeedback:
 				s.applyEventualStateFeedback(m.sess.ID, m.eventualFeedback)
 			case msgDisconnect:
+				// Listener disconnect events always carry a non-nil *Session.
 				if s.eventualTrackers != nil {
 					delete(s.eventualTrackers, m.sess.ID)
 				}
 				if s.onDisconnect != nil {
 					s.onDisconnect(m.sess)
 				}
+				// Avatar remains readable during onDisconnect; clean up after.
+				// Reaps any avatar still bound to the session, including a
+				// replacement spawned inside the user callback.
+				s.cleanupAvatarOnDisconnect(m.sess.ID)
 			}
 		default:
 			return
@@ -983,10 +1040,32 @@ func (s *Server) runBroadcastTick() error {
 	return nil
 }
 
+// copyInterestDiffs deep-copies ComputeDiffs output so callers can release
+// interestMu before consuming the result (manager Diff storage is reused).
+func copyInterestDiffs(in map[int64]*interest.Diff) map[int64]*interest.Diff {
+	out := make(map[int64]*interest.Diff, len(in))
+	for sid, d := range in {
+		if d == nil {
+			out[sid] = nil
+			continue
+		}
+		out[sid] = &interest.Diff{
+			Entered: append([]int64(nil), d.Entered...),
+			Stayed:  append([]int64(nil), d.Stayed...),
+			Exited:  append([]int64(nil), d.Exited...),
+		}
+	}
+	return out
+}
+
 // runInterestTick performs per-session interest-filtered sends.
 func (s *Server) runInterestTick() error {
+	// Snapshot interest diffs under interestMu, then release before registry
+	// flush and network sends. Diff storage is reused by the manager, so copy.
+	s.interestMu.Lock()
 	s.interest.UpdateGrid(s.reg)
-	diffs := s.interest.ComputeDiffs()
+	diffs := copyInterestDiffs(s.interest.ComputeDiffs())
+	s.interestMu.Unlock()
 
 	result, err := s.reg.FlushAll()
 	if err != nil {

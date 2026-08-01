@@ -15,11 +15,12 @@ func TestDrainMessages_Ordering(t *testing.T) {
 	srv := NewServer(ServerConfig{TickRate: 20, Transport: golemnet.TransportWebSocket, StateUpdateLane: StateUpdateLaneStream})
 
 	// Push events directly onto the queue to simulate connection goroutines.
-	// We use nil sessions because drainMessages only invokes the stored
-	// callback — it does not dereference sess itself.
-	srv.msgQueue <- pendingMsg{kind: msgConnect, sess: nil}
-	srv.msgQueue <- pendingMsg{kind: msgMessage, sess: nil, data: []byte{1, 2, 3}}
-	srv.msgQueue <- pendingMsg{kind: msgDisconnect, sess: nil}
+	// Disconnect events from the listener always carry a non-nil *Session;
+	// connect/message may use a placeholder session in this unit test.
+	sess := &Session{ID: 1}
+	srv.msgQueue <- pendingMsg{kind: msgConnect, sess: sess}
+	srv.msgQueue <- pendingMsg{kind: msgMessage, sess: sess, data: []byte{1, 2, 3}}
+	srv.msgQueue <- pendingMsg{kind: msgDisconnect, sess: sess}
 
 	var order []string
 
@@ -70,9 +71,10 @@ func TestDrainMessages_DataCopy(t *testing.T) {
 // when no user callbacks are registered.
 func TestDrainMessages_NoCallbacks(t *testing.T) {
 	srv := NewServer(ServerConfig{TickRate: 20, Transport: golemnet.TransportWebSocket, StateUpdateLane: StateUpdateLaneStream})
-	srv.msgQueue <- pendingMsg{kind: msgConnect, sess: nil}
-	srv.msgQueue <- pendingMsg{kind: msgMessage, sess: nil, data: []byte{1}}
-	srv.msgQueue <- pendingMsg{kind: msgDisconnect, sess: nil}
+	sess := &Session{ID: 1}
+	srv.msgQueue <- pendingMsg{kind: msgConnect, sess: sess}
+	srv.msgQueue <- pendingMsg{kind: msgMessage, sess: sess, data: []byte{1}}
+	srv.msgQueue <- pendingMsg{kind: msgDisconnect, sess: sess}
 	srv.drainMessages() // must not panic
 }
 
