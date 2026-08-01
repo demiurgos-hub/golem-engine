@@ -6,6 +6,40 @@ import (
 	"github.com/demiurgos-hub/golem-engine/golem/collision"
 )
 
+// OverlapOfType resolves entityIDs through Server.Get and returns those that
+// satisfy T, preserving input/backend order. Missing IDs and type mismatches are
+// skipped. Returns nil when entityIDs is empty or no entry matches T.
+// A nil Server always panics with "golem: OverlapOfType: Server must be non-nil",
+// including when entityIDs is empty.
+//
+// Compose with overlap ID queries rather than geometry-specific generics:
+//
+//	mobs := golem.OverlapOfType[*Mob](s, s.OverlapCircle(x, y, r, mask))
+func OverlapOfType[T Entity](s *Server, entityIDs []int64) []T {
+	if s == nil {
+		panic("golem: OverlapOfType: Server must be non-nil")
+	}
+	if len(entityIDs) == 0 {
+		return nil
+	}
+	var out []T
+	for _, id := range entityIDs {
+		e, ok := s.Get(id)
+		if !ok {
+			continue
+		}
+		typed, ok := e.(T)
+		if !ok {
+			continue
+		}
+		if out == nil {
+			out = make([]T, 0, len(entityIDs))
+		}
+		out = append(out, typed)
+	}
+	return out
+}
+
 // OverlapBox returns the IDs of all registered entities whose collision shapes
 // overlap the axis-aligned box centred at (cx, cy) with half-extents (hw, hh).
 // Only entities whose layer has at least one bit in layerMask are returned.
