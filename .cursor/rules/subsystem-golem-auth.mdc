@@ -1,0 +1,19 @@
+---
+description: golem/auth — token-in-query-param OnUpgrade handshake helper (not an account/JWT framework).
+globs: golem/auth/**/*
+alwaysApply: false
+---
+
+# `golem/auth`
+
+**Upgrade handshake helper:** `UpgradeHandler(UpgradeOptions) func(*http.Request) (any, error)` extracts a query-parameter token (default name `token`), rejects missing/blank values, and delegates to game-supplied `Validate`. Wire with `server.OnUpgrade(auth.UpgradeHandler(...))`. Successful `Validate` return values become `Session.Data`; non-nil errors map to HTTP 401 via `golem/net` / `golem.Server.OnUpgrade`.
+
+**Options:** `TokenParam` is trimmed; empty/whitespace-only defaults to `"token"`. Duplicate query values use the first (`url.Values.Get`). Token values are trimmed with `strings.TrimSpace` (Unicode whitespace included). The request is not mutated (`URL.Query` only). `Validate` receives the original `*http.Request` plus the trimmed token so games can read other params (e.g. `char_id`).
+
+**Nil Validate:** required field; `UpgradeHandler` does not panic (consistent with option constructors such as `golem/host.Run`). The returned handler rejects every request with `ErrNilValidate`. Nil request or nil URL → `ErrInvalidRequest` (distinct from missing credentials; still HTTP 401 via OnUpgrade). Missing/blank token → `ErrMissingToken` (wrapped with the TokenParam name, never the token value); `Validate` is not called.
+
+**Boundaries:** stdlib only (`net/http`, `errors`, `fmt`, `strings`). Does **not** import `golem`, `golem/net`, clients, JWT libraries, or persistence. Does not parse Authorization headers, cookies, or JWTs; does not store sessions or game state. Games own token meaning and lookup.
+
+**Security:** package error strings never include the token. `Validate` must not put secrets in returned errors — the net listener logs the error and writes `err.Error()` into the 401 body. Validator errors are wrapped with `%w` so `errors.Is` still works.
+
+**Client pairing (docs only):** Go `golem-go-client` `WithQueryParam` / realtime bootstrap helpers and JS `golem-engine` realtime bootstrap helpers attach the same query params. This package must not depend on those clients.

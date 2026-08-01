@@ -15,6 +15,7 @@ Golem Engine is a Go module for building multiplayer game backends. It includes 
 | `golem/registry/` | Thread-safe entity registry and `Entity` interface. |
 | `golem/world/` | Thread-safe store for static world data. |
 | `golem/footprint/` | Collision-only footprint YAML loader and 2D/3D placers (`collision.Backend` / `collision3d.Backend`). |
+| `golem/auth/` | Token-in-query-param `OnUpgrade` handshake helper (not an account/JWT framework). |
 | `golem-go-client/` | Native Go client runtime. |
 | `golem-ebiten/` | Ebiten client lifecycle and generated bridge helpers. |
 | `golem-js/` | JS/TS runtime npm package (`golem-engine`). |
@@ -23,8 +24,8 @@ Golem Engine is a Go module for building multiplayer game backends. It includes 
 
 ## Subsystem Boundaries
 
-- Tooling is `cmd/`, `schema/`, and `codegen/`. Runtime library code is `golem/`, `golem/registry/`, `golem/world/`, and `golem/footprint/`.
-- `golem/registry`, `golem/world`, and `golem/footprint` do not import `golem`. Prefer depending on `golem/registry` for storage/entity-only work, `golem/world` for world-data-only work, and `golem/footprint` for collision footprint load/place work.
+- Tooling is `cmd/`, `schema/`, and `codegen/`. Runtime library code is `golem/`, `golem/registry/`, `golem/world/`, `golem/footprint/`, and `golem/auth/`.
+- `golem/registry`, `golem/world`, `golem/footprint`, and `golem/auth` do not import `golem`. Prefer depending on `golem/registry` for storage/entity-only work, `golem/world` for world-data-only work, `golem/footprint` for collision footprint load/place work, and `golem/auth` for token-query `OnUpgrade` helpers.
 - Consumer repos hold `golem.yaml` and schema YAML at their root. This engine repo may omit them.
 - Cursor subsystem rules live in `.cursor/rules/subsystem-*.mdc`. When a subsystem's layout or responsibilities change, update the matching rule description, boundaries, and globs.
 
@@ -47,4 +48,4 @@ Golem Engine is a Go module for building multiplayer game backends. It includes 
 
 - User-facing docs live in the separate Astro Starlight website repo under its `docs/` directory, not under this engine repo.
 - When public behavior changes, mention whether the website docs need a matching update.
-- Documentation must match current public behavior in `cmd/golem-bake`, `schema/`, `codegen/`, `golem/`, `golem/registry/`, and `golem/footprint/`.
+- Documentation must match current public behavior in `cmd/golem-bake`, `schema/`, `codegen/`, `golem/`, `golem/registry/`, `golem/footprint/`, and `golem/auth/`.
