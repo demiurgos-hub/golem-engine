@@ -134,9 +134,65 @@ func TestGenerateGoSharedTemplateIncludesRuntimeHelper(t *testing.T) {
 		"return r.Server.SaveSnapshot(SchemaFingerprint, path)",
 		"func (r *Runtime) LoadSnapshot(path string) error {",
 		"return r.Server.LoadSnapshot(path, SchemaFingerprint, RestoreEntity)",
+		"func (r *Runtime) LoadSnapshotIfExists(path string) (bool, error) {",
+		"if errors.Is(err, os.ErrNotExist) {",
+		"func (r *Runtime) RunSnapshotAutosave(ctx context.Context, path string, interval time.Duration) error {",
+		"func startSnapshotAutosave(ctx context.Context, interval time.Duration, save func() <-chan error, newTicker func(time.Duration) *time.Ticker) error {",
+		"func runSnapshotAutosave(ctx context.Context, ticks <-chan time.Time, save func() <-chan error) error {",
+		"if err := ctx.Err(); err != nil {",
+		`"context"`,
+		`"errors"`,
+		`"os"`,
+		`"time"`,
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("generated shared helper missing %q\n%s", want, content)
+		}
+	}
+}
+
+func TestGenerateGoSharedTemplateSnapshotHelpersWithoutOptionalFeatures(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/go_server/shared.go.tmpl")
+	if err != nil {
+		t.Fatalf("loadEmbeddedTemplate: %v", err)
+	}
+
+	data := schema.SharedData{
+		GolemImport: "github.com/demiurgos-hub/golem-engine/golem",
+		GoPackage:   "generated",
+		Fingerprint: "test-fingerprint",
+	}
+
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, data); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := out.String()
+
+	for _, want := range []string{
+		`"context"`,
+		`"errors"`,
+		`"os"`,
+		`"time"`,
+		"func (r *Runtime) LoadSnapshotIfExists(path string) (bool, error) {",
+		"func (r *Runtime) RunSnapshotAutosave(ctx context.Context, path string, interval time.Duration) error {",
+		"return startSnapshotAutosave(ctx, interval, func() <-chan error {",
+		"time.NewTicker",
+		"default:",
+		"_ = p",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("minimal shared helper missing %q\n%s", want, content)
+		}
+	}
+	for _, ban := range []string{
+		"var _ = errors.Is",
+		"CommandRouter",
+		"EventBroadcaster",
+		"EnableCollision",
+	} {
+		if strings.Contains(content, ban) {
+			t.Fatalf("minimal shared helper unexpectedly contains %q", ban)
 		}
 	}
 }
@@ -608,12 +664,14 @@ func TestGenerateGoSharedTemplateSkipsSessionNotFoundDuringFOIEventFanout(t *tes
 	for _, want := range []string{
 		"import (",
 		"\"errors\"",
-		"var _ = errors.Is",
 		"if errors.Is(err, golem.ErrSessionNotFound) {",
 		"continue",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("generated shared helper missing %q\n%s", want, content)
 		}
+	}
+	if strings.Contains(content, "var _ = errors.Is") {
+		t.Fatal("shared helper should not keep errors.Is blank-assign now that snapshot helpers use errors")
 	}
 }
