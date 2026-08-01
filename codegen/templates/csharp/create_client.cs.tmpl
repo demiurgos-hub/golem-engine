@@ -9,10 +9,56 @@ namespace {{.GoPackage}}
     {
         public static GameClient CreateClient()
         {
-            return CreateClient(() => new GolemWebSocketTransport());
+            return CreateClient(CreateDefaultTransport);
         }
 
+        /// <summary>
+        /// Compatibility factory that ignores <see cref="GolemConnectOptions.Transport"/> selection.
+        /// Prefer <see cref="CreateClient(Func{GolemConnectOptions, IGolemTransport})"/>.
+        /// </summary>
+        [Obsolete("Use Func<GolemConnectOptions, IGolemTransport> so Connect(GolemConnectOptions) can select transports and apply ACK/certificate options.")]
         public static GameClient CreateClient(Func<IGolemTransport> transportFactory)
+        {
+            if (transportFactory == null)
+            {
+                throw new ArgumentNullException(nameof(transportFactory));
+            }
+            var entities = new EntityManager();
+{{if .WorldTypes}}
+            var world = new WorldManager();
+{{- end}}
+{{if .Events}}
+            var events = new EventManager(entities);
+{{- end}}
+#pragma warning disable CS0618
+            return new GameClient(
+#pragma warning restore CS0618
+                entities,
+                bytes => EntityUpdate.Decode(bytes),
+{{if .Commands}}
+                command => ClientMessage.Encode((ClientMessage)command),
+                frames => ClientPacket.Encode(frames),
+{{- else}}
+                _ => System.Array.Empty<byte>(),
+                frames => System.Array.Empty<byte>(),
+{{- end}}
+                transportFactory
+{{if .WorldTypes}},
+                world,
+                bytes => WorldUpdate.Decode(bytes)
+{{- else}},
+                null,
+                null
+{{- end}}
+{{if .Events}},
+                events
+{{- else}},
+                null
+{{- end}}
+            );
+        }
+
+        public static GameClient CreateClient(Func<GolemConnectOptions, IGolemTransport> transportFactory)
         {
             var entities = new EntityManager();
 {{if .WorldTypes}}
@@ -45,6 +91,22 @@ namespace {{.GoPackage}}
                 null
 {{- end}}
             );
+        }
+
+        private static IGolemTransport CreateDefaultTransport(GolemConnectOptions options)
+        {
+            var transport = string.IsNullOrEmpty(options.Transport)
+                ? GolemConnectOptions.TransportWebSocket
+                : options.Transport;
+            switch (transport)
+            {
+                case GolemConnectOptions.TransportWebSocket:
+                    return new GolemWebSocketTransport();
+                case GolemConnectOptions.TransportWebTransport:
+                    return GolemWebTransportTransport.FromConnectOptions(options);
+                default:
+                    throw new ArgumentException($"golem-unity: unsupported transport \"{options.Transport}\"", nameof(options));
+            }
         }
 {{if .Commands}}
 {{range .Commands}}

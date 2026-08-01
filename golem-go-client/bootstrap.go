@@ -8,8 +8,10 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -33,7 +35,7 @@ type realtimeConfigResponse struct {
 		Algorithm string `json:"algorithm"`
 		Value     string `json:"value"`
 	} `json:"serverCertificateHashes"`
-	EventualAckIntervalMs *int `json:"eventualAckIntervalMs"`
+	EventualAckIntervalMs *json.Number `json:"eventualAckIntervalMs"`
 }
 
 // FetchRealtimeConfig loads and decodes a realtime config JSON endpoint.
@@ -43,11 +45,11 @@ func FetchRealtimeConfig(ctx context.Context, endpoint string, client *http.Clie
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return RealtimeConfig{}, fmt.Errorf("golem-go-client: creating realtime config request: %w", err)
+		return RealtimeConfig{}, fmt.Errorf("golem-go-client: creating realtime config request: %w", sanitizeURLError(err))
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return RealtimeConfig{}, fmt.Errorf("golem-go-client: fetching realtime config: %w", err)
+		return RealtimeConfig{}, fmt.Errorf("golem-go-client: fetching realtime config: %w", sanitizeURLError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
@@ -61,13 +63,27 @@ func FetchRealtimeConfig(ctx context.Context, endpoint string, client *http.Clie
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return RealtimeConfig{}, fmt.Errorf("golem-go-client: decoding realtime config: %w", err)
 	}
+	transport := TransportKind(strings.TrimSpace(body.Transport))
+	switch transport {
+	case TransportWebSocket, TransportWebTransport:
+	default:
+		if strings.TrimSpace(body.Transport) == "" {
+			return RealtimeConfig{}, fmt.Errorf("golem-go-client: realtime config transport is required")
+		}
+		return RealtimeConfig{}, fmt.Errorf("golem-go-client: unsupported transport %q", body.Transport)
+	}
+	if strings.TrimSpace(body.URL) == "" {
+		return RealtimeConfig{}, fmt.Errorf("golem-go-client: realtime config url is required")
+	}
 	cfg := RealtimeConfig{
-		Transport: TransportKind(body.Transport),
+		Transport: transport,
 		URL:       body.URL,
 	}
-	if body.EventualAckIntervalMs != nil {
-		cfg.EventualAckIntervalMs = *body.EventualAckIntervalMs
+	ack, err := parseEventualAckIntervalMs(body.EventualAckIntervalMs)
+	if err != nil {
+		return RealtimeConfig{}, err
 	}
+	cfg.EventualAckIntervalMs = ack
 	for _, hash := range body.ServerCertificateHashes {
 		decoded, err := decodeCertificateHash(hash.Algorithm, hash.Value)
 		if err != nil {
@@ -133,10 +149,16 @@ func ConnectOptionsFromRealtimeConfig(cfg RealtimeConfig, opts ...ConnectOption)
 	default:
 		return ConnectOptions{}, fmt.Errorf("golem-go-client: unsupported transport %q", cfg.Transport)
 	}
+	if strings.TrimSpace(cfg.URL) == "" {
+		return ConnectOptions{}, fmt.Errorf("golem-go-client: realtime config url is required")
+	}
+	if err := validateEventualAckIntervalMs(cfg.EventualAckIntervalMs); err != nil {
+		return ConnectOptions{}, err
+	}
 	options := ConnectOptions{
 		Transport:               cfg.Transport,
 		URL:                     cfg.URL,
-		ServerCertificateHashes: append([]CertificateHash(nil), cfg.ServerCertificateHashes...),
+		ServerCertificateHashes: cloneCertificateHashes(cfg.ServerCertificateHashes),
 		EventualAckIntervalMs:   cfg.EventualAckIntervalMs,
 	}
 	builder := &connectOptionsBuilder{options: &options}
@@ -151,7 +173,7 @@ func ConnectOptionsFromRealtimeConfig(cfg RealtimeConfig, opts ...ConnectOption)
 	if len(builder.query) > 0 {
 		u, err := url.Parse(options.URL)
 		if err != nil {
-			return ConnectOptions{}, fmt.Errorf("golem-go-client: parsing realtime transport URL: %w", err)
+			return ConnectOptions{}, fmt.Errorf("golem-go-client: parsing realtime transport URL: %w", sanitizeURLError(err))
 		}
 		query := u.Query()
 		for key, list := range builder.query {
@@ -173,7 +195,7 @@ func TLSClientConfigFromCertificateHashes(serverName string, hashes []Certificat
 	if err := validateCertificateHashes(hashes); err != nil {
 		return nil, err
 	}
-	pinned := append([]CertificateHash(nil), hashes...)
+	pinned := cloneCertificateHashes(hashes)
 	return &tls.Config{
 		ServerName:         serverName,
 		InsecureSkipVerify: true,
@@ -181,6 +203,76 @@ func TLSClientConfigFromCertificateHashes(serverName string, hashes []Certificat
 			return verifyPinnedPeerCertificate(serverName, pinned, rawCerts)
 		},
 	}, nil
+}
+
+func parseEventualAckIntervalMs(raw *json.Number) (int, error) {
+	if raw == nil {
+		return 0, nil
+	}
+	text := strings.TrimSpace(raw.String())
+	if text == "" {
+		return 0, fmt.Errorf("golem-go-client: eventualAckIntervalMs must be an integer")
+	}
+	if strings.ContainsAny(text, ".eE") {
+		return 0, fmt.Errorf("golem-go-client: eventualAckIntervalMs must be an integer")
+	}
+	n, err := raw.Int64()
+	if err != nil {
+		return 0, fmt.Errorf("golem-go-client: eventualAckIntervalMs must be an integer: %w", err)
+	}
+	if n < 0 || n > math.MaxInt32 {
+		return 0, fmt.Errorf("golem-go-client: eventualAckIntervalMs %d out of int32 range", n)
+	}
+	return int(n), nil
+}
+
+func validateEventualAckIntervalMs(value int) error {
+	if value < 0 || value > math.MaxInt32 {
+		return fmt.Errorf("golem-go-client: eventualAckIntervalMs %d out of int32 range", value)
+	}
+	return nil
+}
+
+func cloneCertificateHashes(hashes []CertificateHash) []CertificateHash {
+	if len(hashes) == 0 {
+		return nil
+	}
+	out := make([]CertificateHash, len(hashes))
+	for i, hash := range hashes {
+		out[i] = CertificateHash{
+			Algorithm: hash.Algorithm,
+			Value:     append([]byte(nil), hash.Value...),
+		}
+	}
+	return out
+}
+
+// sanitizeURLError redacts query/fragment from *url.Error so tokens are not leaked in Error().
+// The underlying Err is preserved for errors.Is / errors.As.
+func sanitizeURLError(err error) error {
+	var uerr *url.Error
+	if !errors.As(err, &uerr) {
+		return err
+	}
+	return &url.Error{
+		Op:  uerr.Op,
+		URL: redactEndpointURL(uerr.URL),
+		Err: uerr.Err,
+	}
+}
+
+func redactEndpointURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.Redacted()
 }
 
 func decodeCertificateHash(algorithm, value string) (CertificateHash, error) {

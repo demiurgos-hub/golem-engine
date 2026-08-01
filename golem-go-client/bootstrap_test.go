@@ -74,6 +74,8 @@ func TestFetchRealtimeConfigRejectsInvalidResponses(t *testing.T) {
 		{name: "json", status: http.StatusOK, body: `{`},
 		{name: "hex", status: http.StatusOK, body: `{"transport":"webtransport","url":"https://example.com/wt","serverCertificateHashes":[{"algorithm":"sha-256","value":"not-hex"}]}`},
 		{name: "algorithm", status: http.StatusOK, body: `{"transport":"webtransport","url":"https://example.com/wt","serverCertificateHashes":[{"algorithm":"sha-512","value":"` + hex.EncodeToString(sum[:]) + `"}]}`},
+		{name: "transport", status: http.StatusOK, body: `{"transport":"bad","url":"https://example.com/wt"}`},
+		{name: "url", status: http.StatusOK, body: `{"transport":"websocket","url":""}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -102,6 +104,46 @@ func TestFetchRealtimeConfigIncludesErrorBodySnippet(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "status 404") || !strings.Contains(err.Error(), "missing realtime config") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestFetchRealtimeConfigDoesNotLeakEndpointTokenInURLErrors(t *testing.T) {
+	secret := "super-secret-token"
+	endpoint := "http://127.0.0.1:1/realtime-config?token=" + secret + "#frag"
+	_, err := FetchRealtimeConfig(context.Background(), endpoint, &http.Client{Timeout: 50 * time.Millisecond})
+	if err == nil {
+		t.Fatal("FetchRealtimeConfig returned nil error")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error leaked token: %v", err)
+	}
+	if strings.Contains(err.Error(), "token=") {
+		t.Fatalf("error leaked query: %v", err)
+	}
+	var uerr *url.Error
+	if !errors.As(err, &uerr) {
+		t.Fatalf("expected url.Error in chain, got %v", err)
+	}
+	if strings.Contains(uerr.URL, secret) || strings.Contains(uerr.URL, "token=") {
+		t.Fatalf("url.Error.URL leaked token: %q", uerr.URL)
+	}
+}
+
+func TestFetchRealtimeConfigRejectsInvalidAckIntervals(t *testing.T) {
+	tests := []string{
+		`{"transport":"websocket","url":"ws://example.com/ws","eventualAckIntervalMs":-1}`,
+		`{"transport":"websocket","url":"ws://example.com/ws","eventualAckIntervalMs":1.5}`,
+		`{"transport":"websocket","url":"ws://example.com/ws","eventualAckIntervalMs":2147483648}`,
+	}
+	for _, body := range tests {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Write([]byte(body))
+		}))
+		if _, err := FetchRealtimeConfig(context.Background(), server.URL, nil); err == nil {
+			server.Close()
+			t.Fatalf("expected error for body %s", body)
+		}
+		server.Close()
 	}
 }
 
@@ -148,6 +190,34 @@ func TestConnectOptionsFromRealtimeConfigAppliesOptions(t *testing.T) {
 func TestConnectOptionsFromRealtimeConfigRejectsUnsupportedTransport(t *testing.T) {
 	if _, err := ConnectOptionsFromRealtimeConfig(RealtimeConfig{Transport: "bad", URL: "https://example.com/wt"}); err == nil {
 		t.Fatal("ConnectOptionsFromRealtimeConfig returned nil error")
+	}
+}
+
+func TestConnectOptionsFromRealtimeConfigRejectsEmptyURL(t *testing.T) {
+	if _, err := ConnectOptionsFromRealtimeConfig(RealtimeConfig{Transport: TransportWebSocket, URL: "   "}); err == nil {
+		t.Fatal("ConnectOptionsFromRealtimeConfig returned nil error")
+	}
+}
+
+func TestConnectOptionsFromRealtimeConfigDeepCopiesHashBytes(t *testing.T) {
+	sum := sha256.Sum256([]byte("cert"))
+	value := append([]byte(nil), sum[:]...)
+	cfg := RealtimeConfig{
+		Transport:               TransportWebTransport,
+		URL:                     "https://example.com/wt",
+		ServerCertificateHashes: []CertificateHash{{Algorithm: certificateHashSHA256, Value: value}},
+		EventualAckIntervalMs:   25,
+	}
+	options, err := ConnectOptionsFromRealtimeConfig(cfg)
+	if err != nil {
+		t.Fatalf("ConnectOptionsFromRealtimeConfig: %v", err)
+	}
+	if options.EventualAckIntervalMs != 25 {
+		t.Fatalf("ack = %d, want 25", options.EventualAckIntervalMs)
+	}
+	value[0] ^= 0xff
+	if got := options.ServerCertificateHashes[0].Value; bytes.Equal(got, value) || !bytes.Equal(got, sum[:]) {
+		t.Fatalf("hash bytes were not deep-copied: got %x want %x (mutated source %x)", got, sum, value)
 	}
 }
 

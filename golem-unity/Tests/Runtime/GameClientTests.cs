@@ -15,7 +15,7 @@ namespace GolemEngine.Unity.Tests
                 bytes => bytes,
                 _ => Array.Empty<byte>(),
                 _ => Array.Empty<byte>(),
-                () => new RecordingTransport());
+                _ => new RecordingTransport());
 
             var payload = new byte[] { 9 };
             var message = new PbWriter().Tag(1, 2).Bytes(payload).Finish();
@@ -35,7 +35,7 @@ namespace GolemEngine.Unity.Tests
                 bytes => bytes,
                 _ => Array.Empty<byte>(),
                 _ => Array.Empty<byte>(),
-                () => new RecordingTransport());
+                _ => new RecordingTransport());
 
             var frame = new byte[] { 1, 2, 3 };
             var batch = GolemDatagramProtocol.EncodeLengthPrefixedFrame(frame);
@@ -54,7 +54,7 @@ namespace GolemEngine.Unity.Tests
                 bytes => bytes,
                 _ => Array.Empty<byte>(),
                 _ => Array.Empty<byte>(),
-                () => new RecordingTransport());
+                _ => new RecordingTransport());
 
             var error = Assert.Throws<System.Reflection.TargetInvocationException>(() =>
                 typeof(GameClient)
@@ -72,7 +72,7 @@ namespace GolemEngine.Unity.Tests
                 bytes => bytes,
                 cmd => (byte[])cmd,
                 frames => ClientPacket(frames),
-                () => transport);
+                _ => transport);
 
             client.Connect("ws://example.invalid/ws");
             var command = new byte[] { 9, 8, 7 };
@@ -94,7 +94,7 @@ namespace GolemEngine.Unity.Tests
                 bytes => bytes,
                 cmd => (byte[])cmd,
                 frames => ClientPacket(frames),
-                () => transport);
+                _ => transport);
 
             client.Connect("ws://example.invalid/ws");
 

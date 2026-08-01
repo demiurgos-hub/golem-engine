@@ -1,0 +1,23 @@
+---
+description: integration/unity - Unity/C# client runtime and csharp-client codegen.
+globs:
+  - golem-unity/**/*
+  - codegen/templates/csharp/**/*.tmpl
+  - codegen/templates/unity/**/*.tmpl
+  - codegen/csharp*.go
+alwaysApply: false
+---
+
+# `integration/unity`
+
+`golem-unity` is the UPM package (`io.demiurgos.golemengine`) for Unity clients: `GameClient`, WebSocket/WebTransport transports, codecs, Unity bridge helpers, and Scribe editor export. It must not import or duplicate the Go `golem.Server` game loop. Nested `Runtime/WebTransport` is a separate asmdef that references `Demiurgos.WebTransport.Client.Unity`.
+
+The `csharp-client` codegen integration emits generated C# from `codegen/templates/csharp/` (managers, codecs, `ClientFactory`). The `unity` integration emits thin entity-view bridges from `codegen/templates/unity/` and depends on `csharp-client` output.
+
+**Connect options:** `GolemConnectOptions` carries transport kind (`websocket` / `webtransport`), URL, certificate hashes, and `EventualAckIntervalMs` (`EffectiveEventualAckIntervalMs` maps 0→default 1). `GameClient.Connect(GolemConnectOptions)` requires an options-aware `Func<GolemConnectOptions, IGolemTransport>` factory. `Connect(string)` remains compatible with obsolete parameterless `Func<IGolemTransport>` factories; `Connect(GolemConnectOptions)` with a non-empty transport and a legacy factory fails clearly. Generated `ClientFactory` defaults to `CreateDefaultTransport`; `CreateClient(Func<IGolemTransport>)` is obsolete.
+
+**Realtime bootstrap** (`GolemRealtimeBootstrap`): async fetch with injectable fetch for tests; `GolemBoundedDownloadHandler` caps success bodies at 64 KiB and error snippets at 512 bytes (fail clearly when oversized). CancellationToken is polled between yields and does not Abort UnityWebRequest (main-thread limitation). Dependency-free JSON parse validates optional fields/arrays and `eventualAckIntervalMs` (absent/zero OK; reject negatives/fractions/out-of-int32). `AppendQuery` is append-only (preserves prefix, `+`/percent escapes, default ports, duplicates, fragment). Error messages must not leak query token values.
+
+**WebTransport platform limit:** `WebTransportClientOptions` supports timeouts/datagrams/`AllowUntrustedCertificates` but not browser-style `serverCertificateHashes`. Built-in `FromConnectOptions` applies ACK interval (`EventualAckIntervalMilliseconds` test seam) and rejects non-empty hashes — never silently ignore them. Custom options-aware factories own certificate policy if they construct transports directly.
+
+Keep framing aligned with `golem/net` / `golem-js`: reliable frame cap `32000`, WebTransport datagram cap `1200`, datagram lanes, and control frames. When changing C# generated shapes or connect APIs, update `codegen` template tests and `golem-unity/Tests`.

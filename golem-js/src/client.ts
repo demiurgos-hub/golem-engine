@@ -277,6 +277,8 @@ export interface ConnectOptions {
   transport: TransportKind;
   url: string;
   serverCertificateHashes?: WebTransportCertificateHash[];
+  /** Delay before sending standalone eventual-state ACK packets when ACKs are not piggybacked. */
+  eventualAckIntervalMs?: number;
 }
 
 /** Send-only unreliable lane exposed by transports that support datagrams. */

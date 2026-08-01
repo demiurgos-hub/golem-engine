@@ -33,8 +33,45 @@ namespace GolemEngine.Unity
         public GolemWebTransportTransport(WebTransportClientOptions options, int eventualAckIntervalMilliseconds)
         {
             _options = options ?? throw new ArgumentNullException(nameof(options));
-            _eventualAckIntervalMilliseconds = eventualAckIntervalMilliseconds;
+            _eventualAckIntervalMilliseconds = GolemConnectOptions.EffectiveEventualAckIntervalMs(eventualAckIntervalMilliseconds);
         }
+
+        /// <summary>
+        /// Builds a WebTransport transport from connect options.
+        /// Applies eventual ACK interval; rejects non-empty browser-style certificate hashes.
+        /// Custom options-aware factories that construct this type directly own certificate handling.
+        /// </summary>
+        public static GolemWebTransportTransport FromConnectOptions(GolemConnectOptions options)
+        {
+            if (options == null)
+            {
+                throw new ArgumentNullException(nameof(options));
+            }
+            GolemRealtimeBootstrap.EnsureNativeWebTransportSupportsCertificateHashes(options.ServerCertificateHashes);
+            var clientOptions = new WebTransportClientOptions();
+            return new GolemWebTransportTransport(clientOptions, options.EventualAckIntervalMs);
+        }
+
+        /// <summary>
+        /// Builds a WebTransport transport from connect options with an explicit client options instance
+        /// (for example development <see cref="WebTransportClientOptions.AllowUntrustedCertificates"/>).
+        /// Built-in helpers still reject non-empty browser-style certificate hashes; custom factories that
+        /// bypass <see cref="FromConnectOptions"/> own certificate policy.
+        /// </summary>
+        public static GolemWebTransportTransport FromConnectOptions(
+            GolemConnectOptions options,
+            WebTransportClientOptions clientOptions)
+        {
+            if (options == null)
+            {
+                throw new ArgumentNullException(nameof(options));
+            }
+            GolemRealtimeBootstrap.EnsureNativeWebTransportSupportsCertificateHashes(options.ServerCertificateHashes);
+            return new GolemWebTransportTransport(clientOptions, options.EventualAckIntervalMs);
+        }
+
+        /// <summary>Resolved eventual-state ACK interval used by the datagram protocol (test seam).</summary>
+        public int EventualAckIntervalMilliseconds => _eventualAckIntervalMilliseconds;
 
         public bool Connected => _connected;
         public int MaxMessageBytes => GameClient.MaxReliableMessageBytes;

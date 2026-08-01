@@ -19,3 +19,13 @@ export {
   type WebTransportCertificateHash,
   type WebTransportConnectOptions,
 } from "./client.js";
+export {
+  fetchRealtimeConfig,
+  connectOptionsFromRealtimeConfig,
+  withQueryParam,
+  withQuery,
+  readBoundedText,
+  type RealtimeConfig,
+  type FetchRealtimeConfigOptions,
+  type ConnectOption,
+} from "./bootstrap.js";

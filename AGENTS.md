@@ -20,14 +20,14 @@ Golem Engine is a Go module for building multiplayer game backends. It includes 
 | `golem-ebiten/` | Ebiten client lifecycle and generated bridge helpers. |
 | `golem-js/` | JS/TS runtime npm package (`golem-engine`). |
 | `golem-phaser/` | Phaser helper package built on `golem-engine`. |
-| `golem-unity/` | Unity client package. |
+| `golem-unity/` | Unity client package (runtime, WebTransport transport, Scribe editor, realtime bootstrap). |
 
 ## Subsystem Boundaries
 
 - Tooling is `cmd/`, `schema/`, and `codegen/`. Runtime library code is `golem/`, `golem/registry/`, `golem/world/`, `golem/footprint/`, and `golem/auth/`.
 - `golem/registry`, `golem/world`, `golem/footprint`, and `golem/auth` do not import `golem`. Prefer depending on `golem/registry` for storage/entity-only work, `golem/world` for world-data-only work, `golem/footprint` for collision footprint load/place work, and `golem/auth` for token-query `OnUpgrade` helpers.
 - Consumer repos hold `golem.yaml` and schema YAML at their root. This engine repo may omit them.
-- Cursor subsystem rules live in `.cursor/rules/subsystem-*.mdc`. When a subsystem's layout or responsibilities change, update the matching rule description, boundaries, and globs.
+- Cursor subsystem rules live in `.cursor/rules/subsystem-*.mdc` (including `subsystem-integration-unity.mdc` for `golem-unity` / C# client codegen). When a subsystem's layout or responsibilities change, update the matching rule description, boundaries, and globs.
 
 ## Build and Test
 

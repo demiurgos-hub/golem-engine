@@ -12,12 +12,43 @@ namespace GolemEngine.Unity
         private readonly Func<object, byte[]> _encodeCommand;
         private readonly Func<IReadOnlyList<byte[]>, byte[]> _encodePacket;
         private readonly Func<byte[], object> _decodeWorldUpdate;
-        private readonly Func<IGolemTransport> _transportFactory;
+        private readonly Func<GolemConnectOptions, IGolemTransport> _transportFactory;
+        private readonly bool _legacyTransportFactory;
         private readonly List<byte[]> _queuedFrames = new List<byte[]>();
         private int _queuedBytes;
         private bool _flushScheduled;
         private IGolemTransport _transport;
 
+        public GameClient(
+            IEntityManager entityManager,
+            Func<byte[], object> decodeEntityUpdate,
+            Func<object, byte[]> encodeCommand,
+            Func<IReadOnlyList<byte[]>, byte[]> encodePacket,
+            Func<GolemConnectOptions, IGolemTransport> transportFactory,
+            IWorldManager worldManager = null,
+            Func<byte[], object> decodeWorldUpdate = null,
+            IEventManager eventManager = null)
+        {
+            Entities = entityManager ?? throw new ArgumentNullException(nameof(entityManager));
+            _decodeEntityUpdate = decodeEntityUpdate ?? throw new ArgumentNullException(nameof(decodeEntityUpdate));
+            _encodeCommand = encodeCommand ?? throw new ArgumentNullException(nameof(encodeCommand));
+            _encodePacket = encodePacket ?? throw new ArgumentNullException(nameof(encodePacket));
+            _transportFactory = transportFactory ?? throw new ArgumentNullException(nameof(transportFactory));
+            _legacyTransportFactory = false;
+            World = worldManager;
+            Events = eventManager;
+            _decodeWorldUpdate = decodeWorldUpdate;
+        }
+
+        /// <summary>
+        /// Compatibility constructor for parameterless transport factories.
+        /// Compatible with <see cref="Connect(string)"/>. Prefer
+        /// <see cref="GameClient(IEntityManager, Func{byte[], object}, Func{object, byte[]}, Func{IReadOnlyList{byte[]}, byte[]}, Func{GolemConnectOptions, IGolemTransport}, IWorldManager, Func{byte[], object}, IEventManager)"/>
+        /// so <see cref="Connect(GolemConnectOptions)"/> can select transports and apply ACK options.
+        /// Custom options-aware factories own certificate-hash handling; built-in
+        /// <c>GolemWebTransportTransport.FromConnectOptions</c> still rejects unsupported hashes.
+        /// </summary>
+        [Obsolete("Use Func<GolemConnectOptions, IGolemTransport> so Connect(GolemConnectOptions) can select transports and apply ACK/certificate options.")]
         public GameClient(
             IEntityManager entityManager,
             Func<byte[], object> decodeEntityUpdate,
@@ -32,7 +63,12 @@ namespace GolemEngine.Unity
             _decodeEntityUpdate = decodeEntityUpdate ?? throw new ArgumentNullException(nameof(decodeEntityUpdate));
             _encodeCommand = encodeCommand ?? throw new ArgumentNullException(nameof(encodeCommand));
             _encodePacket = encodePacket ?? throw new ArgumentNullException(nameof(encodePacket));
-            _transportFactory = transportFactory ?? throw new ArgumentNullException(nameof(transportFactory));
+            if (transportFactory == null)
+            {
+                throw new ArgumentNullException(nameof(transportFactory));
+            }
+            _transportFactory = _ => transportFactory();
+            _legacyTransportFactory = true;
             World = worldManager;
             Events = eventManager;
             _decodeWorldUpdate = decodeWorldUpdate;
@@ -45,11 +81,35 @@ namespace GolemEngine.Unity
         public event Action ConnectedEvent;
         public event Action<GolemDisconnectInfo> DisconnectedEvent;
 
+        /// <summary>
+        /// Connects using the configured transport factory.
+        /// Preserves factory behavior for custom parameterless factories (transport selection is not overridden).
+        /// </summary>
         public void Connect(string url)
         {
+            if (url == null)
+            {
+                throw new ArgumentNullException(nameof(url));
+            }
+            Connect(new GolemConnectOptions(url));
+        }
+
+        /// <summary>Connects using transport-aware options (URL, transport kind, cert hashes, ACK interval).</summary>
+        public void Connect(GolemConnectOptions options)
+        {
+            if (options == null)
+            {
+                throw new ArgumentNullException(nameof(options));
+            }
+            if (_legacyTransportFactory && !string.IsNullOrEmpty(options.Transport))
+            {
+                throw new InvalidOperationException(
+                    "golem-unity: parameterless transport factory cannot honor GolemConnectOptions.Transport; use Func<GolemConnectOptions, IGolemTransport> or Connect(string)");
+            }
             Disconnect();
-            GolemUnityLog.Info($"connect url={GolemUnityLog.RedactUrl(url)}");
-            var transport = _transportFactory();
+            GolemUnityLog.Info(
+                $"connect transport={(string.IsNullOrEmpty(options.Transport) ? "factory-default" : options.Transport)} url={GolemUnityLog.RedactUrl(options.Url)}");
+            var transport = _transportFactory(options) ?? throw new InvalidOperationException("golem-unity: transport factory returned null");
             transport.ConnectedEvent += () => GolemMainThreadDispatcher.Enqueue(() => ConnectedEvent?.Invoke());
             transport.MessageEvent += bytes => GolemMainThreadDispatcher.Enqueue(() => HandleMessage(bytes));
             transport.UnreliableStateMessageEvent += bytes => GolemMainThreadDispatcher.Enqueue(() => HandleCompactStateBatch(bytes));
@@ -66,7 +126,7 @@ namespace GolemEngine.Unity
                 DisconnectedEvent?.Invoke(info);
             });
             _transport = transport;
-            transport.Connect(url);
+            transport.Connect(options.Url);
         }
 
         public void Disconnect()
