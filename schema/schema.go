@@ -442,6 +442,19 @@ func LoadSchemas(schemasDir string, dimensions int, customTypes map[string]Custo
 	return entities, nil
 }
 
+// checkReservedGeneratedMethodVars returns an error when any var key's
+// SnakeToPascal form collides with generated Synced* methods Server or BindServer
+// (e.g. server, bind_server, Server, BindServer).
+func checkReservedGeneratedMethodVars(entity string, vars map[string]SchemaVarDef) error {
+	for _, k := range SortedKeys(vars) {
+		switch SnakeToPascal(k) {
+		case "Server", "BindServer":
+			return fmt.Errorf("entity %q: var name %q is reserved because it collides with generated Server/BindServer methods", entity, k)
+		}
+	}
+	return nil
+}
+
 // BuildEntityData converts a parsed schema file into template-ready entity data.
 // Each var must carry an explicit tag (≥ 1). Proto field numbers are offset by
 // the reserved entity metadata fields: entity_id, position components, and revision.
@@ -463,6 +476,9 @@ func BuildEntityData(sf SchemaFile, dimensions int, customTypes map[string]Custo
 		if _, ok := sf.Vars[reserved]; ok {
 			log.Fatalf("entity %q: var name %q is reserved for implicit entity metadata", sf.Entity, reserved)
 		}
+	}
+	if err := checkReservedGeneratedMethodVars(sf.Entity, sf.Vars); err != nil {
+		log.Fatal(err)
 	}
 
 	persistent := true

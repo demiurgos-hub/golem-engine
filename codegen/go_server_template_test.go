@@ -209,6 +209,52 @@ func TestGenerateGoServerTemplateIncludesStateRevision(t *testing.T) {
 	}
 }
 
+func TestGenerateGoServerTemplateIncludesServerBinding(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/go_server/server.go.tmpl")
+	if err != nil {
+		t.Fatalf("loadEmbeddedTemplate: %v", err)
+	}
+
+	data := schema.EntityData{
+		Name:      "Player",
+		LowerName: "player",
+		TickVars: []schema.VarInfo{
+			{
+				GoName:      "Health",
+				FieldName:   "health",
+				GoType:      "int32",
+				ProtoType:   "int32",
+				ProtoHelper: "Int32",
+				BitIndex:    2,
+			},
+		},
+	}
+
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, data); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := out.String()
+
+	for _, want := range []string{
+		"srv *golem.Server",
+		"func (s *SyncedPlayer) BindServer(srv *golem.Server) {",
+		"func (s *SyncedPlayer) Server() *golem.Server {",
+		"or nil if the entity has not yet",
+		"Wrapper types that embed *SyncedPlayer",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("generated server helper missing %q\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "s.srv = st.") {
+		t.Fatal("ApplyState must not hydrate runtime-only srv from snapshot state")
+	}
+	if strings.Contains(content, "Srv:") || strings.Contains(content, "srv:") {
+		t.Fatal("constructor/FullState must not treat srv as replicated state")
+	}
+}
+
 func TestGenerateGoServerTemplateIncludesMaskAwareDeltas(t *testing.T) {
 	tmpl, err := loadEmbeddedTemplate("templates/go_server/server.go.tmpl")
 	if err != nil {

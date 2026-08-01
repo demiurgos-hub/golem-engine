@@ -37,6 +37,9 @@ type Synced{{.Name}} struct {
 	dirty         uint64
 	lastFlushMask uint64
 	revision      uint64
+	// srv is a runtime-only back-reference set by CreateEntity; it is not part
+	// of wire or snapshot state.
+	srv *golem.Server
 }
 
 func NewSynced{{.Name}}(posX float32, posY float32{{if .Is3D}}, posZ float32{{end}}{{range .AllVars}}, {{.FieldName}} {{.GoType}}{{end}}, entityID ...int64) *Synced{{.Name}} {
@@ -65,6 +68,20 @@ func (s *Synced{{.Name}}) SetEntityID(id int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.entityID = id
+}
+
+// BindServer stores the owning server. Called by golem.Server.CreateEntity after
+// ID assignment and before registry insertion so OnSpawn can use Server().
+// Wrapper types that embed *Synced{{.Name}} inherit this method.
+func (s *Synced{{.Name}}) BindServer(srv *golem.Server) {
+	s.srv = srv
+}
+
+// Server returns the owning *golem.Server, or nil if the entity has not yet
+// been registered via CreateEntity. Wrapper types that embed *Synced{{.Name}}
+// inherit this accessor.
+func (s *Synced{{.Name}}) Server() *golem.Server {
+	return s.srv
 }
 
 func (s *Synced{{.Name}}) TypeName() string { return "{{.Name}}" }

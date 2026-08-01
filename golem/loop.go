@@ -315,9 +315,18 @@ func (s *Server) SetEntityIDCounter(n int64) {
 	atomic.StoreInt64(&s.idCounter, n)
 }
 
+// ServerBinder is implemented by entities that store a back-reference to the
+// owning Server. CreateEntity calls BindServer after ID assignment and before
+// registry Add/AddOwned so OnSpawn can use the bound server.
+type ServerBinder interface {
+	BindServer(*Server)
+}
+
 // CreateEntity registers e for simulation and replication. If the entity was
 // constructed without an ID (EntityID() == 0), the next counter value is
-// assigned automatically via EntityIDSetter. With no extra owner arguments the
+// assigned automatically via EntityIDSetter. If e implements ServerBinder,
+// BindServer is invoked after validation/ID assignment and before registry
+// insertion so OnSpawn can call Server(). With no extra owner arguments the
 // entity is unowned (e.g. world NPC); with one argument that value is the
 // owning session ID for command authority. More than one owner argument is invalid.
 func (s *Server) CreateEntity(e Entity, owner ...int64) error {
@@ -331,6 +340,10 @@ func (s *Server) CreateEntity(e Entity, owner ...int64) error {
 			return fmt.Errorf("golem: entity has no ID and does not implement EntityIDSetter")
 		}
 		setter.SetEntityID(s.nextID())
+	}
+
+	if binder, ok := e.(ServerBinder); ok {
+		binder.BindServer(s)
 	}
 
 	if len(owner) == 1 {
