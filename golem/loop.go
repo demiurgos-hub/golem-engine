@@ -12,13 +12,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/quic-go/quic-go/http3"
-	"github.com/quic-go/webtransport-go"
 	"github.com/demiurgos-hub/golem-engine/golem/collision3d"
 	"github.com/demiurgos-hub/golem-engine/golem/interest"
 	golemnet "github.com/demiurgos-hub/golem-engine/golem/net"
 	"github.com/demiurgos-hub/golem-engine/golem/registry"
 	"github.com/demiurgos-hub/golem-engine/golem/world"
+	"github.com/quic-go/quic-go/http3"
+	"github.com/quic-go/webtransport-go"
 
 	"github.com/demiurgos-hub/golem-engine/golem/collision"
 	"github.com/demiurgos-hub/golem-engine/golem/nav"
@@ -164,6 +164,8 @@ type Server struct {
 	interest             *interest.Manager
 	collision            collision.Backend
 	collision3D          collision3d.Backend
+	layers               *collision.Layers
+	layers3D             *collision3d.Layers
 	navBackend           nav.Backend
 	contactEventsEnabled bool
 	triggerPairs         map[[2]int64]struct{}
@@ -340,9 +342,19 @@ type ServerBinder interface {
 // constructed without an ID (EntityID() == 0), the next counter value is
 // assigned automatically via EntityIDSetter. If e implements ServerBinder,
 // BindServer is invoked after validation/ID assignment and before registry
-// insertion so OnSpawn can call Server(). With no extra owner arguments the
-// entity is unowned (e.g. world NPC); with one argument that value is the
-// owning session ID for command authority. More than one owner argument is invalid.
+// insertion so OnSpawn can call Server().
+//
+// When e implements ColliderProvider or ColliderProvider3D, its shape is
+// registered on the configured named-layer helper after successful registry
+// insertion and before OnSpawn. Registration is skipped without panicking when
+// no layer helper is set — call SetCollisionLayers / SetCollisionLayers3D
+// (or generated EnableCollision / EnableCollision3D) before spawning or
+// snapshot-loading collidable entities. Failed duplicate insertion does not
+// register a collider.
+//
+// With no extra owner arguments the entity is unowned (e.g. world NPC); with
+// one argument that value is the owning session ID for command authority.
+// More than one owner argument is invalid.
 func (s *Server) CreateEntity(e Entity, owner ...int64) error {
 	if len(owner) > 1 {
 		return fmt.Errorf("golem: CreateEntity expects 0 or 1 owner session ID, got %d", len(owner))
@@ -360,18 +372,34 @@ func (s *Server) CreateEntity(e Entity, owner ...int64) error {
 		binder.BindServer(s)
 	}
 
+	var err error
 	if len(owner) == 1 {
-		return s.reg.AddOwned(e, owner[0])
+		err = s.reg.AddOwnedWithoutSpawn(e, owner[0])
+	} else {
+		err = s.reg.AddWithoutSpawn(e)
 	}
-	return s.reg.Add(e)
+	if err != nil {
+		return err
+	}
+
+	// After successful insertion, before OnSpawn, so spawn hooks observe the shape.
+	s.registerCollider(e)
+	registry.NotifySpawn(e)
+	return nil
 }
 
 // DeleteEntity unregisters an entity by ID and queues a removal for clients.
 // If the entity is a session avatar, both avatar indexes are cleared in O(1)
-// before registry deletion. Safe to call repeatedly; does not hold the avatar
-// mutex while invoking registry hooks (OnRemove) or interest operations.
+// before registry deletion. When the entity implements ColliderProvider or
+// ColliderProvider3D and a matching layer helper is configured, its shape is
+// removed after avatar index cleanup and before registry deletion (and thus
+// before OnRemove). Safe to call repeatedly; does not hold the avatar mutex
+// while invoking registry hooks (OnRemove) or interest operations.
 func (s *Server) DeleteEntity(id int64) {
 	s.clearAvatarByEntity(id)
+	if e, ok := s.reg.Get(id); ok {
+		s.unregisterCollider(e)
+	}
 	s.reg.DeleteEntity(id)
 }
 

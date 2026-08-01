@@ -83,6 +83,9 @@ type (
 	// SetCollides to configure it; then pass Layer/Mask/MaskFor results to
 	// backend.Add, backend.Set, and spatial query methods.
 	CollisionLayers = collision.Layers
+	// CollisionLayers3D is the 3D equivalent of CollisionLayers for
+	// collision3d.Backend. Use NewCollisionLayers3D to create one.
+	CollisionLayers3D = collision3d.Layers
 
 	// CollisionSpatialQuery3D is an optional interface backends may implement to
 	// support OverlapBox3D / OverlapSphere queries.

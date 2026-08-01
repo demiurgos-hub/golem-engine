@@ -16,6 +16,7 @@ type SchemaFile struct {
 	Entity     string                  `yaml:"entity"`
 	Global     bool                    `yaml:"global"`               // true = always replicated to every client (bypasses FOI)
 	Persistent *bool                   `yaml:"persistent,omitempty"` // nil = default true; false = omit from snapshots
+	Collider   *ColliderDef            `yaml:"collider,omitempty"`   // optional; bake-time / runtime only (not on the wire)
 	Vars       map[string]SchemaVarDef `yaml:"vars"`
 }
 
@@ -83,6 +84,7 @@ type EntityData struct {
 	Is3D            bool
 	Global          bool // always replicated to every client (bypasses FOI)
 	Persistent      bool // false = omit this entity type from world snapshots
+	Collider        *ColliderData // optional schema collider; not part of wire/snapshot state
 	AllVars         []VarInfo
 	TickVars        []VarInfo
 	OnceVars        []VarInfo
@@ -210,6 +212,7 @@ type SharedData struct {
 	GoPackage               string
 	Dimensions              int
 	Is3D                    bool
+	Collision               *CollisionData // nil when golem.yaml has no collision: section
 	Entities                []EntityData
 	Commands                []CommandData
 	WorldTypes              []WorldTypeData
@@ -486,6 +489,11 @@ func BuildEntityData(sf SchemaFile, dimensions int, customTypes map[string]Custo
 		persistent = *sf.Persistent
 	}
 
+	collider, err := ResolveCollider(sf.Entity, sf.Collider, dimensions)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	ed := EntityData{
 		Name:       sf.Entity,
 		LowerName:  LcFirst(sf.Entity),
@@ -493,6 +501,7 @@ func BuildEntityData(sf SchemaFile, dimensions int, customTypes map[string]Custo
 		Is3D:       dimensions == 3,
 		Global:     sf.Global,
 		Persistent: persistent,
+		Collider:   collider,
 	}
 
 	usedTypes := make(map[string]CustomTypeData)

@@ -387,6 +387,199 @@ func TestGenerateGoServerTemplateIncludes3DPositions(t *testing.T) {
 	}
 }
 
+func TestGenerateGoServerTemplateIncludes2DCollider(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/go_server/server.go.tmpl")
+	if err != nil {
+		t.Fatalf("loadEmbeddedTemplate: %v", err)
+	}
+
+	data := schema.EntityData{
+		Name:       "Player",
+		LowerName:  "player",
+		Dimensions: 2,
+		Collider: &schema.ColliderData{
+			Kind:  schema.ColliderKindCircle,
+			Layer: "Player",
+			R:     0.5,
+		},
+	}
+
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, data); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := out.String()
+	for _, want := range []string{
+		"func (s *SyncedPlayer) Collider() (golem.CollisionShape, string, bool) {",
+		"return golem.CollisionCircle{R: 0.5}, \"Player\", false",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("generated 2D collider missing %q\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "Collider3D") {
+		t.Fatal("2D entity must not emit Collider3D")
+	}
+}
+
+func TestGenerateGoServerTemplateIncludes3DCollider(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/go_server/server.go.tmpl")
+	if err != nil {
+		t.Fatalf("loadEmbeddedTemplate: %v", err)
+	}
+
+	data := schema.EntityData{
+		Name:       "Crate",
+		LowerName:  "crate",
+		Dimensions: 3,
+		Is3D:       true,
+		Collider: &schema.ColliderData{
+			Kind:    schema.ColliderKindAABB3D,
+			Layer:   "Prop",
+			Trigger: true,
+			W:       1,
+			H:       2,
+			D:       3,
+		},
+	}
+
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, data); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := out.String()
+	for _, want := range []string{
+		"func (s *SyncedCrate) Collider3D() (golem.CollisionShape3D, string, bool) {",
+		"return golem.CollisionAABB3D{W: 1, H: 2, D: 3}, \"Prop\", true",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("generated 3D collider missing %q\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "func (s *SyncedCrate) Collider()") {
+		t.Fatal("3D entity must not emit 2D Collider()")
+	}
+}
+
+func TestGenerateGoSharedTemplateIncludesEnableCollision2D(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/go_server/shared.go.tmpl")
+	if err != nil {
+		t.Fatalf("loadEmbeddedTemplate: %v", err)
+	}
+
+	data := schema.SharedData{
+		GolemImport: "github.com/demiurgos-hub/golem-engine/golem",
+		GoPackage:   "generated",
+		Fingerprint: "test-fingerprint",
+		Dimensions:  2,
+		Collision: &schema.CollisionData{
+			Layers:   []string{"Player", "Monster"},
+			Collides: []schema.CollisionPair{{A: "Player", B: "Monster"}},
+		},
+	}
+
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, data); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := out.String()
+	for _, want := range []string{
+		"Layers *golem.CollisionLayers",
+		"func (r *Runtime) EnableCollision(backend golem.CollisionBackend) {",
+		"golem.MustCollisionBackend(backend)",
+		`Define("Player", "Monster")`,
+		`layers.SetCollides("Player", "Monster")`,
+		"r.Server.SetCollisionBackend(backend)",
+		"r.Server.SetCollisionLayers(layers)",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("generated EnableCollision missing %q\n%s", want, content)
+		}
+	}
+	mustIdx := strings.Index(content, "golem.MustCollisionBackend(backend)")
+	setIdx := strings.Index(content, "r.Server.SetCollisionLayers(layers)")
+	if mustIdx < 0 || setIdx < 0 || mustIdx > setIdx {
+		t.Fatal("MustCollisionBackend must run before SetCollisionLayers")
+	}
+	if strings.Contains(content, "EnableCollision3D") || strings.Contains(content, "Layers3D") {
+		t.Fatal("2D collision config must not emit 3D helpers")
+	}
+}
+
+func TestGenerateGoSharedTemplateIncludesEnableCollision3D(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/go_server/shared.go.tmpl")
+	if err != nil {
+		t.Fatalf("loadEmbeddedTemplate: %v", err)
+	}
+
+	data := schema.SharedData{
+		GolemImport: "github.com/demiurgos-hub/golem-engine/golem",
+		GoPackage:   "generated",
+		Fingerprint: "test-fingerprint",
+		Dimensions:  3,
+		Is3D:        true,
+		Collision: &schema.CollisionData{
+			Layers:   []string{"Player", "Wall"},
+			Collides: []schema.CollisionPair{{A: "Player", B: "Wall"}},
+		},
+	}
+
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, data); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := out.String()
+	for _, want := range []string{
+		"Layers3D *golem.CollisionLayers3D",
+		"func (r *Runtime) EnableCollision3D(backend golem.CollisionBackend3D) {",
+		"golem.MustCollisionBackend3D(backend)",
+		`Define("Player", "Wall")`,
+		"r.Server.SetCollision3DBackend(backend)",
+		"r.Server.SetCollisionLayers3D(layers)",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("generated EnableCollision3D missing %q\n%s", want, content)
+		}
+	}
+	mustIdx := strings.Index(content, "golem.MustCollisionBackend3D(backend)")
+	setIdx := strings.Index(content, "r.Server.SetCollisionLayers3D(layers)")
+	if mustIdx < 0 || setIdx < 0 || mustIdx > setIdx {
+		t.Fatal("MustCollisionBackend3D must run before SetCollisionLayers3D")
+	}
+	if strings.Contains(content, "func (r *Runtime) EnableCollision(") {
+		t.Fatal("3D collision config must not emit 2D EnableCollision")
+	}
+}
+
+func TestGenerateGoSharedTemplateOmitsCollisionWithoutConfig(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/go_server/shared.go.tmpl")
+	if err != nil {
+		t.Fatalf("loadEmbeddedTemplate: %v", err)
+	}
+
+	data := schema.SharedData{
+		GolemImport: "github.com/demiurgos-hub/golem-engine/golem",
+		GoPackage:   "generated",
+		Fingerprint: "test-fingerprint",
+	}
+
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, data); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := out.String()
+	for _, ban := range []string{
+		"EnableCollision",
+		"Layers *golem.CollisionLayers",
+		"Layers3D",
+		"SetCollisionLayers",
+	} {
+		if strings.Contains(content, ban) {
+			t.Fatalf("shared helper without collision config unexpectedly contains %q", ban)
+		}
+	}
+}
+
 func TestGenerateGoSharedTemplateSkipsSessionNotFoundDuringFOIEventFanout(t *testing.T) {
 	tmpl, err := loadEmbeddedTemplate("templates/go_server/shared.go.tmpl")
 	if err != nil {

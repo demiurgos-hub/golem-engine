@@ -10,14 +10,28 @@ import (
 
 // Config is the top-level golem.yaml project configuration.
 type Config struct {
-	EntitySchemas  string                       `yaml:"entity_schema"`
-	CommandSchemas string                       `yaml:"command_schema"`
-	WorldSchema    string                       `yaml:"world_schema"`
-	TypesSchema    string                       `yaml:"types_schema"`
-	EventSchemas   string                       `yaml:"event_schema"`
-	Simulation     SimulationConfig             `yaml:"simulation"`
-	Proto          ProtoConfig                  `yaml:"proto"`
-	Integrations   map[string]IntegrationConfig `yaml:"integrations"`
+	EntitySchemas  string           `yaml:"entity_schema"`
+	CommandSchemas string           `yaml:"command_schema"`
+	WorldSchema    string           `yaml:"world_schema"`
+	TypesSchema    string           `yaml:"types_schema"`
+	EventSchemas   string           `yaml:"event_schema"`
+	Simulation     SimulationConfig `yaml:"simulation"`
+	Collision      *CollisionConfig `yaml:"collision,omitempty"`
+	// ResolvedCollision is the validated collision matrix from Collision.
+	// LoadConfig populates it; excluded from YAML unmarshaling.
+	ResolvedCollision *CollisionData               `yaml:"-"`
+	Proto             ProtoConfig                  `yaml:"proto"`
+	Integrations      map[string]IntegrationConfig `yaml:"integrations"`
+}
+
+// CollisionConfig is the optional top-level collision: section in golem.yaml.
+// layers lists named bit layers (at most MaxCollisionLayers).
+// collides lists symmetric pair interactions; self-pairs like [Player, Player]
+// are valid (same-layer collisions). Duplicate unordered pairs ([A,B] and [B,A])
+// are rejected at load/bake time.
+type CollisionConfig struct {
+	Layers   []string   `yaml:"layers"`
+	Collides [][]string `yaml:"collides"`
 }
 
 // SimulationConfig controls project-wide simulation semantics used by codegen.
@@ -71,5 +85,10 @@ func LoadConfig(projectRoot string) (*Config, error) {
 	if cfg.Simulation.Dimensions != 2 && cfg.Simulation.Dimensions != 3 {
 		return nil, fmt.Errorf("simulation.dimensions must be 2 or 3, got %d", cfg.Simulation.Dimensions)
 	}
+	resolved, err := ResolveCollisionConfig(cfg.Collision)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ResolvedCollision = resolved
 	return &cfg, nil
 }

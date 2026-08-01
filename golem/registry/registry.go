@@ -42,19 +42,10 @@ func NewRegistry() *Registry {
 // If the entity implements Spawner, OnSpawn is called after insertion.
 // Returns an error if the ID is already taken.
 func (r *Registry) Add(e Entity) error {
-	r.mu.Lock()
-	id := e.EntityID()
-	if _, exists := r.entities[id]; exists {
-		r.mu.Unlock()
-		return fmt.Errorf("entity %d already registered", id)
+	if err := r.AddWithoutSpawn(e); err != nil {
+		return err
 	}
-	r.entities[id] = e
-	r.spawned = append(r.spawned, e)
-	r.mu.Unlock()
-
-	if s, ok := e.(Spawner); ok {
-		s.OnSpawn()
-	}
+	NotifySpawn(e)
 	return nil
 }
 
@@ -63,21 +54,47 @@ func (r *Registry) Add(e Entity) error {
 // entity-targeted commands. If the entity implements Spawner, OnSpawn is called
 // after insertion. Returns an error if the ID is already taken.
 func (r *Registry) AddOwned(e Entity, ownerSessionID int64) error {
+	if err := r.AddOwnedWithoutSpawn(e, ownerSessionID); err != nil {
+		return err
+	}
+	NotifySpawn(e)
+	return nil
+}
+
+// AddWithoutSpawn registers an unowned entity and marks it spawned for the next
+// flush, but does not call OnSpawn. Server uses this to register colliders
+// between successful insertion and the spawn hook.
+func (r *Registry) AddWithoutSpawn(e Entity) error {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	id := e.EntityID()
 	if _, exists := r.entities[id]; exists {
-		r.mu.Unlock()
+		return fmt.Errorf("entity %d already registered", id)
+	}
+	r.entities[id] = e
+	r.spawned = append(r.spawned, e)
+	return nil
+}
+
+// AddOwnedWithoutSpawn is AddOwned without calling OnSpawn.
+func (r *Registry) AddOwnedWithoutSpawn(e Entity, ownerSessionID int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	id := e.EntityID()
+	if _, exists := r.entities[id]; exists {
 		return fmt.Errorf("entity %d already registered", id)
 	}
 	r.entities[id] = e
 	r.owners[id] = ownerSessionID
 	r.spawned = append(r.spawned, e)
-	r.mu.Unlock()
+	return nil
+}
 
+// NotifySpawn calls OnSpawn when e implements Spawner.
+func NotifySpawn(e Entity) {
 	if s, ok := e.(Spawner); ok {
 		s.OnSpawn()
 	}
-	return nil
 }
 
 // Owner returns the session ID that owns the given entity.

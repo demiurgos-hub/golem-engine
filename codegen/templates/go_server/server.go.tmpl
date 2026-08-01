@@ -83,6 +83,45 @@ func (s *Synced{{.Name}}) BindServer(srv *golem.Server) {
 func (s *Synced{{.Name}}) Server() *golem.Server {
 	return s.srv
 }
+{{- if .Collider}}
+{{- if .Collider.IsAABB3D}}
+
+// Collider3D returns the schema-declared 3D collision shape for this entity.
+// Wrapper types that embed *Synced{{.Name}} inherit this method and may override
+// it intentionally. CreateEntity registers the shape before OnSpawn when
+// Runtime.EnableCollision3D (or SetCollisionLayers3D) has been called.
+func (s *Synced{{.Name}}) Collider3D() (golem.CollisionShape3D, string, bool) {
+	return golem.CollisionAABB3D{W: {{printf "%g" .Collider.W}}, H: {{printf "%g" .Collider.H}}, D: {{printf "%g" .Collider.D}}}, "{{.Collider.Layer}}", {{.Collider.Trigger}}
+}
+{{- else if .Collider.IsSphere}}
+
+// Collider3D returns the schema-declared 3D collision shape for this entity.
+// Wrapper types that embed *Synced{{.Name}} inherit this method and may override
+// it intentionally. CreateEntity registers the shape before OnSpawn when
+// Runtime.EnableCollision3D (or SetCollisionLayers3D) has been called.
+func (s *Synced{{.Name}}) Collider3D() (golem.CollisionShape3D, string, bool) {
+	return golem.CollisionSphere{R: {{printf "%g" .Collider.R}}}, "{{.Collider.Layer}}", {{.Collider.Trigger}}
+}
+{{- else if .Collider.IsAABB}}
+
+// Collider returns the schema-declared 2D collision shape for this entity.
+// Wrapper types that embed *Synced{{.Name}} inherit this method and may override
+// it intentionally. CreateEntity registers the shape before OnSpawn when
+// Runtime.EnableCollision (or SetCollisionLayers) has been called.
+func (s *Synced{{.Name}}) Collider() (golem.CollisionShape, string, bool) {
+	return golem.CollisionAABB{W: {{printf "%g" .Collider.W}}, H: {{printf "%g" .Collider.H}}}, "{{.Collider.Layer}}", {{.Collider.Trigger}}
+}
+{{- else if .Collider.IsCircle}}
+
+// Collider returns the schema-declared 2D collision shape for this entity.
+// Wrapper types that embed *Synced{{.Name}} inherit this method and may override
+// it intentionally. CreateEntity registers the shape before OnSpawn when
+// Runtime.EnableCollision (or SetCollisionLayers) has been called.
+func (s *Synced{{.Name}}) Collider() (golem.CollisionShape, string, bool) {
+	return golem.CollisionCircle{R: {{printf "%g" .Collider.R}}}, "{{.Collider.Layer}}", {{.Collider.Trigger}}
+}
+{{- end}}
+{{- end}}
 
 func (s *Synced{{.Name}}) TypeName() string { return "{{.Name}}" }
 

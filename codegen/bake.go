@@ -37,6 +37,10 @@ func Bake(projectRoot string) error {
 		return err
 	}
 
+	if err := schema.ValidateEntityColliders(entities, cfg.ResolvedCollision); err != nil {
+		return err
+	}
+
 	commandsDir := filepath.Join(projectRoot, cfg.CommandSchemas)
 	commands, err := schema.LoadCommands(commandsDir, customTypesMap)
 	if err != nil {
@@ -162,6 +166,7 @@ func Bake(projectRoot string) error {
 			GoPackage:               goPackage,
 			Dimensions:              cfg.Simulation.Dimensions,
 			Is3D:                    cfg.Simulation.Dimensions == 3,
+			Collision:               cfg.ResolvedCollision,
 			Entities:                entities,
 			Commands:                commands,
 			WorldTypes:              worldTypes,

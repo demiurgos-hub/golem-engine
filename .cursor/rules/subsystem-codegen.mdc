@@ -16,7 +16,9 @@ Templates live under `codegen/templates/` and are embedded with `go:embed`.
 
 `go_proto.go` and `js_proto.go` generate lightweight protobuf codecs for consumers; keep Go, JS, and C# client targets conceptually parallel.
 
-**Go server entities (`templates/go_server/server.go.tmpl`):** each `Synced*` carries a runtime-only unexported `srv *golem.Server` plus exported `BindServer` / `Server()` (not wire/snapshot state). `Server()` may be nil before `CreateEntity`; wrapper types embedding `*Synced*` inherit both methods.
+**Go server entities (`templates/go_server/server.go.tmpl`):** each `Synced*` carries a runtime-only unexported `srv *golem.Server` plus exported `BindServer` / `Server()` (not wire/snapshot state). `Server()` may be nil before `CreateEntity`; wrapper types embedding `*Synced*` inherit both methods. When `EntityData.Collider` is set, emit `Collider()` (2D) or `Collider3D()` (3D) from schema shape/layer/trigger; wrappers inherit and may override intentionally.
+
+**Go server shared (`templates/go_server/shared.go.tmpl`):** when `SharedData.Collision` is set, `Runtime` includes `Layers`+`EnableCollision` (2D) or `Layers3D`+`EnableCollision3D` (3D) that call `MustCollisionBackend`/`MustCollisionBackend3D` (nil panics before any Server setter), build the YAML named matrix, bind the backend, and call `SetCollisionBackend`/`SetCollisionLayers` (or 3D equivalents). Omit those fields/methods when there is no collision config so projects without collision still compile.
 
 `codegen/` imports config and template data from `schema`; it should not define YAML schema structs or reimplement schema loading.
 

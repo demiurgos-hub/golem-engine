@@ -22,6 +22,15 @@ const SchemaFingerprint = "{{.Fingerprint}}"
 // Runtime wires the generated go-server integration to a golem.Server.
 type Runtime struct {
 	Server *golem.Server
+{{- if .Collision}}
+{{- if .Is3D}}
+	// Layers3D is the named collision matrix from golem.yaml, set by EnableCollision3D.
+	Layers3D *golem.CollisionLayers3D
+{{- else}}
+	// Layers is the named collision matrix from golem.yaml, set by EnableCollision.
+	Layers *golem.CollisionLayers
+{{- end}}
+{{- end}}
 {{- if .Commands}}
 	Commands *CommandRouter
 {{- end}}
@@ -48,6 +57,47 @@ func NewRuntime(srv *golem.Server) *Runtime {
 {{- end}}
 	return rt
 }
+{{- if .Collision}}
+{{- if .Is3D}}
+
+// EnableCollision3D builds the named 3D layer matrix from golem.yaml, binds it to
+// backend, and stores it on the Server for automatic ColliderProvider3D
+// registration. Call before CreateEntity or LoadSnapshot for entities with
+// schema-declared colliders. Panics immediately if backend is nil so a
+// half-configured Layers3D helper is never installed.
+func (r *Runtime) EnableCollision3D(backend golem.CollisionBackend3D) {
+	golem.MustCollisionBackend3D(backend)
+	layers := golem.NewCollisionLayers3D().
+		Bind(backend).
+		Define({{range $i, $name := .Collision.Layers}}{{if $i}}, {{end}}"{{$name}}"{{end}})
+{{- range .Collision.Collides}}
+	layers.SetCollides("{{.A}}", "{{.B}}")
+{{- end}}
+	r.Layers3D = layers
+	r.Server.SetCollision3DBackend(backend)
+	r.Server.SetCollisionLayers3D(layers)
+}
+{{- else}}
+
+// EnableCollision builds the named 2D layer matrix from golem.yaml, binds it to
+// backend, and stores it on the Server for automatic ColliderProvider
+// registration. Call before CreateEntity or LoadSnapshot for entities with
+// schema-declared colliders. Panics immediately if backend is nil so a
+// half-configured Layers helper is never installed.
+func (r *Runtime) EnableCollision(backend golem.CollisionBackend) {
+	golem.MustCollisionBackend(backend)
+	layers := golem.NewCollisionLayers().
+		Bind(backend).
+		Define({{range $i, $name := .Collision.Layers}}{{if $i}}, {{end}}"{{$name}}"{{end}})
+{{- range .Collision.Collides}}
+	layers.SetCollides("{{.A}}", "{{.B}}")
+{{- end}}
+	r.Layers = layers
+	r.Server.SetCollisionBackend(backend)
+	r.Server.SetCollisionLayers(layers)
+}
+{{- end}}
+{{- end}}
 
 // SaveSnapshot writes a schema-checked entity snapshot using the generated fingerprint.
 func (r *Runtime) SaveSnapshot(path string) <-chan error {
