@@ -13,8 +13,9 @@ func WrapEntityUpdate(data []byte) []byte {
 }
 
 // WrapWorldUpdate wraps serialized WorldUpdate bytes in a ServerMessage
-// envelope (proto field 2, length-delimited). Used by PushWorldData and the
-// world snapshot closure — world frames bypass the entity messageWrapper.
+// envelope (proto field 2, length-delimited). Used by PushWorldData,
+// SendWorldData / SendStoredWorldData, and the world snapshot closure —
+// world frames bypass the entity messageWrapper.
 func WrapWorldUpdate(data []byte) []byte {
 	w := &pb.Writer{}
 	w.Tag(2, 2) // field 2 = world_update, wire type 2 = length-delimited

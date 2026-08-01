@@ -1,0 +1,11 @@
+---
+description: golem/world — thread-safe store for static world data serialization.
+globs: golem/world/**/*.go
+alwaysApply: false
+---
+
+# `golem/world`
+
+**Static world data store:** `Data` (`WorldName`, `MarshalUpdate`) and thread-safe `Store` (`Set`, `Get`, `MarshalAll`, `MarshalAllExcept`). `MarshalAll` / `MarshalAllExcept` return payloads in sorted name order for deterministic connect snapshots. `MarshalAllExcept(exclude)` omits names present in the exclude set; nil/empty exclude includes everything. Excluded-but-absent names are ignored.
+
+**Boundaries:** pure data/serialization. Stdlib only. Does **not** import `golem`, `golem/net`, `golem/registry`, or `golem/interest`. Session targeting, snapshot exclusion policy, and reliable-frame delivery live on `golem.Server` (`PushWorldData`, `SendWorldData`, `SendStoredWorldData`, `WorldSnapshotExclude`).

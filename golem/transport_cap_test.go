@@ -27,6 +27,17 @@ func TestPushWorldDataRejectsOversizeWrappedFrame(t *testing.T) {
 	}
 }
 
+func TestSendWorldDataRejectsOversizeWrappedFrame(t *testing.T) {
+	srv := NewServer(ServerConfig{})
+	err := srv.SendWorldData(1, &oversizedWorldData{
+		name: "zone",
+		data: bytes.Repeat([]byte("w"), 33000),
+	})
+	if err == nil {
+		t.Fatal("SendWorldData returned nil for oversized wrapped frame")
+	}
+}
+
 func TestBroadcastEventRejectsOversizeWrappedFrame(t *testing.T) {
 	srv := NewServer(ServerConfig{})
 	data := WrapServerEvent(bytes.Repeat([]byte("e"), 33000))

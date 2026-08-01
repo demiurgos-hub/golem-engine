@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -132,6 +133,13 @@ type ServerConfig struct {
 	// The environment variable GOLEM_LOG_REPLICATION_STATS=1 (or "true", case
 	// insensitive) also turns this on for quick debugging without recompiling.
 	LogReplicationStats bool
+	// WorldSnapshotExclude lists world data names omitted from the connect
+	// snapshot. Entries remain in Server.World; callers own on-demand delivery
+	// (typically via SendWorldData / SendStoredWorldData). NewServer copies and
+	// normalizes the slice (drops empties/duplicates) so later caller mutation
+	// cannot race with snapshot reads. Large embedded maps can exceed the
+	// 32000-byte reliable frame cap — prefer map_url for oversized payloads.
+	WorldSnapshotExclude []string
 }
 
 // TickFunc is the signature for the user's per-tick game logic callback.
@@ -235,7 +243,9 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 	cfg.Transport = normalizeServerTransport(cfg.Transport)
 	cfg.StateUpdateLane = normalizeStateUpdateLane(cfg.StateUpdateLane)
+	cfg.WorldSnapshotExclude = normalizeWorldSnapshotExclude(cfg.WorldSnapshotExclude)
 	validateStateUpdateLane(cfg)
+	worldSnapshotExclude := worldSnapshotExcludeSet(cfg.WorldSnapshotExclude)
 	s := &Server{
 		reg:            registry.NewRegistry(),
 		World:          world.NewStore(),
@@ -272,7 +282,7 @@ func NewServer(cfg ServerConfig) *Server {
 		s.listener.SetEntitySnapshotCompleteFunc(s.commitBroadcastSnapshotKnown)
 	}
 	s.listener.SetWorldSnapshotFunc(func() ([][]byte, error) {
-		updates, err := s.World.MarshalAll()
+		updates, err := s.World.MarshalAllExcept(worldSnapshotExclude)
 		if err != nil {
 			return nil, err
 		}
@@ -759,6 +769,8 @@ func (s *Server) hasFOI(sessionID int64) bool {
 // PushWorldData broadcasts the current value of a single world data type to
 // all connected sessions. Returns nil if the name is not in the store or the
 // broadcast succeeds. Returns a non-nil error if serialization fails.
+// Reliable frames are capped at 32000 bytes; oversized embedded maps should
+// use map_url instead of tile_data.
 func (s *Server) PushWorldData(name string) error {
 	d := s.World.Get(name)
 	if d == nil {
@@ -769,6 +781,89 @@ func (s *Server) PushWorldData(name string) error {
 		return err
 	}
 	return s.listener.BroadcastRaw(WrapWorldUpdate(data))
+}
+
+// SendWorldData serializes data directly, wraps it with WrapWorldUpdate, and
+// sends it on the reliable stream to one session. It does not read or mutate
+// Server.World, so two sessions can receive different generated values that
+// share the same WorldName. Nil and typed-nil data return an error. Marshal
+// failures, oversize reliable frames (32000-byte cap), and disconnected
+// sessions propagate. Prefer map_url when payloads may exceed the frame cap.
+// Names listed in WorldSnapshotExclude are omitted from connect snapshots;
+// callers own delivering those values (for example via this method).
+func (s *Server) SendWorldData(sessionID int64, data WorldData) error {
+	if isNilWorldData(data) {
+		return errors.New("golem: SendWorldData requires non-nil world data")
+	}
+	payload, err := data.MarshalUpdate()
+	if err != nil {
+		return err
+	}
+	return s.Send(sessionID, WrapWorldUpdate(payload))
+}
+
+// SendStoredWorldData sends the currently stored world value for name to one
+// session. Returns nil when the name is missing (same no-op as PushWorldData).
+// Marshal failures, oversize reliable frames, and disconnected sessions
+// propagate. Prefer SendWorldData when delivering a per-session value that
+// must not replace Server.World.
+func (s *Server) SendStoredWorldData(sessionID int64, name string) error {
+	d := s.World.Get(name)
+	if d == nil {
+		return nil
+	}
+	return s.SendWorldData(sessionID, d)
+}
+
+// normalizeWorldSnapshotExclude copies names, dropping empties and duplicates
+// so NewServer owns an immutable-after-construction exclusion list.
+func normalizeWorldSnapshotExclude(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func worldSnapshotExcludeSet(names []string) map[string]struct{} {
+	if len(names) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[name] = struct{}{}
+	}
+	return set
+}
+
+// isNilWorldData reports whether data is a nil interface or a typed nil
+// (pointer/map/slice/chan/func/interface). Non-nillable concrete values are
+// never treated as nil.
+func isNilWorldData(data WorldData) bool {
+	if data == nil {
+		return true
+	}
+	v := reflect.ValueOf(data)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 // enqueue pushes m onto the message queue. If the queue is full the event is

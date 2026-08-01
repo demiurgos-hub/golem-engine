@@ -43,6 +43,15 @@ func (s *Store) Get(name string) Data {
 // MarshalAll serializes every stored world data value and returns the results
 // in sorted name order for deterministic client snapshots.
 func (s *Store) MarshalAll() ([][]byte, error) {
+	return s.MarshalAllExcept(nil)
+}
+
+// MarshalAllExcept serializes stored world data values whose names are not in
+// exclude, in sorted name order. A nil or empty exclude set includes every
+// entry (same as MarshalAll). Excluded names that are absent from the store
+// have no effect. This is a pure serialization helper — callers own any
+// delivery policy for omitted names.
+func (s *Store) MarshalAllExcept(exclude map[string]struct{}) ([][]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -52,7 +61,13 @@ func (s *Store) MarshalAll() ([][]byte, error) {
 
 	names := make([]string, 0, len(s.items))
 	for name := range s.items {
+		if _, skip := exclude[name]; skip {
+			continue
+		}
 		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return nil, nil
 	}
 	sort.Strings(names)
 
