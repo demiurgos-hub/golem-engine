@@ -108,14 +108,19 @@ func (r *Registry) Owner(entityID int64) (sessionID int64, owned bool) {
 
 // SetOwner updates the owning session of an existing entity. Useful for
 // transferring command authority on reconnect (new session ID for the same
-// character). Returns false if the entity does not exist.
+// character). sessionID 0 clears ownership (entity becomes unowned).
+// Returns false if the entity does not exist.
 func (r *Registry) SetOwner(entityID, sessionID int64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.entities[entityID]; !exists {
 		return false
 	}
-	r.owners[entityID] = sessionID
+	if sessionID == 0 {
+		delete(r.owners, entityID)
+	} else {
+		r.owners[entityID] = sessionID
+	}
 	return true
 }
 

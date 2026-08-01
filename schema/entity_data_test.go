@@ -65,6 +65,68 @@ func TestBuildEntityData_3DOffsetsEntityVarTagsAndBits(t *testing.T) {
 	}
 }
 
+func TestBuildEntityData_ownerVisibility(t *testing.T) {
+	ed := BuildEntityData(SchemaFile{
+		Entity: "Player",
+		Vars: map[string]SchemaVarDef{
+			"health":  {Type: "int32", Tag: 1},
+			"secret":  {Type: "int32", Tag: 2, Visibility: "owner"},
+			"public":  {Type: "string", Tag: 3, Visibility: "all"},
+			"default": {Type: "int32", Tag: 4},
+			"token":   {Type: "string", Tag: 5, Sync: "once", Visibility: "owner"},
+		},
+	}, 2, nil)
+
+	if !ed.HasOwnerVars() {
+		t.Fatal("HasOwnerVars = false, want true")
+	}
+	byName := map[string]VarInfo{}
+	for _, v := range ed.AllVars {
+		byName[v.SnakeName] = v
+	}
+	for _, name := range []string{"health", "public", "default"} {
+		if byName[name].OwnerOnly {
+			t.Fatalf("%s: OwnerOnly = true, want false", name)
+		}
+	}
+	for _, name := range []string{"secret", "token"} {
+		if !byName[name].OwnerOnly {
+			t.Fatalf("%s: OwnerOnly = false, want true", name)
+		}
+	}
+}
+
+func TestNormalizeVarVisibility(t *testing.T) {
+	cases := []struct {
+		vis       string
+		ownerOnly bool
+		wantErr   bool
+	}{
+		{vis: "", ownerOnly: false},
+		{vis: "all", ownerOnly: false},
+		{vis: "owner", ownerOnly: true},
+		{vis: "party", wantErr: true},
+		{vis: "private", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.vis, func(t *testing.T) {
+			got, err := normalizeVarVisibility("Player", "secret", tc.vis)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.ownerOnly {
+				t.Fatalf("ownerOnly = %v, want %v", got, tc.ownerOnly)
+			}
+		})
+	}
+}
+
 func TestCheckReservedGeneratedMethodVars(t *testing.T) {
 	cases := []struct {
 		name    string

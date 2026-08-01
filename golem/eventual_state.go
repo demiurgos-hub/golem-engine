@@ -8,9 +8,10 @@ import (
 )
 
 type eventualStateChange struct {
-	id   int64
-	mask uint64
-	full bool
+	id     int64
+	mask   uint64
+	full   bool
+	public bool // true = serialize public/redacted payload for non-owners
 }
 
 const (
@@ -39,9 +40,10 @@ type eventualPreparedFrame struct {
 }
 
 type eventualStateFrameKey struct {
-	id   int64
-	mask uint64
-	full bool
+	id     int64
+	mask   uint64
+	full   bool
+	public bool
 }
 
 type eventualStateTickCache struct {
@@ -88,6 +90,9 @@ func (t *eventualStateTracker) markDirtyChange(ch eventualStateChange) {
 		return
 	}
 	if existing, ok := t.dirtySet[ch.id]; ok {
+		// public is per-session tracker state; never clear it once set so a
+		// later full refresh stays redacted for non-owner sessions.
+		existing.public = existing.public || ch.public
 		if existing.full || ch.full {
 			existing.full = true
 			existing.mask = 0
@@ -100,6 +105,7 @@ func (t *eventualStateTracker) markDirtyChange(ch eventualStateChange) {
 	if len(t.dirtyQueue) != len(t.dirtySet) {
 		t.compactDirtyQueueNow()
 		if existing, ok := t.dirtySet[ch.id]; ok {
+			existing.public = existing.public || ch.public
 			if existing.full || ch.full {
 				existing.full = true
 				existing.mask = 0
@@ -309,7 +315,7 @@ func (t *eventualStateTracker) subtractNewerInFlight(lostToken uint64, ch eventu
 			return eventualStateChange{}
 		}
 	}
-	return eventualStateChange{id: ch.id, mask: mask}
+	return eventualStateChange{id: ch.id, mask: mask, public: ch.public}
 }
 
 func (s *Server) eventualTracker(sessionID int64) *eventualStateTracker {
@@ -379,7 +385,7 @@ func (s *Server) clearEventualEntities(entityIDs []int64) {
 }
 
 func (c *eventualStateTickCache) frame(s *Server, ch eventualStateChange) (eventualStateFrame, bool, error) {
-	key := eventualStateFrameKey{id: ch.id, mask: ch.mask, full: ch.full}
+	key := eventualStateFrameKey{id: ch.id, mask: ch.mask, full: ch.full, public: ch.public}
 	if f, ok := c.frames[key]; ok {
 		return f, true, nil
 	}
@@ -401,13 +407,30 @@ func (s *Server) eventualPreparedFrameForChange(ch eventualStateChange) (eventua
 }
 
 // eventualFrameForChange serializes the current entity values represented by ch.
+// When ch.public is set, owner-only fields are omitted / masked out so cache
+// keys cannot reuse private bytes for public recipients. Defense in depth:
+// public deltas always reapply PublicReplicationMask immediately before
+// compact/stream serialization so a stale private bit left in a merged retry
+// mask cannot leak after ownership transfer.
 func (s *Server) eventualFrameForChange(ch eventualStateChange) (eventualStateFrame, bool, error) {
 	e, ok := s.reg.Get(ch.id)
 	if !ok {
 		return eventualStateFrame{}, false, nil
 	}
 	if ch.full {
-		data, err := e.FullUpdate()
+		var (
+			data []byte
+			err  error
+		)
+		if ch.public {
+			scoped, ok := e.(registry.OwnerScopedEntity)
+			if !ok {
+				return eventualStateFrame{}, true, fmt.Errorf("public full for eventual entity %d: missing OwnerScopedEntity", ch.id)
+			}
+			data, err = scoped.PublicFullUpdate()
+		} else {
+			data, err = e.FullUpdate()
+		}
 		if err != nil {
 			return eventualStateFrame{}, true, fmt.Errorf("full update for eventual entity %d: %w", ch.id, err)
 		}
@@ -415,7 +438,20 @@ func (s *Server) eventualFrameForChange(ch eventualStateChange) (eventualStateFr
 		return f, true, nil
 	}
 
-	compact, err := s.compactDeltaForMask(ch.id, ch.mask)
+	mask := ch.mask
+	if ch.public {
+		scoped, ok := e.(registry.OwnerScopedEntity)
+		if !ok {
+			return eventualStateFrame{}, true, fmt.Errorf("public delta for eventual entity %d: missing OwnerScopedEntity", ch.id)
+		}
+		mask = scoped.PublicReplicationMask(mask)
+		if mask == 0 {
+			// Live entity, but nothing public remains — clear dirty safely.
+			return eventualStateFrame{}, true, nil
+		}
+	}
+
+	compact, err := s.compactDeltaForMask(ch.id, mask)
 	if err != nil {
 		return eventualStateFrame{}, true, err
 	}
@@ -433,12 +469,21 @@ func (s *Server) eventualFrameForChange(ch eventualStateChange) (eventualStateFr
 
 	var data []byte
 	if delta, ok := e.(registry.ReplicationDeltaEntity); ok {
-		data, err = delta.MarshalDeltaMask(ch.mask)
+		data, err = delta.MarshalDeltaMask(mask)
 		if err != nil {
 			return eventualStateFrame{}, true, fmt.Errorf("delta update for eventual entity %d: %w", ch.id, err)
 		}
 		if data == nil {
 			return eventualStateFrame{}, true, nil
+		}
+	} else if ch.public {
+		scoped, ok := e.(registry.OwnerScopedEntity)
+		if !ok {
+			return eventualStateFrame{}, true, fmt.Errorf("public full for eventual entity %d: missing OwnerScopedEntity", ch.id)
+		}
+		data, err = scoped.PublicFullUpdate()
+		if err != nil {
+			return eventualStateFrame{}, true, fmt.Errorf("full update for eventual entity %d: %w", ch.id, err)
 		}
 	} else {
 		data, err = e.FullUpdate()

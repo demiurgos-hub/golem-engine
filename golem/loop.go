@@ -53,17 +53,19 @@ type pendingMsg struct {
 // between ticks. Per-session batch buffers are still owned by the send path
 // and must not be reused after SendBatch enqueues them.
 type interestTickScratch struct {
-	spawnData        map[int64][]byte
-	deltaData        map[int64][]byte
-	removalData      map[int64][]byte
-	wrappedSpawns    map[int64][]byte
-	wrappedDeltas    map[int64][]byte
-	wrappedRemovals  map[int64][]byte
-	wrappedFull      map[int64][]byte
-	eventualChanges  map[int64]eventualStateChange
-	eventualFrames   map[int64]eventualPreparedFrame
-	eventualDirty    []eventualStateChange
-	eventualPrepared []eventualPreparedFrame
+	spawnData          map[int64][]byte
+	deltaData          map[int64][]byte
+	removalData        map[int64][]byte
+	wrappedSpawns      map[int64][]byte
+	wrappedDeltas      map[int64][]byte
+	wrappedRemovals    map[int64][]byte
+	wrappedFull        map[int64][]byte // authoritative full frames
+	wrappedPublicFull  map[int64][]byte // public/redacted full frames
+	wrappedPublicDelta map[int64][]byte // public/redacted stream deltas (nil value = skip)
+	eventualChanges    map[int64]eventualStateChange
+	eventualFrames     map[int64]eventualPreparedFrame
+	eventualDirty      []eventualStateChange
+	eventualPrepared   []eventualPreparedFrame
 }
 
 // reset clears the reused per-tick lookup maps while preserving capacity.
@@ -77,6 +79,8 @@ func (s *interestTickScratch) reset() {
 		s.wrappedDeltas = make(map[int64][]byte)
 		s.wrappedRemovals = make(map[int64][]byte)
 		s.wrappedFull = make(map[int64][]byte)
+		s.wrappedPublicFull = make(map[int64][]byte)
+		s.wrappedPublicDelta = make(map[int64][]byte)
 		s.eventualChanges = make(map[int64]eventualStateChange)
 		s.eventualFrames = make(map[int64]eventualPreparedFrame)
 		return
@@ -89,6 +93,8 @@ func (s *interestTickScratch) reset() {
 	clear(s.wrappedDeltas)
 	clear(s.wrappedRemovals)
 	clear(s.wrappedFull)
+	clear(s.wrappedPublicFull)
+	clear(s.wrappedPublicDelta)
 	clear(s.eventualChanges)
 	clear(s.eventualFrames)
 }
@@ -173,6 +179,7 @@ type Server struct {
 	interest             *interest.Manager
 	visibility           *visibility.Manager
 	broadcastKnown       map[int64]map[int64]struct{} // sessionID → known entity IDs (broadcast mode)
+	ownershipRefresh     map[int64]ownershipRefresh   // entityID → coalesced ownership confidentiality transition
 	collision            collision.Backend
 	collision3D          collision3d.Backend
 	layers               *collision.Layers
@@ -436,12 +443,47 @@ func (s *Server) Owner(entityID int64) (sessionID int64, owned bool) {
 }
 
 // SetOwner updates the owning session of an existing entity for command
-// authority (e.g. reconnect with a new session ID). Ownership transfer does
-// not transfer avatar identity: session↔avatar indexes from SpawnAvatar are
-// unchanged. Re-bind avatars explicitly with SpawnAvatar after disconnect
-// cleanup (or after DeleteEntity) rather than via SetOwner.
+// authority immediately (e.g. reconnect with a new session ID). sessionID 0
+// clears ownership. Ownership transfer does not transfer avatar identity:
+// session↔avatar indexes from SpawnAvatar are unchanged. Re-bind avatars
+// explicitly with SpawnAvatar after disconnect cleanup (or after DeleteEntity)
+// rather than via SetOwner.
+//
+// Concurrent SetOwner calls are serialized under interestMu (lock order:
+// interestMu before the registry mutex). Owner lookup, registry mutation, and
+// ownership-refresh coalescing are atomic relative to other Server.SetOwner
+// calls so a stale pre-change owner cannot be recorded. Locks are not held
+// across network sends or registry hooks.
+//
+// For entities with visibility: owner vars, SetOwner also queues a replication
+// confidentiality refresh processed on the next replication pass: the original
+// old owner that still knows the entity receives public full state (clearing
+// retained private fields), and the final new owner that knows it receives
+// authoritative full state. Same-tick A→…→A coalesces to a no-op. Visibility:
+// owner is replication redaction only — command authorization remains the
+// separate Owner check used by generated routers.
 func (s *Server) SetOwner(entityID, sessionID int64) bool {
-	return s.reg.SetOwner(entityID, sessionID)
+	s.interestMu.Lock()
+	defer s.interestMu.Unlock()
+
+	e, exists := s.reg.Get(entityID)
+	if !exists {
+		return false
+	}
+	oldOwner, owned := s.reg.Owner(entityID)
+	if !owned {
+		oldOwner = 0
+	}
+	if oldOwner == sessionID {
+		return true
+	}
+	if !s.reg.SetOwner(entityID, sessionID) {
+		return false
+	}
+	if entityIsOwnerScoped(e) {
+		s.queueOwnershipRefreshLocked(entityID, oldOwner, sessionID)
+	}
+	return true
 }
 
 // All returns a snapshot of every registered entity.
@@ -1158,6 +1200,12 @@ func (s *Server) shouldFilterBroadcastLocked(sessionIDs []int64, live []Entity) 
 	if s.visibility.HasGroupedEntities() {
 		return true
 	}
+	if s.hasPendingOwnershipRefreshLocked() {
+		return true
+	}
+	if hasOwnerScopedEntities(live) {
+		return true
+	}
 	liveCount := len(live)
 	for _, sid := range sessionIDs {
 		known := s.broadcastKnown[sid]
@@ -1272,29 +1320,38 @@ func (s *Server) runBroadcastTickBlind(result registry.FlushResult, deltasFlushe
 }
 
 // runBroadcastTickFiltered performs per-session known-set replication when
-// visibility groups are active.
+// visibility groups, owner-scoped payloads, or ownership refreshes require it.
 func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlushed int) error {
 	scratch := &s.interestScratch
 	scratch.reset()
 
 	spawnData := scratch.spawnData
 	wrappedSpawns := scratch.wrappedSpawns
+	wrappedFull := scratch.wrappedFull
 	for i, id := range result.SpawnIDs {
 		data := result.Spawns[i]
 		spawnData[id] = data
-		wrappedSpawns[id] = s.listener.Wrap(data)
+		wrapped := s.listener.Wrap(data)
+		wrappedSpawns[id] = wrapped
+		wrappedFull[id] = wrapped
 	}
 
 	deltaData := scratch.deltaData
-	wrappedDeltas := scratch.wrappedDeltas
 	eventualChanges := scratch.eventualChanges
 	eventualFrames := scratch.eventualFrames
+	ownerScopedDeltas := false
 	for i, id := range result.DeltaIDs {
 		data := result.Deltas[i]
 		deltaData[id] = data
+		if e, ok := s.reg.Get(id); ok && entityIsOwnerScoped(e) {
+			ownerScopedDeltas = true
+		}
 		if s.usesDatagramStateUpdates() {
-			ch := s.eventualChangeForDelta(id)
-			eventualChanges[id] = ch
+			eventualChanges[id] = s.eventualChangeForDelta(id)
+		}
+	}
+	if s.usesDatagramStateUpdates() && !ownerScopedDeltas {
+		for id, ch := range eventualChanges {
 			prepared, err := s.eventualPreparedFrameForChange(ch)
 			if err != nil {
 				return err
@@ -1333,27 +1390,20 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 		s.onUpdates(updates)
 	}
 
-	wrapDelta := func(id int64) ([]byte, bool) {
-		if data, ok := wrappedDeltas[id]; ok {
-			return data, true
-		}
-		data, ok := deltaData[id]
-		if !ok {
-			return nil, false
-		}
-		wrapped := s.listener.Wrap(data)
-		wrappedDeltas[id] = wrapped
-		return wrapped, true
-	}
-
 	live := s.reg.All()
 	var eventualCache *eventualStateTickCache
 	if s.usesDatagramStateUpdates() {
 		eventualCache = newEventualStateTickCache()
 	}
 
+	s.interestMu.Lock()
+	ownershipPending := s.snapshotOwnershipRefreshLocked()
+	s.interestMu.Unlock()
+
 	var streamBatchedSum, streamMsgsSum, datagramBatchedSum, datagramMsgsSum int
-	wrappedFull := scratch.wrappedFull
+	wrappedPublicFull := scratch.wrappedPublicFull
+	wrappedPublicDelta := scratch.wrappedPublicDelta
+	wrappedDeltas := scratch.wrappedDeltas
 
 	for _, sessionID := range sessionIDs {
 		entered, stayed, exited := s.computeBroadcastDiff(sessionID, live)
@@ -1368,52 +1418,50 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 			if s.usesDatagramStateUpdates() {
 				s.clearEventualEntity(sessionID, id)
 			}
-			data, ok := wrappedSpawns[id]
+			data, ok, err := s.wrappedFullForSession(sessionID, id, spawnData, wrappedFull, wrappedPublicFull)
+			if err != nil {
+				return fmt.Errorf("full update for entity %d entering visibility: %w", id, err)
+			}
 			if !ok {
-				data, ok = wrappedFull[id]
-				if !ok {
-					e, found := s.reg.Get(id)
-					if !found {
-						continue
-					}
-					raw, err := e.FullUpdate()
-					if err != nil {
-						return fmt.Errorf("full update for entity %d entering visibility: %w", id, err)
-					}
-					data = s.listener.Wrap(raw)
-					wrappedFull[id] = data
-				}
+				continue
 			}
 			streamFrames = append(streamFrames, data)
 		}
 
 		for _, id := range stayed {
-			if _, ok := deltaData[id]; ok {
+			if authDelta, ok := deltaData[id]; ok {
 				if s.usesDatagramStateUpdates() {
 					if ch, ok := eventualChanges[id]; ok {
-						eventualDirty = append(eventualDirty, ch)
-						if prepared, ok := eventualFrames[id]; ok {
-							eventualDirectFrames = append(eventualDirectFrames, prepared)
+						sch, send := s.eventualChangeForSession(sessionID, ch)
+						if send {
+							eventualDirty = append(eventualDirty, sch)
+							if !sch.public && !ownerScopedDeltas {
+								if prepared, ok := eventualFrames[id]; ok {
+									eventualDirectFrames = append(eventualDirectFrames, prepared)
+								}
+							}
 						}
 					}
-				} else if data, ok := wrapDelta(id); ok {
+				} else {
+					data, send, err := s.streamDeltaForSession(sessionID, id, authDelta, wrappedDeltas, wrappedPublicDelta)
+					if err != nil {
+						return err
+					}
+					if send {
+						streamFrames = append(streamFrames, data)
+					}
+				}
+			}
+			if _, ok := spawnData[id]; ok {
+				data, ok, err := s.wrappedFullForSession(sessionID, id, spawnData, wrappedFull, wrappedPublicFull)
+				if err != nil {
+					return err
+				}
+				if ok {
 					streamFrames = append(streamFrames, data)
 				}
 			}
-			if data, ok := wrappedSpawns[id]; ok {
-				streamFrames = append(streamFrames, data)
-			}
 		}
-		if len(eventualDirty) > 0 {
-			tracker := s.eventualTracker(sessionID)
-			if tracker.hasDirty() {
-				for _, ch := range eventualDirty {
-					tracker.markDirtyChange(ch)
-				}
-				eventualDirectFrames = eventualDirectFrames[:0]
-			}
-		}
-
 		for _, id := range exited {
 			if s.usesDatagramStateUpdates() {
 				s.clearEventualEntity(sessionID, id)
@@ -1441,6 +1489,12 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 			}
 		}
 
+		var err error
+		streamFrames, err = s.appendOwnershipRefreshFrames(sessionID, ownershipPending, stayed, wrappedFull, wrappedPublicFull, streamFrames)
+		if err != nil {
+			return err
+		}
+
 		if len(streamFrames) > 0 {
 			if err := s.listener.SendBatch(sessionID, streamFrames); err != nil {
 				if isDisconnectedSessionSend(err) {
@@ -1457,16 +1511,7 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 			streamBatchedSum += len(streamFrames)
 		}
 		if s.usesDatagramStateUpdates() {
-			var (
-				batched int
-				msgs    int
-				err     error
-			)
-			if len(eventualDirectFrames) > 0 {
-				batched, msgs, err = s.sendPreparedEventualStateFrames(sessionID, s.eventualTracker(sessionID), eventualDirectFrames)
-			} else {
-				batched, msgs, err = s.sendEventualState(sessionID, s.eventualTracker(sessionID), eventualCache)
-			}
+			batched, msgs, err := s.sendSessionEventualState(sessionID, eventualDirty, eventualDirectFrames, eventualCache)
 			if err != nil {
 				if isDisconnectedSessionSend(err) {
 					s.clearBroadcastKnownSession(sessionID)
@@ -1484,6 +1529,30 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 	s.cleanupVisibilityForRemovals(result.Removals)
 	s.storeReplicationSnapshot(streamBatchedSum, streamMsgsSum, datagramBatchedSum, datagramMsgsSum, deltasFlushed)
 	return nil
+}
+
+// sendSessionEventualState sends this tick's per-session eventual changes,
+// merging into any requeued tracker dirty state when present.
+func (s *Server) sendSessionEventualState(
+	sessionID int64,
+	eventualDirty []eventualStateChange,
+	eventualDirectFrames []eventualPreparedFrame,
+	eventualCache *eventualStateTickCache,
+) (int, int, error) {
+	tracker := s.eventualTracker(sessionID)
+	if len(eventualDirty) > 0 && tracker.hasDirty() {
+		for _, ch := range eventualDirty {
+			tracker.markDirtyChange(ch)
+		}
+		return s.sendEventualState(sessionID, tracker, eventualCache)
+	}
+	if len(eventualDirectFrames) > 0 {
+		return s.sendPreparedEventualStateFrames(sessionID, tracker, eventualDirectFrames)
+	}
+	if len(eventualDirty) > 0 {
+		return s.sendEventualStateChanges(sessionID, tracker, eventualCache, eventualDirty)
+	}
+	return s.sendEventualState(sessionID, tracker, eventualCache)
 }
 
 // clearBroadcastKnownSession drops broadcast known state for a session that
@@ -1580,9 +1649,11 @@ func (s *Server) cleanupVisibilityOnDisconnect(sessionID int64) {
 // entitySnapshotForSession returns connect-time entity frames visible to
 // sessionID under a point-in-time visibility policy. Allowed entity IDs are
 // selected under interestMu, then the mutex is released before FullUpdate and
-// Listener writes. A later public→grouped mutation does not revoke frames
-// already selected; successful snapshot IDs become known and can be removed on
-// the next replication pass. Provider/write failures never commit known state.
+// Listener writes. The current owner receives authoritative full state; every
+// other recipient receives PublicFullUpdate when the entity is owner-scoped.
+// A later public→grouped mutation does not revoke frames already selected;
+// successful snapshot IDs become known and can be removed on the next
+// replication pass. Provider/write failures never commit known state.
 func (s *Server) entitySnapshotForSession(sessionID int64) ([]golemnet.EntitySnapshot, error) {
 	all := s.reg.All()
 	allowed := make([]Entity, 0, len(all))
@@ -1597,7 +1668,7 @@ func (s *Server) entitySnapshotForSession(sessionID int64) ([]golemnet.EntitySna
 	out := make([]golemnet.EntitySnapshot, 0, len(allowed))
 	for _, e := range allowed {
 		id := e.EntityID()
-		data, err := e.FullUpdate()
+		data, err := s.fullUpdateForSession(e, sessionID)
 		if err != nil {
 			return nil, fmt.Errorf("snapshotting entity %d (%s): %w", id, e.TypeName(), err)
 		}
@@ -1644,6 +1715,7 @@ func (s *Server) runInterestTick() error {
 	s.interestMu.Lock()
 	s.interest.UpdateGrid(s.reg)
 	diffs := copyInterestDiffs(s.interest.ComputeDiffsFiltered(s.visibility.Allows))
+	ownershipPending := s.snapshotOwnershipRefreshLocked()
 	s.interestMu.Unlock()
 
 	result, err := s.reg.FlushAll()
@@ -1656,22 +1728,31 @@ func (s *Server) runInterestTick() error {
 
 	spawnData := scratch.spawnData
 	wrappedSpawns := scratch.wrappedSpawns
+	wrappedFull := scratch.wrappedFull
 	for i, id := range result.SpawnIDs {
 		data := result.Spawns[i]
 		spawnData[id] = data
-		wrappedSpawns[id] = s.listener.Wrap(data)
+		wrapped := s.listener.Wrap(data)
+		wrappedSpawns[id] = wrapped
+		wrappedFull[id] = wrapped
 	}
 
 	deltaData := scratch.deltaData
-	wrappedDeltas := scratch.wrappedDeltas
 	eventualChanges := scratch.eventualChanges
 	eventualFrames := scratch.eventualFrames
+	ownerScopedDeltas := false
 	for i, id := range result.DeltaIDs {
 		data := result.Deltas[i]
 		deltaData[id] = data
+		if e, ok := s.reg.Get(id); ok && entityIsOwnerScoped(e) {
+			ownerScopedDeltas = true
+		}
 		if s.usesDatagramStateUpdates() {
-			ch := s.eventualChangeForDelta(id)
-			eventualChanges[id] = ch
+			eventualChanges[id] = s.eventualChangeForDelta(id)
+		}
+	}
+	if s.usesDatagramStateUpdates() && !ownerScopedDeltas {
+		for id, ch := range eventualChanges {
 			prepared, err := s.eventualPreparedFrameForChange(ch)
 			if err != nil {
 				return err
@@ -1697,19 +1778,9 @@ func (s *Server) runInterestTick() error {
 		s.clearEventualEntities(result.Removals)
 	}
 
-	wrappedFull := scratch.wrappedFull
-	wrapDelta := func(id int64) ([]byte, bool) {
-		if data, ok := wrappedDeltas[id]; ok {
-			return data, true
-		}
-		data, ok := deltaData[id]
-		if !ok {
-			return nil, false
-		}
-		wrapped := s.listener.Wrap(data)
-		wrappedDeltas[id] = wrapped
-		return wrapped, true
-	}
+	wrappedPublicFull := scratch.wrappedPublicFull
+	wrappedPublicDelta := scratch.wrappedPublicDelta
+	wrappedDeltas := scratch.wrappedDeltas
 
 	sessionIDs := s.listener.SessionIDs()
 	var eventualCache *eventualStateTickCache
@@ -1735,55 +1806,48 @@ func (s *Server) runInterestTick() error {
 			if s.usesDatagramStateUpdates() {
 				s.clearEventualEntity(sessionID, id)
 			}
-			data, ok := wrappedSpawns[id]
+			data, ok, err := s.wrappedFullForSession(sessionID, id, spawnData, wrappedFull, wrappedPublicFull)
+			if err != nil {
+				return fmt.Errorf("full update for entity %d entering FOI: %w", id, err)
+			}
 			if !ok {
-				data, ok = wrappedFull[id]
-				if !ok {
-					e, found := s.reg.Get(id)
-					if !found {
-						continue
-					}
-					var err error
-					data, err = e.FullUpdate()
-					if err != nil {
-						return fmt.Errorf("full update for entity %d entering FOI: %w", id, err)
-					}
-					data = s.listener.Wrap(data)
-					wrappedFull[id] = data
-				}
+				continue
 			}
 			streamFrames = append(streamFrames, data)
 		}
 
 		for _, id := range diff.Stayed {
-			if _, ok := deltaData[id]; ok {
+			if authDelta, ok := deltaData[id]; ok {
 				if s.usesDatagramStateUpdates() {
 					if ch, ok := eventualChanges[id]; ok {
-						eventualDirty = append(eventualDirty, ch)
-						if prepared, ok := eventualFrames[id]; ok {
-							eventualDirectFrames = append(eventualDirectFrames, prepared)
+						sch, send := s.eventualChangeForSession(sessionID, ch)
+						if send {
+							eventualDirty = append(eventualDirty, sch)
+							if !sch.public && !ownerScopedDeltas {
+								if prepared, ok := eventualFrames[id]; ok {
+									eventualDirectFrames = append(eventualDirectFrames, prepared)
+								}
+							}
 						}
 					}
 				} else {
-					if data, ok := wrapDelta(id); ok {
+					data, send, err := s.streamDeltaForSession(sessionID, id, authDelta, wrappedDeltas, wrappedPublicDelta)
+					if err != nil {
+						return err
+					}
+					if send {
 						streamFrames = append(streamFrames, data)
 					}
 				}
 			}
-			if data, ok := wrappedSpawns[id]; ok {
-				streamFrames = append(streamFrames, data)
-			}
-		}
-		if len(eventualDirty) > 0 {
-			tracker := s.eventualTracker(sessionID)
-			if !tracker.hasDirty() {
-				// Prepared frames are the current tick's hot path. Requeued tracker
-				// state still uses the generic cache path below.
-			} else {
-				for _, ch := range eventualDirty {
-					tracker.markDirtyChange(ch)
+			if _, ok := spawnData[id]; ok {
+				data, ok, err := s.wrappedFullForSession(sessionID, id, spawnData, wrappedFull, wrappedPublicFull)
+				if err != nil {
+					return err
 				}
-				eventualDirectFrames = eventualDirectFrames[:0]
+				if ok {
+					streamFrames = append(streamFrames, data)
+				}
 			}
 		}
 
@@ -1814,6 +1878,11 @@ func (s *Server) runInterestTick() error {
 			}
 		}
 
+		streamFrames, err = s.appendOwnershipRefreshFrames(sessionID, ownershipPending, diff.Stayed, wrappedFull, wrappedPublicFull, streamFrames)
+		if err != nil {
+			return err
+		}
+
 		if len(streamFrames) > 0 {
 			if err := s.listener.SendBatch(sessionID, streamFrames); err != nil {
 				if isDisconnectedSessionSend(err) {
@@ -1829,16 +1898,7 @@ func (s *Server) runInterestTick() error {
 			streamBatchedSum += len(streamFrames)
 		}
 		if s.usesDatagramStateUpdates() {
-			var (
-				batched int
-				msgs    int
-				err     error
-			)
-			if len(eventualDirectFrames) > 0 {
-				batched, msgs, err = s.sendPreparedEventualStateFrames(sessionID, s.eventualTracker(sessionID), eventualDirectFrames)
-			} else {
-				batched, msgs, err = s.sendEventualState(sessionID, s.eventualTracker(sessionID), eventualCache)
-			}
+			batched, msgs, err := s.sendSessionEventualState(sessionID, eventualDirty, eventualDirectFrames, eventualCache)
 			if err != nil {
 				return err
 			}

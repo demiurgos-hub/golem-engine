@@ -9,6 +9,9 @@ import (
 )
 
 var _ golem.Entity = (*Synced{{.Name}})(nil)
+{{- if .HasOwnerVars}}
+var _ golem.OwnerScopedEntity = (*Synced{{.Name}})(nil)
+{{- end}}
 
 // --- {{.Name}} ---
 
@@ -20,6 +23,9 @@ const (
 {{- end}}
 {{- range .TickVars}}
 	{{$.LowerName}}Field{{.GoName}} uint64 = 1 << {{.BitIndex}}
+{{- end}}
+{{- if .HasOwnerVars}}
+	{{$.LowerName}}OwnerOnlyMask uint64 = 0{{- range .TickVars}}{{if .OwnerOnly}} | {{$.LowerName}}Field{{.GoName}}{{end}}{{end}}
 {{- end}}
 )
 
@@ -370,6 +376,41 @@ func (s *Synced{{.Name}}) FullUpdate() ([]byte, error) {
 	}
 	return msg.Marshal(), nil
 }
+{{- if .HasOwnerVars}}
+
+// PublicFullUpdate returns a full EntityUpdate with owner-only vars omitted
+// (including sync: once). Used for non-owner replication; FullUpdate remains
+// authoritative for persistence and owner delivery.
+func (s *Synced{{.Name}}) PublicFullUpdate() ([]byte, error) {
+	s.mu.Lock()
+	st := &{{.Name}}State{
+		EntityId: s.entityID,
+		PosX:     s.posX,
+		PosY:     s.posY,
+{{- if .Is3D}}
+		PosZ:     s.posZ,
+{{- end}}
+		Revision: s.revision,
+{{- range .AllVars}}
+{{- if not .OwnerOnly}}
+		{{.GoName}}: s.{{.FieldName}},
+{{- end}}
+{{- end}}
+	}
+	s.mu.Unlock()
+	msg := &EntityUpdate{
+		Payload: &EntityUpdate_{{.Name}}State{{"{"}}{{.Name}}State: st},
+	}
+	return msg.Marshal(), nil
+}
+
+// PublicReplicationMask clears owner-only tick bits from mask so non-owners
+// receive redacted deltas. A zero result means no public delta should be sent.
+// Does not call FlushUpdate; callers remarshal from LastFlushMask.
+func (s *Synced{{.Name}}) PublicReplicationMask(mask uint64) uint64 {
+	return mask &^ {{.LowerName}}OwnerOnlyMask
+}
+{{- end}}
 
 // ApplyState sets all entity fields from a full state snapshot, clearing dirty bits.
 // Used by RestoreEntity to hydrate entities loaded from a snapshot file.

@@ -22,9 +22,10 @@ type SchemaFile struct {
 
 // SchemaVarDef defines a single synced variable in a schema.
 type SchemaVarDef struct {
-	Type string `yaml:"type"`
-	Sync string `yaml:"sync"` // "tick" (default) or "once"
-	Tag  int    `yaml:"tag"`  // required user-slot index (1-based); proto field = Tag + 3 for entity vars
+	Type       string `yaml:"type"`
+	Sync       string `yaml:"sync"`                 // "tick" (default) or "once"
+	Tag        int    `yaml:"tag"`                  // required user-slot index (1-based); proto field = Tag + 3 for entity vars
+	Visibility string `yaml:"visibility,omitempty"` // empty/"all" = public; "owner" = owner-only replication
 }
 
 // VarInfo holds all computed metadata for a single synced variable across languages.
@@ -49,6 +50,7 @@ type VarInfo struct {
 	ProtoTag      int // wire-format field number (UserTag + per-type offset)
 	BitIndex      int
 	Sync          string
+	OwnerOnly     bool // true when visibility: owner — replicated only to the owning session
 	// Collection fields (non-zero when IsRepeated or IsMap is true)
 	IsRepeated      bool
 	IsMap           bool
@@ -82,8 +84,8 @@ type EntityData struct {
 	LowerName       string
 	Dimensions      int
 	Is3D            bool
-	Global          bool // always replicated to every client (bypasses FOI)
-	Persistent      bool // false = omit this entity type from world snapshots
+	Global          bool          // always replicated to every client (bypasses FOI)
+	Persistent      bool          // false = omit this entity type from world snapshots
 	Collider        *ColliderData // optional schema collider; not part of wire/snapshot state
 	AllVars         []VarInfo
 	TickVars        []VarInfo
@@ -94,6 +96,16 @@ type EntityData struct {
 	ProtocolImport  string
 	GolemImport     string
 	GoPackage       string // Go package name for generated *_synced.go (e.g. "generated")
+}
+
+// HasOwnerVars reports whether any var uses visibility: owner.
+func (ed EntityData) HasOwnerVars() bool {
+	for _, v := range ed.AllVars {
+		if v.OwnerOnly {
+			return true
+		}
+	}
+	return false
 }
 
 // EntityUpdateField is one oneof entry in the generated EntityUpdate message.
@@ -458,6 +470,20 @@ func checkReservedGeneratedMethodVars(entity string, vars map[string]SchemaVarDe
 	return nil
 }
 
+// normalizeVarVisibility validates a var's visibility attribute.
+// Empty and "all" mean public; "owner" means owner-only replication.
+// Any other value is rejected.
+func normalizeVarVisibility(entity, varName, visibility string) (ownerOnly bool, err error) {
+	switch visibility {
+	case "", "all":
+		return false, nil
+	case "owner":
+		return true, nil
+	default:
+		return false, fmt.Errorf(`entity %q: var %q: visibility must be empty, "all", or "owner", got %q`, entity, varName, visibility)
+	}
+}
+
 // BuildEntityData converts a parsed schema file into template-ready entity data.
 // Each var must carry an explicit tag (≥ 1). Proto field numbers are offset by
 // the reserved entity metadata fields: entity_id, position components, and revision.
@@ -551,6 +577,11 @@ func BuildEntityData(sf SchemaFile, dimensions int, customTypes map[string]Custo
 		vi.UserTag = def.Tag
 		vi.ProtoTag = def.Tag + entityTagOffset
 		vi.Sync = sync
+		ownerOnly, visErr := normalizeVarVisibility(sf.Entity, k, def.Visibility)
+		if visErr != nil {
+			log.Fatal(visErr)
+		}
+		vi.OwnerOnly = ownerOnly
 
 		isRepeated, isMap, mapKeyType, elemType, isCollection := ParseCollectionType(def.Type)
 		if isCollection {

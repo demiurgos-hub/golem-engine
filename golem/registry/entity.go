@@ -45,6 +45,18 @@ type CompactReplicationDeltaEntity interface {
 	MarshalCompactDeltaMask(mask uint64) ([]byte, error)
 }
 
+// OwnerScopedEntity is optionally implemented by entities that have
+// visibility: owner vars. PublicFullUpdate omits those fields (including
+// sync: once); PublicReplicationMask clears owner-only tick bits from a
+// flush/retry mask so non-owners receive redacted deltas. Custom entities
+// that implement this interface must keep both methods consistent.
+// Entities without this interface retain authoritative FullUpdate / mask
+// behavior for every recipient.
+type OwnerScopedEntity interface {
+	PublicFullUpdate() ([]byte, error)
+	PublicReplicationMask(mask uint64) uint64
+}
+
 // Ticker is optionally implemented by entities that need per-tick update logic.
 // The registry dispatches Tick for every Ticker before the user's OnTick callback.
 type Ticker interface {

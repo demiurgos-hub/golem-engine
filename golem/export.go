@@ -24,6 +24,11 @@ type (
 	Spawner = registry.Spawner
 	Remover = registry.Remover
 
+	// OwnerScopedEntity is satisfied by generated entities with visibility: owner
+	// vars. PublicFullUpdate / PublicReplicationMask redact those fields for
+	// non-owner recipients; FullUpdate remains authoritative.
+	OwnerScopedEntity = registry.OwnerScopedEntity
+
 	// PositionWriter is satisfied by any entity with SetPosition(x, y float32).
 	// All generated Synced* types implement it. Used by collision backends to
 	// write physics-corrected positions back to entities each tick.

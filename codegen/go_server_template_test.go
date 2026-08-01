@@ -398,6 +398,91 @@ func TestGenerateGoServerTemplateIncludesFloat32PositionsAndCompactDelta(t *test
 	}
 }
 
+func TestGenerateGoServerTemplateOwnerScopedMethods(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/go_server/server.go.tmpl")
+	if err != nil {
+		t.Fatalf("loadEmbeddedTemplate: %v", err)
+	}
+
+	withOwner := schema.EntityData{
+		Name:      "Player",
+		LowerName: "player",
+		AllVars: []schema.VarInfo{
+			{GoName: "Health", FieldName: "health", GoType: "int32", ProtoType: "int32", ProtoHelper: "Int32", BitIndex: 2},
+			{GoName: "Secret", FieldName: "secret", GoType: "int32", ProtoType: "int32", ProtoHelper: "Int32", BitIndex: 3, OwnerOnly: true},
+			{GoName: "Token", FieldName: "token", GoType: "string", Sync: "once", OwnerOnly: true},
+		},
+		TickVars: []schema.VarInfo{
+			{GoName: "Health", FieldName: "health", GoType: "int32", ProtoType: "int32", ProtoHelper: "Int32", BitIndex: 2},
+			{GoName: "Secret", FieldName: "secret", GoType: "int32", ProtoType: "int32", ProtoHelper: "Int32", BitIndex: 3, OwnerOnly: true},
+		},
+		OnceVars: []schema.VarInfo{
+			{GoName: "Token", FieldName: "token", GoType: "string", OwnerOnly: true},
+		},
+	}
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, withOwner); err != nil {
+		t.Fatalf("Execute owner entity: %v", err)
+	}
+	content := out.String()
+	for _, want := range []string{
+		"var _ golem.OwnerScopedEntity = (*SyncedPlayer)(nil)",
+		"playerOwnerOnlyMask uint64 = 0 | playerFieldSecret",
+		"func (s *SyncedPlayer) PublicFullUpdate() ([]byte, error) {",
+		"func (s *SyncedPlayer) PublicReplicationMask(mask uint64) uint64 {",
+		"return mask &^ playerOwnerOnlyMask",
+		"Health: s.health,",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("owner-scoped template missing %q\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "Secret: s.secret,") && strings.Count(content, "Secret: s.secret,") > 1 {
+		// FullState includes Secret; PublicFullUpdate must not.
+	}
+	publicIdx := strings.Index(content, "func (s *SyncedPlayer) PublicFullUpdate()")
+	if publicIdx < 0 {
+		t.Fatal("PublicFullUpdate missing")
+	}
+	publicEnd := strings.Index(content[publicIdx:], "func (s *SyncedPlayer) PublicReplicationMask")
+	if publicEnd < 0 {
+		t.Fatal("PublicReplicationMask missing after PublicFullUpdate")
+	}
+	publicBody := content[publicIdx : publicIdx+publicEnd]
+	if strings.Contains(publicBody, "Secret:") {
+		t.Fatalf("PublicFullUpdate must omit owner-only tick var Secret:\n%s", publicBody)
+	}
+	if strings.Contains(publicBody, "Token:") {
+		t.Fatalf("PublicFullUpdate must omit owner-only once var Token:\n%s", publicBody)
+	}
+
+	withoutOwner := schema.EntityData{
+		Name:      "Mob",
+		LowerName: "mob",
+		AllVars: []schema.VarInfo{
+			{GoName: "Health", FieldName: "health", GoType: "int32", ProtoType: "int32", ProtoHelper: "Int32", BitIndex: 2},
+		},
+		TickVars: []schema.VarInfo{
+			{GoName: "Health", FieldName: "health", GoType: "int32", ProtoType: "int32", ProtoHelper: "Int32", BitIndex: 2},
+		},
+	}
+	out.Reset()
+	if err := tmpl.Execute(&out, withoutOwner); err != nil {
+		t.Fatalf("Execute plain entity: %v", err)
+	}
+	plain := out.String()
+	for _, ban := range []string{
+		"OwnerScopedEntity",
+		"PublicFullUpdate",
+		"PublicReplicationMask",
+		"OwnerOnlyMask",
+	} {
+		if strings.Contains(plain, ban) {
+			t.Fatalf("entity without owner vars must not emit %q", ban)
+		}
+	}
+}
+
 func TestGenerateGoServerTemplateIncludes3DPositions(t *testing.T) {
 	tmpl, err := loadEmbeddedTemplate("templates/go_server/server.go.tmpl")
 	if err != nil {
