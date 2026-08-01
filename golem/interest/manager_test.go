@@ -256,3 +256,149 @@ func TestComputeDiffsCompactsCandidateMarks(t *testing.T) {
 		t.Fatalf("candidate marks after compaction = %d, want a small working set", after)
 	}
 }
+
+func TestComputeDiffsFilteredEnterStayExitAndGlobals(t *testing.T) {
+	reg := registry.NewRegistry()
+	anchor := &testEntity{id: 1, x: 0, y: 0}
+	near := &testEntity{id: 2, x: 2, y: 0}
+	global := &testEntity{id: 3, x: 100, y: 100, global: true}
+	for _, e := range []*testEntity{anchor, near, global} {
+		if err := reg.Add(e); err != nil {
+			t.Fatalf("Add(%d): %v", e.id, err)
+		}
+	}
+
+	mgr := NewManager(2)
+	mgr.AssignFOI(10, anchor.id, 5, 1)
+	mgr.UpdateGrid(reg)
+
+	allowed := map[int64]bool{1: true, 2: true, 3: true}
+	allow := func(_, entityID int64) bool { return allowed[entityID] }
+
+	diff := mgr.ComputeDiffsFiltered(allow)[10]
+	if got, want := sortedIDs(diff.Entered), []int64{1, 2, 3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("initial entered = %v, want %v", got, want)
+	}
+
+	// Membership loss while still in radius forces exit.
+	allowed[2] = false
+	diff = mgr.ComputeDiffsFiltered(allow)[10]
+	if got, want := sortedIDs(diff.Exited), []int64{2}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("membership-loss exited = %v, want %v", got, want)
+	}
+	if got, want := sortedIDs(diff.Stayed), []int64{1, 3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("membership-loss stayed = %v, want %v", got, want)
+	}
+
+	// Grouped global only for members.
+	allowed[3] = false
+	diff = mgr.ComputeDiffsFiltered(allow)[10]
+	if got, want := sortedIDs(diff.Exited), []int64{3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("global membership-loss exited = %v, want %v", got, want)
+	}
+	if _, ok := mgr.Known(10)[3]; ok {
+		t.Fatal("disallowed global must leave known set")
+	}
+
+	allowed[2] = true
+	allowed[3] = true
+	diff = mgr.ComputeDiffsFiltered(allow)[10]
+	if got, want := sortedIDs(diff.Entered), []int64{2, 3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("re-allowed entered = %v, want %v", got, want)
+	}
+}
+
+func TestComputeDiffsDeletedGlobalExitsWithGlobalAnchor(t *testing.T) {
+	// FOI anchored on a global entity has no grid position, so only
+	// appendGlobalsFiltered runs. Deleted globals must still Exit.
+	reg := registry.NewRegistry()
+	anchor := &testEntity{id: 1, x: 0, y: 0, global: true}
+	extra := &testEntity{id: 2, x: 50, y: 50, global: true}
+	for _, e := range []*testEntity{anchor, extra} {
+		if err := reg.Add(e); err != nil {
+			t.Fatalf("Add(%d): %v", e.id, err)
+		}
+	}
+
+	mgr := NewManager(2)
+	mgr.AssignFOI(10, anchor.id, 5, 1)
+	mgr.UpdateGrid(reg)
+	diff := mgr.ComputeDiffs()[10]
+	if got, want := sortedIDs(diff.Entered), []int64{1, 2}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("initial entered = %v, want %v", got, want)
+	}
+	if _, ok := mgr.Known(10)[2]; !ok {
+		t.Fatal("expected global 2 in known set")
+	}
+
+	reg.DeleteEntity(extra.id)
+	mgr.UpdateGrid(reg)
+	diff = mgr.ComputeDiffs()[10]
+	if got, want := sortedIDs(diff.Exited), []int64{2}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("deleted global exited = %v, want %v", got, want)
+	}
+	if _, ok := mgr.Known(10)[2]; ok {
+		t.Fatal("deleted global must leave known set")
+	}
+	if len(diff.Exited) != 1 {
+		t.Fatalf("expected exactly one Exited entry, got %v", diff.Exited)
+	}
+
+	// Second tick must not re-emit the same exit.
+	diff = mgr.ComputeDiffs()[10]
+	if len(diff.Exited) != 0 {
+		t.Fatalf("repeated exit leak: %v", diff.Exited)
+	}
+}
+
+func TestComputeDiffsFilteredDeletedGlobalExitsWithGlobalAnchor(t *testing.T) {
+	reg := registry.NewRegistry()
+	anchor := &testEntity{id: 1, x: 0, y: 0, global: true}
+	extra := &testEntity{id: 2, x: 50, y: 50, global: true}
+	for _, e := range []*testEntity{anchor, extra} {
+		if err := reg.Add(e); err != nil {
+			t.Fatalf("Add(%d): %v", e.id, err)
+		}
+	}
+
+	mgr := NewManager(2)
+	mgr.AssignFOI(10, anchor.id, 5, 1)
+	mgr.UpdateGrid(reg)
+	allow := func(_, _ int64) bool { return true }
+	_ = mgr.ComputeDiffsFiltered(allow)[10]
+
+	reg.DeleteEntity(extra.id)
+	mgr.UpdateGrid(reg)
+	diff := mgr.ComputeDiffsFiltered(allow)[10]
+	if got, want := sortedIDs(diff.Exited), []int64{2}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("filtered deleted global exited = %v, want %v", got, want)
+	}
+	if _, ok := mgr.Known(10)[2]; ok {
+		t.Fatal("deleted global must leave known set")
+	}
+}
+
+func TestComputeDiffsUnfilteredCompatibility(t *testing.T) {
+	reg := registry.NewRegistry()
+	anchor := &testEntity{id: 1, x: 0, y: 0}
+	near := &testEntity{id: 2, x: 2, y: 0}
+	global := &testEntity{id: 3, x: 100, y: 100, global: true}
+	for _, e := range []*testEntity{anchor, near, global} {
+		if err := reg.Add(e); err != nil {
+			t.Fatalf("Add(%d): %v", e.id, err)
+		}
+	}
+
+	mgr := NewManager(2)
+	mgr.AssignFOI(10, anchor.id, 5, 1)
+	mgr.UpdateGrid(reg)
+
+	unfiltered := mgr.ComputeDiffs()[10]
+	mgr2 := NewManager(2)
+	mgr2.AssignFOI(10, anchor.id, 5, 1)
+	mgr2.UpdateGrid(reg)
+	nilFilter := mgr2.ComputeDiffsFiltered(nil)[10]
+	if !reflect.DeepEqual(sortedIDs(unfiltered.Entered), sortedIDs(nilFilter.Entered)) {
+		t.Fatalf("ComputeDiffs vs nil filter entered: %v vs %v", unfiltered.Entered, nilFilter.Entered)
+	}
+}

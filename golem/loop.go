@@ -16,6 +16,7 @@ import (
 	"github.com/demiurgos-hub/golem-engine/golem/interest"
 	golemnet "github.com/demiurgos-hub/golem-engine/golem/net"
 	"github.com/demiurgos-hub/golem-engine/golem/registry"
+	"github.com/demiurgos-hub/golem-engine/golem/visibility"
 	"github.com/demiurgos-hub/golem-engine/golem/world"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
@@ -162,6 +163,8 @@ type Server struct {
 	config               ServerConfig
 	listener             *golemnet.Listener
 	interest             *interest.Manager
+	visibility           *visibility.Manager
+	broadcastKnown       map[int64]map[int64]struct{} // sessionID → known entity IDs (broadcast mode)
 	collision            collision.Backend
 	collision3D          collision3d.Backend
 	layers               *collision.Layers
@@ -196,10 +199,13 @@ type Server struct {
 	sessionAvatar map[int64]int64 // sessionID → entityID (or avatarSpawnPending)
 	avatarSession map[int64]int64 // entityID → sessionID
 
-	// interestMu guards all accesses to interest.Manager through Server APIs
-	// (AssignFOI, RemoveFOI, SessionsKnowing, UpdateGrid+ComputeDiffs).
+	// interestMu guards interest.Manager, visibility.Manager, and broadcastKnown
+	// through Server APIs (AssignFOI, RemoveFOI, visibility group ops,
+	// SessionsKnowing, UpdateGrid+ComputeDiffs, broadcast known-set updates).
 	// Lock order with avatarMu: interestMu before avatarMu when both are needed.
-	// Never hold interestMu across network sends or registry hooks.
+	// Never hold interestMu across network sends, FullUpdate, or registry hooks.
+	// Visibility policy is point-in-time: mutations after a replication/snapshot
+	// decision apply on the next pass via known-set enter/exit transitions.
 	interestMu sync.Mutex
 
 	replStatsMu         sync.Mutex
@@ -231,12 +237,14 @@ func NewServer(cfg ServerConfig) *Server {
 	cfg.StateUpdateLane = normalizeStateUpdateLane(cfg.StateUpdateLane)
 	validateStateUpdateLane(cfg)
 	s := &Server{
-		reg:           registry.NewRegistry(),
-		World:         world.NewStore(),
-		config:        cfg,
-		msgQueue:      make(chan pendingMsg, msgQueueCap),
-		sessionAvatar: make(map[int64]int64),
-		avatarSession: make(map[int64]int64),
+		reg:            registry.NewRegistry(),
+		World:          world.NewStore(),
+		config:         cfg,
+		msgQueue:       make(chan pendingMsg, msgQueueCap),
+		sessionAvatar:  make(map[int64]int64),
+		avatarSession:  make(map[int64]int64),
+		visibility:     visibility.NewManager(),
+		broadcastKnown: make(map[int64]map[int64]struct{}),
 	}
 	if cfg.CellSize > 0 {
 		s.interest = interest.NewManager(cfg.CellSize)
@@ -256,6 +264,12 @@ func NewServer(cfg ServerConfig) *Server {
 	s.listener.SetMessageWrapper(WrapEntityUpdate)
 	if s.interest != nil {
 		s.listener.SetInterestEnabled(true)
+	} else {
+		// Broadcast mode: recipient-aware connect snapshots exclude grouped
+		// entities from non-members using a point-in-time Allows selection.
+		// Known state is seeded only after every entity frame succeeds.
+		s.listener.SetEntitySnapshotFunc(s.entitySnapshotForSession)
+		s.listener.SetEntitySnapshotCompleteFunc(s.commitBroadcastSnapshotKnown)
 	}
 	s.listener.SetWorldSnapshotFunc(func() ([][]byte, error) {
 		updates, err := s.World.MarshalAll()
@@ -646,25 +660,65 @@ func (s *Server) WaitReady(ctx context.Context) error {
 }
 
 // SessionsKnowing returns the IDs of all sessions that currently have
-// entityID in their known FOI set. When interest management is not enabled,
-// returns all connected session IDs (every entity is visible to every session).
-// Safe to call concurrently with AssignFOI / RemoveFOI / SpawnAvatar; the
-// interest manager is guarded by interestMu.
+// entityID in their actual replication known set. In interest mode this is the
+// FOI known set; in broadcast mode it is the broadcast known set seeded by
+// successful connect snapshots and updated by replication decisions. It never
+// consults raw visibility-group membership — a session that just joined a
+// group is not returned until the next replication pass queues full state.
+// Safe to call concurrently with AssignFOI / RemoveFOI / visibility APIs /
+// SpawnAvatar; guarded by interestMu.
 func (s *Server) SessionsKnowing(entityID int64) []int64 {
 	allSessions := s.listener.SessionIDs()
-	if s.interest == nil {
-		return allSessions
-	}
 	s.interestMu.Lock()
 	defer s.interestMu.Unlock()
 	var result []int64
 	for _, sid := range allSessions {
-		known := s.interest.Known(sid)
+		var known map[int64]struct{}
+		if s.interest != nil {
+			known = s.interest.Known(sid)
+		} else {
+			known = s.broadcastKnown[sid]
+		}
 		if _, ok := known[entityID]; ok {
 			result = append(result, sid)
 		}
 	}
 	return result
+}
+
+// JoinVisibilityGroup adds sessionID to the named visibility group.
+// Grouped entities assigned to that group replicate only to members.
+// Concurrency-safe under interestMu and never waits on network I/O.
+// Policy is point-in-time: a join after a replication/snapshot decision takes
+// effect on the next pass (via known-set enter/stay), and does not revoke
+// frames already selected or queued.
+func (s *Server) JoinVisibilityGroup(sessionID int64, group string) {
+	s.interestMu.Lock()
+	defer s.interestMu.Unlock()
+	s.visibility.JoinGroup(sessionID, group)
+}
+
+// LeaveVisibilityGroup removes sessionID from the named visibility group.
+// Concurrency-safe under interestMu and never waits on network I/O.
+// A leave after a replication/snapshot decision takes effect on the next pass
+// (known recipients get EntityRemoved when no longer allowed).
+func (s *Server) LeaveVisibilityGroup(sessionID int64, group string) {
+	s.interestMu.Lock()
+	defer s.interestMu.Unlock()
+	s.visibility.LeaveGroup(sessionID, group)
+}
+
+// SetEntityVisibilityGroup assigns entityID to group. An empty group clears the
+// assignment and makes the entity public (replicated to all otherwise-eligible
+// sessions). Concurrency-safe under interestMu and never waits on network I/O.
+// Public→grouped (and other) mutations after a blind/filtered decision or
+// connect-snapshot ID selection apply on the next replication pass via
+// known-set removal/full transitions; already selected/queued frames are not
+// retroactively revoked.
+func (s *Server) SetEntityVisibilityGroup(entityID int64, group string) {
+	s.interestMu.Lock()
+	defer s.interestMu.Unlock()
+	s.visibility.SetEntityGroup(entityID, group)
 }
 
 // AssignFOI associates a session with a circular field of interest centred
@@ -829,6 +883,7 @@ func (s *Server) drainMessages() {
 				// Reaps any avatar still bound to the session, including a
 				// replacement spawned inside the user callback.
 				s.cleanupAvatarOnDisconnect(m.sess.ID)
+				s.cleanupVisibilityOnDisconnect(m.sess.ID)
 			}
 		default:
 			return
@@ -976,15 +1031,63 @@ func (s *Server) runLoop(ctx context.Context) error {
 	}
 }
 
-// runBroadcastTick is the original blind-broadcast path used when interest
-// management is not enabled.
+// runBroadcastTick replicates entities when interest management is not enabled.
+// The blind-vs-filtered decision is linearized under interestMu. When no
+// visibility groups are assigned and every session's known set already matches
+// the live public world, it uses the blind BroadcastBatch fast path while still
+// maintaining per-session known sets. Otherwise it computes per-session
+// known-set diffs (enter/stay/exit). A visibility mutation after this decision
+// takes effect on the next pass; interestMu is never held across BroadcastBatch.
 func (s *Server) runBroadcastTick() error {
 	result, err := s.reg.FlushAll()
 	if err != nil {
 		return err
 	}
 	deltasFlushed := len(result.Deltas)
+	live := s.reg.All()
+	sessionIDs := s.listener.SessionIDs()
 
+	s.interestMu.Lock()
+	filter := s.shouldFilterBroadcastLocked(sessionIDs, live)
+	s.interestMu.Unlock()
+
+	if filter {
+		return s.runBroadcastTickFiltered(result, deltasFlushed)
+	}
+	return s.runBroadcastTickBlind(result, deltasFlushed)
+}
+
+// shouldFilterBroadcastLocked reports whether broadcast replication must run
+// the per-session known-set path. Caller must hold interestMu.
+func (s *Server) shouldFilterBroadcastLocked(sessionIDs []int64, live []Entity) bool {
+	if s.visibility.HasGroupedEntities() {
+		return true
+	}
+	liveCount := len(live)
+	for _, sid := range sessionIDs {
+		known := s.broadcastKnown[sid]
+		if known == nil {
+			if liveCount > 0 {
+				return true
+			}
+			continue
+		}
+		if len(known) != liveCount {
+			return true
+		}
+		for _, e := range live {
+			if _, ok := known[e.EntityID()]; !ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// runBroadcastTickBlind is the fast path used when no entity has a visibility
+// group. It preserves blind BroadcastBatch semantics and incrementally updates
+// broadcast known sets so later policy activation is transition-safe.
+func (s *Server) runBroadcastTickBlind(result registry.FlushResult, deltasFlushed int) error {
 	var (
 		updates       [][]byte
 		streamUpdates [][]byte
@@ -1009,6 +1112,7 @@ func (s *Server) runBroadcastTick() error {
 	}
 
 	if len(updates) == 0 {
+		s.cleanupVisibilityForRemovals(result.Removals)
 		s.storeReplicationSnapshot(0, 0, 0, 0, deltasFlushed)
 		return nil
 	}
@@ -1021,6 +1125,8 @@ func (s *Server) runBroadcastTick() error {
 		if err := s.listener.BroadcastBatch(updates); err != nil {
 			return err
 		}
+		s.applyBlindBroadcastKnown(sessionIDs, result.SpawnIDs, result.Removals)
+		s.cleanupVisibilityForRemovals(result.Removals)
 		s.storeBroadcastStreamOnly(updates, deltasFlushed, nClients)
 		return nil
 	}
@@ -1064,8 +1170,357 @@ func (s *Server) runBroadcastTick() error {
 		datagramBatched += batched
 		datagramMsgs += msgs
 	}
+	s.applyBlindBroadcastKnown(sessionIDs, result.SpawnIDs, result.Removals)
+	s.cleanupVisibilityForRemovals(result.Removals)
 	s.storeReplicationSnapshot(len(streamUpdates)*nClients, 0, datagramBatched, datagramMsgs, deltasFlushed)
 	return nil
+}
+
+// runBroadcastTickFiltered performs per-session known-set replication when
+// visibility groups are active.
+func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlushed int) error {
+	scratch := &s.interestScratch
+	scratch.reset()
+
+	spawnData := scratch.spawnData
+	wrappedSpawns := scratch.wrappedSpawns
+	for i, id := range result.SpawnIDs {
+		data := result.Spawns[i]
+		spawnData[id] = data
+		wrappedSpawns[id] = s.listener.Wrap(data)
+	}
+
+	deltaData := scratch.deltaData
+	wrappedDeltas := scratch.wrappedDeltas
+	eventualChanges := scratch.eventualChanges
+	eventualFrames := scratch.eventualFrames
+	for i, id := range result.DeltaIDs {
+		data := result.Deltas[i]
+		deltaData[id] = data
+		if s.usesDatagramStateUpdates() {
+			ch := s.eventualChangeForDelta(id)
+			eventualChanges[id] = ch
+			prepared, err := s.eventualPreparedFrameForChange(ch)
+			if err != nil {
+				return err
+			}
+			eventualFrames[id] = prepared
+		}
+	}
+
+	removalData := scratch.removalData
+	wrappedRemovals := scratch.wrappedRemovals
+	for i, id := range result.Removals {
+		if s.removalSerializer == nil {
+			return fmt.Errorf("entity %d removed but no RemovalSerializer configured", id)
+		}
+		data, err := s.removalSerializer(id, result.RemovalRevisions[i])
+		if err != nil {
+			return fmt.Errorf("serializing removal for entity %d: %w", id, err)
+		}
+		removalData[id] = data
+		wrappedRemovals[id] = s.listener.Wrap(data)
+	}
+	if s.usesDatagramStateUpdates() {
+		s.clearEventualEntities(result.Removals)
+	}
+
+	var updates [][]byte
+	updates = append(updates, result.Spawns...)
+	updates = append(updates, result.Deltas...)
+	for _, id := range result.Removals {
+		updates = append(updates, removalData[id])
+	}
+	// Capture session IDs before onUpdates so a disconnect during the callback
+	// still observes SendBatch ErrSessionNotFound and can clear known state.
+	sessionIDs := s.listener.SessionIDs()
+	if s.onUpdates != nil && len(updates) > 0 {
+		s.onUpdates(updates)
+	}
+
+	wrapDelta := func(id int64) ([]byte, bool) {
+		if data, ok := wrappedDeltas[id]; ok {
+			return data, true
+		}
+		data, ok := deltaData[id]
+		if !ok {
+			return nil, false
+		}
+		wrapped := s.listener.Wrap(data)
+		wrappedDeltas[id] = wrapped
+		return wrapped, true
+	}
+
+	live := s.reg.All()
+	var eventualCache *eventualStateTickCache
+	if s.usesDatagramStateUpdates() {
+		eventualCache = newEventualStateTickCache()
+	}
+
+	var streamBatchedSum, streamMsgsSum, datagramBatchedSum, datagramMsgsSum int
+	wrappedFull := scratch.wrappedFull
+
+	for _, sessionID := range sessionIDs {
+		entered, stayed, exited := s.computeBroadcastDiff(sessionID, live)
+
+		var (
+			streamFrames         [][]byte
+			eventualDirty        = scratch.eventualDirty[:0]
+			eventualDirectFrames = scratch.eventualPrepared[:0]
+		)
+
+		for _, id := range entered {
+			if s.usesDatagramStateUpdates() {
+				s.clearEventualEntity(sessionID, id)
+			}
+			data, ok := wrappedSpawns[id]
+			if !ok {
+				data, ok = wrappedFull[id]
+				if !ok {
+					e, found := s.reg.Get(id)
+					if !found {
+						continue
+					}
+					raw, err := e.FullUpdate()
+					if err != nil {
+						return fmt.Errorf("full update for entity %d entering visibility: %w", id, err)
+					}
+					data = s.listener.Wrap(raw)
+					wrappedFull[id] = data
+				}
+			}
+			streamFrames = append(streamFrames, data)
+		}
+
+		for _, id := range stayed {
+			if _, ok := deltaData[id]; ok {
+				if s.usesDatagramStateUpdates() {
+					if ch, ok := eventualChanges[id]; ok {
+						eventualDirty = append(eventualDirty, ch)
+						if prepared, ok := eventualFrames[id]; ok {
+							eventualDirectFrames = append(eventualDirectFrames, prepared)
+						}
+					}
+				} else if data, ok := wrapDelta(id); ok {
+					streamFrames = append(streamFrames, data)
+				}
+			}
+			if data, ok := wrappedSpawns[id]; ok {
+				streamFrames = append(streamFrames, data)
+			}
+		}
+		if len(eventualDirty) > 0 {
+			tracker := s.eventualTracker(sessionID)
+			if tracker.hasDirty() {
+				for _, ch := range eventualDirty {
+					tracker.markDirtyChange(ch)
+				}
+				eventualDirectFrames = eventualDirectFrames[:0]
+			}
+		}
+
+		for _, id := range exited {
+			if s.usesDatagramStateUpdates() {
+				s.clearEventualEntity(sessionID, id)
+			}
+			if data, ok := wrappedRemovals[id]; ok {
+				streamFrames = append(streamFrames, data)
+			} else {
+				if s.removalSerializer == nil {
+					return fmt.Errorf("entity %d exited visibility but no RemovalSerializer configured", id)
+				}
+				revision := uint64(1)
+				if e, found := s.reg.Get(id); found {
+					if r, ok := e.(registry.StateRevisioner); ok {
+						revision = r.StateRevision() + 1
+					}
+				}
+				data, err := s.removalSerializer(id, revision)
+				if err != nil {
+					return fmt.Errorf("serializing visibility exit for entity %d: %w", id, err)
+				}
+				removalData[id] = data
+				data = s.listener.Wrap(data)
+				wrappedRemovals[id] = data
+				streamFrames = append(streamFrames, data)
+			}
+		}
+
+		if len(streamFrames) > 0 {
+			if err := s.listener.SendBatch(sessionID, streamFrames); err != nil {
+				if isDisconnectedSessionSend(err) {
+					s.clearBroadcastKnownSession(sessionID)
+					continue
+				}
+				return err
+			}
+			if s.config.LogReplicationStats {
+				if c, err := golemnet.ReliableStreamWriteChunkCount(s.config.Transport, streamFrames); err == nil {
+					streamMsgsSum += c
+				}
+			}
+			streamBatchedSum += len(streamFrames)
+		}
+		if s.usesDatagramStateUpdates() {
+			var (
+				batched int
+				msgs    int
+				err     error
+			)
+			if len(eventualDirectFrames) > 0 {
+				batched, msgs, err = s.sendPreparedEventualStateFrames(sessionID, s.eventualTracker(sessionID), eventualDirectFrames)
+			} else {
+				batched, msgs, err = s.sendEventualState(sessionID, s.eventualTracker(sessionID), eventualCache)
+			}
+			if err != nil {
+				if isDisconnectedSessionSend(err) {
+					s.clearBroadcastKnownSession(sessionID)
+					continue
+				}
+				return err
+			}
+			datagramBatchedSum += batched
+			datagramMsgsSum += msgs
+		}
+		scratch.eventualDirty = eventualDirty[:0]
+		scratch.eventualPrepared = eventualDirectFrames[:0]
+	}
+
+	s.cleanupVisibilityForRemovals(result.Removals)
+	s.storeReplicationSnapshot(streamBatchedSum, streamMsgsSum, datagramBatchedSum, datagramMsgsSum, deltasFlushed)
+	return nil
+}
+
+// clearBroadcastKnownSession drops broadcast known state for a session that
+// disconnected after enter/exit decisions were applied but before sends completed.
+func (s *Server) clearBroadcastKnownSession(sessionID int64) {
+	s.interestMu.Lock()
+	defer s.interestMu.Unlock()
+	delete(s.broadcastKnown, sessionID)
+}
+
+// computeBroadcastDiff updates broadcast known state for sessionID and returns
+// enter/stay/exit entity IDs. Known transitions are accepted here (queued sends
+// count as known), matching interest-mode semantics.
+func (s *Server) computeBroadcastDiff(sessionID int64, live []Entity) (entered, stayed, exited []int64) {
+	s.interestMu.Lock()
+	defer s.interestMu.Unlock()
+
+	known := s.broadcastKnown[sessionID]
+	if known == nil {
+		known = make(map[int64]struct{})
+		s.broadcastKnown[sessionID] = known
+	}
+
+	desired := make(map[int64]struct{}, len(live))
+	for _, e := range live {
+		id := e.EntityID()
+		if s.visibility.Allows(sessionID, id) {
+			desired[id] = struct{}{}
+		}
+	}
+
+	for id := range desired {
+		if _, ok := known[id]; ok {
+			stayed = append(stayed, id)
+		} else {
+			entered = append(entered, id)
+			known[id] = struct{}{}
+		}
+	}
+	for id := range known {
+		if _, ok := desired[id]; !ok {
+			exited = append(exited, id)
+			delete(known, id)
+		}
+	}
+	return entered, stayed, exited
+}
+
+// applyBlindBroadcastKnown incrementally maintains broadcast known sets on the
+// blind fast path: add successful spawn IDs, remove despawned IDs.
+func (s *Server) applyBlindBroadcastKnown(sessionIDs, spawnIDs, removalIDs []int64) {
+	if len(sessionIDs) == 0 {
+		return
+	}
+	s.interestMu.Lock()
+	defer s.interestMu.Unlock()
+	for _, sid := range sessionIDs {
+		known := s.broadcastKnown[sid]
+		if known == nil {
+			known = make(map[int64]struct{})
+			s.broadcastKnown[sid] = known
+		}
+		for _, id := range spawnIDs {
+			known[id] = struct{}{}
+		}
+		for _, id := range removalIDs {
+			delete(known, id)
+		}
+	}
+}
+
+// cleanupVisibilityForRemovals drops group assignments after recipients have
+// been given removal decisions for the tick.
+func (s *Server) cleanupVisibilityForRemovals(removalIDs []int64) {
+	if len(removalIDs) == 0 {
+		return
+	}
+	s.interestMu.Lock()
+	defer s.interestMu.Unlock()
+	for _, id := range removalIDs {
+		s.visibility.RemoveEntity(id)
+	}
+}
+
+// cleanupVisibilityOnDisconnect clears session group membership and broadcast
+// known state. Interest FOI cleanup remains in cleanupAvatarOnDisconnect.
+func (s *Server) cleanupVisibilityOnDisconnect(sessionID int64) {
+	s.interestMu.Lock()
+	defer s.interestMu.Unlock()
+	s.visibility.RemoveSession(sessionID)
+	delete(s.broadcastKnown, sessionID)
+}
+
+// entitySnapshotForSession returns connect-time entity frames visible to
+// sessionID under a point-in-time visibility policy. Allowed entity IDs are
+// selected under interestMu, then the mutex is released before FullUpdate and
+// Listener writes. A later public→grouped mutation does not revoke frames
+// already selected; successful snapshot IDs become known and can be removed on
+// the next replication pass. Provider/write failures never commit known state.
+func (s *Server) entitySnapshotForSession(sessionID int64) ([]golemnet.EntitySnapshot, error) {
+	all := s.reg.All()
+	allowed := make([]Entity, 0, len(all))
+	s.interestMu.Lock()
+	for _, e := range all {
+		if s.visibility.Allows(sessionID, e.EntityID()) {
+			allowed = append(allowed, e)
+		}
+	}
+	s.interestMu.Unlock()
+
+	out := make([]golemnet.EntitySnapshot, 0, len(allowed))
+	for _, e := range allowed {
+		id := e.EntityID()
+		data, err := e.FullUpdate()
+		if err != nil {
+			return nil, fmt.Errorf("snapshotting entity %d (%s): %w", id, e.TypeName(), err)
+		}
+		out = append(out, golemnet.EntitySnapshot{EntityID: id, Data: data})
+	}
+	return out, nil
+}
+
+// commitBroadcastSnapshotKnown seeds the broadcast known set after every
+// connect snapshot entity frame has been written successfully.
+func (s *Server) commitBroadcastSnapshotKnown(sessionID int64, entityIDs []int64) {
+	s.interestMu.Lock()
+	defer s.interestMu.Unlock()
+	known := make(map[int64]struct{}, len(entityIDs))
+	for _, id := range entityIDs {
+		known[id] = struct{}{}
+	}
+	s.broadcastKnown[sessionID] = known
 }
 
 // copyInterestDiffs deep-copies ComputeDiffs output so callers can release
@@ -1090,9 +1545,10 @@ func copyInterestDiffs(in map[int64]*interest.Diff) map[int64]*interest.Diff {
 func (s *Server) runInterestTick() error {
 	// Snapshot interest diffs under interestMu, then release before registry
 	// flush and network sends. Diff storage is reused by the manager, so copy.
+	// Visibility Allows is evaluated under the same lock (no policy mirroring).
 	s.interestMu.Lock()
 	s.interest.UpdateGrid(s.reg)
-	diffs := copyInterestDiffs(s.interest.ComputeDiffs())
+	diffs := copyInterestDiffs(s.interest.ComputeDiffsFiltered(s.visibility.Allows))
 	s.interestMu.Unlock()
 
 	result, err := s.reg.FlushAll()
@@ -1298,6 +1754,7 @@ func (s *Server) runInterestTick() error {
 		scratch.eventualPrepared = eventualDirectFrames[:0]
 	}
 
+	s.cleanupVisibilityForRemovals(result.Removals)
 	s.storeReplicationSnapshot(streamBatchedSum, streamMsgsSum, datagramBatchedSum, datagramMsgsSum, len(result.Deltas))
 	return nil
 }

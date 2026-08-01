@@ -14,6 +14,7 @@ Golem Engine is a Go module for building multiplayer game backends. It includes 
 | `golem/` | Runtime loop: `Server`, tick/delta hooks, world data, networking entrypoints, and re-exports for generated code. |
 | `golem/registry/` | Thread-safe entity registry and `Entity` interface. |
 | `golem/world/` | Thread-safe store for static world data. |
+| `golem/visibility/` | Named visibility group policy manager (non-thread-safe; `Server` provides concurrency). |
 | `golem/footprint/` | Collision-only footprint YAML loader and 2D/3D placers (`collision.Backend` / `collision3d.Backend`). |
 | `golem/auth/` | Token-in-query-param `OnUpgrade` handshake helper (not an account/JWT framework). |
 | `golem-go-client/` | Native Go client runtime. |
@@ -24,8 +25,8 @@ Golem Engine is a Go module for building multiplayer game backends. It includes 
 
 ## Subsystem Boundaries
 
-- Tooling is `cmd/`, `schema/`, and `codegen/`. Runtime library code is `golem/`, `golem/registry/`, `golem/world/`, `golem/footprint/`, and `golem/auth/`.
-- `golem/registry`, `golem/world`, `golem/footprint`, and `golem/auth` do not import `golem`. Prefer depending on `golem/registry` for storage/entity-only work, `golem/world` for world-data-only work, `golem/footprint` for collision footprint load/place work, and `golem/auth` for token-query `OnUpgrade` helpers.
+- Tooling is `cmd/`, `schema/`, and `codegen/`. Runtime library code is `golem/`, `golem/registry/`, `golem/world/`, `golem/visibility/`, `golem/footprint/`, and `golem/auth/`.
+- `golem/registry`, `golem/world`, `golem/visibility`, `golem/footprint`, and `golem/auth` do not import `golem`. Prefer depending on `golem/registry` for storage/entity-only work, `golem/world` for world-data-only work, `golem/visibility` for group-policy-only work, `golem/footprint` for collision footprint load/place work, and `golem/auth` for token-query `OnUpgrade` helpers.
 - Consumer repos hold `golem.yaml` and schema YAML at their root. This engine repo may omit them.
 - Cursor subsystem rules live in `.cursor/rules/subsystem-*.mdc` (including `subsystem-integration-unity.mdc` for `golem-unity` / C# client codegen). When a subsystem's layout or responsibilities change, update the matching rule description, boundaries, and globs.
 
@@ -48,4 +49,4 @@ Golem Engine is a Go module for building multiplayer game backends. It includes 
 
 - User-facing docs live in the separate Astro Starlight website repo under its `docs/` directory, not under this engine repo.
 - When public behavior changes, mention whether the website docs need a matching update.
-- Documentation must match current public behavior in `cmd/golem-bake`, `schema/`, `codegen/`, `golem/`, `golem/registry/`, `golem/footprint/`, and `golem/auth/`.
+- Documentation must match current public behavior in `cmd/golem-bake`, `schema/`, `codegen/`, `golem/`, `golem/registry/`, `golem/visibility/`, `golem/footprint/`, and `golem/auth/`.

@@ -16,9 +16,9 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
-	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
 // Listener manages client sessions and bridges the game-loop deltas to the
@@ -42,6 +42,8 @@ type Listener struct {
 	onDisconnect            func(*Session)
 	messageWrapper          func([]byte) []byte      // wraps outgoing entity frames (ServerMessage tag 1)
 	worldSnapshotFunc       func() ([][]byte, error) // returns fully-wrapped ServerMessage bytes for world data
+	entitySnapshotFunc      func(sessionID int64) ([]EntitySnapshot, error)
+	entitySnapshotComplete  func(sessionID int64, entityIDs []int64)
 
 	wtServer          *webtransport.Server
 	certificateHashes []CertificateHash
@@ -163,6 +165,29 @@ func (l *Listener) SetMessageWrapper(fn func([]byte) []byte) { l.messageWrapper 
 // ServerMessage bytes for all world data. Called during sendSnapshot to
 // deliver world state before entity snapshots on connect.
 func (l *Listener) SetWorldSnapshotFunc(fn func() ([][]byte, error)) { l.worldSnapshotFunc = fn }
+
+// EntitySnapshot is one entity FullUpdate frame for a connect-time snapshot,
+// paired with its entity ID so callers can track per-session known state.
+type EntitySnapshot struct {
+	EntityID int64
+	Data     []byte // unwrapped entity FullUpdate bytes
+}
+
+// SetEntitySnapshotFunc registers a session-aware entity snapshot provider.
+// When nil (the default), sendSnapshot uses registry.SnapshotAll() for
+// low-level Listener users. When set, results must preserve entity IDs so
+// known-state bookkeeping can match delivered frames.
+func (l *Listener) SetEntitySnapshotFunc(fn func(sessionID int64) ([]EntitySnapshot, error)) {
+	l.entitySnapshotFunc = fn
+}
+
+// SetEntitySnapshotCompleteFunc registers a callback invoked with the entity
+// IDs that were successfully written during sendSnapshot. It runs only after
+// every entity snapshot frame succeeds; partial failures close the connection
+// without calling this hook, so known state must not be committed earlier.
+func (l *Listener) SetEntitySnapshotCompleteFunc(fn func(sessionID int64, entityIDs []int64)) {
+	l.entitySnapshotComplete = fn
+}
 
 // CertificateHashes returns the WebTransport certificate hashes known by the listener.
 func (l *Listener) CertificateHashes() []CertificateHash {
@@ -822,6 +847,7 @@ func (l *Listener) handleWebTransport(w http.ResponseWriter, r *http.Request) {
 // through messageWrapper (which applies entity-only WrapEntityUpdate).
 // When interest management is enabled, entity snapshots are skipped;
 // the interest system sends initial visibility on the first tick.
+// Entity known-state callbacks fire only after every entity frame succeeds.
 func (l *Listener) sendSnapshot(ctx context.Context, sess *Session) error {
 	if l.worldSnapshotFunc != nil {
 		worldFrames, err := l.worldSnapshotFunc()
@@ -842,18 +868,45 @@ func (l *Listener) sendSnapshot(ctx context.Context, sess *Session) error {
 		return nil
 	}
 
-	snapshots, err := l.registry.SnapshotAll()
-	if err != nil {
-		return err
+	var (
+		deliveredIDs []int64
+		err          error
+	)
+	if l.entitySnapshotFunc != nil {
+		var snaps []EntitySnapshot
+		snaps, err = l.entitySnapshotFunc(sess.ID)
+		if err != nil {
+			return err
+		}
+		deliveredIDs = make([]int64, 0, len(snaps))
+		for _, snap := range snaps {
+			wrapped := l.wrap(snap.Data)
+			if err := validateReliableMessageSize(wrapped); err != nil {
+				return err
+			}
+			if err := sess.writeBatch(ctx, [][]byte{wrapped}); err != nil {
+				return err
+			}
+			deliveredIDs = append(deliveredIDs, snap.EntityID)
+		}
+	} else {
+		var snapshots [][]byte
+		snapshots, err = l.registry.SnapshotAll()
+		if err != nil {
+			return err
+		}
+		for _, data := range snapshots {
+			wrapped := l.wrap(data)
+			if err := validateReliableMessageSize(wrapped); err != nil {
+				return err
+			}
+			if err := sess.writeBatch(ctx, [][]byte{wrapped}); err != nil {
+				return err
+			}
+		}
 	}
-	for _, data := range snapshots {
-		wrapped := l.wrap(data)
-		if err := validateReliableMessageSize(wrapped); err != nil {
-			return err
-		}
-		if err := sess.writeBatch(ctx, [][]byte{wrapped}); err != nil {
-			return err
-		}
+	if l.entitySnapshotComplete != nil {
+		l.entitySnapshotComplete(sess.ID, deliveredIDs)
 	}
 	return nil
 }

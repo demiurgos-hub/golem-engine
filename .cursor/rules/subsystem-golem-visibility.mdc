@@ -1,0 +1,13 @@
+---
+description: golem/visibility — named visibility group policy manager (non-thread-safe).
+globs: golem/visibility/**/*.go
+alwaysApply: false
+---
+
+# `golem/visibility`
+
+**Named visibility groups:** a lower-level `Manager` owns `entityID → group` and `sessionID → groups` exactly once. Empty/absent entity group means public. Key methods: `SetEntityGroup`, `JoinGroup`, `LeaveGroup`, `RemoveSession`, `RemoveEntity`, `Allows(sessionID, entityID)`, `HasGroupedEntities`, `EntityGroup`, `InGroup`, `Generation` (monotonic, bumped on mutation).
+
+**Not thread-safe.** The parent **`golem`** `Server` always constructs one manager in `NewServer` and serializes access under `interestMu` (shared with interest / broadcast known-set bookkeeping). Visibility mutations never wait on network I/O; replication/snapshot decisions are point-in-time under `interestMu`, and later mutations apply on the next pass via known-set transitions. Do not mirror policy state into `interest.Manager`.
+
+**Boundaries:** stdlib only. Does **not** import `golem`, `golem/net`, `golem/registry`, or `golem/interest`. Consumers use `Server.JoinVisibilityGroup` / `LeaveVisibilityGroup` / `SetEntityVisibilityGroup` rather than the lower-level manager.

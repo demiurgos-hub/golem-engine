@@ -36,27 +36,29 @@ type diffScratch struct {
 // Generated 3D entities are projected onto X/Z so PosY remains vertical.
 // Not thread-safe; all methods must be called from the game tick goroutine.
 type Manager struct {
-	grid        *Grid
-	fois        map[int64]*FOI               // sessionID → FOI
-	known       map[int64]map[int64]struct{} // sessionID → set of currently known entity IDs
-	globals     map[int64]struct{}           // entity IDs flagged as global
-	tracked     map[int64]struct{}           // entity IDs currently in the grid
-	alive       map[int64]struct{}           // reused tick-local set of entities seen during UpdateGrid
-	diffs       map[int64]*Diff              // reused per-session diff storage; valid until next ComputeDiffs call
-	diffScratch map[int64]*diffScratch
+	grid           *Grid
+	fois           map[int64]*FOI               // sessionID → FOI
+	known          map[int64]map[int64]struct{} // sessionID → set of currently known entity IDs
+	globals        map[int64]struct{}           // entity IDs flagged as global
+	removedGlobals map[int64]struct{}           // globals deleted since last UpdateGrid (reused)
+	tracked        map[int64]struct{}           // entity IDs currently in the grid
+	alive          map[int64]struct{}           // reused tick-local set of entities seen during UpdateGrid
+	diffs          map[int64]*Diff              // reused per-session diff storage; valid until next ComputeDiffs call
+	diffScratch    map[int64]*diffScratch
 }
 
 // NewManager creates a Manager backed by a spatial hash grid with the given cell size.
 func NewManager(cellSize float64) *Manager {
 	return &Manager{
-		grid:        NewGrid(cellSize),
-		fois:        make(map[int64]*FOI),
-		known:       make(map[int64]map[int64]struct{}),
-		globals:     make(map[int64]struct{}),
-		tracked:     make(map[int64]struct{}),
-		alive:       make(map[int64]struct{}),
-		diffs:       make(map[int64]*Diff),
-		diffScratch: make(map[int64]*diffScratch),
+		grid:           NewGrid(cellSize),
+		fois:           make(map[int64]*FOI),
+		known:          make(map[int64]map[int64]struct{}),
+		globals:        make(map[int64]struct{}),
+		removedGlobals: make(map[int64]struct{}),
+		tracked:        make(map[int64]struct{}),
+		alive:          make(map[int64]struct{}),
+		diffs:          make(map[int64]*Diff),
+		diffScratch:    make(map[int64]*diffScratch),
 	}
 }
 
@@ -107,11 +109,15 @@ func (m *Manager) Known(sessionID int64) map[int64]struct{} {
 
 // UpdateGrid synchronises the spatial grid with the current registry state.
 // Inserts new entities, removes stale ones, and moves existing ones.
+// Globals that leave the registry are recorded in removedGlobals for the next
+// ComputeDiffs pass so known sessions emit Exited even when the FOI anchor is
+// not on the spatial grid.
 func (m *Manager) UpdateGrid(reg *registry.Registry) {
 	all := reg.All()
 
 	alive := m.alive
 	clear(alive)
+	clear(m.removedGlobals)
 	for _, e := range all {
 		id := e.EntityID()
 		alive[id] = struct{}{}
@@ -141,6 +147,7 @@ func (m *Manager) UpdateGrid(reg *registry.Registry) {
 	}
 	for id := range m.globals {
 		if _, ok := alive[id]; !ok {
+			m.removedGlobals[id] = struct{}{}
 			delete(m.globals, id)
 		}
 	}
@@ -150,7 +157,22 @@ func (m *Manager) UpdateGrid(reg *registry.Registry) {
 // an assigned FOI. It also updates the internal known sets. The returned Diff
 // values are reused between calls, so callers must consume them before the
 // next ComputeDiffs invocation.
+//
+// Equivalent to ComputeDiffsFiltered(nil): every spatially/global-visible
+// entity is allowed.
 func (m *Manager) ComputeDiffs() map[int64]*Diff {
+	return m.ComputeDiffsFiltered(nil)
+}
+
+// ComputeDiffsFiltered is ComputeDiffs with an optional allow predicate applied
+// before Entered/Stayed. When allow is nil, all candidates are allowed. When a
+// previously known entity becomes disallowed, it is forced into Exited even if
+// it remains inside the FOI. The same predicate applies to global entities:
+// grouped globals bypass distance but still require allow(sessionID, entityID).
+//
+// Known sets are updated to match the filtered decisions. Returned Diff values
+// are reused until the next ComputeDiffs / ComputeDiffsFiltered call.
+func (m *Manager) ComputeDiffsFiltered(allow func(sessionID, entityID int64) bool) map[int64]*Diff {
 	diffs := m.diffs
 	clear(diffs)
 
@@ -164,7 +186,7 @@ func (m *Manager) ComputeDiffs() map[int64]*Diff {
 			if _, isGlobal := m.globals[foi.EntityID]; isGlobal {
 				// anchor entity removed or global-only; can't compute spatial diff
 			}
-			m.appendGlobals(knownSet, diff)
+			m.appendGlobalsFiltered(sessionID, knownSet, diff, allow)
 			diffs[sessionID] = diff
 			continue
 		}
@@ -185,14 +207,14 @@ func (m *Manager) ComputeDiffs() map[int64]*Diff {
 			d2 := dx*dx + dy*dy
 
 			if _, wasKnown := knownSet[id]; wasKnown {
-				if d2 <= exitR2 {
+				if d2 <= exitR2 && entityAllowed(allow, sessionID, id) {
 					diff.Stayed = append(diff.Stayed, id)
 				} else {
 					diff.Exited = append(diff.Exited, id)
 					delete(knownSet, id)
 				}
 			} else {
-				if d2 <= enterR2 {
+				if d2 <= enterR2 && entityAllowed(allow, sessionID, id) {
 					diff.Entered = append(diff.Entered, id)
 					knownSet[id] = struct{}{}
 				}
@@ -215,11 +237,18 @@ func (m *Manager) ComputeDiffs() map[int64]*Diff {
 			}
 		}
 
-		m.appendGlobals(knownSet, diff)
+		m.appendGlobalsFiltered(sessionID, knownSet, diff, allow)
 		diffs[sessionID] = diff
 	}
 
 	return diffs
+}
+
+func entityAllowed(allow func(sessionID, entityID int64) bool, sessionID, entityID int64) bool {
+	if allow == nil {
+		return true
+	}
+	return allow(sessionID, entityID)
 }
 
 // diffFor returns the reusable per-session scratch for sessionID, resetting all
@@ -270,11 +299,20 @@ func (s *diffScratch) compactCandidateMarks(candidates []int64, generation uint6
 	s.candidateMarks = marks
 }
 
-// appendGlobals adds global entities to the diff. Newly seen globals are
-// added to Entered; already-known globals go to Stayed. Globals that no
-// longer exist are moved to Exited.
-func (m *Manager) appendGlobals(knownSet map[int64]struct{}, diff *Diff) {
+// appendGlobalsFiltered adds global entities to the diff subject to allow.
+// Newly allowed globals are added to Entered; already-known allowed globals
+// go to Stayed. Known globals that are disallowed exit. Globals recorded in
+// removedGlobals (deleted since the previous UpdateGrid) emit Exited once when
+// still present in knownSet.
+func (m *Manager) appendGlobalsFiltered(sessionID int64, knownSet map[int64]struct{}, diff *Diff, allow func(sessionID, entityID int64) bool) {
 	for id := range m.globals {
+		if !entityAllowed(allow, sessionID, id) {
+			if _, wasKnown := knownSet[id]; wasKnown {
+				diff.Exited = append(diff.Exited, id)
+				delete(knownSet, id)
+			}
+			continue
+		}
 		if _, wasKnown := knownSet[id]; wasKnown {
 			diff.Stayed = append(diff.Stayed, id)
 		} else {
@@ -283,11 +321,8 @@ func (m *Manager) appendGlobals(knownSet map[int64]struct{}, diff *Diff) {
 		}
 	}
 
-	for id := range knownSet {
-		if _, isGlobal := m.globals[id]; !isGlobal {
-			continue
-		}
-		if _, stillExists := m.globals[id]; !stillExists {
+	for id := range m.removedGlobals {
+		if _, wasKnown := knownSet[id]; wasKnown {
 			diff.Exited = append(diff.Exited, id)
 			delete(knownSet, id)
 		}
