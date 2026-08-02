@@ -21,6 +21,50 @@ const jsBakeTSConfig = `{
 }
 `
 
+// isGeneratedJSIntermediateTS reports whether name is a bake-emitted TypeScript
+// intermediate that must be removed after tsc leaves .js/.d.ts outputs.
+// Authored or unknown .ts files and all .d.ts files are left alone.
+func isGeneratedJSIntermediateTS(name string) bool {
+	if !strings.HasSuffix(name, ".ts") || strings.HasSuffix(name, ".d.ts") {
+		return false
+	}
+	switch name {
+	case "EntityManager.ts",
+		"EventManager.ts",
+		"WorldManager.ts",
+		"entities_pb.ts",
+		"events_pb.ts",
+		"world_pb.ts",
+		"client.ts":
+		return true
+	default:
+		return strings.HasSuffix(name, "Synced.ts")
+	}
+}
+
+// removeGeneratedJSIntermediates deletes known bake intermediate .ts files and
+// the temporary bake tsconfig from outDir. Unknown/authored .ts and .d.ts survive.
+func removeGeneratedJSIntermediates(outDir string) error {
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", outDir, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if name == "tsconfig.golem-bake.json" {
+			_ = os.Remove(filepath.Join(outDir, name))
+			continue
+		}
+		if isGeneratedJSIntermediateTS(name) {
+			_ = os.Remove(filepath.Join(outDir, name))
+		}
+	}
+	return nil
+}
+
 // compileJSIntegration runs tsc on generated .ts in outDir, then removes intermediate .ts
 // and the temporary tsconfig so only .js and .d.ts remain.
 func compileJSIntegration(projectRoot, outDir string) error {
@@ -50,29 +94,8 @@ func compileJSIntegration(projectRoot, outDir string) error {
 		return fmt.Errorf("tsc in %s: %w\n%s", outDir, err, out)
 	}
 
-	entries, err := os.ReadDir(outDir)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", outDir, err)
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if name == "tsconfig.golem-bake.json" {
-			_ = os.Remove(filepath.Join(outDir, name))
-			continue
-		}
-		if !strings.HasSuffix(name, ".ts") {
-			continue
-		}
-		switch {
-		case name == "EntityManager.ts",
-			name == "entities_pb.ts",
-			name == "client.ts",
-			strings.HasSuffix(name, "Synced.ts"):
-			_ = os.Remove(filepath.Join(outDir, name))
-		}
+	if err := removeGeneratedJSIntermediates(outDir); err != nil {
+		return err
 	}
 	return nil
 }
