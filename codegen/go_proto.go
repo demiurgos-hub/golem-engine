@@ -748,10 +748,20 @@ func generateGoWorldProto(outDir, golemImport, goPackage string, proto schema.Pr
 	w("")
 	w("\t\"%s/pb\"", golemImport)
 	if needTiled {
-		w("\t\"%s/tiled\"", golemImport)
+		// Tiled helpers live under golem/tiled. Go-client golem_import is
+		// golem-go-client (no tiled subpackage) — always import the engine path.
+		if strings.Contains(golemImport, "golem-go-client") {
+			w("\t\"github.com/demiurgos-hub/golem-engine/golem/tiled\"")
+		} else {
+			w("\t\"%s/tiled\"", golemImport)
+		}
 	}
 	if needLDtk {
-		w("\t\"%s/ldtk\"", golemImport)
+		if strings.Contains(golemImport, "golem-go-client") {
+			w("\t\"github.com/demiurgos-hub/golem-engine/golem/ldtk\"")
+		} else {
+			w("\t\"%s/ldtk\"", golemImport)
+		}
 	}
 	if needYAML {
 		w("\t\"gopkg.in/yaml.v3\"")
