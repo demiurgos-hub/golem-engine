@@ -413,3 +413,31 @@ func waitForSerialEntityCount(t *testing.T, entities *serialCheckingEntities, wa
 		}
 	}
 }
+
+func TestGameClientDisconnectNotifiesOnClose(t *testing.T) {
+	channel := &fakeChannel{connected: true}
+	client := NewGameClient(GameClientOptions{
+		EntityManager: newRecordingEntities(),
+		CreateChannel: func(context.Context, ConnectOptions) (ReliableMessageChannel, error) {
+			return channel, nil
+		},
+	})
+	var got atomic.Int32
+	client.OnDisconnect(func(info DisconnectInfo) {
+		if !info.WasClean {
+			t.Errorf("WasClean=%v want true", info.WasClean)
+		}
+		got.Add(1)
+	})
+	if err := client.Connect(context.Background(), ConnectOptions{Transport: TransportWebSocket, URL: "ws://example"}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	client.Disconnect()
+	if got.Load() != 1 {
+		t.Fatalf("OnDisconnect calls=%d want 1", got.Load())
+	}
+	client.Disconnect() // idempotent; no second notify
+	if got.Load() != 1 {
+		t.Fatalf("second Disconnect notified again: %d", got.Load())
+	}
+}

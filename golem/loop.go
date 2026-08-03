@@ -232,6 +232,18 @@ type Server struct {
 	replDatagramMsgs    int
 }
 
+// ReplicationStats is a snapshot of the most recently completed replication pass.
+// Wire message totals include every session (broadcast multiplies by client count;
+// interest sums per-send chunks).
+type ReplicationStats struct {
+	LastTick              uint64
+	DeltasFlushed         int
+	StreamBatchedFrames   int
+	StreamWireMsgs        int
+	DatagramBatchedFrames int
+	DatagramWirePayloads  int
+}
+
 // NewServer creates a game server with the given configuration.
 // The internal Listener is always created so Handler() works regardless of
 // whether Addr is set. When Addr is set, Run also starts the built-in
@@ -524,9 +536,32 @@ func (s *Server) Tick() uint64 { return s.tick }
 // OnUpdates registers a callback that receives all serialized entity updates
 // (spawns, deltas, and removals) after each tick. When integrated networking
 // is active the server broadcasts automatically; use OnUpdates for extra
-// logic like logging or filtering.
+// logic like logging or filtering. Interest mode invokes the callback with the
+// unique flush payloads before per-session FOI sends (does not replace sends).
 func (s *Server) OnUpdates(fn UpdateFunc) {
 	s.onUpdates = fn
+}
+
+// SessionCount returns the number of currently connected realtime sessions.
+func (s *Server) SessionCount() int {
+	if s == nil || s.listener == nil {
+		return 0
+	}
+	return len(s.listener.SessionIDs())
+}
+
+// ReplicationStats returns counts from the most recently completed replication pass.
+func (s *Server) ReplicationStats() ReplicationStats {
+	s.replStatsMu.Lock()
+	defer s.replStatsMu.Unlock()
+	return ReplicationStats{
+		LastTick:              s.replLastTick,
+		DeltasFlushed:         s.replDeltasFlushed,
+		StreamBatchedFrames:   s.replStreamBatched,
+		StreamWireMsgs:        s.replStreamMsgs,
+		DatagramBatchedFrames: s.replDatagramBatched,
+		DatagramWirePayloads:  s.replDatagramMsgs,
+	}
 }
 
 // SetRemovalSerializer registers the function used to serialize EntityRemoved
@@ -1503,10 +1538,9 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 				}
 				return err
 			}
-			if s.config.LogReplicationStats {
-				if c, err := golemnet.ReliableStreamWriteChunkCount(s.config.Transport, streamFrames); err == nil {
-					streamMsgsSum += c
-				}
+			// Always accumulate wire chunk counts for ReplicationStats (not only when logging).
+			if c, err := golemnet.ReliableStreamWriteChunkCount(s.config.Transport, streamFrames); err == nil {
+				streamMsgsSum += c
 			}
 			streamBatchedSum += len(streamFrames)
 		}
@@ -1778,6 +1812,16 @@ func (s *Server) runInterestTick() error {
 		s.clearEventualEntities(result.Removals)
 	}
 
+	var updates [][]byte
+	updates = append(updates, result.Spawns...)
+	updates = append(updates, result.Deltas...)
+	for _, id := range result.Removals {
+		updates = append(updates, removalData[id])
+	}
+	if s.onUpdates != nil && len(updates) > 0 {
+		s.onUpdates(updates)
+	}
+
 	wrappedPublicFull := scratch.wrappedPublicFull
 	wrappedPublicDelta := scratch.wrappedPublicDelta
 	wrappedDeltas := scratch.wrappedDeltas
@@ -1890,10 +1934,9 @@ func (s *Server) runInterestTick() error {
 				}
 				return err
 			}
-			if s.config.LogReplicationStats {
-				if c, err := golemnet.ReliableStreamWriteChunkCount(s.config.Transport, streamFrames); err == nil {
-					streamMsgsSum += c
-				}
+			// Always accumulate wire chunk counts for ReplicationStats (not only when logging).
+			if c, err := golemnet.ReliableStreamWriteChunkCount(s.config.Transport, streamFrames); err == nil {
+				streamMsgsSum += c
 			}
 			streamBatchedSum += len(streamFrames)
 		}
@@ -1925,12 +1968,10 @@ func isDisconnectedSessionSend(err error) bool {
 }
 
 // storeReplicationSnapshot records counts for the most recently completed
-// flush/broadcast (tick goroutine only). wire message totals include every
+// flush/broadcast (tick goroutine only). Wire message totals include every
 // session (broadcast multiplies by client count; interest sums per-send chunks).
+// Always stored so game hosts can expose metrics without enabling 1 Hz logging.
 func (s *Server) storeReplicationSnapshot(streamBatched, streamWireMsgs, datagramBatched, datagramWireMsgs, deltasFlushed int) {
-	if !s.config.LogReplicationStats {
-		return
-	}
 	s.replStatsMu.Lock()
 	defer s.replStatsMu.Unlock()
 	s.replLastTick = s.tick
@@ -1942,9 +1983,6 @@ func (s *Server) storeReplicationSnapshot(streamBatched, streamWireMsgs, datagra
 }
 
 func (s *Server) storeBroadcastStreamOnly(updates [][]byte, deltasFlushed, nClients int) {
-	if !s.config.LogReplicationStats {
-		return
-	}
 	wrapped := make([][]byte, len(updates))
 	for i, d := range updates {
 		wrapped[i] = s.listener.Wrap(d)

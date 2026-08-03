@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- `golem-go-client` `GameClient.Disconnect` (and therefore `Connect` when replacing a live session) emits exactly one clean `OnDisconnect` (`WasClean=true`) for a live local teardown. Clearing the channel before `Close` prevents a duplicate transport `OnClose` notify; a second `Disconnect` with no active session remains a no-op.
+- Interest-mode (and filtered broadcast) `ReplicationStats.StreamWireMsgs` always accumulates reliable-stream chunk counts for the completed pass, not only when `LogReplicationStats` logging is enabled, so public stats stay consistent with batched frame counts.
 - Owner-only replication no longer risks leaking private bits from a former owner's eventual-state retry mask after ownership transfer: public eventual frames reapply `PublicReplicationMask` at serialize time, ownership full clear/grant clears that session/entity's eventual tracker, and loss/requeue preserves the public flag. Concurrent `Server.SetOwner` calls serialize Owner lookup, registry mutation, and refresh coalescing under `interestMu`.
 
 ### Added

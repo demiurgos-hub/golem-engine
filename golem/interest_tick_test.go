@@ -653,3 +653,78 @@ func TestSendDatagramStateIgnoresDisconnectedSession(t *testing.T) {
 		t.Fatalf("in-flight tokens = %d, want 0", len(tracker.inFlight))
 	}
 }
+
+func TestInterestTickInvokesOnUpdatesWithFlushPayloads(t *testing.T) {
+	srv := NewServer(ServerConfig{
+		Transport:       golemnet.TransportWebSocket,
+		StateUpdateLane: StateUpdateLaneStream,
+		CellSize:        4,
+	})
+	srv.SetRemovalSerializer(func(entityID int64, _ uint64) ([]byte, error) {
+		return []byte(fmt.Sprintf("removed:%d", entityID)), nil
+	})
+
+	anchor := &interestTickEntity{id: 1, x: 0, y: 0, full: []byte("anchor-full")}
+	shared := &interestTickEntity{id: 2, x: 1, y: 0, full: []byte("shared-full"), flush: []byte("shared-flush")}
+	if err := srv.CreateEntity(anchor); err != nil {
+		t.Fatalf("CreateEntity anchor: %v", err)
+	}
+	if err := srv.CreateEntity(shared); err != nil {
+		t.Fatalf("CreateEntity shared: %v", err)
+	}
+
+	var got [][]byte
+	srv.OnUpdates(func(updates [][]byte) {
+		got = make([][]byte, len(updates))
+		for i, u := range updates {
+			got[i] = append([]byte(nil), u...)
+		}
+	})
+
+	httpSrv := httptest.NewServer(srv.Handler())
+	defer httpSrv.Close()
+	client := mustDialGameClient(t, "ws"+httpSrv.URL[4:])
+	defer client.CloseNow()
+	ids := waitForSessionIDs(t, srv, 1)
+	srv.AssignFOI(ids[0], anchor.id, 10, 1)
+
+	if err := srv.runInterestTick(); err != nil {
+		t.Fatalf("runInterestTick spawn: %v", err)
+	}
+	_ = mustReadWrappedMessages(t, client, 1)
+
+	wantFlush := []byte("shared-flush-delta")
+	shared.flush = wantFlush
+	got = nil
+
+	if err := srv.runInterestTick(); err != nil {
+		t.Fatalf("runInterestTick delta: %v", err)
+	}
+
+	found := false
+	for _, u := range got {
+		if bytes.Equal(u, wantFlush) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("interest-mode OnUpdates missing flush payload %q; got=%q", wantFlush, got)
+	}
+
+	// StreamWireMsgs accumulates ReliableStreamWriteChunkCount even when
+	// LogReplicationStats is off (default), so interest-mode stats stay
+	// internally consistent with batched stream frames.
+	stats := srv.ReplicationStats()
+	if stats.StreamBatchedFrames == 0 {
+		t.Fatalf("interest-mode ReplicationStats StreamBatchedFrames=0 after flush tick")
+	}
+	if stats.StreamWireMsgs == 0 {
+		t.Fatalf("interest-mode StreamWireMsgs=0 with StreamBatchedFrames=%d; chunk counts must accumulate without LogReplicationStats",
+			stats.StreamBatchedFrames)
+	}
+	if stats.StreamWireMsgs < stats.StreamBatchedFrames {
+		t.Fatalf("interest-mode StreamWireMsgs=%d < StreamBatchedFrames=%d (wire msgs must cover batched frames)",
+			stats.StreamWireMsgs, stats.StreamBatchedFrames)
+	}
+}

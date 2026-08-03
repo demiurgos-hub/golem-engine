@@ -125,7 +125,10 @@ func (c *GameClient) Events() EventManagerLike { return c.events }
 // OnConnect registers a callback fired when the transport opens.
 func (c *GameClient) OnConnect(fn func()) { c.onOpen = fn }
 
-// OnDisconnect registers a callback fired when the transport closes.
+// OnDisconnect registers a callback fired when the transport closes (remote or
+// local). Local GameClient.Disconnect emits exactly one clean notify for a live
+// session; a subsequent Connect tears down any prior live session the same way
+// before dialing (see Disconnect).
 func (c *GameClient) OnDisconnect(fn func(DisconnectInfo)) { c.onClose = fn }
 
 // ConnectURL opens a WebSocket connection to url.
@@ -134,6 +137,8 @@ func (c *GameClient) ConnectURL(ctx context.Context, url string) error {
 }
 
 // Connect opens a transport connection.
+// If a session is already live, Disconnect runs first and emits one clean
+// OnDisconnect for that prior session before the new dial.
 func (c *GameClient) Connect(ctx context.Context, options ConnectOptions) error {
 	c.Disconnect()
 	if options.Transport == "" {
@@ -195,16 +200,35 @@ func (c *GameClient) Connect(ctx context.Context, options ConnectOptions) error 
 }
 
 // Disconnect closes the active transport, if any.
+//
+// API contract: for a live local teardown, Disconnect emits exactly one
+// OnDisconnect with WasClean=true. The channel pointer is cleared before
+// Close so the transport OnClose path does not double-notify; a second
+// Disconnect with no active session is a no-op (no extra notify). Connect
+// calls Disconnect first, so replacing a live session also yields one clean
+// OnDisconnect for the old session before the new dial.
 func (c *GameClient) Disconnect() {
 	c.mu.Lock()
 	channel := c.channel
 	inbound := c.inbound
 	c.channel = nil
 	c.inbound = nil
+	shouldNotify := channel != nil
+	onClose := c.onClose
+	if shouldNotify {
+		c.lastErr = nil
+		closeOnce(&c.closedCh)
+	}
 	c.mu.Unlock()
-	inbound.stop()
+	if inbound != nil {
+		inbound.stop()
+	}
 	if channel != nil {
 		_ = channel.Close()
+	}
+	if shouldNotify && onClose != nil {
+		log.Printf("golem-go-client: disconnect was_clean=%v error=%v", true, nil)
+		onClose(DisconnectInfo{WasClean: true})
 	}
 }
 
