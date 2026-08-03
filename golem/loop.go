@@ -22,6 +22,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
 
+	"github.com/alitto/pond/v2"
 	"github.com/demiurgos-hub/golem-engine/golem/collision"
 	"github.com/demiurgos-hub/golem-engine/golem/nav"
 )
@@ -151,10 +152,25 @@ type ServerConfig struct {
 	// NewServer. A full queue causes Post to return ErrPostQueueFull without
 	// blocking.
 	PostQueueCapacity int
-	// AsyncCallbacksPerTick caps how many posted callbacks run each tick
-	// (default 256). Excess remain queued for later ticks. Zero selects the
-	// default; negative values panic in NewServer.
+	// AsyncCallbacksPerTick caps how many task-completion and Post callbacks
+	// run each tick combined (default 256). Drain is round-robin that starts
+	// with a completion on the first drain and persists preference across
+	// ticks. Excess remain queued for later ticks. Zero selects the default;
+	// negative values panic in NewServer.
 	AsyncCallbacksPerTick int
+	// TaskWorkers is the maximum Pond worker concurrency for SubmitTask
+	// (default 4). Zero selects the default; negative values panic in NewServer.
+	TaskWorkers int
+	// TaskQueueCapacity is the bounded Pond task-queue capacity for SubmitTask
+	// (default 256). Zero selects the default; negative values panic in
+	// NewServer. A full queue causes SubmitTask to return ErrTaskQueueFull
+	// without blocking.
+	TaskQueueCapacity int
+	// TaskCompletionQueueCapacity is the bounded capacity of the independent
+	// worker→tick completion queue (default 256). Zero selects the default;
+	// negative values panic in NewServer. When full, finished workers apply
+	// backpressure until capacity frees or the run context ends.
+	TaskCompletionQueueCapacity int
 }
 
 // TickFunc is the signature for the user's per-tick game logic callback.
@@ -240,12 +256,21 @@ type Server struct {
 	replDatagramBatched int
 	replDatagramMsgs    int
 
-	// lifeMu gates Run/Post acceptance against the linearizable lifecycle
-	// (created → running → stopping → stopped). Hold only across state checks
-	// and non-blocking postQueue sends; never across callback execution.
-	lifeMu    sync.Mutex
-	life      lifecycleState
-	postQueue chan func(*Server)
+	// lifeMu gates Run/Post/SubmitTask acceptance against the linearizable
+	// lifecycle (created → running → stopping → stopped). Hold only across
+	// state checks, non-blocking postQueue sends, and TrySubmitErr; never
+	// across callback or work execution.
+	lifeMu          sync.Mutex
+	life            lifecycleState
+	postQueue       chan func(*Server)
+	completionQueue chan taskCompletion
+	// asyncPreferCompletion is the cross-tick round-robin preference for
+	// drainAsyncCallbacks. true means try a completion first; starts true so
+	// the first drain is completion-first, then alternates across ticks.
+	asyncPreferCompletion bool
+	taskPool              pond.Pool
+	runCtx                context.Context
+	runCancel             context.CancelFunc
 }
 
 // ReplicationStats is a snapshot of the most recently completed replication pass.
@@ -283,15 +308,17 @@ func NewServer(cfg ServerConfig) *Server {
 	validateStateUpdateLane(cfg)
 	worldSnapshotExclude := worldSnapshotExcludeSet(cfg.WorldSnapshotExclude)
 	s := &Server{
-		reg:            registry.NewRegistry(),
-		World:          world.NewStore(),
-		config:         cfg,
-		msgQueue:       make(chan pendingMsg, msgQueueCap),
-		postQueue:      make(chan func(*Server), cfg.PostQueueCapacity),
-		sessionAvatar:  make(map[int64]int64),
-		avatarSession:  make(map[int64]int64),
-		visibility:     visibility.NewManager(),
-		broadcastKnown: make(map[int64]map[int64]struct{}),
+		reg:                   registry.NewRegistry(),
+		World:                 world.NewStore(),
+		config:                cfg,
+		msgQueue:              make(chan pendingMsg, msgQueueCap),
+		postQueue:             make(chan func(*Server), cfg.PostQueueCapacity),
+		completionQueue:       make(chan taskCompletion, cfg.TaskCompletionQueueCapacity),
+		asyncPreferCompletion: true,
+		sessionAvatar:         make(map[int64]int64),
+		avatarSession:         make(map[int64]int64),
+		visibility:            visibility.NewManager(),
+		broadcastKnown:        make(map[int64]map[int64]struct{}),
 	}
 	if cfg.CellSize > 0 {
 		s.interest = interest.NewManager(cfg.CellSize)
@@ -1086,31 +1113,55 @@ func (s *Server) drainMessages() {
 // auto-broadcast to all connected clients after each tick regardless of
 // whether the built-in server or an external router is used.
 //
-// Each tick runs in order: OnTickStart, drain posted callbacks (bounded by
-// AsyncCallbacksPerTick), drain session-event queue (OnConnect / OnMessage /
-// OnDisconnect), entity ticks, OnTick game logic, collision step, flush and
-// broadcast, OnTickEnd.
+// Each tick runs in order: OnTickStart, drain async completions/posts (combined
+// AsyncCallbacksPerTick budget, round-robin starting with completions on the
+// first drain and persisting preference across ticks), drain session-event
+// queue (OnConnect / OnMessage / OnDisconnect), entity ticks, OnTick game
+// logic, collision step, flush and broadcast, OnTickEnd.
 //
 // Run is single-use: a concurrent or later call returns ErrServerAlreadyRun.
-// It always derives an internal context for the listener and tick loop.
-// Cancellation (or any Run return) linearizes shutdown: Post stops accepting
-// (ErrServerNotRunning), queued posts are discarded without running, and no
-// posted callback runs after Run returns.
+// It always derives an internal run context for the listener, tick loop, and
+// SubmitTask worker pool (independent of the caller context so Pond can be
+// cancelled then StopAndWait). Cancellation linearizes shutdown in this order:
+// stop accepting Post/SubmitTask (ErrServerNotRunning), cancel the run/worker
+// context, wait for the Pond pool (queued-not-started tasks are not executed;
+// running tasks receive cancellation), discard queued completions/posts, and
+// mark stopped. No Post or SubmitTask completion callback runs after Run
+// returns. Work that ignores context cancellation can delay return indefinitely.
+//
+// If the caller context is already cancelled, Run linearizes stopping under
+// lifeMu before the tick loop or Post/SubmitTask acceptance, then shuts down
+// the independent run context and pool without entering the loop. Live caller
+// cancellation is still linked through AfterFunc after acceptance opens.
 //
 // Blocks until the internal context is cancelled or the loop fails.
 // Returns ctx.Err() on clean shutdown.
 func (s *Server) Run(ctx context.Context) error {
+	runCtx, cancel := context.WithCancel(context.Background())
 	s.lifeMu.Lock()
 	if s.life != lifecycleCreated {
 		s.lifeMu.Unlock()
+		cancel()
 		return ErrServerAlreadyRun
+	}
+	s.runCancel = cancel
+	s.startTaskPool(runCtx)
+	// Already-done caller contexts must not briefly expose lifecycleRunning:
+	// context.AfterFunc schedules asynchronously when ctx is already cancelled.
+	if err := ctx.Err(); err != nil {
+		s.life = lifecycleStopping
+		s.lifeMu.Unlock()
+		defer s.finalizeLifecycle()
+		return err
 	}
 	s.life = lifecycleRunning
 	s.lifeMu.Unlock()
 
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	stopAfter := context.AfterFunc(runCtx, s.markLifecycleStopping)
+	// Stop accepting before cancelling workers when the caller context ends.
+	stopAfter := context.AfterFunc(ctx, func() {
+		s.markLifecycleStopping()
+		cancel()
+	})
 	defer stopAfter()
 	defer s.finalizeLifecycle()
 
@@ -1120,20 +1171,22 @@ func (s *Server) Run(ctx context.Context) error {
 			err := s.listener.ListenAndServe(runCtx)
 			listenerErr <- err
 			if err != nil {
+				s.markLifecycleStopping()
 				cancel()
 			}
 		}()
 
 		loopErr := s.runLoop(runCtx)
+		s.markLifecycleStopping()
 		cancel()
 		lErr := <-listenerErr
 
-		if lErr != nil && loopErr == context.Canceled {
+		if lErr != nil && errors.Is(loopErr, context.Canceled) {
 			return fmt.Errorf("listener: %w", lErr)
 		}
-		return loopErr
+		return mapRunErr(loopErr, ctx)
 	}
-	return s.runLoop(runCtx)
+	return mapRunErr(s.runLoop(runCtx), ctx)
 }
 
 // envLogReplicationStats reports whether the process environment requests
@@ -1169,7 +1222,7 @@ func (s *Server) runLoop(ctx context.Context) error {
 				fn(s.tick)
 			}
 
-			s.drainPosts()
+			s.drainAsyncCallbacks()
 			s.drainMessages()
 
 			s.reg.TickAll(dt)

@@ -1,3 +1,5 @@
+github.com/alitto/pond/v2 v2.7.1 h1:QxMbcfjcVTa0pyxX5Ib1226mM8u8D7gKUVkCUU4DYIw=
+github.com/alitto/pond/v2 v2.7.1/go.mod h1:xkjYEgQ05RSpWdfSd1nM3OVv7TBhLdy7rMp3+2Nq+yE=
 github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
 github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/dunglas/httpsfv v1.1.0 h1:Jw76nAyKWKZKFrpMMcL76y35tOpYHqQPzHQiwDvpe54=
