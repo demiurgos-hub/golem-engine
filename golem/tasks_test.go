@@ -1567,3 +1567,555 @@ func TestTickPhaseOrderWithAsyncAndSession(t *testing.T) {
 	cancel()
 	<-errCh
 }
+
+func waitTaskStats(t *testing.T, srv *Server, ok func(TaskStats) bool) TaskStats {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		st := srv.TaskStats()
+		if ok(st) {
+			return st
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for TaskStats snapshot: %+v", st)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestTaskStatsAcceptedBeforeWorkInvariant ensures Pond cannot run/finish user
+// work before TasksAccepted counts the submission. Each task records
+// tasksAccepted at work entry; without the start gate that value can lag the
+// sequential submit index. A concurrent sampler loads finish/cancel/panic
+// before accepted so a torn TaskStats()-style read cannot false-positive.
+func TestTaskStatsAcceptedBeforeWorkInvariant(t *testing.T) {
+	srv := NewServer(ServerConfig{
+		TickRate:          1000,
+		TaskWorkers:       8,
+		TaskQueueCapacity: 256,
+	})
+	ready := make(chan struct{})
+	srv.OnTickStart(func(uint64) {
+		select {
+		case <-ready:
+		default:
+			close(ready)
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Run(ctx) }()
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for Run")
+	}
+
+	const iterations = 4000
+	var stopSample atomic.Bool
+	var sampleViolation atomic.Bool
+	var sampleWG sync.WaitGroup
+	sampleWG.Add(1)
+	go func() {
+		defer sampleWG.Done()
+		for !stopSample.Load() {
+			// Load dependents before accepted so SC atomics make
+			// finished/cancelled/panic > accepted a real write-order bug.
+			finished := srv.tasksFinished.Load()
+			cancelled := srv.tasksCancelled.Load()
+			panics := srv.taskPanics.Load()
+			accepted := srv.tasksAccepted.Load()
+			if finished > accepted || cancelled > accepted || panics > accepted {
+				sampleViolation.Store(true)
+				return
+			}
+		}
+	}()
+
+	var earlyWork atomic.Uint64
+	var completed atomic.Int32
+	for i := 1; i <= iterations; i++ {
+		done := make(chan struct{})
+		wantAccepted := uint64(i)
+		for {
+			err := srv.SubmitTask(context.Background(), func(context.Context) error {
+				if srv.tasksAccepted.Load() < wantAccepted {
+					earlyWork.Add(1)
+				}
+				return nil
+			}, func(*Server, error) {
+				completed.Add(1)
+				close(done)
+			})
+			if err == nil {
+				break
+			}
+			if errors.Is(err, ErrTaskQueueFull) {
+				time.Sleep(time.Microsecond)
+				continue
+			}
+			t.Fatalf("SubmitTask: %v", err)
+		}
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timeout waiting for completion %d", i)
+		}
+	}
+
+	stopSample.Store(true)
+	sampleWG.Wait()
+
+	if n := earlyWork.Load(); n != 0 {
+		t.Fatalf("work observed TasksAccepted before this submission was counted (%d times)", n)
+	}
+	if sampleViolation.Load() {
+		t.Fatal("sampled TasksFinished/Cancelled/Panics > TasksAccepted")
+	}
+	st := srv.TaskStats()
+	if st.TasksAccepted != iterations || st.TasksFinished != iterations ||
+		st.TaskCompletionsExecuted != iterations || completed.Load() != int32(iterations) {
+		t.Fatalf("final stats=%+v completed=%d, want accepted/finished/executed=%d", st, completed.Load(), iterations)
+	}
+	cancel()
+	<-errCh
+}
+
+func TestTaskStatsAcceptRejectAndGauges(t *testing.T) {
+	srv := NewServer(ServerConfig{
+		TickRate:          1000,
+		TaskWorkers:       1,
+		TaskQueueCapacity: 1,
+		PostQueueCapacity: 2,
+	})
+	gate := make(chan struct{})
+	ready := make(chan struct{})
+	workStarted := make(chan struct{})
+	srv.OnTickStart(func(tick uint64) {
+		if tick == 1 {
+			close(ready)
+			<-gate
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Run(ctx) }()
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for tick gate")
+	}
+
+	block := make(chan struct{})
+	if err := srv.SubmitTask(context.Background(), func(context.Context) error {
+		close(workStarted)
+		<-block
+		return nil
+	}, func(*Server, error) {}); err != nil {
+		t.Fatalf("running SubmitTask: %v", err)
+	}
+	select {
+	case <-workStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for worker")
+	}
+	if err := srv.SubmitTask(context.Background(), func(context.Context) error { return nil }, func(*Server, error) {}); err != nil {
+		t.Fatalf("queued SubmitTask: %v", err)
+	}
+	if err := srv.SubmitTask(context.Background(), func(context.Context) error { return nil }, func(*Server, error) {}); !errors.Is(err, ErrTaskQueueFull) {
+		t.Fatalf("full SubmitTask: %v, want ErrTaskQueueFull", err)
+	}
+
+	st := waitTaskStats(t, srv, func(st TaskStats) bool {
+		return st.TasksAccepted == 2 && st.TasksRejectedFull == 1 && st.RunningTasks >= 1 && st.QueuedTasks >= 1
+	})
+	if st.TasksFinished != 0 || st.TaskCompletionsExecuted != 0 {
+		t.Fatalf("premature finish/execute: finished=%d executed=%d", st.TasksFinished, st.TaskCompletionsExecuted)
+	}
+
+	if err := srv.Post(func(*Server) {}); err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	if err := srv.Post(func(*Server) {}); err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	if err := srv.Post(func(*Server) {}); !errors.Is(err, ErrPostQueueFull) {
+		t.Fatalf("full Post: %v, want ErrPostQueueFull", err)
+	}
+	st = srv.TaskStats()
+	if st.PostsAccepted != 2 || st.PostsRejectedFull != 1 || st.QueuedPosts != 2 {
+		t.Fatalf("post stats=%+v, want accepted=2 rejected=1 queued=2", st)
+	}
+
+	close(block)
+	close(gate)
+	cancel()
+	<-errCh
+}
+
+func TestTaskStatsFinishedDistinctFromExecuted(t *testing.T) {
+	srv := NewServer(ServerConfig{
+		TickRate:                    1000,
+		TaskWorkers:                 1,
+		TaskCompletionQueueCapacity: 4,
+		AsyncCallbacksPerTick:       256,
+	})
+	gate := make(chan struct{})
+	ready := make(chan struct{})
+	var executed atomic.Int32
+	srv.OnTickStart(func(tick uint64) {
+		if tick == 1 {
+			close(ready)
+			<-gate
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Run(ctx) }()
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for tick gate")
+	}
+
+	if err := srv.SubmitTask(context.Background(), func(context.Context) error {
+		return nil
+	}, func(*Server, error) {
+		executed.Add(1)
+	}); err != nil {
+		t.Fatalf("SubmitTask: %v", err)
+	}
+	st := waitTaskStats(t, srv, func(st TaskStats) bool {
+		return st.TasksAccepted == 1 && st.TasksFinished == 1 && st.QueuedCompletions >= 1
+	})
+	if st.TaskCompletionsExecuted != 0 || executed.Load() != 0 {
+		t.Fatalf("completion ran while gated: stats=%+v executed=%d", st, executed.Load())
+	}
+
+	cancel()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if errors.Is(srv.Post(func(*Server) {}), ErrServerNotRunning) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timeout waiting for shutdown")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(gate)
+	select {
+	case <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for Run exit")
+	}
+	st = srv.TaskStats()
+	if st.TasksFinished != 1 {
+		t.Fatalf("TasksFinished=%d, want 1 after shutdown discard", st.TasksFinished)
+	}
+	if st.TaskCompletionsExecuted != 0 || executed.Load() != 0 {
+		t.Fatalf("TaskCompletionsExecuted=%d callback=%d, want 0 (shutdown discard)", st.TaskCompletionsExecuted, executed.Load())
+	}
+}
+
+func TestTaskStatsHappyPathExecutedAndPosts(t *testing.T) {
+	srv := NewServer(ServerConfig{TickRate: 1000})
+	ready := make(chan struct{})
+	done := make(chan struct{})
+	srv.OnTickStart(func(uint64) {
+		select {
+		case <-ready:
+		default:
+			close(ready)
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Run(ctx) }()
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for Run")
+	}
+
+	if err := srv.SubmitTask(context.Background(), func(context.Context) error {
+		return nil
+	}, func(*Server, error) {
+		if err := srv.Post(func(*Server) { close(done) }); err != nil {
+			t.Errorf("Post from complete: %v", err)
+		}
+	}); err != nil {
+		t.Fatalf("SubmitTask: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for post after completion")
+	}
+	st := waitTaskStats(t, srv, func(st TaskStats) bool {
+		return st.TasksAccepted == 1 && st.TasksFinished == 1 && st.TaskCompletionsExecuted == 1 &&
+			st.PostsAccepted == 1 && st.PostsExecuted == 1
+	})
+	if st.TasksCancelled != 0 || st.TaskPanics != 0 || st.TasksRejectedFull != 0 || st.PostsRejectedFull != 0 {
+		t.Fatalf("unexpected reject/cancel/panic counters: %+v", st)
+	}
+	cancel()
+	<-errCh
+}
+
+func TestTaskStatsCancellationAndPanic(t *testing.T) {
+	t.Run("callerCancel", func(t *testing.T) {
+		srv := NewServer(ServerConfig{TickRate: 1000})
+		ready := make(chan struct{})
+		done := make(chan struct{})
+		srv.OnTickStart(func(uint64) {
+			select {
+			case <-ready:
+			default:
+				close(ready)
+			}
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		errCh := make(chan error, 1)
+		go func() { errCh <- srv.Run(ctx) }()
+		select {
+		case <-ready:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for Run")
+		}
+
+		taskCtx, taskCancel := context.WithCancel(context.Background())
+		started := make(chan struct{})
+		if err := srv.SubmitTask(taskCtx, func(c context.Context) error {
+			close(started)
+			<-c.Done()
+			return nil
+		}, func(*Server, error) { close(done) }); err != nil {
+			t.Fatalf("SubmitTask: %v", err)
+		}
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for work")
+		}
+		taskCancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for completion")
+		}
+		st := srv.TaskStats()
+		if st.TasksAccepted != 1 || st.TasksFinished != 1 || st.TaskCompletionsExecuted != 1 || st.TasksCancelled != 1 {
+			t.Fatalf("caller-cancel stats=%+v", st)
+		}
+		cancel()
+		<-errCh
+	})
+
+	t.Run("queuedDiscardOnShutdown", func(t *testing.T) {
+		srv := NewServer(ServerConfig{
+			TickRate:          1000,
+			TaskWorkers:       1,
+			TaskQueueCapacity: 4,
+		})
+		gate := make(chan struct{})
+		ready := make(chan struct{})
+		workStarted := make(chan struct{})
+		var completed atomic.Int32
+		srv.OnTickStart(func(tick uint64) {
+			if tick == 1 {
+				close(ready)
+				<-gate
+			}
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		go func() { errCh <- srv.Run(ctx) }()
+		select {
+		case <-ready:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for tick gate")
+		}
+
+		block := make(chan struct{})
+		if err := srv.SubmitTask(context.Background(), func(context.Context) error {
+			close(workStarted)
+			<-block
+			return nil
+		}, func(*Server, error) { completed.Add(1) }); err != nil {
+			t.Fatalf("blocker: %v", err)
+		}
+		select {
+		case <-workStarted:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for blocker")
+		}
+		if err := srv.SubmitTask(context.Background(), func(context.Context) error {
+			return nil
+		}, func(*Server, error) { completed.Add(1) }); err != nil {
+			t.Fatalf("queued: %v", err)
+		}
+		waitTaskStats(t, srv, func(st TaskStats) bool {
+			return st.TasksAccepted == 2 && st.QueuedTasks >= 1
+		})
+
+		cancel()
+		// Linearize stopping before releasing the blocker so the queued task
+		// cannot start user work after the worker frees.
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if errors.Is(srv.Post(func(*Server) {}), ErrServerNotRunning) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("timeout waiting for shutdown rejection")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		// Before release: running work has not finished; Pond fold-in has not run.
+		mid := srv.TaskStats()
+		if mid.TasksFinished != 0 || mid.TasksCancelled != 0 || mid.TaskCompletionsExecuted != 0 {
+			t.Fatalf("counters moved before blocker release: %+v", mid)
+		}
+		close(block)
+		close(gate)
+		select {
+		case <-errCh:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for Run exit")
+		}
+		st := srv.TaskStats()
+		if st.TasksAccepted != 2 {
+			t.Fatalf("TasksAccepted=%d, want 2", st.TasksAccepted)
+		}
+		// Running blocker: finished + cancelled via effective context.
+		// Queued task: Pond CanceledTasks fold-in only (no user work / finish).
+		if st.TasksFinished != 1 {
+			t.Fatalf("TasksFinished=%d, want 1 (only blocker ran)", st.TasksFinished)
+		}
+		if n := srv.taskPool.CanceledTasks(); n != 1 {
+			t.Fatalf("Pond CanceledTasks=%d, want 1 (queued-not-started discard)", n)
+		}
+		if st.TasksCancelled != 2 {
+			t.Fatalf("TasksCancelled=%d, want 2 (1 running effCtx + 1 Pond fold-in)", st.TasksCancelled)
+		}
+		if st.TaskCompletionsExecuted != 0 || completed.Load() != 0 {
+			t.Fatalf("callbacks ran after shutdown: executed=%d completed=%d", st.TaskCompletionsExecuted, completed.Load())
+		}
+	})
+
+	t.Run("panic", func(t *testing.T) {
+		srv := NewServer(ServerConfig{TickRate: 1000})
+		ready := make(chan struct{})
+		done := make(chan struct{})
+		srv.OnTickStart(func(uint64) {
+			select {
+			case <-ready:
+			default:
+				close(ready)
+			}
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		errCh := make(chan error, 1)
+		go func() { errCh <- srv.Run(ctx) }()
+		select {
+		case <-ready:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for Run")
+		}
+		if err := srv.SubmitTask(context.Background(), func(context.Context) error {
+			panic("stats-boom")
+		}, func(_ *Server, err error) {
+			if !errors.Is(err, ErrTaskPanicked) {
+				t.Errorf("complete err=%v", err)
+			}
+			close(done)
+		}); err != nil {
+			t.Fatalf("SubmitTask: %v", err)
+		}
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for panic completion")
+		}
+		st := srv.TaskStats()
+		if st.TasksAccepted != 1 || st.TasksFinished != 1 || st.TaskCompletionsExecuted != 1 || st.TaskPanics != 1 {
+			t.Fatalf("panic stats=%+v", st)
+		}
+		cancel()
+		<-errCh
+	})
+}
+
+func TestTaskStatsPostDiscardOnShutdown(t *testing.T) {
+	srv := NewServer(ServerConfig{
+		TickRate:              1000,
+		PostQueueCapacity:     8,
+		AsyncCallbacksPerTick: 256,
+	})
+	gate := make(chan struct{})
+	ready := make(chan struct{})
+	var ran atomic.Int32
+	srv.OnTickStart(func(tick uint64) {
+		if tick == 1 {
+			close(ready)
+			<-gate
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Run(ctx) }()
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for tick gate")
+	}
+
+	const n = 3
+	for i := 0; i < n; i++ {
+		if err := srv.Post(func(*Server) { ran.Add(1) }); err != nil {
+			t.Fatalf("Post: %v", err)
+		}
+	}
+	st := srv.TaskStats()
+	if st.PostsAccepted != n || st.QueuedPosts != n || st.PostsExecuted != 0 {
+		t.Fatalf("pre-shutdown post stats=%+v, want accepted=%d queued=%d executed=0", st, n, n)
+	}
+
+	cancel()
+	// Poll lifecycle so the wait itself cannot accept another Post.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		srv.lifeMu.Lock()
+		life := srv.life
+		srv.lifeMu.Unlock()
+		if life != lifecycleRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timeout waiting for shutdown")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(gate)
+	select {
+	case <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for Run exit")
+	}
+	st = srv.TaskStats()
+	if st.PostsAccepted != n {
+		t.Fatalf("PostsAccepted=%d, want %d", st.PostsAccepted, n)
+	}
+	if st.PostsExecuted != 0 || ran.Load() != 0 {
+		t.Fatalf("PostsExecuted=%d ran=%d, want 0 (shutdown discard while gated)", st.PostsExecuted, ran.Load())
+	}
+	if st.PostsAccepted <= st.PostsExecuted {
+		t.Fatalf("expected PostsAccepted (%d) > PostsExecuted (%d)", st.PostsAccepted, st.PostsExecuted)
+	}
+}

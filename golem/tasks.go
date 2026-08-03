@@ -10,6 +10,92 @@ import (
 	"github.com/alitto/pond/v2"
 )
 
+// TaskStats holds independently sampled counters and live gauges for the
+// background-task and Post pipelines. Fields are not a single cross-field
+// consistent cut: atomics and gauges are read separately and may disagree
+// slightly under concurrency. Cumulative counters are Golem-owned and
+// monotonic for the Server's lifetime. Live gauges are approximate:
+// QueuedTasks/RunningTasks come from the internal Pond pool when present;
+// QueuedCompletions/QueuedPosts are instantaneous channel lengths and may
+// race with producers and the tick drain.
+type TaskStats struct {
+	// QueuedTasks is the number of accepted tasks waiting in the worker-pool
+	// queue (not yet executing). Approximate under concurrency.
+	QueuedTasks uint64
+	// RunningTasks is the number of active worker goroutines currently
+	// executing accepted task wrappers. Approximate under concurrency.
+	RunningTasks uint64
+	// QueuedCompletions is the instantaneous length of the independent
+	// worker→tick completion queue. Approximate under concurrency.
+	QueuedCompletions uint64
+	// QueuedPosts is the instantaneous length of the Post queue.
+	// Approximate under concurrency.
+	QueuedPosts uint64
+	// TasksAccepted counts SubmitTask calls that successfully entered the
+	// worker pool (not validation failures, not ErrServerNotRunning, not
+	// ErrTaskQueueFull).
+	TasksAccepted uint64
+	// TasksFinished counts accepted tasks whose work function returned or
+	// panicked. Distinct from TaskCompletionsExecuted: finished work may
+	// still be awaiting tick drain, or its completion may be discarded on
+	// shutdown without running the callback.
+	TasksFinished uint64
+	// TaskCompletionsExecuted counts completion callbacks that actually ran
+	// on the tick goroutine. Shutdown discard of queued completions does not
+	// increment this counter.
+	TaskCompletionsExecuted uint64
+	// TasksRejectedFull counts SubmitTask calls that returned ErrTaskQueueFull.
+	TasksRejectedFull uint64
+	// TasksCancelled counts each accepted task at most once when either
+	// (1) queued-not-started work is discarded on shutdown without executing
+	// user work, or (2) accepted work runs and its effective context has
+	// already ended by the time work returns (caller or server cancellation).
+	TasksCancelled uint64
+	// TaskPanics counts accepted tasks whose work function panicked
+	// (recovered into an ErrTaskPanicked completion error while running).
+	TaskPanics uint64
+	// PostsAccepted counts Post calls that successfully enqueued a callback.
+	PostsAccepted uint64
+	// PostsExecuted counts Post callbacks that actually ran on the tick
+	// goroutine. Shutdown discard of queued posts does not increment this.
+	PostsExecuted uint64
+	// PostsRejectedFull counts Post calls that returned ErrPostQueueFull.
+	PostsRejectedFull uint64
+}
+
+// TaskStats returns independently sampled pipeline counters and live gauges.
+// Values are read separately (atomics and gauges are not frozen together), so
+// the returned struct is not a cross-field consistent point-in-time cut under
+// concurrency. See TaskStats field docs for counter semantics.
+func (s *Server) TaskStats() TaskStats {
+	s.lifeMu.Lock()
+	pool := s.taskPool
+	queuedCompletions := uint64(len(s.completionQueue))
+	queuedPosts := uint64(len(s.postQueue))
+	s.lifeMu.Unlock()
+
+	stats := TaskStats{
+		QueuedCompletions:       queuedCompletions,
+		QueuedPosts:             queuedPosts,
+		TasksAccepted:           s.tasksAccepted.Load(),
+		TasksFinished:           s.tasksFinished.Load(),
+		TaskCompletionsExecuted: s.taskCompletionsExecuted.Load(),
+		TasksRejectedFull:       s.tasksRejectedFull.Load(),
+		TasksCancelled:          s.tasksCancelled.Load(),
+		TaskPanics:              s.taskPanics.Load(),
+		PostsAccepted:           s.postsAccepted.Load(),
+		PostsExecuted:           s.postsExecuted.Load(),
+		PostsRejectedFull:       s.postsRejectedFull.Load(),
+	}
+	if pool != nil {
+		stats.QueuedTasks = pool.WaitingTasks()
+		if n := pool.RunningWorkers(); n > 0 {
+			stats.RunningTasks = uint64(n)
+		}
+	}
+	return stats
+}
+
 // Lifecycle, Post, and SubmitTask sentinel errors.
 var (
 	// ErrServerNotRunning is returned by Post and SubmitTask when the server
@@ -67,6 +153,9 @@ type taskCompletion struct {
 // before they are drained. Posts and task completions share the per-tick
 // AsyncCallbacksPerTick budget (round-robin, completion-first on the first
 // drain, preference persisted across ticks).
+//
+// Pipeline counters are exposed by TaskStats / Server.TaskStats
+// (PostsAccepted, PostsExecuted, PostsRejectedFull, QueuedPosts).
 func (s *Server) Post(fn func(*Server)) error {
 	if fn == nil {
 		return errors.New("golem: Post requires non-nil callback")
@@ -78,8 +167,10 @@ func (s *Server) Post(fn func(*Server)) error {
 	}
 	select {
 	case s.postQueue <- fn:
+		s.postsAccepted.Add(1)
 		return nil
 	default:
+		s.postsRejectedFull.Add(1)
 		return ErrPostQueueFull
 	}
 }
@@ -116,6 +207,15 @@ func (s *Server) Post(fn func(*Server)) error {
 // work receives cancellation, queued completions/posts are discarded, and no
 // complete/Post callback runs after the tick loop exits. Work that ignores
 // context cancellation can delay Run's return indefinitely.
+//
+// Pipeline counters are exposed by TaskStats / Server.TaskStats. TasksAccepted
+// is incremented under lifeMu before the per-submission start gate opens, so
+// worker finish/cancel/panic counters cannot observe an accepted task before
+// TasksAccepted reflects it. TasksFinished increments when work returns or
+// panics; TaskCompletionsExecuted increments only when complete actually runs
+// on the tick goroutine (so shutdown discard is observable as finished without
+// executed). Rejected submissions never open the gate and are not counted as
+// accepted.
 func (s *Server) SubmitTask(ctx context.Context, work func(context.Context) error, complete func(*Server, error)) error {
 	if ctx == nil {
 		return errors.New("golem: SubmitTask requires non-nil context")
@@ -134,7 +234,15 @@ func (s *Server) SubmitTask(ctx context.Context, work func(context.Context) erro
 	}
 	runCtx := s.runCtx
 	pool := s.taskPool
+	// Pond may run the wrapper on a worker before TrySubmitErr returns. Gate
+	// user work until accept is counted so finish/cancel/panic cannot race
+	// ahead of TasksAccepted. lifeMu is held until the gate opens, so shutdown
+	// (which takes lifeMu before cancelling the pool) cannot StopAndWait a
+	// worker blocked on the gate. Rejected TrySubmitErr never closes the gate
+	// and never launches a waiter.
+	startGate := make(chan struct{})
 	_, ok := pool.TrySubmitErr(func() error {
+		<-startGate
 		return s.runSubmittedTask(runCtx, ctx, work, complete)
 	})
 	if !ok {
@@ -143,8 +251,11 @@ func (s *Server) SubmitTask(ctx context.Context, work func(context.Context) erro
 		if s.life != lifecycleRunning || pool.Stopped() {
 			return ErrServerNotRunning
 		}
+		s.tasksRejectedFull.Add(1)
 		return ErrTaskQueueFull
 	}
+	s.tasksAccepted.Add(1)
+	close(startGate)
 	return nil
 }
 
@@ -159,11 +270,13 @@ func (s *Server) runSubmittedTask(runCtx, callerCtx context.Context, work func(c
 	defer effCancel()
 
 	var workErr error
+	panicked := false
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("golem: SubmitTask work panicked: %v\n%s", r, debug.Stack())
 				workErr = fmt.Errorf("%w: %v", ErrTaskPanicked, r)
+				panicked = true
 			}
 		}()
 		workErr = work(effCtx)
@@ -171,6 +284,16 @@ func (s *Server) runSubmittedTask(runCtx, callerCtx context.Context, work func(c
 			workErr = effCtx.Err()
 		}
 	}()
+
+	// Work returned or panicked: finished is independent of whether the tick
+	// completion callback later runs (shutdown may discard it).
+	s.tasksFinished.Add(1)
+	if panicked {
+		s.taskPanics.Add(1)
+	}
+	if effCtx.Err() != nil {
+		s.tasksCancelled.Add(1)
+	}
 
 	select {
 	case s.completionQueue <- taskCompletion{complete: complete, err: workErr}:
@@ -260,8 +383,10 @@ func (s *Server) drainAsyncCallbacks() {
 			return
 		}
 		if post != nil {
+			s.postsExecuted.Add(1)
 			post(s)
 		} else {
+			s.taskCompletionsExecuted.Add(1)
 			comp.complete(s, comp.err)
 		}
 	}
@@ -311,6 +436,12 @@ func (s *Server) finalizeLifecycle() {
 	}
 	if s.taskPool != nil {
 		s.taskPool.StopAndWait()
+		// Pond skips user work for accepted tasks still queued when the pool
+		// context ends; fold that into Golem's TasksCancelled (at most once
+		// per accepted task; runSubmittedTask never ran for these).
+		if n := s.taskPool.CanceledTasks(); n > 0 {
+			s.tasksCancelled.Add(n)
+		}
 	}
 	s.lifeMu.Lock()
 	s.life = lifecycleStopped

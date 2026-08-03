@@ -150,7 +150,7 @@ type ServerConfig struct {
 	// PostQueueCapacity is the bounded capacity of the tick-safe Post queue
 	// (default 1024). Zero selects the default; negative values panic in
 	// NewServer. A full queue causes Post to return ErrPostQueueFull without
-	// blocking.
+	// blocking. Depth is visible as TaskStats.QueuedPosts (approximate).
 	PostQueueCapacity int
 	// AsyncCallbacksPerTick caps how many task-completion and Post callbacks
 	// run each tick combined (default 256). Drain is round-robin that starts
@@ -160,16 +160,18 @@ type ServerConfig struct {
 	AsyncCallbacksPerTick int
 	// TaskWorkers is the maximum Pond worker concurrency for SubmitTask
 	// (default 4). Zero selects the default; negative values panic in NewServer.
+	// Live concurrency is visible as TaskStats.RunningTasks (approximate).
 	TaskWorkers int
 	// TaskQueueCapacity is the bounded Pond task-queue capacity for SubmitTask
 	// (default 256). Zero selects the default; negative values panic in
 	// NewServer. A full queue causes SubmitTask to return ErrTaskQueueFull
-	// without blocking.
+	// without blocking. Depth is visible as TaskStats.QueuedTasks (approximate).
 	TaskQueueCapacity int
 	// TaskCompletionQueueCapacity is the bounded capacity of the independent
 	// worker→tick completion queue (default 256). Zero selects the default;
 	// negative values panic in NewServer. When full, finished workers apply
-	// backpressure until capacity frees or the run context ends.
+	// backpressure until capacity frees or the run context ends. Depth is
+	// visible as TaskStats.QueuedCompletions (approximate).
 	TaskCompletionQueueCapacity int
 }
 
@@ -258,8 +260,9 @@ type Server struct {
 
 	// lifeMu gates Run/Post/SubmitTask acceptance against the linearizable
 	// lifecycle (created → running → stopping → stopped). Hold only across
-	// state checks, non-blocking postQueue sends, and TrySubmitErr; never
-	// across callback or work execution.
+	// state checks, non-blocking postQueue sends, TrySubmitErr, and the
+	// SubmitTask start-gate open (accepted before worker work); never across
+	// callback or work execution.
 	lifeMu          sync.Mutex
 	life            lifecycleState
 	postQueue       chan func(*Server)
@@ -271,6 +274,17 @@ type Server struct {
 	taskPool              pond.Pool
 	runCtx                context.Context
 	runCancel             context.CancelFunc
+
+	// Golem-owned TaskStats cumulatives (see TaskStats / Server.TaskStats).
+	tasksAccepted           atomic.Uint64
+	tasksFinished           atomic.Uint64
+	taskCompletionsExecuted atomic.Uint64
+	tasksRejectedFull       atomic.Uint64
+	tasksCancelled          atomic.Uint64
+	taskPanics              atomic.Uint64
+	postsAccepted           atomic.Uint64
+	postsExecuted           atomic.Uint64
+	postsRejectedFull       atomic.Uint64
 }
 
 // ReplicationStats is a snapshot of the most recently completed replication pass.
@@ -1133,6 +1147,9 @@ func (s *Server) drainMessages() {
 // lifeMu before the tick loop or Post/SubmitTask acceptance, then shuts down
 // the independent run context and pool without entering the loop. Live caller
 // cancellation is still linked through AfterFunc after acceptance opens.
+//
+// TaskStats / Server.TaskStats expose accept/reject, finish vs callback-executed,
+// cancellation, panic, and approximate queue/worker gauges for this pipeline.
 //
 // Blocks until the internal context is cancelled or the loop fails.
 // Returns ctx.Err() on clean shutdown.
