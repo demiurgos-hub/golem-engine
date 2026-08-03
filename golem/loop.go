@@ -146,6 +146,15 @@ type ServerConfig struct {
 	// cannot race with snapshot reads. Large embedded maps can exceed the
 	// 32000-byte reliable frame cap — prefer map_url for oversized payloads.
 	WorldSnapshotExclude []string
+	// PostQueueCapacity is the bounded capacity of the tick-safe Post queue
+	// (default 1024). Zero selects the default; negative values panic in
+	// NewServer. A full queue causes Post to return ErrPostQueueFull without
+	// blocking.
+	PostQueueCapacity int
+	// AsyncCallbacksPerTick caps how many posted callbacks run each tick
+	// (default 256). Excess remain queued for later ticks. Zero selects the
+	// default; negative values panic in NewServer.
+	AsyncCallbacksPerTick int
 }
 
 // TickFunc is the signature for the user's per-tick game logic callback.
@@ -230,6 +239,13 @@ type Server struct {
 	replStreamMsgs      int
 	replDatagramBatched int
 	replDatagramMsgs    int
+
+	// lifeMu gates Run/Post acceptance against the linearizable lifecycle
+	// (created → running → stopping → stopped). Hold only across state checks
+	// and non-blocking postQueue sends; never across callback execution.
+	lifeMu    sync.Mutex
+	life      lifecycleState
+	postQueue chan func(*Server)
 }
 
 // ReplicationStats is a snapshot of the most recently completed replication pass.
@@ -263,6 +279,7 @@ func NewServer(cfg ServerConfig) *Server {
 	cfg.Transport = normalizeServerTransport(cfg.Transport)
 	cfg.StateUpdateLane = normalizeStateUpdateLane(cfg.StateUpdateLane)
 	cfg.WorldSnapshotExclude = normalizeWorldSnapshotExclude(cfg.WorldSnapshotExclude)
+	normalizeTaskConfig(&cfg)
 	validateStateUpdateLane(cfg)
 	worldSnapshotExclude := worldSnapshotExcludeSet(cfg.WorldSnapshotExclude)
 	s := &Server{
@@ -270,6 +287,7 @@ func NewServer(cfg ServerConfig) *Server {
 		World:          world.NewStore(),
 		config:         cfg,
 		msgQueue:       make(chan pendingMsg, msgQueueCap),
+		postQueue:      make(chan func(*Server), cfg.PostQueueCapacity),
 		sessionAvatar:  make(map[int64]int64),
 		avatarSession:  make(map[int64]int64),
 		visibility:     visibility.NewManager(),
@@ -1067,25 +1085,46 @@ func (s *Server) drainMessages() {
 // also starts the built-in transport server. Entity updates are
 // auto-broadcast to all connected clients after each tick regardless of
 // whether the built-in server or an external router is used.
-// Each tick runs in order: OnTickStart, drain session-event queue (OnConnect /
-// OnMessage / OnDisconnect), entity ticks, OnTick game logic, collision step,
-// flush and broadcast, OnTickEnd.
-// Blocks until ctx is cancelled. Returns ctx.Err() on clean shutdown.
+//
+// Each tick runs in order: OnTickStart, drain posted callbacks (bounded by
+// AsyncCallbacksPerTick), drain session-event queue (OnConnect / OnMessage /
+// OnDisconnect), entity ticks, OnTick game logic, collision step, flush and
+// broadcast, OnTickEnd.
+//
+// Run is single-use: a concurrent or later call returns ErrServerAlreadyRun.
+// It always derives an internal context for the listener and tick loop.
+// Cancellation (or any Run return) linearizes shutdown: Post stops accepting
+// (ErrServerNotRunning), queued posts are discarded without running, and no
+// posted callback runs after Run returns.
+//
+// Blocks until the internal context is cancelled or the loop fails.
+// Returns ctx.Err() on clean shutdown.
 func (s *Server) Run(ctx context.Context) error {
-	if s.config.Addr != "" {
-		ctx, cancel := context.WithCancel(ctx)
-		defer cancel()
+	s.lifeMu.Lock()
+	if s.life != lifecycleCreated {
+		s.lifeMu.Unlock()
+		return ErrServerAlreadyRun
+	}
+	s.life = lifecycleRunning
+	s.lifeMu.Unlock()
 
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stopAfter := context.AfterFunc(runCtx, s.markLifecycleStopping)
+	defer stopAfter()
+	defer s.finalizeLifecycle()
+
+	if s.config.Addr != "" {
 		listenerErr := make(chan error, 1)
 		go func() {
-			err := s.listener.ListenAndServe(ctx)
+			err := s.listener.ListenAndServe(runCtx)
 			listenerErr <- err
 			if err != nil {
 				cancel()
 			}
 		}()
 
-		loopErr := s.runLoop(ctx)
+		loopErr := s.runLoop(runCtx)
 		cancel()
 		lErr := <-listenerErr
 
@@ -1094,7 +1133,7 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		return loopErr
 	}
-	return s.runLoop(ctx)
+	return s.runLoop(runCtx)
 }
 
 // envLogReplicationStats reports whether the process environment requests
@@ -1130,6 +1169,7 @@ func (s *Server) runLoop(ctx context.Context) error {
 				fn(s.tick)
 			}
 
+			s.drainPosts()
 			s.drainMessages()
 
 			s.reg.TickAll(dt)
