@@ -17,6 +17,8 @@ The `go-client` codegen integration emits generated Go in consumer projects from
 
 Keep transport constants and framing aligned with `golem/net` and `golem-js`: reliable frame cap `32000`, WebTransport datagram cap `1200`, datagram header/ACK mask sizes, lane IDs (`1` unreliable, `2` reliable-unordered, `3` reliable-ordered, `4` state-aware datagram delivery), and control frames `0x00 'OGS' 0x01/0x02`.
 
+`GameClient` exposes two command sends: `Send` uses reliable-unordered datagrams on WebTransport, while `SendOrdered` uses reliable-ordered datagrams. Both use a reliable-stream `ClientPacket` on WebSocket. Keep raw byte sends confined to `ReliableMessageChannel`, enforce each datagram lane's payload budget without stream fallback, and keep generated `Send{Name}` / `Send{Name}Ordered` helpers aligned.
+
 Public state update modes are only `stream` and `datagram`. Treat server names such as `datagramLaneEventualState`, `SendEventualState`, and `EventualStateDatagramPayloads` as internal wire/protocol details of the datagram mode, not a third public lane.
 
 `GameClient` treats stream `ServerMessage` frames as wrapped protobuf payloads, while compact state datagrams are framed state records and go directly through `EntityManager.ApplyCompactUpdate`. Keep world updates and server events on the reliable stream path.

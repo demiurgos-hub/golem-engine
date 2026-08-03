@@ -3,6 +3,7 @@ package golemclient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 )
@@ -232,74 +233,69 @@ func (c *GameClient) Disconnect() {
 	}
 }
 
-// Send encodes and sends a command over the reliable stream.
+// Send encodes and sends a command over the reliable unordered datagram lane
+// when available, or over the reliable stream otherwise.
 func (c *GameClient) Send(command any) error {
-	if c.encodeCommand == nil || c.encodePacket == nil {
+	return c.sendCommand(command, false)
+}
+
+// SendOrdered encodes and sends a command over the reliable ordered datagram
+// lane when available, or over the reliable stream otherwise.
+func (c *GameClient) SendOrdered(command any) error {
+	return c.sendCommand(command, true)
+}
+
+func (c *GameClient) sendCommand(command any, ordered bool) error {
+	c.mu.Lock()
+	channel := c.channel
+	c.mu.Unlock()
+	if channel == nil || !channel.Connected() {
+		return nil
+	}
+
+	if c.encodeCommand == nil {
 		return errors.New("golem-go-client: command codec is not configured")
 	}
 	frame, err := c.encodeCommand(command)
 	if err != nil {
 		return err
 	}
+
+	if maxDatagramBytes := channel.MaxDatagramBytes(); maxDatagramBytes > 0 {
+		maxPayloadBytes := maxDatagramBytes -
+			datagramPacketHeaderBytes -
+			datagramLaneHeaderBytes -
+			datagramReliableMessageIDBytes
+		laneName := "reliable unordered"
+		if ordered {
+			maxPayloadBytes -= datagramReliableOrderedSequenceBytes
+			laneName = "reliable ordered"
+		}
+		if len(frame) > maxPayloadBytes {
+			return fmt.Errorf(
+				"golem-go-client: encoded %s command size %d exceeds max payload %d",
+				laneName,
+				len(frame),
+				maxPayloadBytes,
+			)
+		}
+		if ordered {
+			return channel.SendReliableOrdered(frame)
+		}
+		return channel.SendReliableUnordered(frame)
+	}
+
+	if c.encodePacket == nil {
+		return errors.New("golem-go-client: command codec is not configured")
+	}
 	packet, err := c.encodePacket([][]byte{frame})
 	if err != nil {
 		return err
 	}
-	c.mu.Lock()
-	channel := c.channel
-	c.mu.Unlock()
-	if channel == nil || !channel.Connected() {
-		return nil
+	if maxBytes := channel.MaxMessageBytes(); maxBytes > 0 && len(packet) > maxBytes {
+		return fmt.Errorf("golem-go-client: encoded packet size %d exceeds max reliable message %d", len(packet), maxBytes)
 	}
 	return channel.Send(packet)
-}
-
-// SendUnreliable sends a raw unreliable datagram payload if supported.
-func (c *GameClient) SendUnreliable(data []byte) error {
-	c.mu.Lock()
-	channel := c.channel
-	c.mu.Unlock()
-	if channel == nil || !channel.Connected() {
-		return nil
-	}
-	return channel.SendUnreliable(data)
-}
-
-// SendReliableUnordered encodes and sends a command over reliable unordered datagrams.
-func (c *GameClient) SendReliableUnordered(command any) error {
-	frame, err := c.encodeDatagramCommand(command)
-	if err != nil {
-		return err
-	}
-	c.mu.Lock()
-	channel := c.channel
-	c.mu.Unlock()
-	if channel == nil || !channel.Connected() {
-		return nil
-	}
-	return channel.SendReliableUnordered(frame)
-}
-
-// SendReliableOrdered encodes and sends a command over reliable ordered datagrams.
-func (c *GameClient) SendReliableOrdered(command any) error {
-	frame, err := c.encodeDatagramCommand(command)
-	if err != nil {
-		return err
-	}
-	c.mu.Lock()
-	channel := c.channel
-	c.mu.Unlock()
-	if channel == nil || !channel.Connected() {
-		return nil
-	}
-	return channel.SendReliableOrdered(frame)
-}
-
-func (c *GameClient) encodeDatagramCommand(command any) ([]byte, error) {
-	if c.encodeCommand == nil {
-		return nil, errors.New("golem-go-client: command codec is not configured")
-	}
-	return c.encodeCommand(command)
 }
 
 // dispatchInboundEvent applies one inbound event under the client dispatch lock.

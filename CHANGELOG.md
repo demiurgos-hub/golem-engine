@@ -47,6 +47,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Changed
 
+- **Breaking:** JavaScript, Go, and Unity clients use two command sends: `send`/`Send` and `sendOrdered`/`SendOrdered`. On WebTransport, the first uses reliable unordered datagrams and the second uses reliable ordered datagrams; on WebSocket, both use the reliable stream. WebTransport commands must fit the lane payload budget (1176 bytes unordered or 1174 bytes ordered) and do not fall back to the stream when oversized. Generated per-command helpers are now `send{Name}`/`Send{Name}` and `send{Name}Ordered`/`Send{Name}Ordered`; re-run `golem-bake`.
 - JS `ConnectOptions` now includes optional `eventualAckIntervalMs` (already consumed by the WebTransport channel at runtime).
 - **Breaking:** `golem-phaser` now targets Phaser 4 and requires `phaser >=4.0.0`. Phaser 3 projects must upgrade their Phaser dependency before using the package.
 - **Breaking:** Phaser clients now register `GolemPlugin` globally with the `golem` scene mapping instead of extending `GameScene`; the connection persists across scene transitions.
@@ -60,6 +61,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Removed
 
+- Client `GameClient` raw-send methods and the legacy `sendReliableUnorderedCommand` / `sendReliableOrderedCommand`, `SendReliableUnordered` / `SendReliableOrdered`, and generated `*ReliableUnordered` / `*ReliableOrdered` command helpers.
 - `GameScene`, `createSpriteView`, `createGpuEntityView`, Phaser bridge interfaces, and generated Phaser `*Bridge.ts` files.
 
 ### Fixed

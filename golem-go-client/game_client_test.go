@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
+	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -53,22 +56,40 @@ func (r *recordingEntities) snapshot() (int, int, []byte) {
 }
 
 type fakeChannel struct {
-	callbacks channelCallbacks
-	sent      [][]byte
-	connected bool
+	callbacks             channelCallbacks
+	sent                  [][]byte
+	reliableUnorderedSent [][]byte
+	reliableOrderedSent   [][]byte
+	connected             bool
+	maxMessageBytes       int
+	maxDatagramBytes      int
+	sendErr               error
+	reliableUnorderedErr  error
+	reliableOrderedErr    error
 }
 
-func (f *fakeChannel) Connected() bool       { return f.connected }
-func (f *fakeChannel) MaxMessageBytes() int  { return maxReliableMessageBytes }
-func (f *fakeChannel) MaxDatagramBytes() int { return maxWebTransportDatagramBytes }
+func (f *fakeChannel) Connected() bool { return f.connected }
+func (f *fakeChannel) MaxMessageBytes() int {
+	if f.maxMessageBytes > 0 {
+		return f.maxMessageBytes
+	}
+	return maxReliableMessageBytes
+}
+func (f *fakeChannel) MaxDatagramBytes() int { return f.maxDatagramBytes }
 func (f *fakeChannel) Send(data []byte) error {
 	f.sent = append(f.sent, append([]byte(nil), data...))
-	return nil
+	return f.sendErr
 }
-func (f *fakeChannel) SendUnreliable(data []byte) error        { return f.Send(data) }
-func (f *fakeChannel) SendReliableUnordered(data []byte) error { return f.Send(data) }
-func (f *fakeChannel) SendReliableOrdered(data []byte) error   { return f.Send(data) }
-func (f *fakeChannel) Close() error                            { f.connected = false; return nil }
+func (f *fakeChannel) SendUnreliable(data []byte) error { return f.Send(data) }
+func (f *fakeChannel) SendReliableUnordered(data []byte) error {
+	f.reliableUnorderedSent = append(f.reliableUnorderedSent, append([]byte(nil), data...))
+	return f.reliableUnorderedErr
+}
+func (f *fakeChannel) SendReliableOrdered(data []byte) error {
+	f.reliableOrderedSent = append(f.reliableOrderedSent, append([]byte(nil), data...))
+	return f.reliableOrderedErr
+}
+func (f *fakeChannel) Close() error { f.connected = false; return nil }
 func (f *fakeChannel) OnOpen(fn func()) {
 	f.callbacks.onOpen = fn
 	if fn != nil {
@@ -86,6 +107,251 @@ func (f *fakeChannel) OnEventualStateMessage(fn func([]byte)) {
 	f.callbacks.onEventualStateMessage = fn
 }
 func (f *fakeChannel) OnClose(fn func(DisconnectInfo)) { f.callbacks.onClose = fn }
+
+func TestGameClientSendUsesWebTransportCommandLanes(t *testing.T) {
+	channel := &fakeChannel{
+		connected:        true,
+		maxDatagramBytes: maxWebTransportDatagramBytes,
+	}
+	client := NewGameClient(GameClientOptions{
+		EncodeCommand: func(command any) ([]byte, error) {
+			return []byte(command.(string)), nil
+		},
+	})
+	client.channel = channel
+
+	if err := client.Send("unordered"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := client.SendOrdered("ordered"); err != nil {
+		t.Fatalf("SendOrdered: %v", err)
+	}
+
+	if len(channel.sent) != 0 {
+		t.Fatalf("stream sends = %d, want 0", len(channel.sent))
+	}
+	if len(channel.reliableUnorderedSent) != 1 || !bytes.Equal(channel.reliableUnorderedSent[0], []byte("unordered")) {
+		t.Fatalf("reliable unordered sends = %q, want bare command frame", channel.reliableUnorderedSent)
+	}
+	if len(channel.reliableOrderedSent) != 1 || !bytes.Equal(channel.reliableOrderedSent[0], []byte("ordered")) {
+		t.Fatalf("reliable ordered sends = %q, want bare command frame", channel.reliableOrderedSent)
+	}
+}
+
+func TestGameClientSendUsesWebSocketStreamFallback(t *testing.T) {
+	channel := &fakeChannel{connected: true}
+	var packetCalls int
+	client := NewGameClient(GameClientOptions{
+		EncodeCommand: func(command any) ([]byte, error) {
+			return []byte(command.(string)), nil
+		},
+		EncodePacket: func(frames [][]byte) ([]byte, error) {
+			packetCalls++
+			if len(frames) != 1 {
+				t.Fatalf("packet frames = %d, want 1", len(frames))
+			}
+			return append([]byte("packet:"), frames[0]...), nil
+		},
+	})
+	client.channel = channel
+
+	if err := client.Send("unordered"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := client.SendOrdered("ordered"); err != nil {
+		t.Fatalf("SendOrdered: %v", err)
+	}
+
+	if packetCalls != 2 {
+		t.Fatalf("EncodePacket calls = %d, want 2", packetCalls)
+	}
+	want := [][]byte{[]byte("packet:unordered"), []byte("packet:ordered")}
+	if !reflect.DeepEqual(channel.sent, want) {
+		t.Fatalf("stream sends = %q, want %q", channel.sent, want)
+	}
+	if len(channel.reliableUnorderedSent) != 0 || len(channel.reliableOrderedSent) != 0 {
+		t.Fatalf("datagram sends = unordered %d ordered %d, want 0", len(channel.reliableUnorderedSent), len(channel.reliableOrderedSent))
+	}
+}
+
+func TestGameClientSendIsNoOpWhileDisconnected(t *testing.T) {
+	channel := &fakeChannel{maxDatagramBytes: maxWebTransportDatagramBytes}
+	client := NewGameClient(GameClientOptions{})
+	client.channel = channel
+
+	if err := client.Send("ignored"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := client.SendOrdered("ignored"); err != nil {
+		t.Fatalf("SendOrdered: %v", err)
+	}
+	if len(channel.sent)+len(channel.reliableUnorderedSent)+len(channel.reliableOrderedSent) != 0 {
+		t.Fatal("disconnected command was sent")
+	}
+}
+
+func TestGameClientSendPropagatesSelectedLaneErrors(t *testing.T) {
+	t.Run("command encoder", func(t *testing.T) {
+		wantErr := errors.New("encode failed")
+		channel := &fakeChannel{connected: true, maxDatagramBytes: maxWebTransportDatagramBytes}
+		client := NewGameClient(GameClientOptions{
+			EncodeCommand: func(any) ([]byte, error) { return nil, wantErr },
+		})
+		client.channel = channel
+
+		if err := client.Send("command"); !errors.Is(err, wantErr) {
+			t.Fatalf("Send error = %v, want %v", err, wantErr)
+		}
+	})
+
+	t.Run("packet encoder", func(t *testing.T) {
+		wantErr := errors.New("packet failed")
+		channel := &fakeChannel{connected: true}
+		client := NewGameClient(GameClientOptions{
+			EncodeCommand: func(any) ([]byte, error) { return []byte("command"), nil },
+			EncodePacket:  func([][]byte) ([]byte, error) { return nil, wantErr },
+		})
+		client.channel = channel
+
+		if err := client.SendOrdered("command"); !errors.Is(err, wantErr) {
+			t.Fatalf("SendOrdered error = %v, want %v", err, wantErr)
+		}
+	})
+
+	t.Run("reliable stream channel", func(t *testing.T) {
+		wantErr := errors.New("stream failed")
+		channel := &fakeChannel{connected: true, sendErr: wantErr}
+		client := NewGameClient(GameClientOptions{
+			EncodeCommand: func(any) ([]byte, error) { return []byte("command"), nil },
+			EncodePacket:  func([][]byte) ([]byte, error) { return []byte("packet"), nil },
+		})
+		client.channel = channel
+
+		if err := client.Send("command"); !errors.Is(err, wantErr) {
+			t.Fatalf("Send error = %v, want %v", err, wantErr)
+		}
+	})
+
+	t.Run("reliable unordered channel", func(t *testing.T) {
+		wantErr := errors.New("unordered failed")
+		channel := &fakeChannel{
+			connected:            true,
+			maxDatagramBytes:     maxWebTransportDatagramBytes,
+			reliableUnorderedErr: wantErr,
+		}
+		client := NewGameClient(GameClientOptions{
+			EncodeCommand: func(any) ([]byte, error) { return []byte("command"), nil },
+		})
+		client.channel = channel
+
+		if err := client.Send("command"); !errors.Is(err, wantErr) {
+			t.Fatalf("Send error = %v, want %v", err, wantErr)
+		}
+		if len(channel.sent) != 0 {
+			t.Fatalf("stream sends = %d, want no fallback", len(channel.sent))
+		}
+	})
+
+	t.Run("reliable ordered channel", func(t *testing.T) {
+		wantErr := errors.New("ordered failed")
+		channel := &fakeChannel{
+			connected:          true,
+			maxDatagramBytes:   maxWebTransportDatagramBytes,
+			reliableOrderedErr: wantErr,
+		}
+		client := NewGameClient(GameClientOptions{
+			EncodeCommand: func(any) ([]byte, error) { return []byte("command"), nil },
+		})
+		client.channel = channel
+
+		if err := client.SendOrdered("command"); !errors.Is(err, wantErr) {
+			t.Fatalf("SendOrdered error = %v, want %v", err, wantErr)
+		}
+		if len(channel.sent) != 0 {
+			t.Fatalf("stream sends = %d, want no fallback", len(channel.sent))
+		}
+	})
+}
+
+func TestGameClientSendEnforcesSelectedLaneSizes(t *testing.T) {
+	t.Run("reliable unordered datagram", func(t *testing.T) {
+		const payloadBytes = 3
+		channel := &fakeChannel{
+			connected: true,
+			maxDatagramBytes: datagramPacketHeaderBytes +
+				datagramLaneHeaderBytes +
+				datagramReliableMessageIDBytes +
+				payloadBytes,
+		}
+		client := NewGameClient(GameClientOptions{
+			EncodeCommand: func(any) ([]byte, error) { return []byte("wide"), nil },
+		})
+		client.channel = channel
+
+		err := client.Send("command")
+		if err == nil || !strings.Contains(err.Error(), "reliable unordered command size 4 exceeds max payload 3") {
+			t.Fatalf("Send error = %v, want reliable unordered payload size error", err)
+		}
+		if len(channel.sent)+len(channel.reliableUnorderedSent) != 0 {
+			t.Fatal("oversized WebTransport command used a transport lane")
+		}
+	})
+
+	t.Run("reliable ordered datagram", func(t *testing.T) {
+		const payloadBytes = 3
+		channel := &fakeChannel{
+			connected: true,
+			maxDatagramBytes: datagramPacketHeaderBytes +
+				datagramLaneHeaderBytes +
+				datagramReliableMessageIDBytes +
+				datagramReliableOrderedSequenceBytes +
+				payloadBytes,
+		}
+		client := NewGameClient(GameClientOptions{
+			EncodeCommand: func(any) ([]byte, error) { return []byte("wide"), nil },
+		})
+		client.channel = channel
+
+		err := client.SendOrdered("command")
+		if err == nil || !strings.Contains(err.Error(), "reliable ordered command size 4 exceeds max payload 3") {
+			t.Fatalf("SendOrdered error = %v, want reliable ordered payload size error", err)
+		}
+		if len(channel.sent)+len(channel.reliableOrderedSent) != 0 {
+			t.Fatal("oversized WebTransport command used a transport lane")
+		}
+	})
+
+	t.Run("WebSocket stream", func(t *testing.T) {
+		channel := &fakeChannel{connected: true, maxMessageBytes: 3}
+		client := NewGameClient(GameClientOptions{
+			EncodeCommand: func(any) ([]byte, error) { return []byte("x"), nil },
+			EncodePacket:  func([][]byte) ([]byte, error) { return []byte("wide"), nil },
+		})
+		client.channel = channel
+
+		err := client.SendOrdered("command")
+		if err == nil || !strings.Contains(err.Error(), "exceeds max reliable message 3") {
+			t.Fatalf("SendOrdered error = %v, want stream size error", err)
+		}
+		if len(channel.sent) != 0 {
+			t.Fatal("oversized WebSocket packet was sent")
+		}
+	})
+}
+
+func TestGameClientCommandAPIExcludesLegacyMethods(t *testing.T) {
+	clientType := reflect.TypeOf((*GameClient)(nil))
+	for _, name := range []string{"Send", "SendOrdered"} {
+		if _, ok := clientType.MethodByName(name); !ok {
+			t.Errorf("GameClient.%s is missing", name)
+		}
+	}
+	for _, name := range []string{"SendUnreliable", "SendReliableUnordered", "SendReliableOrdered"} {
+		if _, ok := clientType.MethodByName(name); ok {
+			t.Errorf("legacy GameClient.%s is still public", name)
+		}
+	}
+}
 
 func TestGameClientRoutesStreamEntityUpdates(t *testing.T) {
 	entities := newRecordingEntities()

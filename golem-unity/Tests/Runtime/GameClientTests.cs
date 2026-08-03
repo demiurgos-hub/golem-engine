@@ -64,9 +64,9 @@ namespace GolemEngine.Unity.Tests
         }
 
         [Test]
-        public void SendsReliableDatagramCommandsWithoutClientPacketWrapper()
+        public void MapsCommandsToReliableDatagramLanesWithoutClientPacketWrapper()
         {
-            var transport = new RecordingTransport();
+            var transport = new RecordingTransport(GolemDatagramProtocol.MaxWebTransportDatagramBytes);
             var client = new GameClient(
                 new RecordingEntityManager(),
                 bytes => bytes,
@@ -77,12 +77,110 @@ namespace GolemEngine.Unity.Tests
             client.Connect("ws://example.invalid/ws");
             var command = new byte[] { 9, 8, 7 };
 
-            client.SendReliableUnordered(command);
-            client.SendReliableOrdered(command);
+            client.Send(command);
+            client.SendOrdered(command);
 
             Assert.That(transport.ReliableUnorderedSent[0], Is.EqualTo(command));
             Assert.That(transport.ReliableOrderedSent[0], Is.EqualTo(command));
             Assert.That(transport.Sent, Is.Empty);
+        }
+
+        [Test]
+        public void ExposesOnlyUnifiedCommandSendingMethods()
+        {
+            Assert.That(typeof(GameClient).GetMethod("Send", new[] { typeof(object) }), Is.Not.Null);
+            Assert.That(typeof(GameClient).GetMethod("SendOrdered", new[] { typeof(object) }), Is.Not.Null);
+            Assert.That(typeof(GameClient).GetMethod("SendUnreliable"), Is.Null);
+            Assert.That(typeof(GameClient).GetMethod("SendReliableUnordered"), Is.Null);
+            Assert.That(typeof(GameClient).GetMethod("SendReliableOrdered"), Is.Null);
+        }
+
+        [Test]
+        public void BatchesWebSocketCommandsInCallOrderOnSharedReliableStream()
+        {
+            var transport = new RecordingTransport();
+            var client = new GameClient(
+                new RecordingEntityManager(),
+                bytes => bytes,
+                cmd => (byte[])cmd,
+                frames => ClientPacket(frames),
+                _ => transport);
+
+            client.Connect("ws://example.invalid/ws");
+            var first = new byte[] { 1 };
+            var second = new byte[] { 2 };
+
+            client.Send(first);
+            client.SendOrdered(second);
+            Flush(client);
+
+            Assert.That(transport.Sent, Has.Count.EqualTo(1));
+            Assert.That(transport.Sent[0], Is.EqualTo(ClientPacket(new[] { first, second })));
+            Assert.That(transport.ReliableUnorderedSent, Is.Empty);
+            Assert.That(transport.ReliableOrderedSent, Is.Empty);
+        }
+
+        [Test]
+        public void RejectsOversizedDatagramCommandsWithoutStreamFallback()
+        {
+            var unorderedTransport = new RecordingTransport(
+                GolemDatagramProtocol.PacketHeaderBytes +
+                GolemDatagramProtocol.LaneHeaderBytes +
+                GolemDatagramProtocol.ReliableMessageIdBytes +
+                3);
+            var unorderedClient = new GameClient(
+                new RecordingEntityManager(),
+                bytes => bytes,
+                cmd => (byte[])cmd,
+                frames => ClientPacket(frames),
+                _ => unorderedTransport);
+            unorderedClient.Connect("https://example.invalid/wt");
+
+            var command = new byte[4];
+            var unorderedError = Assert.Throws<InvalidOperationException>(() => unorderedClient.Send(command));
+            Assert.That(unorderedError.Message, Does.Contain("reliable unordered command size 4 exceeds max payload 3"));
+            Assert.That(unorderedTransport.Sent, Is.Empty);
+            Assert.That(unorderedTransport.ReliableUnorderedSent, Is.Empty);
+
+            var orderedTransport = new RecordingTransport(
+                GolemDatagramProtocol.PacketHeaderBytes +
+                GolemDatagramProtocol.LaneHeaderBytes +
+                GolemDatagramProtocol.ReliableMessageIdBytes +
+                GolemDatagramProtocol.ReliableOrderedSequenceBytes +
+                3);
+            var orderedClient = new GameClient(
+                new RecordingEntityManager(),
+                bytes => bytes,
+                cmd => (byte[])cmd,
+                frames => ClientPacket(frames),
+                _ => orderedTransport);
+            orderedClient.Connect("https://example.invalid/wt");
+
+            var orderedError = Assert.Throws<InvalidOperationException>(() => orderedClient.SendOrdered(command));
+            Assert.That(orderedError.Message, Does.Contain("reliable ordered command size 4 exceeds max payload 3"));
+            Assert.That(orderedTransport.Sent, Is.Empty);
+            Assert.That(orderedTransport.ReliableOrderedSent, Is.Empty);
+        }
+
+        [Test]
+        public void IgnoresCommandsWhileDisconnected()
+        {
+            var encodeCalls = 0;
+            var client = new GameClient(
+                new RecordingEntityManager(),
+                bytes => bytes,
+                cmd =>
+                {
+                    encodeCalls++;
+                    return (byte[])cmd;
+                },
+                frames => ClientPacket(frames),
+                _ => new RecordingTransport());
+
+            client.Send(new byte[] { 1 });
+            client.SendOrdered(new byte[] { 2 });
+
+            Assert.That(encodeCalls, Is.Zero);
         }
 
         [Test]
@@ -101,9 +199,7 @@ namespace GolemEngine.Unity.Tests
             client.Send(new byte[31995]);
             client.Send(new byte[1]);
 
-            typeof(GameClient)
-                .GetMethod("Flush", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-                ?.Invoke(client, Array.Empty<object>());
+            Flush(client);
 
             Assert.That(transport.Sent.Count, Is.EqualTo(2));
         }
@@ -153,6 +249,13 @@ namespace GolemEngine.Unity.Tests
             return w.Finish();
         }
 
+        private static void Flush(GameClient client)
+        {
+            typeof(GameClient)
+                .GetMethod("Flush", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                ?.Invoke(client, Array.Empty<object>());
+        }
+
         private sealed class RecordingEntityManager : IEntityManager
         {
             public object LastUpdate { get; private set; }
@@ -171,9 +274,16 @@ namespace GolemEngine.Unity.Tests
 
         private sealed class RecordingTransport : IGolemTransport
         {
+            private readonly int _maxDatagramBytes;
+
+            public RecordingTransport(int maxDatagramBytes = 0)
+            {
+                _maxDatagramBytes = maxDatagramBytes;
+            }
+
             public bool Connected => true;
             public int MaxMessageBytes => GameClient.MaxReliableMessageBytes;
-            public int MaxDatagramBytes => GolemDatagramProtocol.MaxWebTransportDatagramBytes;
+            public int MaxDatagramBytes => _maxDatagramBytes;
             public List<byte[]> Sent { get; } = new List<byte[]>();
             public List<byte[]> UnreliableSent { get; } = new List<byte[]>();
             public List<byte[]> ReliableUnorderedSent { get; } = new List<byte[]>();

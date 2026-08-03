@@ -400,14 +400,38 @@ export class GameClient {
     this._channel = null;
   }
 
-  /** Encode and queue a command object built by a generated build*Command helper. */
+  /** Send a command over reliable-unordered datagrams, or the reliable stream when unavailable. */
   send(cmd: object): void {
+    this._sendCommand(cmd, "reliableUnordered");
+  }
+
+  /** Send a command over reliable-ordered datagrams, or the reliable stream when unavailable. */
+  sendOrdered(cmd: object): void {
+    this._sendCommand(cmd, "reliableOrdered");
+  }
+
+  private _sendCommand(
+    cmd: object,
+    lane: "reliableUnordered" | "reliableOrdered",
+  ): void {
     const channel = this._channel;
     if (!channel?.connected) {
       return;
     }
 
     const frame = this._encode(cmd);
+    const datagramChannel = channel[lane];
+    if (datagramChannel) {
+      if (frame.byteLength > datagramChannel.maxDatagramBytes) {
+        const laneName = lane === "reliableUnordered" ? "reliable unordered" : "reliable ordered";
+        throw new Error(
+          `golem-js: encoded ${laneName} command size ${frame.byteLength} exceeds max ${datagramChannel.maxDatagramBytes}`,
+        );
+      }
+      datagramChannel.send(frame);
+      return;
+    }
+
     const frameBytes = clientPacketEntrySize(frame);
     if (frameBytes > channel.maxMessageBytes) {
       throw new Error(
@@ -422,78 +446,6 @@ export class GameClient {
     this._queuedFrames.push(frame);
     this._queuedBytes += frameBytes;
     this._scheduleFlush();
-  }
-
-  /** Send one lossy datagram when the active transport supports it. */
-  sendUnreliable(bytes: Uint8Array): void {
-    const channel = this._channel?.unreliable;
-    if (!channel) {
-      return;
-    }
-    if (bytes.byteLength > channel.maxDatagramBytes) {
-      throw new Error(
-        `golem-js: datagram size ${bytes.byteLength} exceeds max webtransport datagram ${channel.maxDatagramBytes}`,
-      );
-    }
-    channel.send(bytes);
-  }
-
-  /** Send one reliable unordered datagram when the active transport supports it. */
-  sendReliableUnordered(bytes: Uint8Array): void {
-    const channel = this._channel?.reliableUnordered;
-    if (!channel) {
-      return;
-    }
-    if (bytes.byteLength > channel.maxDatagramBytes) {
-      throw new Error(
-        `golem-js: reliable unordered datagram size ${bytes.byteLength} exceeds max ${channel.maxDatagramBytes}`,
-      );
-    }
-    channel.send(bytes);
-  }
-
-  /** Encode and send one command over the reliable unordered datagram lane. */
-  sendReliableUnorderedCommand(cmd: object): void {
-    const channel = this._channel?.reliableUnordered;
-    if (!channel) {
-      return;
-    }
-    const frame = this._encode(cmd);
-    if (frame.byteLength > channel.maxDatagramBytes) {
-      throw new Error(
-        `golem-js: encoded reliable unordered command size ${frame.byteLength} exceeds max ${channel.maxDatagramBytes}`,
-      );
-    }
-    channel.send(frame);
-  }
-
-  /** Send one reliable ordered datagram when the active transport supports it. */
-  sendReliableOrdered(bytes: Uint8Array): void {
-    const channel = this._channel?.reliableOrdered;
-    if (!channel) {
-      return;
-    }
-    if (bytes.byteLength > channel.maxDatagramBytes) {
-      throw new Error(
-        `golem-js: reliable ordered datagram size ${bytes.byteLength} exceeds max ${channel.maxDatagramBytes}`,
-      );
-    }
-    channel.send(bytes);
-  }
-
-  /** Encode and send one command over the reliable ordered datagram lane. */
-  sendReliableOrderedCommand(cmd: object): void {
-    const channel = this._channel?.reliableOrdered;
-    if (!channel) {
-      return;
-    }
-    const frame = this._encode(cmd);
-    if (frame.byteLength > channel.maxDatagramBytes) {
-      throw new Error(
-        `golem-js: encoded reliable ordered command size ${frame.byteLength} exceeds max ${channel.maxDatagramBytes}`,
-      );
-    }
-    channel.send(frame);
   }
 
   get connected(): boolean {

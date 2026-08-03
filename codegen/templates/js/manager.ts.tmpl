@@ -150,7 +150,7 @@ export class EntityManager {
 
 // --- Command builders ---
 // Each function returns a plain object matching the ClientMessage shape.
-// Send with client.send(buildMove(...)) via the GameClient from createClient().
+// Send with client.send(buildMoveCommand(...)) or client.sendOrdered(buildMoveCommand(...)).
 {{range .Commands}}
 /** Build a {{.Name}} command{{if eq .Target "entity"}} targeting the given entity{{end}}. */
 export function build{{.Name}}Command({{if eq .Target "entity"}}entityId: number{{if .Fields}}, {{end}}{{end}}{{range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.FieldName}}: {{$f.TSType}}{{end}}) {

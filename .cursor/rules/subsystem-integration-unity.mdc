@@ -20,4 +20,6 @@ The `csharp-client` codegen integration emits generated C# from `codegen/templat
 
 **WebTransport platform limit:** `WebTransportClientOptions` supports timeouts/datagrams/`AllowUntrustedCertificates` but not browser-style `serverCertificateHashes`. Built-in `FromConnectOptions` applies ACK interval (`EventualAckIntervalMilliseconds` test seam) and rejects non-empty hashes — never silently ignore them. Custom options-aware factories own certificate policy if they construct transports directly.
 
+`GameClient` exposes two command sends: `Send` uses reliable-unordered datagrams on WebTransport, while `SendOrdered` uses reliable-ordered datagrams. Both share the reliable-stream `ClientPacket` queue on WebSocket. Keep raw byte sends confined to `IGolemTransport`, enforce each datagram lane's payload budget without stream fallback, and keep generated `Send{Name}` / `Send{Name}Ordered` helpers aligned.
+
 Keep framing aligned with `golem/net` / `golem-js`: reliable frame cap `32000`, WebTransport datagram cap `1200`, datagram lanes, and control frames. When changing C# generated shapes or connect APIs, update `codegen` template tests and `golem-unity/Tests`.

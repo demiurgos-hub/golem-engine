@@ -45,6 +45,8 @@ func TestGenerateGoClientManagerTemplateWiresCompactUpdatesAndCommands(t *testin
 		"mask := r.Uint64()",
 		"d.EntityId = id",
 		"d.Revision = revision",
+		"// Command builders create typed client messages for GameClient.Send and GameClient.SendOrdered.",
+		"// BuildMoveCommand builds a Move command targeting an entity for GameClient.Send or GameClient.SendOrdered.",
 		"func BuildMoveCommand(entityID int64, dx float32) *ClientMessage",
 		"Payload: &ClientMessage_MoveCommand{",
 	} {
@@ -62,9 +64,16 @@ func TestGenerateGoClientCreateClientTemplateWiresGeneratedCodecs(t *testing.T) 
 	data := schema.SharedData{
 		GolemImport: "github.com/demiurgos-hub/golem-engine/golem-go-client",
 		GoPackage:   "client",
-		Commands:    []schema.CommandData{{Name: "Move", Target: "entity"}},
-		WorldTypes:  []schema.WorldTypeData{{Name: "Zone", DataName: "ZoneData"}},
-		Events:      []schema.EventData{{Name: "Toast", Target: "global"}},
+		Commands: []schema.CommandData{{
+			Name:   "Move",
+			Target: "entity",
+			Fields: []schema.CommandFieldInfo{{
+				FieldName: "dx",
+				GoType:    "float32",
+			}},
+		}},
+		WorldTypes: []schema.WorldTypeData{{Name: "Zone", DataName: "ZoneData"}},
+		Events:     []schema.EventData{{Name: "Toast", Target: "global"}},
 	}
 	var out bytes.Buffer
 	if err := tmpl.Execute(&out, data); err != nil {
@@ -80,9 +89,23 @@ func TestGenerateGoClientCreateClientTemplateWiresGeneratedCodecs(t *testing.T) 
 		"return command.(*ClientMessage).Marshal(), nil",
 		"return (&ClientPacket{Frames: frames}).Marshal(), nil",
 		"msg := &WorldUpdate{}",
+		"func SendMove(client *golemclient.GameClient, entityID int64, dx float32) error",
+		"return client.Send(BuildMoveCommand(entityID, dx))",
+		"func SendMoveOrdered(client *golemclient.GameClient, entityID int64, dx float32) error",
+		"return client.SendOrdered(BuildMoveCommand(entityID, dx))",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("generated go client factory missing %q\n%s", want, content)
+		}
+	}
+	for _, legacy := range []string{
+		"SendMoveReliableUnordered",
+		"SendMoveReliableOrdered",
+		"client.SendReliableUnordered",
+		"client.SendReliableOrdered",
+	} {
+		if strings.Contains(content, legacy) {
+			t.Fatalf("generated go client factory still contains legacy helper %q\n%s", legacy, content)
 		}
 	}
 }

@@ -117,19 +117,24 @@ test("GameClient flushes one small command on the next microtask", async () => {
   assert.equal(channel.sent[0].byteLength, packetBytes([new Uint8Array(10)]).byteLength);
 });
 
-test("GameClient batches back-to-back sends into one ClientPacket", async () => {
+test("GameClient stream fallback batches send and sendOrdered in call order", async () => {
   const { client, channel } = makeClient();
   client.connect("ws://example.test");
 
-  client.send({ bytes: 10 });
-  client.send({ bytes: 20 });
+  client.send({ bytes: [1] });
+  client.sendOrdered({ bytes: [2] });
+  client.send({ bytes: [3] });
 
   await flushMicrotasks();
 
   assert.equal(channel.sent.length, 1);
-  assert.equal(
-    channel.sent[0].byteLength,
-    packetBytes([new Uint8Array(10), new Uint8Array(20)]).byteLength,
+  assert.deepEqual(
+    Array.from(channel.sent[0]),
+    Array.from(packetBytes([
+      new Uint8Array([1]),
+      new Uint8Array([2]),
+      new Uint8Array([3]),
+    ])),
   );
 });
 
@@ -265,34 +270,16 @@ test("WebTransport certificate hashes are validated before connect", () => {
   }
 });
 
-test("GameClient sends unreliable datagrams through the optional channel", () => {
-  const unreliable = {
-    maxDatagramBytes: 1280,
+test("GameClient routes send methods to bare reliable datagram commands when supported", async () => {
+  const reliableUnordered = {
+    maxDatagramBytes: 1176,
     sent: [],
     send(bytes) {
       this.sent.push(bytes);
     },
   };
-  const channel = new MockChannel();
-  channel.unreliable = unreliable;
-  const client = new GameClient({
-    entityManager: { applyUpdate() {}, get() { return undefined; } },
-    decode: (bytes) => bytes,
-    encode: (cmd) => new Uint8Array(cmd.bytes),
-    encodePacket: (frames) => packetBytes(frames),
-    createChannel: () => channel,
-  });
-  client.connect("ws://example.test");
-
-  client.sendUnreliable(new Uint8Array([1, 2, 3]));
-
-  assert.equal(unreliable.sent.length, 1);
-  assert.deepEqual(Array.from(unreliable.sent[0]), [1, 2, 3]);
-});
-
-test("GameClient sends reliable unordered datagrams through the optional channel", () => {
-  const reliableUnordered = {
-    maxDatagramBytes: 1256,
+  const reliableOrdered = {
+    maxDatagramBytes: 1174,
     sent: [],
     send(bytes) {
       this.sent.push(bytes);
@@ -300,30 +287,6 @@ test("GameClient sends reliable unordered datagrams through the optional channel
   };
   const channel = new MockChannel();
   channel.reliableUnordered = reliableUnordered;
-  const client = new GameClient({
-    entityManager: { applyUpdate() {}, get() { return undefined; } },
-    decode: (bytes) => bytes,
-    encode: (cmd) => new Uint8Array(cmd.bytes),
-    encodePacket: (frames) => packetBytes(frames),
-    createChannel: () => channel,
-  });
-  client.connect("ws://example.test");
-
-  client.sendReliableUnordered(new Uint8Array([4, 5, 6]));
-
-  assert.equal(reliableUnordered.sent.length, 1);
-  assert.deepEqual(Array.from(reliableUnordered.sent[0]), [4, 5, 6]);
-});
-
-test("GameClient sends reliable ordered datagrams through the optional channel", () => {
-  const reliableOrdered = {
-    maxDatagramBytes: 1254,
-    sent: [],
-    send(bytes) {
-      this.sent.push(bytes);
-    },
-  };
-  const channel = new MockChannel();
   channel.reliableOrdered = reliableOrdered;
   const client = new GameClient({
     entityManager: { applyUpdate() {}, get() { return undefined; } },
@@ -334,40 +297,48 @@ test("GameClient sends reliable ordered datagrams through the optional channel",
   });
   client.connect("ws://example.test");
 
-  client.sendReliableOrdered(new Uint8Array([7, 8, 9]));
+  client.send({ bytes: [1, 2, 3, 4] });
+  client.sendOrdered({ bytes: [4, 3, 2, 1] });
+  await flushMicrotasks();
 
-  assert.equal(reliableOrdered.sent.length, 1);
-  assert.deepEqual(Array.from(reliableOrdered.sent[0]), [7, 8, 9]);
-});
-
-test("GameClient encodes and sends reliable unordered commands through the datagram lane", () => {
-  const reliableUnordered = {
-    maxDatagramBytes: 1256,
-    sent: [],
-    send(bytes) {
-      this.sent.push(bytes);
-    },
-  };
-  const channel = new MockChannel();
-  channel.reliableUnordered = reliableUnordered;
-  const client = new GameClient({
-    entityManager: { applyUpdate() {}, get() { return undefined; } },
-    decode: (bytes) => bytes,
-    encode: (cmd) => new Uint8Array(cmd.bytes),
-    encodePacket: (frames) => packetBytes(frames),
-    createChannel: () => channel,
-  });
-  client.connect("ws://example.test");
-
-  client.sendReliableUnorderedCommand({ bytes: [1, 2, 3, 4] });
-
+  assert.equal(channel.sent.length, 0);
   assert.equal(reliableUnordered.sent.length, 1);
   assert.deepEqual(Array.from(reliableUnordered.sent[0]), [1, 2, 3, 4]);
+  assert.equal(reliableOrdered.sent.length, 1);
+  assert.deepEqual(Array.from(reliableOrdered.sent[0]), [4, 3, 2, 1]);
 });
 
-test("GameClient encodes and sends reliable ordered commands through the datagram lane", () => {
+test("GameClient enforces the reliable unordered datagram payload cap without stream fallback", () => {
+  const reliableUnordered = {
+    maxDatagramBytes: 3,
+    sent: [],
+    send(bytes) {
+      this.sent.push(bytes);
+    },
+  };
+  const channel = new MockChannel();
+  channel.reliableUnordered = reliableUnordered;
+  const client = new GameClient({
+    entityManager: { applyUpdate() {}, get() { return undefined; } },
+    decode: (bytes) => bytes,
+    encode: (cmd) => new Uint8Array(cmd.bytes),
+    encodePacket: (frames) => packetBytes(frames),
+    createChannel: () => channel,
+  });
+  client.connect("ws://example.test");
+
+  assert.throws(
+    () => client.send({ bytes: [1, 2, 3, 4] }),
+    /reliable unordered command size 4 exceeds max 3/,
+  );
+
+  assert.equal(reliableUnordered.sent.length, 0);
+  assert.equal(channel.sent.length, 0);
+});
+
+test("GameClient enforces the reliable ordered datagram payload cap without stream fallback", () => {
   const reliableOrdered = {
-    maxDatagramBytes: 1254,
+    maxDatagramBytes: 2,
     sent: [],
     send(bytes) {
       this.sent.push(bytes);
@@ -384,10 +355,48 @@ test("GameClient encodes and sends reliable ordered commands through the datagra
   });
   client.connect("ws://example.test");
 
-  client.sendReliableOrderedCommand({ bytes: [4, 3, 2, 1] });
+  assert.throws(
+    () => client.sendOrdered({ bytes: [4, 3, 2] }),
+    /reliable ordered command size 3 exceeds max 2/,
+  );
 
-  assert.equal(reliableOrdered.sent.length, 1);
-  assert.deepEqual(Array.from(reliableOrdered.sent[0]), [4, 3, 2, 1]);
+  assert.equal(reliableOrdered.sent.length, 0);
+  assert.equal(channel.sent.length, 0);
+});
+
+test("GameClient command sends are no-ops while disconnected", async () => {
+  let encodeCalls = 0;
+  const channel = new MockChannel();
+  const client = new GameClient({
+    entityManager: { applyUpdate() {}, get() { return undefined; } },
+    decode: (bytes) => bytes,
+    encode: () => {
+      encodeCalls++;
+      return new Uint8Array([1]);
+    },
+    encodePacket: (frames) => packetBytes(frames),
+    createChannel: () => channel,
+  });
+
+  client.send({});
+  client.sendOrdered({});
+  await flushMicrotasks();
+
+  assert.equal(encodeCalls, 0);
+  assert.equal(channel.sent.length, 0);
+});
+
+test("GameClient does not expose legacy raw or lane-specific send methods", () => {
+  const { client } = makeClient();
+  for (const method of [
+    "sendUnreliable",
+    "sendReliableUnordered",
+    "sendReliableOrdered",
+    "sendReliableUnorderedCommand",
+    "sendReliableOrderedCommand",
+  ]) {
+    assert.equal(method in client, false);
+  }
 });
 
 function delay(ms) {
@@ -669,14 +678,11 @@ test("WebTransport stream sends piggyback eventual ACK state", async () => {
   const previousWebTransport = globalThis.WebTransport;
   globalThis.WebTransport = FakeWebTransport;
   try {
-    const client = new GameClient({
-      entityManager: { applyUpdate() {}, applyCompactUpdate() {}, get() { return undefined; } },
-      decode: (bytes) => bytes,
-      encode: (cmd) => new Uint8Array(cmd.bytes),
-      encodePacket: (frames) => packetBytes(frames),
-      createChannel,
+    const channel = createChannel({
+      transport: "webtransport",
+      url: "https://example.test",
+      eventualAckIntervalMs: 1000,
     });
-    client.connect({ transport: "webtransport", url: "https://example.test", eventualAckIntervalMs: 1000 });
     await delay(5);
     const transport = FakeWebTransport.instances.at(-1);
 
@@ -691,8 +697,7 @@ test("WebTransport stream sends piggyback eventual ACK state", async () => {
     }));
     await delay(10);
 
-    client.send({ bytes: [9, 8, 7] });
-    await flushMicrotasks();
+    channel.send(packetBytes([new Uint8Array([9, 8, 7])]));
     await delay(5);
 
     assert.equal(transport.datagramWrites.length, 0);
@@ -705,7 +710,7 @@ test("WebTransport stream sends piggyback eventual ACK state", async () => {
       Array.from(streamPayload.slice(23)),
       Array.from(packetBytes([new Uint8Array([9, 8, 7])])),
     );
-    client.disconnect();
+    channel.close();
   } finally {
     globalThis.WebTransport = previousWebTransport;
     FakeWebTransport.instances.length = 0;

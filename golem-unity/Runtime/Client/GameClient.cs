@@ -136,56 +136,22 @@ namespace GolemEngine.Unity
             _transport = null;
         }
 
+        /// <summary>
+        /// Sends a command on the reliable-unordered datagram lane when available,
+        /// or on the shared reliable stream otherwise.
+        /// </summary>
         public void Send(object command)
         {
-            var frame = _encodeCommand(command);
-            var entrySize = ClientPacketEntrySize(frame);
-            if (entrySize > MaxReliableMessageBytes)
-            {
-                throw new InvalidOperationException($"golem-unity: command size {entrySize} exceeds max reliable message {MaxReliableMessageBytes}");
-            }
-
-            if (_queuedBytes > 0 && _queuedBytes + entrySize > MaxReliableMessageBytes)
-            {
-                Flush();
-            }
-
-            _queuedFrames.Add(frame);
-            _queuedBytes += entrySize;
-
-            if (!_flushScheduled)
-            {
-                _flushScheduled = true;
-                GolemMainThreadDispatcher.Enqueue(Flush);
-            }
+            SendCommand(command, ordered: false);
         }
 
-        public void SendUnreliable(byte[] bytes)
+        /// <summary>
+        /// Sends a command on the reliable-ordered datagram lane when available,
+        /// or on the shared reliable stream otherwise.
+        /// </summary>
+        public void SendOrdered(object command)
         {
-            var transport = _transport;
-            if (transport == null || !transport.Connected || transport.MaxDatagramBytes <= 0)
-            {
-                return;
-            }
-            if (bytes == null)
-            {
-                throw new ArgumentNullException(nameof(bytes));
-            }
-            if (bytes.Length > transport.MaxDatagramBytes)
-            {
-                throw new InvalidOperationException($"golem-unity: datagram size {bytes.Length} exceeds max datagram {transport.MaxDatagramBytes}");
-            }
-            transport.SendUnreliable(bytes);
-        }
-
-        public void SendReliableUnordered(object command)
-        {
-            SendDatagramCommand(command, reliableOrdered: false);
-        }
-
-        public void SendReliableOrdered(object command)
-        {
-            SendDatagramCommand(command, reliableOrdered: true);
+            SendCommand(command, ordered: true);
         }
 
         private void Flush()
@@ -213,25 +179,65 @@ namespace GolemEngine.Unity
             _transport.Send(packet);
         }
 
-        private void SendDatagramCommand(object command, bool reliableOrdered)
+        private void SendCommand(object command, bool ordered)
         {
             var transport = _transport;
-            if (transport == null || !transport.Connected || transport.MaxDatagramBytes <= 0)
+            if (transport == null || !transport.Connected)
             {
                 return;
             }
+
             var frame = _encodeCommand(command);
-            if (frame.Length > transport.MaxDatagramBytes)
+            if (transport.MaxDatagramBytes > 0)
             {
-                throw new InvalidOperationException($"golem-unity: encoded datagram command size {frame.Length} exceeds max datagram {transport.MaxDatagramBytes}");
+                var maxPayloadBytes = transport.MaxDatagramBytes -
+                    GolemDatagramProtocol.PacketHeaderBytes -
+                    GolemDatagramProtocol.LaneHeaderBytes -
+                    GolemDatagramProtocol.ReliableMessageIdBytes;
+                var laneName = "reliable unordered";
+                if (ordered)
+                {
+                    maxPayloadBytes -= GolemDatagramProtocol.ReliableOrderedSequenceBytes;
+                    laneName = "reliable ordered";
+                }
+                if (frame.Length > maxPayloadBytes)
+                {
+                    throw new InvalidOperationException($"golem-unity: encoded {laneName} command size {frame.Length} exceeds max payload {maxPayloadBytes}");
+                }
+                if (ordered)
+                {
+                    transport.SendReliableOrdered(frame);
+                }
+                else
+                {
+                    transport.SendReliableUnordered(frame);
+                }
+                return;
             }
-            if (reliableOrdered)
+
+            QueueReliableStreamCommand(frame);
+        }
+
+        private void QueueReliableStreamCommand(byte[] frame)
+        {
+            var entrySize = ClientPacketEntrySize(frame);
+            if (entrySize > MaxReliableMessageBytes)
             {
-                transport.SendReliableOrdered(frame);
+                throw new InvalidOperationException($"golem-unity: command size {entrySize} exceeds max reliable message {MaxReliableMessageBytes}");
             }
-            else
+
+            if (_queuedBytes > 0 && _queuedBytes + entrySize > MaxReliableMessageBytes)
             {
-                transport.SendReliableUnordered(frame);
+                Flush();
+            }
+
+            _queuedFrames.Add(frame);
+            _queuedBytes += entrySize;
+
+            if (!_flushScheduled)
+            {
+                _flushScheduled = true;
+                GolemMainThreadDispatcher.Enqueue(Flush);
             }
         }
 

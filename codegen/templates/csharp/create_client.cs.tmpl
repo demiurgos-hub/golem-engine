@@ -110,14 +110,14 @@ namespace {{.GoPackage}}
         }
 {{if .Commands}}
 {{range .Commands}}
-        public static void Send{{.Name}}ReliableUnordered(GameClient client{{if or (eq .Target "entity") .Fields}}, {{end}}{{if eq .Target "entity"}}long entityId{{if .Fields}}, {{end}}{{end}}{{range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.CSType}} {{$f.FieldName}}{{end}})
+        public static void Send{{.Name}}(GameClient client{{if or (eq .Target "entity") .Fields}}, {{end}}{{if eq .Target "entity"}}long entityId{{if .Fields}}, {{end}}{{end}}{{range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.CSType}} {{$f.FieldName}}{{end}})
         {
-            client.SendReliableUnordered(CommandBuilders.Build{{.Name}}Command({{if eq .Target "entity"}}entityId{{if .Fields}}, {{end}}{{end}}{{range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.FieldName}}{{end}}));
+            client.Send(CommandBuilders.Build{{.Name}}Command({{if eq .Target "entity"}}entityId{{if .Fields}}, {{end}}{{end}}{{range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.FieldName}}{{end}}));
         }
 
-        public static void Send{{.Name}}ReliableOrdered(GameClient client{{if or (eq .Target "entity") .Fields}}, {{end}}{{if eq .Target "entity"}}long entityId{{if .Fields}}, {{end}}{{end}}{{range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.CSType}} {{$f.FieldName}}{{end}})
+        public static void Send{{.Name}}Ordered(GameClient client{{if or (eq .Target "entity") .Fields}}, {{end}}{{if eq .Target "entity"}}long entityId{{if .Fields}}, {{end}}{{end}}{{range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.CSType}} {{$f.FieldName}}{{end}})
         {
-            client.SendReliableOrdered(CommandBuilders.Build{{.Name}}Command({{if eq .Target "entity"}}entityId{{if .Fields}}, {{end}}{{end}}{{range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.FieldName}}{{end}}));
+            client.SendOrdered(CommandBuilders.Build{{.Name}}Command({{if eq .Target "entity"}}entityId{{if .Fields}}, {{end}}{{end}}{{range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.FieldName}}{{end}}));
         }
 {{end}}
 {{end}}

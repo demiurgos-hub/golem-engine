@@ -202,10 +202,10 @@ func (m *EntityManager) applyDelta{{.Name}}(d *{{.Name}}Delta) {
 {{- end}}
 {{if .Commands}}
 
-// Command builders create typed client messages for GameClient.Send.
+// Command builders create typed client messages for GameClient.Send and GameClient.SendOrdered.
 {{range .Commands}}
 
-// Build{{.Name}}Command builds a {{.Name}} command{{if eq .Target "entity"}} targeting an entity{{end}}.
+// Build{{.Name}}Command builds a {{.Name}} command{{if eq .Target "entity"}} targeting an entity{{end}} for GameClient.Send or GameClient.SendOrdered.
 func Build{{.Name}}Command({{if eq .Target "entity"}}entityID int64{{if .Fields}}, {{end}}{{end}}{{range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.FieldName}} {{$f.GoType}}{{end}}) *ClientMessage {
 	return &ClientMessage{
 		Payload: &ClientMessage_{{.Name}}Command{

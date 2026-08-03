@@ -8,7 +8,7 @@ import (
 	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
-func TestCreateClientTemplateIncludesDatagramCommandHelpers(t *testing.T) {
+func TestCreateClientTemplateIncludesUnifiedCommandHelpers(t *testing.T) {
 	tmpl, err := loadEmbeddedTemplate("templates/js/create_client.ts.tmpl")
 	if err != nil {
 		t.Fatalf("loadEmbeddedTemplate: %v", err)
@@ -44,15 +44,26 @@ func TestCreateClientTemplateIncludesDatagramCommandHelpers(t *testing.T) {
 		`import { EntityManager, buildMoveCommand, buildReadyUpCommand } from "./EntityManager.js";`,
 		`export { buildMoveCommand } from "./EntityManager.js";`,
 		`export { buildReadyUpCommand } from "./EntityManager.js";`,
-		"export function sendMoveReliableUnordered(client: GameClient, entityId: number, dx: number, dy: number): void {",
-		"client.sendReliableUnorderedCommand(buildMoveCommand(entityId, dx, dy));",
-		"export function sendMoveReliableOrdered(client: GameClient, entityId: number, dx: number, dy: number): void {",
-		"client.sendReliableOrderedCommand(buildMoveCommand(entityId, dx, dy));",
-		"export function sendReadyUpReliableUnordered(client: GameClient): void {",
-		"export function sendReadyUpReliableOrdered(client: GameClient): void {",
+		"export function sendMove(client: GameClient, entityId: number, dx: number, dy: number): void {",
+		"client.send(buildMoveCommand(entityId, dx, dy));",
+		"export function sendMoveOrdered(client: GameClient, entityId: number, dx: number, dy: number): void {",
+		"client.sendOrdered(buildMoveCommand(entityId, dx, dy));",
+		"export function sendReadyUp(client: GameClient): void {",
+		"export function sendReadyUpOrdered(client: GameClient): void {",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("generated create_client helper missing %q\n%s", want, content)
+		}
+	}
+
+	for _, legacy := range []string{
+		"ReliableUnordered",
+		"ReliableOrdered",
+		"sendReliableUnorderedCommand",
+		"sendReliableOrderedCommand",
+	} {
+		if strings.Contains(content, legacy) {
+			t.Fatalf("generated create_client helper contains legacy name %q\n%s", legacy, content)
 		}
 	}
 }

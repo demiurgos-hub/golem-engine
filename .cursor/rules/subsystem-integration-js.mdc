@@ -20,6 +20,8 @@ The `js-client` integration emits generated TypeScript in consumer projects from
 
 Transport constants and framing must stay in sync with `golem/net`: reliable frame cap `32000`, WebTransport datagram cap `1200`, datagram header/ACK mask sizes, lane IDs (`1` unreliable, `2` reliable-unordered, `3` reliable-ordered, `4` eventual-state), and control frames `0x00 'OGS' 0x01/0x02`.
 
+`GameClient` exposes two command sends: `send` uses reliable-unordered datagrams on WebTransport, while `sendOrdered` uses reliable-ordered datagrams. Both fall back to the shared reliable-stream `ClientPacket` queue on WebSocket. Keep raw byte sends confined to the low-level channel contracts, enforce each datagram lane's payload budget without stream fallback, and keep generated `send{Name}` / `send{Name}Ordered` helpers aligned.
+
 `GameClient` treats stream `ServerMessage` frames as wrapped protobuf payloads, while compact state datagrams are framed state records and go directly through `EntityManager.applyCompactUpdate`. Keep world updates and server events on the reliable stream path.
 
 Generated managers own client-side state: entity revisions reject stale updates; full state spawns/registers lifecycle hooks; deltas update existing entities only; collection/map deltas use `undefined` as absent and empty values as explicit clears. Entity, world, and event listeners are multicast sets whose registration methods return unsubscribe functions. Entity-targeted events expose typed `(entity, event)` subscriptions while preserving optional entity hooks for advanced model logic. The generated `Client` intersection type exposes each configured entity, world, and event manager as its concrete generated type rather than the optional runtime interface.
