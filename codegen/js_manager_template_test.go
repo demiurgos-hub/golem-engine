@@ -109,6 +109,8 @@ func TestGenerateJSManagerTemplateUsesMulticastSubscriptions(t *testing.T) {
 		"for (const fn of this._onSpawn) fn(e!);",
 		"for (const fn of this._onUpdate) fn(e);",
 		"for (const fn of this._onRemove) fn(id);",
+		"clear(): void {",
+		"this._lastRevisions.clear();",
 		"Phaser presentation should use an entity-view registry instead.",
 	} {
 		if !strings.Contains(content, want) {

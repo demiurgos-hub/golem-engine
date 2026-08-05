@@ -37,6 +37,26 @@ namespace {{.GoPackage}}
         public void OnSpawn(Action<object> fn) { _onSpawn = fn; }
         public void OnUpdate(Action<object> fn) { _onUpdate = fn; }
         public void OnRemove(Action<long> fn) { _onRemove = fn; }
+
+        /// <summary>
+        /// Remove every known entity, fire OnRemove for each, and clear revision
+        /// tracking. Call on disconnect / before reconnect so stale views cannot
+        /// linger when remove frames were lost with the transport.
+        /// </summary>
+        public void Clear()
+        {
+            var ids = new List<long>(_entities.Keys);
+            foreach (var id in ids)
+            {
+                if (!_entities.TryGetValue(id, out var removed) || !_entities.Remove(id))
+                {
+                    continue;
+                }
+                if (removed is IEntityLifecycle lifecycle) lifecycle.OnRemove();
+                _onRemove?.Invoke(id);
+            }
+            _lastRevisions.Clear();
+        }
 {{range .Entities}}
         public void Register{{.Name}}(Func<long, Synced{{.Name}}> factory) { _{{.LowerName}}Factory = factory; }
 {{- end}}

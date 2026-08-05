@@ -191,6 +191,8 @@ export interface EntityManagerLike {
   applyUpdate(update: unknown): void;
   applyCompactUpdate?(frame: Uint8Array): void;
   get(entityId: number): unknown;
+  /** Optional: drop all entities (fires remove listeners). Called on disconnect. */
+  clear?(): void;
 }
 
 /**
@@ -381,6 +383,7 @@ export class GameClient {
     channel.onOpen(() => this._onConnect?.());
     channel.onClose((ev) => {
       this._clearQueuedFrames();
+      this._clearEntities();
       if (this._channel === channel) {
         this._channel = null;
       }
@@ -534,6 +537,10 @@ export class GameClient {
     this._queuedFrames = [];
     this._queuedBytes = 0;
     this._flushScheduled = false;
+  }
+
+  private _clearEntities(): void {
+    this.entities.clear?.();
   }
 
   onConnect(fn: () => void): void { this._onConnect = fn; }

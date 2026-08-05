@@ -152,6 +152,31 @@ func TestSessionReadPumpClosesTransportWhenDatagramReadFails(t *testing.T) {
 	}
 }
 
+func TestSessionCloseWithReasonHandshake(t *testing.T) {
+	serverConn, clientConn, cleanup := testWSPairWithClient(t)
+	defer cleanup()
+
+	sess := newWebSocketSession(42, serverConn)
+	sess.CloseWithReason("session_replaced")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _, err := clientConn.Read(ctx)
+	if err == nil {
+		t.Fatal("expected client read to fail after server close")
+	}
+	var ce websocket.CloseError
+	if !errors.As(err, &ce) {
+		t.Fatalf("err type %T = %v, want CloseError", err, err)
+	}
+	if ce.Code != websocket.StatusNormalClosure {
+		t.Fatalf("close code = %v, want StatusNormalClosure", ce.Code)
+	}
+	if ce.Reason != "session_replaced" {
+		t.Fatalf("close reason = %q, want session_replaced", ce.Reason)
+	}
+}
+
 func TestSessionReadPumpInterceptsClientCloseControlFrame(t *testing.T) {
 	reliable := &scriptedReliableChannel{
 		messages: [][]byte{ClientCloseControlFrame(), []byte("after-close")},

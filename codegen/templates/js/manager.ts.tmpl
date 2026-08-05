@@ -51,6 +51,22 @@ export class EntityManager {
     this._onRemove.add(fn);
     return () => { this._onRemove.delete(fn); };
   }
+
+  /**
+   * Remove every known entity, fire onRemove for each, and clear revision
+   * tracking. Call on disconnect / before reconnect so stale sprites cannot
+   * linger when remove frames were lost with the transport.
+   */
+  clear(): void {
+    const ids = [...this._entities.keys()];
+    for (const id of ids) {
+      const removed = this._entities.get(id);
+      if (!removed || !this._entities.delete(id)) continue;
+      (removed as EntityLifecycle).onRemove?.();
+      for (const fn of this._onRemove) fn(id);
+    }
+    this._lastRevisions.clear();
+  }
 {{range .Entities}}
   /**
    * Register a custom subclass for {{.Name}} entity logic.

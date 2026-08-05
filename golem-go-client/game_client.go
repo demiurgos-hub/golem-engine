@@ -191,6 +191,7 @@ func (c *GameClient) Connect(ctx context.Context, options ConnectOptions) error 
 		c.mu.Unlock()
 		inbound.stop()
 		if shouldNotify {
+			c.clearEntities()
 			log.Printf("golem-go-client: disconnect was_clean=%v error=%v", info.WasClean, info.Err)
 			if c.onClose != nil {
 				c.onClose(info)
@@ -227,9 +228,18 @@ func (c *GameClient) Disconnect() {
 	if channel != nil {
 		_ = channel.Close()
 	}
-	if shouldNotify && onClose != nil {
-		log.Printf("golem-go-client: disconnect was_clean=%v error=%v", true, nil)
-		onClose(DisconnectInfo{WasClean: true})
+	if shouldNotify {
+		c.clearEntities()
+		if onClose != nil {
+			log.Printf("golem-go-client: disconnect was_clean=%v error=%v", true, nil)
+			onClose(DisconnectInfo{WasClean: true})
+		}
+	}
+}
+
+func (c *GameClient) clearEntities() {
+	if clearer, ok := c.entities.(clearableEntityManager); ok {
+		clearer.Clear()
 	}
 }
 

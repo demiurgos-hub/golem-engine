@@ -58,6 +58,30 @@ func (m *EntityManager) OnUpdate(fn func(SyncedEntity)) { m.onUpdate = fn }
 
 // OnRemove registers a callback fired after an entity is removed.
 func (m *EntityManager) OnRemove(fn func(int64)) { m.onRemove = fn }
+
+// Clear removes every known entity, fires onRemove for each, and clears
+// revision tracking. Call on disconnect / before reconnect so stale state
+// cannot linger when remove frames were lost with the transport.
+func (m *EntityManager) Clear() {
+	ids := make([]int64, 0, len(m.entities))
+	for id := range m.entities {
+		ids = append(ids, id)
+	}
+	for _, id := range ids {
+		removed, ok := m.entities[id]
+		if !ok {
+			continue
+		}
+		delete(m.entities, id)
+		if life, ok := removed.(golemclient.EntityLifecycle); ok {
+			life.OnRemove()
+		}
+		if m.onRemove != nil {
+			m.onRemove(id)
+		}
+	}
+	clear(m.lastRevisions)
+}
 {{range .Entities}}
 
 // Register{{.Name}} registers a custom factory for {{.Name}} entities.

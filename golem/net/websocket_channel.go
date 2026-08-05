@@ -46,8 +46,13 @@ func (c *websocketReliableChannel) ReadMessages(ctx context.Context, onMsg func(
 }
 
 func (c *websocketReliableChannel) Close() error {
-	c.conn.CloseNow()
-	return nil
+	return c.CloseWith(websocket.StatusNormalClosure, "")
+}
+
+// CloseWith performs the WebSocket close handshake so clients see a clean
+// disconnect (wasClean) instead of an abrupt CloseNow drop.
+func (c *websocketReliableChannel) CloseWith(code websocket.StatusCode, reason string) error {
+	return c.conn.Close(code, reason)
 }
 
 func logReliableWriteDrop(sessionID int64, err error) error {

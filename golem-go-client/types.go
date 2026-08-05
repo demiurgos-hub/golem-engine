@@ -53,6 +53,11 @@ type EntityManagerLike interface {
 	Get(int64) any
 }
 
+// clearableEntityManager is optionally implemented by generated EntityManagers.
+type clearableEntityManager interface {
+	Clear()
+}
+
 // WorldManagerLike is the contract generated Go WorldManagers satisfy.
 type WorldManagerLike interface {
 	ApplyUpdate(any)

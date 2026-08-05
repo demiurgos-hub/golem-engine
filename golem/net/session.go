@@ -39,6 +39,8 @@ type Session struct {
 	done      chan struct{}
 	doneOnce  sync.Once
 	closeOnce sync.Once
+	// closeReason is set by CloseWithReason before closeTransport runs.
+	closeReason string
 
 	// Cumulative successful writes (for LogReplicationStats deltas).
 	wireDatagramOK atomic.Uint64
@@ -80,17 +82,25 @@ func newDatagramDrainBudget() datagramDrainBudget {
 // newWebSocketSession wraps a WebSocket connection in the transport-neutral Session API.
 func newWebSocketSession(id int64, conn *websocket.Conn) *Session {
 	reliable := newWebSocketReliableChannel(conn)
-	return newSession(id, reliable, nil, reliable.Close)
+	s := newSession(id, reliable, nil, nil)
+	s.closeTransport = func() error {
+		return reliable.CloseWith(websocket.StatusNormalClosure, s.closeReason)
+	}
+	return s
 }
 
 // newWebTransportSession wraps a WebTransport session in the transport-neutral Session API.
 func newWebTransportSession(id int64, session *webtransport.Session, stream *webtransport.Stream) *Session {
-	return newSession(
+	s := newSession(
 		id,
 		newWebTransportReliableChannel(stream),
 		newWebTransportDatagramChannel(session),
-		func() error { return session.CloseWithError(0, "") },
+		nil,
 	)
+	s.closeTransport = func() error {
+		return session.CloseWithError(0, s.closeReason)
+	}
+	return s
 }
 
 // writePump drains the session's per-lane queues using ack preemption and
@@ -776,10 +786,20 @@ func laneName(lane datagramLane) string {
 
 // Close terminates the session transport and unblocks any waiting writePump.
 // Exported so generated routers and custom middleware can reject bad clients.
+// The close handshake uses StatusNormalClosure with an empty reason so JS
+// clients observe wasClean and do not auto-reconnect.
 func (s *Session) Close() {
+	s.CloseWithReason("")
+}
+
+// CloseWithReason is Close with a transport close reason string (WebSocket
+// close reason / WebTransport error message). Reason should be short ASCII
+// (WebSocket limits reasons to 123 bytes). Empty reason is allowed.
+func (s *Session) CloseWithReason(reason string) {
 	if s.closed.Swap(true) {
 		return
 	}
+	s.closeReason = reason
 	s.closeNow()
 	s.shutdown()
 }
