@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/quic-go/webtransport-go"
 	golemnet "github.com/demiurgos-hub/golem-engine/golem/net"
 	"github.com/demiurgos-hub/golem-engine/golem/pb"
+	"github.com/quic-go/webtransport-go"
 )
 
 type interestTickEntity struct {
@@ -35,6 +35,7 @@ func (e *interestTickEntity) EntityID() int64              { return e.id }
 func (e *interestTickEntity) TypeName() string             { return "interest-test" }
 func (e *interestTickEntity) Position() (float32, float32) { return float32(e.x), float32(e.y) }
 func (e *interestTickEntity) IsGlobal() bool               { return e.global }
+func (e *interestTickEntity) StateRevision() uint64        { return e.revision }
 func (e *interestTickEntity) FlushUpdate() ([]byte, error) {
 	e.flushCalls++
 	if e.flush == nil {
@@ -188,13 +189,15 @@ func TestRunInterestTickCachesWrappedFramesPerTick(t *testing.T) {
 		StateUpdateLane: StateUpdateLaneStream,
 		CellSize:        4,
 	})
-	srv.SetRemovalSerializer(func(entityID int64, _ uint64) ([]byte, error) {
+	removalRevisions := make(map[int64]uint64)
+	srv.SetRemovalSerializer(func(entityID int64, revision uint64) ([]byte, error) {
+		removalRevisions[entityID] = revision
 		return []byte(fmt.Sprintf("removed:%d", entityID)), nil
 	})
 
 	anchorA := &interestTickEntity{id: 1, x: 0, y: 0, full: []byte("anchorA-full")}
 	anchorB := &interestTickEntity{id: 2, x: 0, y: 0, full: []byte("anchorB-full")}
-	shared := &interestTickEntity{id: 3, x: 1, y: 0, full: []byte("shared-full"), flush: []byte("shared-delta")}
+	shared := &interestTickEntity{id: 3, x: 1, y: 0, full: []byte("shared-full"), flush: []byte("shared-delta"), revision: 7}
 
 	for _, e := range []*interestTickEntity{anchorA, anchorB, shared} {
 		if err := srv.CreateEntity(e); err != nil {
@@ -298,6 +301,19 @@ func TestRunInterestTickCachesWrappedFramesPerTick(t *testing.T) {
 	}
 	if !bytes.Equal(payloads1[0], []byte("removed:3")) || !bytes.Equal(payloads2[0], []byte("removed:3")) {
 		t.Fatalf("removal payload mismatch: got %q and %q", payloads1[0], payloads2[0])
+	}
+	if got := removalRevisions[shared.id]; got != shared.revision {
+		t.Fatalf("FOI exit removal revision = %d, want live revision %d", got, shared.revision)
+	}
+
+	shared.x = 1
+	if err := srv.runInterestTick(); err != nil {
+		t.Fatalf("runInterestTick tick4: %v", err)
+	}
+	payloads1 = mustReadWrappedMessages(t, client1, 1)[0]
+	payloads2 = mustReadWrappedMessages(t, client2, 1)[0]
+	if !containsPayload(payloads1, shared.full) || !containsPayload(payloads2, shared.full) {
+		t.Fatalf("FOI re-entry must send full state at the unchanged revision: got %q and %q", payloads1, payloads2)
 	}
 }
 

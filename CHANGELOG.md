@@ -8,6 +8,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Entities that leave and re-enter a field of interest or visibility group now respawn even when their state revision did not change while hidden. Interest-only removals retain the live revision; hard deletions still use a newer tombstone revision to reject late state.
 - `Server.SubmitTask` accounting now increments `TasksAccepted` before Pond can run user work: a per-submission start gate opens only after a successful `TrySubmitErr` and the accepted increment (rejected full-queue submissions are not counted and never open the gate). This keeps `TasksFinished` / `TasksCancelled` / `TaskPanics` from racing ahead of `TasksAccepted` when a worker claims a task immediately, without blocking the tick on queue capacity.
 - `Server.Run` with an already-cancelled caller context now linearizes shutdown synchronously before the tick loop or `Post`/`SubmitTask` acceptance, while keeping the independent internal run context for Pond shutdown ordering.
 - `golem-go-client` `GameClient.Disconnect` (and therefore `Connect` when replacing a live session) emits exactly one clean `OnDisconnect` (`WasClean=true`) for a live local teardown. Clearing the channel before `Close` prevents a duplicate transport `OnClose` notify; a second `Disconnect` with no active session remains a no-op.

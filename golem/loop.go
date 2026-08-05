@@ -1617,10 +1617,12 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 				if s.removalSerializer == nil {
 					return fmt.Errorf("entity %d exited visibility but no RemovalSerializer configured", id)
 				}
-				revision := uint64(1)
+				// A visibility exit only hides a live entity. Keep its current
+				// revision so a same-revision full state is accepted on re-entry.
+				revision := uint64(0)
 				if e, found := s.reg.Get(id); found {
 					if r, ok := e.(registry.StateRevisioner); ok {
-						revision = r.StateRevision() + 1
+						revision = r.StateRevision()
 					}
 				}
 				data, err := s.removalSerializer(id, revision)
@@ -2015,10 +2017,12 @@ func (s *Server) runInterestTick() error {
 				if s.removalSerializer == nil {
 					return fmt.Errorf("entity %d exited FOI but no RemovalSerializer configured", id)
 				}
-				revision := uint64(1)
+				// An FOI exit only hides a live entity. Keep its current revision
+				// so a same-revision full state is accepted on re-entry.
+				revision := uint64(0)
 				if e, found := s.reg.Get(id); found {
 					if r, ok := e.(registry.StateRevisioner); ok {
-						revision = r.StateRevision() + 1
+						revision = r.StateRevision()
 					}
 				}
 				data, err := s.removalSerializer(id, revision)

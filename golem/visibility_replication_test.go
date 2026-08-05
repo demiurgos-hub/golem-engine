@@ -69,12 +69,14 @@ func TestInterestVisibilityMemberNonMemberLeaveRejoin(t *testing.T) {
 		StateUpdateLane: StateUpdateLaneStream,
 		CellSize:        4,
 	})
-	srv.SetRemovalSerializer(func(entityID int64, _ uint64) ([]byte, error) {
+	removalRevisions := make(map[int64]uint64)
+	srv.SetRemovalSerializer(func(entityID int64, revision uint64) ([]byte, error) {
+		removalRevisions[entityID] = revision
 		return []byte(fmt.Sprintf("removed:%d", entityID)), nil
 	})
 
 	anchor := &interestTickEntity{id: 1, x: 0, y: 0, full: []byte("anchor-full")}
-	secret := &interestTickEntity{id: 2, x: 1, y: 0, full: []byte("secret-full"), flush: []byte("secret-delta")}
+	secret := &interestTickEntity{id: 2, x: 1, y: 0, full: []byte("secret-full"), flush: []byte("secret-delta"), revision: 9}
 	for _, e := range []*interestTickEntity{anchor, secret} {
 		if err := srv.CreateEntity(e); err != nil {
 			t.Fatalf("CreateEntity(%d): %v", e.id, err)
@@ -139,6 +141,9 @@ func TestInterestVisibilityMemberNonMemberLeaveRejoin(t *testing.T) {
 	leaveBatch := mustReadWrappedMessages(t, memberConn, 1)[0]
 	if !containsPayload(leaveBatch, []byte("removed:2")) {
 		t.Fatalf("leave must send EntityRemoved: %v", leaveBatch)
+	}
+	if got := removalRevisions[secret.id]; got != secret.revision {
+		t.Fatalf("visibility exit removal revision = %d, want live revision %d", got, secret.revision)
 	}
 	if knowing := srv.SessionsKnowing(secret.id); len(knowing) != 0 {
 		t.Fatalf("SessionsKnowing after leave = %v, want empty", knowing)
