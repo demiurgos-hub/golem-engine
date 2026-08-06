@@ -8,4 +8,6 @@ alwaysApply: false
 
 **Static world data store:** `Data` (`WorldName`, `MarshalUpdate`) and thread-safe `Store` (`Set`, `Get`, `MarshalAll`, `MarshalAllExcept`). `MarshalAll` / `MarshalAllExcept` return payloads in sorted name order for deterministic connect snapshots. `MarshalAllExcept(exclude)` omits names present in the exclude set; nil/empty exclude includes everything. Excluded-but-absent names are ignored.
 
+**WorldUpdate tags (bake):** world schemas may set optional root `tag:` (≥1). When any world sets `tag`, every world schema must set a unique tag (all-or-nothing). Otherwise tags auto-assign 1..N in sorted type-name order. Explicit tags keep additive world types from shifting existing wire numbers.
+
 **Boundaries:** pure data/serialization. Stdlib only. Does **not** import `golem`, `golem/net`, `golem/registry`, or `golem/interest`. Session targeting, snapshot exclusion policy, and reliable-frame delivery live on `golem.Server` (`PushWorldData`, `SendWorldData`, `SendStoredWorldData`, `WorldSnapshotExclude`).

@@ -118,6 +118,7 @@ type EntityUpdateField struct {
 // WorldSchemaFile is the YAML model for one world data type (e.g. schemas/world/zone.yaml).
 type WorldSchemaFile struct {
 	World  string                   `yaml:"world"`
+	Tag    int                      `yaml:"tag"` // optional WorldUpdate oneof tag (≥1); all-or-nothing across world schemas
 	Fields map[string]WorldFieldDef `yaml:"fields"`
 	Source *WorldSourceDef          `yaml:"source"` // optional; links to a Tiled or LDtk file
 }
@@ -179,6 +180,7 @@ type WorldTypeData struct {
 	DataName       string // Name + "Data", e.g. "ZoneData"
 	SnakeName      string // snake_case of DataName, e.g. "zone_data"
 	LowerName      string // lcFirst of Name, e.g. "zone"
+	UpdateTag      int    // WorldUpdate oneof tag (≥1); set by LoadWorldSchemas
 	Fields         []WorldFieldInfo
 	Source         *WorldSourceDef // non-nil when the schema has a source: block
 	ProtocolImport string
@@ -1045,7 +1047,9 @@ func ValidateEvents(events []EventData, entities []EntityData) error {
 }
 
 // LoadWorldSchemas reads all .yaml files from the world directory and returns
-// parsed world types sorted alphabetically by type name (for stable proto tags).
+// parsed world types sorted alphabetically by type name.
+// WorldUpdate oneof tags are either explicit (`tag:` on every world schema) or
+// auto-assigned 1..N in that sorted order when no schema sets tag.
 // Returns an empty slice (not an error) if the directory does not exist, so
 // world schemas are optional. Returns an error if a file has an empty world
 // name or if two files declare the same world type.
@@ -1058,7 +1062,11 @@ func LoadWorldSchemas(worldDir string, customTypes map[string]CustomTypeData) ([
 		return nil, fmt.Errorf("reading world dir %s: %w", worldDir, err)
 	}
 
-	var worldTypes []WorldTypeData
+	type loadedWorld struct {
+		file string
+		wf   WorldSchemaFile
+	}
+	var loaded []loadedWorld
 	seen := make(map[string]string) // world type name -> first YAML filename
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
@@ -1084,11 +1092,40 @@ func LoadWorldSchemas(worldDir string, customTypes map[string]CustomTypeData) ([
 		}
 		seen[name] = e.Name()
 		wf.World = name
-		worldTypes = append(worldTypes, BuildWorldTypeData(wf, customTypes))
+		loaded = append(loaded, loadedWorld{file: e.Name(), wf: wf})
 	}
-	slices.SortFunc(worldTypes, func(a, b WorldTypeData) int {
-		return strings.Compare(a.Name, b.Name)
+	slices.SortFunc(loaded, func(a, b loadedWorld) int {
+		return strings.Compare(a.wf.World, b.wf.World)
 	})
+
+	explicit := 0
+	for _, lw := range loaded {
+		if lw.wf.Tag != 0 {
+			explicit++
+		}
+	}
+	if explicit != 0 && explicit != len(loaded) {
+		return nil, fmt.Errorf("world schemas: tag must be set on all world types or none (got %d/%d)", explicit, len(loaded))
+	}
+
+	seenTags := make(map[int]string)
+	worldTypes := make([]WorldTypeData, 0, len(loaded))
+	for i, lw := range loaded {
+		wt := BuildWorldTypeData(lw.wf, customTypes)
+		if explicit == 0 {
+			wt.UpdateTag = i + 1
+		} else {
+			if lw.wf.Tag < 1 {
+				return nil, fmt.Errorf("%s: world tag must be ≥ 1", lw.file)
+			}
+			if prev, ok := seenTags[lw.wf.Tag]; ok {
+				return nil, fmt.Errorf("%s: duplicate world tag %d (also %s)", lw.file, lw.wf.Tag, prev)
+			}
+			seenTags[lw.wf.Tag] = lw.file
+			wt.UpdateTag = lw.wf.Tag
+		}
+		worldTypes = append(worldTypes, wt)
+	}
 	return worldTypes, nil
 }
 
@@ -1420,14 +1457,17 @@ func BuildProtoData(cfg *Config, entities []EntityData, commands []CommandData, 
 	}
 
 	pd.WorldTypes = worldTypes
-	worldTag := 1
 	for _, wt := range worldTypes {
+		tag := wt.UpdateTag
+		if tag < 1 {
+			// Defensive fallback for hand-built test fixtures that omit UpdateTag.
+			tag = len(pd.WorldUpdateFields) + 1
+		}
 		pd.WorldUpdateFields = append(pd.WorldUpdateFields, WorldUpdateField{
 			MessageType: wt.DataName,
 			SnakeName:   wt.SnakeName,
-			Tag:         worldTag,
+			Tag:         tag,
 		})
-		worldTag++
 	}
 
 	pd.Events = events
