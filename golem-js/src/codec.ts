@@ -102,7 +102,27 @@ export class PbReader {
     return { field: v >>> 3, wire: v & 7 };
   }
 
-  int32(): number { return this._uvarint() | 0; }
+  /**
+   * Protobuf int32 negatives are 10-byte sign-extended varints. Only the low
+   * 32 bits are meaningful — reading them through float `_uvarint` loses
+   * precision above 2^53 and commonly returns 0 after `| 0`.
+   */
+  int32(): number {
+    let lo = 0;
+    let shift = 0;
+    while (this._pos < this._end) {
+      const b = this._view.getUint8(this._pos++);
+      if (shift < 32) {
+        lo |= (b & 0x7f) << shift;
+      }
+      if (b < 0x80) break;
+      shift += 7;
+      if (shift > 70) {
+        throw new Error("pb: int32 varint overflow");
+      }
+    }
+    return lo | 0;
+  }
   int64(): number { return this._varint64(); }
 
   uint32(): number { return this._uvarint() >>> 0; }
