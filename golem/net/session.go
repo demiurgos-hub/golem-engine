@@ -16,6 +16,10 @@ import (
 
 const sendBufSize = 512
 
+type sessionCloseState struct {
+	reason string
+}
+
 // Session represents a single connected client on the active integrated transport.
 type Session struct {
 	ID         int64
@@ -35,12 +39,9 @@ type Session struct {
 	wake           chan struct{}
 	packetScratch  []byte
 
-	closed    atomic.Bool
-	done      chan struct{}
-	doneOnce  sync.Once
-	closeOnce sync.Once
-	// closeReason is set by CloseWithReason before closeTransport runs.
-	closeReason string
+	closeState atomic.Pointer[sessionCloseState]
+	done       chan struct{}
+	closeOnce  sync.Once
 
 	// Cumulative successful writes (for LogReplicationStats deltas).
 	wireDatagramOK atomic.Uint64
@@ -84,7 +85,7 @@ func newWebSocketSession(id int64, conn *websocket.Conn) *Session {
 	reliable := newWebSocketReliableChannel(conn)
 	s := newSession(id, reliable, nil, nil)
 	s.closeTransport = func() error {
-		return reliable.CloseWith(websocket.StatusNormalClosure, s.closeReason)
+		return reliable.CloseWith(websocket.StatusNormalClosure, s.requestedCloseReason())
 	}
 	return s
 }
@@ -98,7 +99,7 @@ func newWebTransportSession(id int64, session *webtransport.Session, stream *web
 		nil,
 	)
 	s.closeTransport = func() error {
-		return session.CloseWithError(0, s.closeReason)
+		return session.CloseWithError(0, s.requestedCloseReason())
 	}
 	return s
 }
@@ -111,7 +112,7 @@ func (s *Session) writePump(ctx context.Context) {
 	defer func() { stopTimer(timer) }()
 	defer s.closeNow()
 	for {
-		if s.closed.Load() {
+		if s.isClosing() {
 			return
 		}
 		if err := s.drainOutbound(ctx); err != nil {
@@ -151,7 +152,7 @@ func (s *Session) isExpectedSessionCloseError(err error) bool {
 	// a stalled eventual-state lane means the peer stopped acking datagrams,
 	// which is a real failure that must be visible in the logs
 	// (reason=eventual_state_stalled), not a silent close.
-	return s.closed.Load() || errors.Is(err, context.Canceled)
+	return s.isClosing() || errors.Is(err, context.Canceled)
 }
 
 func stopTimer(timer *time.Timer) {
@@ -432,6 +433,9 @@ func (s *Session) readPump(
 		go func() {
 			defer wg.Done()
 			if err := s.datagrams.ReadDatagrams(ctx, func(data []byte) {
+				if s.isClosing() {
+					return
+				}
 				deliveries, wake, err := s.handleIncomingDatagram(time.Now(), data)
 				feedback := s.drainEventualStateFeedback()
 				if wake {
@@ -447,6 +451,9 @@ func (s *Session) readPump(
 					onEventualStateFeedback(s, feedback)
 				}
 				for _, delivery := range deliveries {
+					if s.isClosing() {
+						return
+					}
 					switch delivery.lane {
 					case datagramLaneUnreliable:
 						if onDatagram != nil {
@@ -472,7 +479,7 @@ func (s *Session) readPump(
 	}
 
 	_ = s.reliable.ReadMessages(ctx, func(data []byte) {
-		if s.closed.Load() {
+		if s.isClosing() {
 			return
 		}
 		if isClientCloseControlFrame(data) {
@@ -500,7 +507,7 @@ func (s *Session) readPump(
 		if len(data) == 0 {
 			return
 		}
-		if onMsg != nil {
+		if !s.isClosing() && onMsg != nil {
 			onMsg(s, data)
 		}
 	})
@@ -599,7 +606,7 @@ func (s *Session) SendUnreliable(data []byte) error {
 	if s.datagrams == nil {
 		return ErrUnreliableNotSupported
 	}
-	if len(data) == 0 || s.closed.Load() {
+	if len(data) == 0 || s.isClosing() {
 		return nil
 	}
 	if err := validateUnreliableDatagramPayloadSize(data); err != nil {
@@ -620,7 +627,7 @@ func (s *Session) sendUnreliableStateOwned(data []byte) error {
 	if s.datagrams == nil {
 		return ErrUnreliableNotSupported
 	}
-	if len(data) == 0 || s.closed.Load() {
+	if len(data) == 0 || s.isClosing() {
 		return nil
 	}
 	if err := validateDatagramSize(data); err != nil {
@@ -653,7 +660,7 @@ func (s *Session) sendEventualStateOwned(token uint64, data []byte) error {
 	if s.protocol == nil {
 		return ErrReliableDatagramsNotSupported
 	}
-	if len(data) == 0 || s.closed.Load() {
+	if len(data) == 0 || s.isClosing() {
 		return nil
 	}
 	if err := validateEventualStateDatagramPayloadSize(data); err != nil {
@@ -671,14 +678,14 @@ func (s *Session) queueReliable(lane datagramLane, data []byte) error {
 	if s.protocol == nil {
 		return ErrReliableDatagramsNotSupported
 	}
-	if len(data) == 0 || s.closed.Load() {
+	if len(data) == 0 || s.isClosing() {
 		return nil
 	}
 	s.protocolMu.Lock()
 	err := s.protocol.enqueueReliable(lane, data, time.Now())
 	s.protocolMu.Unlock()
 	if err != nil {
-		if s.closed.Swap(true) {
+		if !s.beginClose("") {
 			return nil
 		}
 		log.Printf("golem/net: session %d send buffer overflow while queueing %s datagram; closing slow session", s.ID, laneName(lane))
@@ -690,7 +697,7 @@ func (s *Session) queueReliable(lane datagramLane, data []byte) error {
 }
 
 func (s *Session) queueStream(frames [][]byte) {
-	if s.closed.Load() {
+	if s.isClosing() {
 		return
 	}
 	for {
@@ -699,7 +706,7 @@ func (s *Session) queueStream(frames [][]byte) {
 			s.signalWake()
 			return
 		default:
-			if s.closed.Swap(true) {
+			if !s.beginClose("") {
 				return
 			}
 			log.Printf("golem/net: session %d send buffer overflow while queueing reliable batch (buffer=%d); closing slow session", s.ID, len(s.streamSend))
@@ -710,7 +717,7 @@ func (s *Session) queueStream(frames [][]byte) {
 }
 
 func (s *Session) queueUnreliable(data []byte) {
-	if s.closed.Load() {
+	if s.isClosing() {
 		return
 	}
 	for {
@@ -719,7 +726,7 @@ func (s *Session) queueUnreliable(data []byte) {
 			s.signalWake()
 			return
 		default:
-			if s.closed.Swap(true) {
+			if !s.beginClose("") {
 				return
 			}
 			log.Printf("golem/net: session %d send buffer overflow while queueing unreliable datagram (buffer=%d); closing slow session", s.ID, len(s.unreliableSend))
@@ -730,7 +737,7 @@ func (s *Session) queueUnreliable(data []byte) {
 }
 
 func (s *Session) queueRawState(data []byte) {
-	if s.closed.Load() {
+	if s.isClosing() {
 		return
 	}
 	for {
@@ -739,7 +746,7 @@ func (s *Session) queueRawState(data []byte) {
 			s.signalWake()
 			return
 		default:
-			if s.closed.Swap(true) {
+			if !s.beginClose("") {
 				return
 			}
 			log.Printf("golem/net: session %d send buffer overflow while queueing raw state datagram (buffer=%d); closing slow session", s.ID, len(s.rawStateSend))
@@ -750,7 +757,7 @@ func (s *Session) queueRawState(data []byte) {
 }
 
 func (s *Session) queueEventualState(msg eventualStateDatagram) {
-	if s.closed.Load() {
+	if s.isClosing() {
 		return
 	}
 	for {
@@ -759,7 +766,7 @@ func (s *Session) queueEventualState(msg eventualStateDatagram) {
 			s.signalWake()
 			return
 		default:
-			if s.closed.Swap(true) {
+			if !s.beginClose("") {
 				return
 			}
 			log.Printf("golem/net: session %d send buffer overflow while queueing eventual state datagram (buffer=%d); closing slow session", s.ID, len(s.eventualSend))
@@ -793,26 +800,57 @@ func (s *Session) Close() {
 }
 
 // CloseWithReason is Close with a transport close reason string (WebSocket
-// close reason / WebTransport error message). Reason should be short ASCII
-// (WebSocket limits reasons to 123 bytes). Empty reason is allowed.
+// close reason / WebTransport error message). It waits for the transport close
+// handshake. Reason should be short ASCII (WebSocket limits reasons to 123
+// bytes). Empty reason is allowed. The first close request wins.
 func (s *Session) CloseWithReason(reason string) {
-	if s.closed.Swap(true) {
+	if !s.beginClose(reason) {
 		return
 	}
-	s.closeReason = reason
 	s.closeNow()
-	s.shutdown()
+}
+
+// RequestCloseWithReason marks the session closing immediately, drops later
+// traffic, and performs the clean transport close handshake asynchronously.
+// It never waits for transport I/O. The first close request wins and retains
+// its reason for the WebSocket or WebTransport close handshake.
+func (s *Session) RequestCloseWithReason(reason string) {
+	if !s.beginClose(reason) {
+		return
+	}
+	go s.closeNow()
+}
+
+func (s *Session) beginClose(reason string) bool {
+	if !s.closeState.CompareAndSwap(nil, &sessionCloseState{reason: reason}) {
+		return false
+	}
+	if s.done != nil {
+		close(s.done)
+	}
+	return true
+}
+
+func (s *Session) isClosing() bool {
+	return s.closeState.Load() != nil
+}
+
+func (s *Session) requestedCloseReason() string {
+	state := s.closeState.Load()
+	if state == nil {
+		return ""
+	}
+	return state.reason
 }
 
 // shutdown signals writePump to exit. Called from Listener.removeSession
 // after the session is deleted from the session map.
 func (s *Session) shutdown() {
-	s.closed.Store(true)
-	s.doneOnce.Do(func() { close(s.done) })
+	s.beginClose("")
 }
 
 func (s *Session) closeNow() {
-	s.closed.Store(true)
+	s.beginClose("")
 	s.closeOnce.Do(func() {
 		if s.closeTransport != nil {
 			_ = s.closeTransport()

@@ -83,7 +83,7 @@ func TestSessionSendOverflow(t *testing.T) {
 	}
 
 	sess.Send([]byte("overflow"))
-	if !sess.closed.Load() {
+	if !sess.isClosing() {
 		t.Fatal("expected session to be marked closed after overflow")
 	}
 
@@ -123,7 +123,7 @@ func TestSessionShutdown(t *testing.T) {
 	sess := newWebSocketSession(1, conn)
 	sess.shutdown()
 
-	if !sess.closed.Load() {
+	if !sess.isClosing() {
 		t.Fatal("expected closed flag after shutdown")
 	}
 
@@ -147,7 +147,7 @@ func TestSessionReadPumpClosesTransportWhenDatagramReadFails(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("readPump did not return after datagram read failure")
 	}
-	if !sess.closed.Load() {
+	if !sess.isClosing() {
 		t.Fatal("session was not marked closed")
 	}
 }
@@ -157,7 +157,114 @@ func TestSessionCloseWithReasonHandshake(t *testing.T) {
 	defer cleanup()
 
 	sess := newWebSocketSession(42, serverConn)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	readErr := make(chan error, 1)
+	go func() {
+		_, _, err := clientConn.Read(ctx)
+		readErr <- err
+	}()
 	sess.CloseWithReason("session_replaced")
+	err := <-readErr
+	if err == nil {
+		t.Fatal("expected client read to fail after server close")
+	}
+	var ce websocket.CloseError
+	if !errors.As(err, &ce) {
+		t.Fatalf("err type %T = %v, want CloseError", err, err)
+	}
+	if ce.Code != websocket.StatusNormalClosure {
+		t.Fatalf("close code = %v, want StatusNormalClosure", ce.Code)
+	}
+	if ce.Reason != "session_replaced" {
+		t.Fatalf("close reason = %q, want session_replaced", ce.Reason)
+	}
+}
+
+func TestSessionRequestCloseWithReasonIsFailClosedAndNonBlocking(t *testing.T) {
+	closeStarted := make(chan string, 1)
+	closeRelease := make(chan struct{})
+	closeFinished := make(chan struct{})
+	var closeCalls atomic.Int32
+
+	sess := newSession(43, &captureReliableChannel{}, nil, nil)
+	sess.closeTransport = func() error {
+		closeCalls.Add(1)
+		closeStarted <- sess.requestedCloseReason()
+		<-closeRelease
+		close(closeFinished)
+		return nil
+	}
+
+	returned := make(chan struct{})
+	go func() {
+		sess.RequestCloseWithReason("auth_revoked")
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("RequestCloseWithReason blocked on transport close")
+	}
+	if !sess.isClosing() {
+		t.Fatal("session was not marked closing before RequestCloseWithReason returned")
+	}
+	select {
+	case <-sess.done:
+	default:
+		t.Fatal("write pump shutdown was not signaled before RequestCloseWithReason returned")
+	}
+	sess.Send([]byte("after-close"))
+	if got := len(sess.streamSend); got != 0 {
+		t.Fatalf("queued stream batches after close request = %d, want 0", got)
+	}
+
+	select {
+	case reason := <-closeStarted:
+		if reason != "auth_revoked" {
+			t.Fatalf("transport close reason = %q, want auth_revoked", reason)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("asynchronous transport close did not start")
+	}
+
+	var concurrent sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		concurrent.Add(1)
+		go func() {
+			defer concurrent.Done()
+			sess.RequestCloseWithReason("later_reason")
+			sess.CloseWithReason("later_blocking_reason")
+		}()
+	}
+	concurrentDone := make(chan struct{})
+	go func() {
+		concurrent.Wait()
+		close(concurrentDone)
+	}()
+	select {
+	case <-concurrentDone:
+	case <-time.After(time.Second):
+		t.Fatal("idempotent close requests blocked behind transport I/O")
+	}
+
+	close(closeRelease)
+	select {
+	case <-closeFinished:
+	case <-time.After(time.Second):
+		t.Fatal("asynchronous transport close did not finish")
+	}
+	if got := closeCalls.Load(); got != 1 {
+		t.Fatalf("transport close calls = %d, want 1", got)
+	}
+}
+
+func TestSessionRequestCloseWithReasonHandshake(t *testing.T) {
+	serverConn, clientConn, cleanup := testWSPairWithClient(t)
+	defer cleanup()
+
+	sess := newWebSocketSession(44, serverConn)
+	sess.RequestCloseWithReason("auth_expired")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -172,8 +279,8 @@ func TestSessionCloseWithReasonHandshake(t *testing.T) {
 	if ce.Code != websocket.StatusNormalClosure {
 		t.Fatalf("close code = %v, want StatusNormalClosure", ce.Code)
 	}
-	if ce.Reason != "session_replaced" {
-		t.Fatalf("close reason = %q, want session_replaced", ce.Reason)
+	if ce.Reason != "auth_expired" {
+		t.Fatalf("close reason = %q, want auth_expired", ce.Reason)
 	}
 }
 
@@ -191,7 +298,7 @@ func TestSessionReadPumpInterceptsClientCloseControlFrame(t *testing.T) {
 	if got := onMsg.Load(); got != 0 {
 		t.Fatalf("onMsg calls = %d, want 0", got)
 	}
-	if !sess.closed.Load() {
+	if !sess.isClosing() {
 		t.Fatal("session was not marked closed")
 	}
 	if got := reliable.closeCount.Load(); got != 1 {
@@ -495,7 +602,7 @@ func TestBroadcastBatchUsesOneSlotPerSession(t *testing.T) {
 		t.Fatalf("BroadcastBatch: %v", err)
 	}
 
-	if sess.closed.Load() {
+	if sess.isClosing() {
 		t.Fatal("session should not be closed: 500 entities batched into 1 channel send")
 	}
 }
@@ -559,7 +666,7 @@ func TestSessionReadPumpRejectsOversizeMessage(t *testing.T) {
 	}
 
 	deadline := time.After(time.Second)
-	for !sess.closed.Load() {
+	for !sess.isClosing() {
 		select {
 		case <-deadline:
 			t.Fatal("session was not closed after oversized inbound message")
