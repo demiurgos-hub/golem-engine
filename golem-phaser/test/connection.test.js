@@ -60,6 +60,16 @@ function fakeScheduler() {
   };
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("GolemConnectionLifecycle", () => {
   it("creates one client and auto-connects", () => {
     const client = fakeClient();
@@ -116,6 +126,120 @@ describe("GolemConnectionLifecycle", () => {
     assert.equal(scheduler.delays.at(-1), 200);
     scheduler.runNext();
     assert.equal(client.connectCalls.at(-1), "ws://localhost/game/3");
+  });
+
+  it("awaits asynchronous options for initial and reconnect attempts", async () => {
+    const client = fakeClient();
+    const scheduler = fakeScheduler();
+    const options = [deferred(), deferred()];
+    let optionIndex = 0;
+    const lifecycle = new GolemConnectionLifecycle(
+      {
+        createClient: () => client,
+        connectionOptions: () => options[optionIndex++].promise,
+        reconnectBaseDelay: 10,
+      },
+      scheduler,
+    );
+
+    lifecycle.start();
+    assert.deepEqual(client.connectCalls, []);
+    options[0].resolve("ws://localhost/game/1");
+    await options[0].promise;
+    assert.deepEqual(client.connectCalls, ["ws://localhost/game/1"]);
+
+    client.close({ wasClean: false });
+    scheduler.runNext();
+    assert.deepEqual(client.connectCalls, ["ws://localhost/game/1"]);
+    options[1].resolve("ws://localhost/game/2");
+    await options[1].promise;
+    assert.deepEqual(client.connectCalls, [
+      "ws://localhost/game/1",
+      "ws://localhost/game/2",
+    ]);
+  });
+
+  it("reconnects when asynchronous options reject", async () => {
+    const client = fakeClient();
+    const scheduler = fakeScheduler();
+    const pending = deferred();
+    const statuses = [];
+    const lifecycle = new GolemConnectionLifecycle(
+      {
+        createClient: () => client,
+        connectionOptions: () => pending.promise,
+        reconnectBaseDelay: 25,
+      },
+      scheduler,
+    );
+    lifecycle.onStatus((status) => statuses.push(status));
+
+    lifecycle.start();
+    const failure = new Error("ticket request failed");
+    pending.reject(failure);
+    await assert.rejects(pending.promise, failure);
+
+    assert.deepEqual(statuses.at(-2), {
+      type: "disconnected",
+      info: {
+        wasClean: false,
+        error: failure,
+        reason: "connection options failed",
+      },
+    });
+    assert.deepEqual(statuses.at(-1), {
+      type: "reconnecting",
+      attempt: 1,
+      delayMs: 25,
+    });
+    assert.equal(scheduler.size, 1);
+  });
+
+  it("ignores async options from superseded connect attempts", async () => {
+    const client = fakeClient();
+    const first = deferred();
+    const second = deferred();
+    let optionIndex = 0;
+    const lifecycle = new GolemConnectionLifecycle({
+      createClient: () => client,
+      connectionOptions: () => [first, second][optionIndex++].promise,
+    });
+
+    lifecycle.start();
+    lifecycle.connect();
+    first.resolve("ws://localhost/stale");
+    await first.promise;
+    assert.deepEqual(client.connectCalls, []);
+
+    second.resolve("ws://localhost/current");
+    await second.promise;
+    assert.deepEqual(client.connectCalls, ["ws://localhost/current"]);
+  });
+
+  it("ignores pending async options after disconnect or destroy", async () => {
+    const disconnectedClient = fakeClient();
+    const disconnectedOptions = deferred();
+    const disconnected = new GolemConnectionLifecycle({
+      createClient: () => disconnectedClient,
+      connectionOptions: () => disconnectedOptions.promise,
+    });
+    disconnected.start();
+    disconnected.disconnect();
+    disconnectedOptions.resolve("ws://localhost/disconnected");
+    await disconnectedOptions.promise;
+    assert.deepEqual(disconnectedClient.connectCalls, []);
+
+    const destroyedClient = fakeClient();
+    const destroyedOptions = deferred();
+    const destroyed = new GolemConnectionLifecycle({
+      createClient: () => destroyedClient,
+      connectionOptions: () => destroyedOptions.promise,
+    });
+    destroyed.start();
+    destroyed.destroy();
+    destroyedOptions.resolve("ws://localhost/destroyed");
+    await destroyedOptions.promise;
+    assert.deepEqual(destroyedClient.connectCalls, []);
   });
 
   it("does not reconnect clean or intentional disconnects", () => {

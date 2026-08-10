@@ -12,8 +12,14 @@ export type GolemConnectionStatus =
 export interface GolemConnectionConfig<C extends GameClient = GameClient> {
   /** Called once when the connection lifecycle starts. */
   createClient: () => C;
-  /** Called for every initial or reconnect attempt. */
-  connectionOptions: () => string | ConnectOptions;
+  /**
+   * Called and awaited for every initial or reconnect attempt. Throwing or
+   * rejecting is handled like an unexpected connection failure.
+   */
+  connectionOptions: () =>
+    | string
+    | ConnectOptions
+    | Promise<string | ConnectOptions>;
   /** Maximum reconnect attempts. Zero means unlimited. Defaults to 5. */
   maxReconnectAttempts?: number;
   /** Base reconnect delay in milliseconds. Defaults to 1500. */
@@ -33,6 +39,14 @@ const defaultScheduler: ConnectionScheduler = {
     globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
+function isPromise<T>(value: T | Promise<T>): value is Promise<T> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as Promise<T>).then === "function"
+  );
+}
+
 /**
  * GolemConnectionLifecycle owns one generated client and reconnects unexpected
  * transport drops independently of Phaser scene lifetimes.
@@ -48,6 +62,7 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
   private reconnectTimer?: unknown;
   private stopped = true;
   private destroyed = false;
+  private connectionAttempt = 0;
 
   constructor(
     private readonly config: GolemConnectionConfig<C>,
@@ -121,36 +136,46 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
     }
     this.stopped = false;
     this.cancelReconnect();
+    const connectionAttempt = ++this.connectionAttempt;
 
     const attempt = this.reconnectAttempts + 1;
     this.emit({ type: "connecting", attempt });
 
-    let options: string | ConnectOptions;
+    let options:
+      | string
+      | ConnectOptions
+      | Promise<string | ConnectOptions>;
     try {
       options = this.config.connectionOptions();
     } catch (error) {
-      this.handleDisconnect({
-        wasClean: false,
+      this.handleAttemptFailure(
+        connectionAttempt,
         error,
-        reason: "connection options failed",
-      });
+        "connection options failed",
+      );
       return;
     }
 
-    try {
-      this.client.connect(options);
-    } catch (error) {
-      this.handleDisconnect({
-        wasClean: false,
-        error,
-        reason: "connect failed",
-      });
+    if (isPromise(options)) {
+      void Promise.resolve(options).then(
+        (resolved) => this.openConnection(connectionAttempt, resolved),
+        (error: unknown) =>
+          this.handleAttemptFailure(
+            connectionAttempt,
+            error,
+            "connection options failed",
+          ),
+      );
+      return;
     }
+
+    this.openConnection(connectionAttempt, options);
   }
 
   /** Stop reconnecting and close the current transport. */
   disconnect(): void {
     this.stopped = true;
+    this.connectionAttempt++;
     this.cancelReconnect();
     this.clientInstance?.disconnect();
   }
@@ -184,6 +209,40 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
     if (!this.stopped && !info.wasClean) {
       this.scheduleReconnect();
     }
+  }
+
+  private openConnection(
+    connectionAttempt: number,
+    options: string | ConnectOptions,
+  ): void {
+    if (!this.isCurrentAttempt(connectionAttempt)) {
+      return;
+    }
+
+    try {
+      this.client.connect(options);
+    } catch (error) {
+      this.handleAttemptFailure(connectionAttempt, error, "connect failed");
+    }
+  }
+
+  private handleAttemptFailure(
+    connectionAttempt: number,
+    error: unknown,
+    reason: string,
+  ): void {
+    if (!this.isCurrentAttempt(connectionAttempt)) {
+      return;
+    }
+    this.handleDisconnect({ wasClean: false, error, reason });
+  }
+
+  private isCurrentAttempt(connectionAttempt: number): boolean {
+    return (
+      connectionAttempt === this.connectionAttempt &&
+      !this.stopped &&
+      !this.destroyed
+    );
   }
 
   private scheduleReconnect(): void {
