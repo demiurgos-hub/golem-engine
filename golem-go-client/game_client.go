@@ -148,6 +148,7 @@ func (c *GameClient) Connect(ctx context.Context, options ConnectOptions) error 
 	redacted := RedactURL(options.URL)
 	channel, err := c.createChannel(ctx, options)
 	if err != nil {
+		err = sanitizeURLError(err)
 		log.Printf("golem-go-client: connect failed transport=%s url=%q error=%v", options.Transport, redacted, err)
 		return err
 	}
@@ -177,6 +178,7 @@ func (c *GameClient) Connect(ctx context.Context, options ConnectOptions) error 
 		inbound.enqueue(inboundEventCompactState, data)
 	})
 	channel.OnClose(func(info DisconnectInfo) {
+		info.Err = sanitizeURLError(info.Err)
 		var shouldNotify bool
 		c.mu.Lock()
 		if c.channel == channel {
@@ -290,9 +292,9 @@ func (c *GameClient) sendCommand(command any, ordered bool) error {
 			)
 		}
 		if ordered {
-			return channel.SendReliableOrdered(frame)
+			return sanitizeURLError(channel.SendReliableOrdered(frame))
 		}
-		return channel.SendReliableUnordered(frame)
+		return sanitizeURLError(channel.SendReliableUnordered(frame))
 	}
 
 	if c.encodePacket == nil {
@@ -305,7 +307,7 @@ func (c *GameClient) sendCommand(command any, ordered bool) error {
 	if maxBytes := channel.MaxMessageBytes(); maxBytes > 0 && len(packet) > maxBytes {
 		return fmt.Errorf("golem-go-client: encoded packet size %d exceeds max reliable message %d", len(packet), maxBytes)
 	}
-	return channel.Send(packet)
+	return sanitizeURLError(channel.Send(packet))
 }
 
 // dispatchInboundEvent applies one inbound event under the client dispatch lock.

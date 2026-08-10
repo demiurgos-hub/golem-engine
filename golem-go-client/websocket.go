@@ -26,6 +26,7 @@ func DialWebSocket(ctx context.Context, options ConnectOptions) (*WebSocketChann
 	log.Printf("golem-go-client: dialing websocket url=%q", redacted)
 	conn, _, err := websocket.Dial(ctx, options.URL, nil)
 	if err != nil {
+		err = sanitizeURLError(err)
 		log.Printf("golem-go-client: websocket dial failed url=%q error=%v", redacted, err)
 		return nil, fmt.Errorf("golem-go-client: websocket dial: %w", err)
 	}
@@ -49,7 +50,7 @@ func (c *WebSocketChannel) Send(data []byte) error {
 		return nil
 	}
 	if err := c.conn.Write(context.Background(), websocket.MessageBinary, data); err != nil {
-		return fmt.Errorf("golem-go-client: websocket send: %w", err)
+		return fmt.Errorf("golem-go-client: websocket send: %w", sanitizeURLError(err))
 	}
 	return nil
 }
@@ -110,7 +111,7 @@ func (c *WebSocketChannel) readLoop(ctx context.Context) {
 		_, data, err := c.conn.Read(ctx)
 		if err != nil {
 			c.connected.Store(false)
-			err = fmt.Errorf("golem-go-client: websocket read: %w", err)
+			err = fmt.Errorf("golem-go-client: websocket read: %w", sanitizeURLError(err))
 			log.Printf("golem-go-client: websocket read loop closed error=%v", err)
 			if c.callbacks.onClose != nil {
 				c.callbacks.onClose(DisconnectInfo{WasClean: false, Err: err})

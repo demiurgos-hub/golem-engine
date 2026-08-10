@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"log"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -232,6 +234,25 @@ func TestGameClientSendPropagatesSelectedLaneErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("credential-bearing stream channel", func(t *testing.T) {
+		const secret = "realtime-ticket-secret"
+		wantErr := errors.New("stream failed for wss://example.test/ws?ticket=" + secret)
+		channel := &fakeChannel{connected: true, sendErr: wantErr}
+		client := NewGameClient(GameClientOptions{
+			EncodeCommand: func(any) ([]byte, error) { return []byte("command"), nil },
+			EncodePacket:  func([][]byte) ([]byte, error) { return []byte("packet"), nil },
+		})
+		client.channel = channel
+
+		err := client.Send("command")
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("Send error = %v, want errors.Is channel error", err)
+		}
+		if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "ticket=") {
+			t.Fatalf("Send error leaked realtime credential: %q", err)
+		}
+	})
+
 	t.Run("reliable unordered channel", func(t *testing.T) {
 		wantErr := errors.New("unordered failed")
 		channel := &fakeChannel{
@@ -349,6 +370,115 @@ func TestGameClientCommandAPIExcludesLegacyMethods(t *testing.T) {
 	for _, name := range []string{"SendUnreliable", "SendReliableUnordered", "SendReliableOrdered"} {
 		if _, ok := clientType.MethodByName(name); ok {
 			t.Errorf("legacy GameClient.%s is still public", name)
+		}
+	}
+}
+
+func TestGameClientConnectSanitizesCredentialBearingURLErrors(t *testing.T) {
+	const secret = "realtime-ticket-secret"
+	endpoint := "wss://example.test/ws?ticket=" + secret + "#fragment"
+	wantErr := errors.New("dial failed")
+	client := NewGameClient(GameClientOptions{
+		CreateChannel: func(_ context.Context, options ConnectOptions) (ReliableMessageChannel, error) {
+			return nil, &url.Error{Op: "dial", URL: options.URL, Err: wantErr}
+		},
+	})
+
+	var logs bytes.Buffer
+	previousWriter := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(previousWriter)
+
+	err := client.Connect(context.Background(), ConnectOptions{Transport: TransportWebSocket, URL: endpoint})
+	if err == nil {
+		t.Fatal("Connect returned nil error")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Connect error = %v, want errors.Is dial failure", err)
+	}
+	var uerr *url.Error
+	if !errors.As(err, &uerr) {
+		t.Fatalf("Connect error lost url.Error: %v", err)
+	}
+	for label, text := range map[string]string{
+		"returned error": err.Error(),
+		"url.Error URL":  uerr.URL,
+		"log output":     logs.String(),
+	} {
+		if strings.Contains(text, secret) || strings.Contains(text, "ticket=") {
+			t.Fatalf("%s leaked realtime credential: %q", label, text)
+		}
+	}
+}
+
+func TestGameClientConnectSanitizesGenericCredentialErrors(t *testing.T) {
+	const secret = "realtime-ticket-secret"
+	endpoint := "wss://example.test/ws?ticket=" + secret
+	rawErr := errors.New("dial failed for " + endpoint)
+	client := NewGameClient(GameClientOptions{
+		CreateChannel: func(context.Context, ConnectOptions) (ReliableMessageChannel, error) {
+			return nil, rawErr
+		},
+	})
+
+	var logs bytes.Buffer
+	previousWriter := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(previousWriter)
+
+	err := client.Connect(context.Background(), ConnectOptions{Transport: TransportWebSocket, URL: endpoint})
+	if err == nil {
+		t.Fatal("Connect returned nil error")
+	}
+	if !errors.Is(err, rawErr) {
+		t.Fatalf("Connect error = %v, want errors.Is raw transport error", err)
+	}
+	for label, text := range map[string]string{
+		"returned error": err.Error(),
+		"log output":     logs.String(),
+	} {
+		if strings.Contains(text, secret) || strings.Contains(text, "ticket=") {
+			t.Fatalf("%s leaked realtime credential: %q", label, text)
+		}
+	}
+}
+
+func TestGameClientDisconnectSanitizesGenericCredentialErrors(t *testing.T) {
+	const secret = "realtime-ticket-secret"
+	endpoint := "wss://example.test/ws?ticket=" + secret
+	rawErr := errors.New("read failed for " + endpoint)
+	channel := &fakeChannel{connected: true}
+	client := NewGameClient(GameClientOptions{
+		CreateChannel: func(context.Context, ConnectOptions) (ReliableMessageChannel, error) {
+			return channel, nil
+		},
+	})
+	var got DisconnectInfo
+	client.OnDisconnect(func(info DisconnectInfo) { got = info })
+
+	var logs bytes.Buffer
+	previousWriter := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(previousWriter)
+
+	if err := client.Connect(context.Background(), ConnectOptions{Transport: TransportWebSocket, URL: endpoint}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	channel.callbacks.onClose(DisconnectInfo{Err: rawErr})
+
+	if got.Err == nil {
+		t.Fatal("OnDisconnect error is nil")
+	}
+	if !errors.Is(got.Err, rawErr) {
+		t.Fatalf("OnDisconnect error = %v, want errors.Is raw transport error", got.Err)
+	}
+	for label, text := range map[string]string{
+		"disconnect error": got.Err.Error(),
+		"last error":       client.lastErr.Error(),
+		"log output":       logs.String(),
+	} {
+		if strings.Contains(text, secret) || strings.Contains(text, "ticket=") {
+			t.Fatalf("%s leaked realtime credential: %q", label, text)
 		}
 	}
 }

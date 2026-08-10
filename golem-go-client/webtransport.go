@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/quic-go/webtransport-go"
 	golemnet "github.com/demiurgos-hub/golem-engine/golem/net"
+	"github.com/quic-go/webtransport-go"
 )
 
 const (
@@ -460,11 +460,13 @@ func DialWebTransport(ctx context.Context, options ConnectOptions) (*WebTranspor
 	dialer := &webtransport.Dialer{TLSClientConfig: tlsConfig}
 	_, session, err := dialer.Dial(ctx, options.URL, nil)
 	if err != nil {
+		err = sanitizeURLError(err)
 		log.Printf("golem-go-client: webtransport dial failed url=%q error=%v", redacted, err)
 		return nil, fmt.Errorf("golem-go-client: webtransport dial: %w", err)
 	}
 	stream, err := session.OpenStreamSync(ctx)
 	if err != nil {
+		err = sanitizeURLError(err)
 		log.Printf("golem-go-client: webtransport open stream failed url=%q error=%v", redacted, err)
 		_ = session.CloseWithError(0, "")
 		return nil, fmt.Errorf("golem-go-client: webtransport open stream: %w", err)
@@ -472,6 +474,7 @@ func DialWebTransport(ctx context.Context, options ConnectOptions) (*WebTranspor
 	// Flush the WebTransport stream header so the server can AcceptStream.
 	// This does not write a golem reliable frame.
 	if _, err := stream.Write(nil); err != nil {
+		err = sanitizeURLError(err)
 		log.Printf("golem-go-client: webtransport stream header write failed url=%q error=%v", redacted, err)
 		_ = session.CloseWithError(0, "")
 		return nil, fmt.Errorf("golem-go-client: webtransport stream header write: %w", err)
@@ -500,22 +503,22 @@ func (c *WebTransportChannel) Send(data []byte) error {
 	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	return writeReliableFrame(c.stream, c.protocol.wrapStreamPayload(data))
+	return sanitizeURLError(writeReliableFrame(c.stream, c.protocol.wrapStreamPayload(data)))
 }
 
 // SendUnreliable sends one raw unreliable datagram.
 func (c *WebTransportChannel) SendUnreliable(data []byte) error {
-	return c.protocol.send(datagramLaneUnreliable, data)
+	return sanitizeURLError(c.protocol.send(datagramLaneUnreliable, data))
 }
 
 // SendReliableUnordered sends one reliable unordered datagram message.
 func (c *WebTransportChannel) SendReliableUnordered(data []byte) error {
-	return c.protocol.send(datagramLaneReliableUnordered, data)
+	return sanitizeURLError(c.protocol.send(datagramLaneReliableUnordered, data))
 }
 
 // SendReliableOrdered sends one reliable ordered datagram message.
 func (c *WebTransportChannel) SendReliableOrdered(data []byte) error {
-	return c.protocol.send(datagramLaneReliableOrdered, data)
+	return sanitizeURLError(c.protocol.send(datagramLaneReliableOrdered, data))
 }
 
 // Close closes the WebTransport session.
@@ -647,6 +650,7 @@ func (c *WebTransportChannel) closeWithError(err error) {
 	if !c.connected.Swap(false) {
 		return
 	}
+	err = sanitizeURLError(err)
 	log.Printf("golem-go-client: webtransport channel closed error=%v", err)
 	c.doneOnce.Do(func() { close(c.done) })
 	if c.callbacks.onClose != nil {

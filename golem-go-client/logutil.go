@@ -9,10 +9,14 @@ func RedactURL(raw string) string {
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return raw
+		return "<invalid-url>"
 	}
 	parsed.User = nil
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
-	return parsed.String()
+	redacted := parsed.String()
+	if redacted == "" {
+		return "<invalid-url>"
+	}
+	return redacted
 }

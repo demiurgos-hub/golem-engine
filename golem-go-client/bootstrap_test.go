@@ -14,6 +14,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -23,10 +24,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go/http3"
-	"github.com/quic-go/webtransport-go"
 	golemnet "github.com/demiurgos-hub/golem-engine/golem/net"
 	"github.com/demiurgos-hub/golem-engine/golem/registry"
+	"github.com/quic-go/quic-go/http3"
+	"github.com/quic-go/webtransport-go"
 )
 
 func TestFetchRealtimeConfigDecodesJSON(t *testing.T) {
@@ -126,6 +127,74 @@ func TestFetchRealtimeConfigDoesNotLeakEndpointTokenInURLErrors(t *testing.T) {
 	}
 	if strings.Contains(uerr.URL, secret) || strings.Contains(uerr.URL, "token=") {
 		t.Fatalf("url.Error.URL leaked token: %q", uerr.URL)
+	}
+}
+
+func TestTransportDialErrorsDoNotLeakCredentialURLs(t *testing.T) {
+	const secret = "realtime-ticket-secret"
+	tests := []struct {
+		name      string
+		transport TransportKind
+		endpoint  string
+		dial      func(context.Context, ConnectOptions) error
+	}{
+		{
+			name:      "websocket",
+			transport: TransportWebSocket,
+			endpoint:  "wss://example.test/%zz?ticket=" + secret,
+			dial: func(ctx context.Context, options ConnectOptions) error {
+				_, err := DialWebSocket(ctx, options)
+				return err
+			},
+		},
+		{
+			name:      "webtransport",
+			transport: TransportWebTransport,
+			endpoint:  "https://example.test/%zz?ticket=" + secret,
+			dial: func(ctx context.Context, options ConnectOptions) error {
+				_, err := DialWebTransport(ctx, options)
+				return err
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			previousWriter := log.Writer()
+			log.SetOutput(&logs)
+			defer log.SetOutput(previousWriter)
+
+			err := tc.dial(context.Background(), ConnectOptions{Transport: tc.transport, URL: tc.endpoint})
+			if err == nil {
+				t.Fatal("dial returned nil error")
+			}
+			for label, text := range map[string]string{
+				"returned error": err.Error(),
+				"log output":     logs.String(),
+			} {
+				if strings.Contains(text, secret) || strings.Contains(text, "ticket=") {
+					t.Fatalf("%s leaked realtime credential: %q", label, text)
+				}
+			}
+			var uerr *url.Error
+			if !errors.As(err, &uerr) {
+				t.Fatalf("dial error lost url.Error: %v", err)
+			}
+			if uerr.URL != "<invalid-url>" {
+				t.Fatalf("sanitized url.Error URL = %q, want <invalid-url>", uerr.URL)
+			}
+		})
+	}
+}
+
+func TestServerNameErrorDoesNotLeakCredentialURL(t *testing.T) {
+	const secret = "realtime-ticket-secret"
+	_, err := serverNameFromEndpointURL("?ticket=" + secret)
+	if err == nil {
+		t.Fatal("serverNameFromEndpointURL returned nil error")
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "ticket=") {
+		t.Fatalf("server name error leaked realtime credential: %v", err)
 	}
 }
 

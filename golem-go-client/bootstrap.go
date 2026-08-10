@@ -247,32 +247,42 @@ func cloneCertificateHashes(hashes []CertificateHash) []CertificateHash {
 	return out
 }
 
-// sanitizeURLError redacts query/fragment from *url.Error so tokens are not leaked in Error().
-// The underlying Err is preserved for errors.Is / errors.As.
-func sanitizeURLError(err error) error {
-	var uerr *url.Error
-	if !errors.As(err, &uerr) {
-		return err
-	}
-	return &url.Error{
-		Op:  uerr.Op,
-		URL: redactEndpointURL(uerr.URL),
-		Err: uerr.Err,
-	}
+const redactedCredentialError = "golem-go-client: credential-bearing transport error redacted"
+
+type credentialSafeError struct {
+	cause error
 }
 
-func redactEndpointURL(raw string) string {
-	if raw == "" {
-		return ""
+func (e *credentialSafeError) Error() string { return redactedCredentialError }
+func (e *credentialSafeError) Unwrap() error { return e.cause }
+
+// sanitizeURLError redacts credential-bearing URLs from structured and generic
+// transport errors before they cross a public return, log, or callback boundary.
+// The underlying error remains reachable through errors.Is / errors.As.
+func sanitizeURLError(err error) error {
+	if err == nil {
+		return nil
 	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return ""
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		op := uerr.Op
+		if containsRealtimeTicket(op) {
+			op = "transport"
+		}
+		return &url.Error{
+			Op:  op,
+			URL: RedactURL(uerr.URL),
+			Err: sanitizeURLError(uerr.Err),
+		}
 	}
-	u.User = nil
-	u.RawQuery = ""
-	u.Fragment = ""
-	return u.Redacted()
+	if containsRealtimeTicket(err.Error()) {
+		return &credentialSafeError{cause: err}
+	}
+	return err
+}
+
+func containsRealtimeTicket(text string) bool {
+	return strings.Contains(strings.ToLower(text), "ticket")
 }
 
 func decodeCertificateHash(algorithm, value string) (CertificateHash, error) {
@@ -382,10 +392,10 @@ func normalizeCertificateHashAlgorithm(algorithm string) string {
 func serverNameFromEndpointURL(endpoint string) (string, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil {
-		return "", fmt.Errorf("golem-go-client: parsing WebTransport URL: %w", err)
+		return "", fmt.Errorf("golem-go-client: parsing WebTransport URL: %w", sanitizeURLError(err))
 	}
 	if u.Hostname() == "" {
-		return "", fmt.Errorf("golem-go-client: WebTransport URL %q has no host", endpoint)
+		return "", fmt.Errorf("golem-go-client: WebTransport URL %q has no host", RedactURL(endpoint))
 	}
 	return u.Hostname(), nil
 }

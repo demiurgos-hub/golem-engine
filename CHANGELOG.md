@@ -8,6 +8,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Native Go WebSocket/WebTransport dial, send, read, write, and close errors now redact credential-bearing URLs before logs, returns, `lastErr`, and disconnect callbacks. Structured `*url.Error` causes retain `errors.Is` / `errors.As`, generic ticket-bearing errors use a credential-free public message, and malformed URLs render as `<invalid-url>`.
 - Built-in JavaScript WebSocket/WebTransport channels no longer log or forward raw browser `ErrorEvent` / runtime `Error` strings, which may repeat credential-bearing connection URLs. Runtime failures delivered through `DisconnectInfo.error` are credential-free, and invalid URLs are logged as `<invalid-url>`.
 - Slow-session queue overflow and generated Go server rejection of malformed commands now initiate the clean transport close handshake asynchronously, so tick-time replication and command dispatch do not wait on a slow peer. Re-run `golem-bake` to update generated Go server helpers.
 - JS `PbReader.int32()` now correctly decodes negative protobuf int32 varints (10-byte sign-extended form). The previous float-based `_uvarint` path lost precision and commonly returned `0`, which broke signed fields such as battle `visual_hp_change` damage deltas on the client.
