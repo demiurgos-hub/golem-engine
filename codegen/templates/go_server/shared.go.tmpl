@@ -326,12 +326,12 @@ func (r *CommandRouter) Dispatch(senderID int64, data []byte) error {
 func (r *CommandRouter) DispatchPacket(sess *golem.Session, data []byte) error {
 	var packet ClientPacket
 	if err := packet.Unmarshal(data); err != nil {
-		sess.Close()
+		sess.RequestCloseWithReason("")
 		return err
 	}
 	for _, frame := range packet.Frames {
 		if err := r.Dispatch(sess.ID, frame); err != nil {
-			sess.Close()
+			sess.RequestCloseWithReason("")
 			return err
 		}
 	}
@@ -342,7 +342,7 @@ func (r *CommandRouter) DispatchPacket(sess *golem.Session, data []byte) error {
 // Malformed commands close the session.
 func (r *CommandRouter) DispatchDatagram(sess *golem.Session, data []byte) error {
 	if err := r.Dispatch(sess.ID, data); err != nil {
-		sess.Close()
+		sess.RequestCloseWithReason("")
 		return err
 	}
 	return nil

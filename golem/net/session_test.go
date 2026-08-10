@@ -92,6 +92,43 @@ func TestSessionSendOverflow(t *testing.T) {
 	}
 }
 
+func TestSessionSendOverflowDoesNotBlockOnTransportClose(t *testing.T) {
+	closeStarted := make(chan struct{})
+	closeRelease := make(chan struct{})
+	sess := newSession(2, &captureReliableChannel{}, nil, func() error {
+		close(closeStarted)
+		<-closeRelease
+		return nil
+	})
+
+	for i := 0; i < sendBufSize; i++ {
+		sess.Send([]byte("x"))
+	}
+	returned := make(chan struct{})
+	go func() {
+		sess.Send([]byte("overflow"))
+		close(returned)
+	}()
+
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		close(closeRelease)
+		t.Fatal("send-buffer overflow blocked on transport close")
+	}
+	if !sess.isClosing() {
+		close(closeRelease)
+		t.Fatal("expected session to be marked closing before Send returned")
+	}
+	select {
+	case <-closeStarted:
+	case <-time.After(time.Second):
+		close(closeRelease)
+		t.Fatal("asynchronous transport close did not start")
+	}
+	close(closeRelease)
+}
+
 func TestSessionSendOverflowLogsBufferOverflow(t *testing.T) {
 	conn, cleanup := testWSPair(t)
 	defer cleanup()

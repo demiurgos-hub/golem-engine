@@ -689,7 +689,7 @@ func (s *Session) queueReliable(lane datagramLane, data []byte) error {
 			return nil
 		}
 		log.Printf("golem/net: session %d send buffer overflow while queueing %s datagram; closing slow session", s.ID, laneName(lane))
-		s.closeNow()
+		go s.closeNow()
 		return err
 	}
 	s.signalWake()
@@ -710,7 +710,7 @@ func (s *Session) queueStream(frames [][]byte) {
 				return
 			}
 			log.Printf("golem/net: session %d send buffer overflow while queueing reliable batch (buffer=%d); closing slow session", s.ID, len(s.streamSend))
-			s.closeNow()
+			go s.closeNow()
 			return
 		}
 	}
@@ -730,7 +730,7 @@ func (s *Session) queueUnreliable(data []byte) {
 				return
 			}
 			log.Printf("golem/net: session %d send buffer overflow while queueing unreliable datagram (buffer=%d); closing slow session", s.ID, len(s.unreliableSend))
-			s.closeNow()
+			go s.closeNow()
 			return
 		}
 	}
@@ -750,7 +750,7 @@ func (s *Session) queueRawState(data []byte) {
 				return
 			}
 			log.Printf("golem/net: session %d send buffer overflow while queueing raw state datagram (buffer=%d); closing slow session", s.ID, len(s.rawStateSend))
-			s.closeNow()
+			go s.closeNow()
 			return
 		}
 	}
@@ -770,7 +770,7 @@ func (s *Session) queueEventualState(msg eventualStateDatagram) {
 				return
 			}
 			log.Printf("golem/net: session %d send buffer overflow while queueing eventual state datagram (buffer=%d); closing slow session", s.ID, len(s.eventualSend))
-			s.closeNow()
+			go s.closeNow()
 			return
 		}
 	}

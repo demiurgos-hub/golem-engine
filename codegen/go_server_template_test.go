@@ -76,7 +76,7 @@ func TestGenerateGoSharedTemplateIncludesDispatchPacket(t *testing.T) {
 	for _, want := range []string{
 		"func (r *CommandRouter) DispatchPacket(sess *golem.Session, data []byte) error {",
 		"var packet ClientPacket",
-		"sess.Close()",
+		"sess.RequestCloseWithReason(\"\")",
 		"if err := r.Dispatch(sess.ID, frame); err != nil {",
 		"func (r *CommandRouter) DispatchDatagram(sess *golem.Session, data []byte) error {",
 		"func (r *CommandRouter) DispatchReliableUnordered(sess *golem.Session, data []byte) error {",
@@ -94,6 +94,12 @@ func TestGenerateGoSharedTemplateIncludesDispatchPacket(t *testing.T) {
 		if !strings.Contains(content, want) {
 			t.Fatalf("generated shared helper missing %q\n%s", want, content)
 		}
+	}
+	if got := strings.Count(content, "sess.RequestCloseWithReason(\"\")"); got != 3 {
+		t.Fatalf("generated shared helper async close calls = %d, want 3\n%s", got, content)
+	}
+	if strings.Contains(content, "sess.Close()") {
+		t.Fatalf("generated shared helper contains blocking session close\n%s", content)
 	}
 }
 

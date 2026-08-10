@@ -8,6 +8,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Slow-session queue overflow and generated Go server rejection of malformed commands now initiate the clean transport close handshake asynchronously, so tick-time replication and command dispatch do not wait on a slow peer. Re-run `golem-bake` to update generated Go server helpers.
 - JS `PbReader.int32()` now correctly decodes negative protobuf int32 varints (10-byte sign-extended form). The previous float-based `_uvarint` path lost precision and commonly returned `0`, which broke signed fields such as battle `visual_hp_change` damage deltas on the client.
 - Intentional `Session.Close` / `CloseWithReason` now performs a WebSocket close handshake (`StatusNormalClosure`) instead of `CloseNow`, and WebTransport closes with the optional reason string. JS clients therefore observe `wasClean` and do not auto-reconnect after a server kick (e.g. latest-session-wins character takeover).
 - `GameClient` (JS and Go) clears the entity manager on disconnect when `clear`/`Clear` is available, so stale entities cannot linger after a transport drop that lost remove frames.
