@@ -20,6 +20,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Optional `protocol_constants` catalog support in `golem.yaml`: define validated shared string sets once and `golem-bake` emits matching Go constants in `entities_pb.go`, TypeScript `as const` objects and union types in `entities_pb`, and C# static string classes in `EntitiesPb.cs`. Catalog names use canonical snake_case; sets reject empty members, generated-name collisions, blank or whitespace-padded values, and duplicate values. These constants do not add protobuf fields or change snapshot fingerprints. Re-run `golem-bake` after catalog changes.
 - World schema files accept an optional root `tag` to pin their `WorldUpdate` oneof field number. If any world schema sets a tag, every world schema must set a unique value of at least 1; otherwise tags remain auto-assigned by sorted world type name. Pin tags before adding more world types when existing clients must keep wire-compatible numbers, then re-run `golem-bake`.
 - `Session.CloseWithReason(reason)` for short transport close reasons (WebSocket close reason / WebTransport error message).
 - Generated `EntityManager.clear()` / `Clear()` removes all known entities, fires remove listeners, and resets revision tracking. Re-run `golem-bake`.
