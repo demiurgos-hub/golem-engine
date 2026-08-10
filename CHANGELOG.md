@@ -24,8 +24,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 ### Added
 
 - `Session.IsClosing()` exposes the monotonic, concurrency-safe close-request state immediately, allowing delayed hydration or other asynchronous work to avoid attaching gameplay state before `OnDisconnect` runs.
-- `Session.RequestCloseWithReason(reason)` atomically marks a session closing, drops later traffic, and signals its write pump before returning, while the clean WebSocket/WebTransport close handshake runs asynchronously with the retained reason. Concurrent/repeated close calls are idempotent and the first close reason wins, so tick and HTTP callbacks can revoke a session without waiting on transport I/O. `CloseWithReason` remains the blocking-handshake API. Website networking docs need a matching session-close note.
-- `golem-phaser` connection-option callbacks may return a `Promise`, allowing each initial connection and reconnect to fetch fresh short-lived authentication or transport configuration. Pending results are ignored after disconnect, plugin destruction, or a newer connection attempt. Website Phaser documentation needs a matching note.
+- `Session.RequestCloseWithReason(reason)` atomically marks a session closing, drops later traffic, and signals its write pump before returning, while the clean WebSocket/WebTransport close handshake runs asynchronously with the retained reason. Concurrent/repeated close calls are idempotent and the first close reason wins, so tick and HTTP callbacks can revoke a session without waiting on transport I/O. `CloseWithReason` remains the blocking-handshake API.
+- `golem-phaser` connection-option callbacks may return a `Promise`, allowing each initial connection and reconnect to fetch fresh short-lived authentication or transport configuration. Pending results are ignored after disconnect, plugin destruction, or a newer connection attempt.
 - Optional `protocol_constants` catalog support in `golem.yaml`: define validated shared string sets once and `golem-bake` emits matching Go constants in `entities_pb.go`, TypeScript `as const` objects and union types in `entities_pb`, and C# static string classes in `EntitiesPb.cs`. Catalog names use canonical snake_case; sets reject empty members, generated-name collisions, blank or whitespace-padded values, and duplicate values. These constants do not add protobuf fields or change snapshot fingerprints. Re-run `golem-bake` after catalog changes.
 - World schema files accept an optional root `tag` to pin their `WorldUpdate` oneof field number. If any world schema sets a tag, every world schema must set a unique value of at least 1; otherwise tags remain auto-assigned by sorted world type name. Pin tags before adding more world types when existing clients must keep wire-compatible numbers, then re-run `golem-bake`.
 - `Session.CloseWithReason(reason)` for short transport close reasons (WebSocket close reason / WebTransport error message).
@@ -72,7 +72,6 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 - **Breaking:** Phaser entity presentation now uses generated `defineEntityViews` registries and scene mounts instead of `createSpriteView`, `createGpuEntityView`, and generated-manager constructor registration.
 - **Breaking:** Generated JavaScript listener registration methods now add listeners rather than replacing a single callback and return an unsubscribe function.
 - Entity lifecycle hooks and custom generated-manager subclasses remain available for advanced model logic, but Phaser presentation is kept separate from synchronized entities.
-- Website Phaser documentation needs a matching update for the plugin and entity-view registry workflow.
 
 ### Deprecated
 
