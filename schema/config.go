@@ -10,13 +10,14 @@ import (
 
 // Config is the top-level golem.yaml project configuration.
 type Config struct {
-	EntitySchemas  string           `yaml:"entity_schema"`
-	CommandSchemas string           `yaml:"command_schema"`
-	WorldSchema    string           `yaml:"world_schema"`
-	TypesSchema    string           `yaml:"types_schema"`
-	EventSchemas   string           `yaml:"event_schema"`
-	Simulation     SimulationConfig `yaml:"simulation"`
-	Collision      *CollisionConfig `yaml:"collision,omitempty"`
+	EntitySchemas     string           `yaml:"entity_schema"`
+	CommandSchemas    string           `yaml:"command_schema"`
+	WorldSchema       string           `yaml:"world_schema"`
+	TypesSchema       string           `yaml:"types_schema"`
+	EventSchemas      string           `yaml:"event_schema"`
+	ProtocolConstants string           `yaml:"protocol_constants"`
+	Simulation        SimulationConfig `yaml:"simulation"`
+	Collision         *CollisionConfig `yaml:"collision,omitempty"`
 	// ResolvedCollision is the validated collision matrix from Collision.
 	// LoadConfig populates it; excluded from YAML unmarshaling.
 	ResolvedCollision *CollisionData               `yaml:"-"`

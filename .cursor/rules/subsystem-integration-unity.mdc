@@ -12,7 +12,7 @@ alwaysApply: false
 
 `golem-unity` is the UPM package (`io.demiurgos.golemengine`) for Unity clients: `GameClient`, WebSocket/WebTransport transports, codecs, Unity bridge helpers, and Scribe editor export. It must not import or duplicate the Go `golem.Server` game loop. Nested `Runtime/WebTransport` is a separate asmdef that references `Demiurgos.WebTransport.Client.Unity`.
 
-The `csharp-client` codegen integration emits generated C# from `codegen/templates/csharp/` (managers, codecs, `ClientFactory`). The `unity` integration emits thin entity-view bridges from `codegen/templates/unity/` and depends on `csharp-client` output.
+The `csharp-client` codegen integration emits generated C# from `codegen/templates/csharp/` (managers, codecs, `ClientFactory`), including optional checked protocol constant sets as static string classes in `EntitiesPb.cs`. The `unity` integration emits thin entity-view bridges from `codegen/templates/unity/` and depends on `csharp-client` output.
 
 **Connect options:** `GolemConnectOptions` carries transport kind (`websocket` / `webtransport`), URL, certificate hashes, and `EventualAckIntervalMs` (`EffectiveEventualAckIntervalMs` maps 0→default 1). `GameClient.Connect(GolemConnectOptions)` requires an options-aware `Func<GolemConnectOptions, IGolemTransport>` factory. `Connect(string)` remains compatible with obsolete parameterless `Func<IGolemTransport>` factories; `Connect(GolemConnectOptions)` with a non-empty transport and a legacy factory fails clearly. Generated `ClientFactory` defaults to `CreateDefaultTransport`; `CreateClient(Func<IGolemTransport>)` is obsolete.
 

@@ -67,6 +67,18 @@ func Bake(projectRoot string) error {
 		return err
 	}
 
+	var protocolConstantSets []schema.ProtocolConstantSetData
+	if cfg.ProtocolConstants != "" {
+		constantsPath := cfg.ProtocolConstants
+		if !filepath.IsAbs(constantsPath) {
+			constantsPath = filepath.Join(projectRoot, constantsPath)
+		}
+		protocolConstantSets, err = schema.LoadProtocolConstants(constantsPath)
+		if err != nil {
+			return err
+		}
+	}
+
 	for _, wt := range worldTypes {
 		if wt.Source == nil || wt.Source.Format != "catalog" {
 			continue
@@ -99,6 +111,7 @@ func Bake(projectRoot string) error {
 	}
 
 	protoData := schema.BuildProtoData(cfg, entities, commands, worldTypes, customTypesList, events)
+	protoData.ProtocolConstantSets = protocolConstantSets
 
 	// Populate each entity's Events field with events that target it.
 	entityEventMap := make(map[string][]schema.EventData, len(entities))
@@ -236,7 +249,7 @@ func Bake(projectRoot string) error {
 		}
 	}
 
-	fmt.Printf("golem-bake: generated code for %d entity type(s), %d command(s), %d world type(s), %d event(s), and %d custom type(s)\n", len(entities), len(commands), len(worldTypes), len(events), len(customTypesList))
+	fmt.Printf("golem-bake: generated code for %d entity type(s), %d command(s), %d world type(s), %d event(s), %d custom type(s), and %d protocol constant set(s)\n", len(entities), len(commands), len(worldTypes), len(events), len(customTypesList), len(protocolConstantSets))
 	return nil
 }
 

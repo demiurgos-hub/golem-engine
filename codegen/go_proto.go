@@ -90,6 +90,8 @@ func generateGoProto(
 	w("\t\"%s/pb\"", golemImport)
 	w(")")
 
+	writeGoProtocolConstants(&b, proto.ProtocolConstantSets)
+
 	for _, ct := range proto.CustomTypes {
 		writeGoCustomTypeStruct(&b, ct)
 	}
@@ -135,6 +137,19 @@ func generateGoProto(
 		}
 	}
 	return nil
+}
+
+func writeGoProtocolConstants(b *strings.Builder, sets []schema.ProtocolConstantSetData) {
+	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
+	for _, set := range sets {
+		w("")
+		w("// %s values are generated protocol string constants.", set.Name)
+		w("const (")
+		for _, member := range set.Members {
+			w("\t%s%s = %q", set.Name, member.Name, member.Value)
+		}
+		w(")")
+	}
 }
 
 // --- State struct (all fields, required) ---

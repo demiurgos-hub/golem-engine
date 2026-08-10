@@ -202,20 +202,21 @@ type WorldUpdateField struct {
 
 // ProtoTemplateData is passed to the entities.proto template.
 type ProtoTemplateData struct {
-	Package             string
-	GoPackage           string
-	Dimensions          int
-	Is3D                bool
-	Entities            []EntityData
-	EntityUpdateFields  []EntityUpdateField
-	EntityRemovedTag    int
-	Commands            []CommandData
-	ClientMessageFields []ClientMessageField
-	WorldTypes          []WorldTypeData
-	WorldUpdateFields   []WorldUpdateField
-	Events              []EventData
-	ServerEventFields   []ServerEventField
-	CustomTypes         []CustomTypeData // all project-wide custom types, for proto message generation
+	Package              string
+	GoPackage            string
+	Dimensions           int
+	Is3D                 bool
+	ProtocolConstantSets []ProtocolConstantSetData
+	Entities             []EntityData
+	EntityUpdateFields   []EntityUpdateField
+	EntityRemovedTag     int
+	Commands             []CommandData
+	ClientMessageFields  []ClientMessageField
+	WorldTypes           []WorldTypeData
+	WorldUpdateFields    []WorldUpdateField
+	Events               []EventData
+	ServerEventFields    []ServerEventField
+	CustomTypes          []CustomTypeData // all project-wide custom types, for proto message generation
 }
 
 // SharedData is passed to once-per-bake shared templates (e.g. MarshalEntityRemoved,

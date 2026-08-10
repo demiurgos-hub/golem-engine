@@ -14,7 +14,7 @@ Templates live under `codegen/templates/` and are embedded with `go:embed`.
 
 `integration.go` maps config keys to template paths, output filenames, post-process hooks, extra emitters, and finalizers.
 
-`go_proto.go` and `js_proto.go` generate lightweight protobuf codecs for consumers; keep Go, JS, and C# client targets conceptually parallel.
+`go_proto.go`, `js_proto.go`, and `csharp_proto.go` generate lightweight codecs for consumers. Optional checked protocol constant sets are emitted in the existing entities outputs as Go untyped constants, TypeScript `as const` objects/unions, and C# static string classes; they are not protobuf fields and do not alter `entities.proto`. Keep Go, JS, and C# client targets conceptually parallel.
 
 **Go server entities (`templates/go_server/server.go.tmpl`):** each `Synced*` carries a runtime-only unexported `srv *golem.Server` plus exported `BindServer` / `Server()` (not wire/snapshot state). `Server()` may be nil before `CreateEntity`; wrapper types embedding `*Synced*` inherit both methods. When `EntityData.Collider` is set, emit `Collider()` (2D) or `Collider3D()` (3D) from schema shape/layer/trigger; wrappers inherit and may override intentionally. When `HasOwnerVars`, emit `OwnerScopedEntity` (`PublicFullUpdate` omitting owner-only tick/once fields, `PublicReplicationMask` clearing owner-only tick bits via `*OwnerOnlyMask`); keep authoritative `FullState`/`FullUpdate` unchanged for persistence and owner delivery. Do not emit those methods for entities without owner-only vars.
 

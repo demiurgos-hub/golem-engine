@@ -95,6 +95,7 @@ func generateCSharpProto(
 func generateCSharpEntitiesProto(outDir, golemImport, namespace string, entities []schema.EntityData, commands []schema.CommandData, proto schema.ProtoTemplateData) error {
 	var b strings.Builder
 	writeCSharpHeader(&b, golemImport, namespace)
+	writeCSProtocolConstants(&b, proto.ProtocolConstantSets)
 
 	for _, ct := range proto.CustomTypes {
 		writeCSCustomType(&b, ct)
@@ -123,6 +124,19 @@ func generateCSharpEntitiesProto(outDir, golemImport, namespace string, entities
 	}
 	fmt.Printf("  wrote %s\n", outPath)
 	return nil
+}
+
+func writeCSProtocolConstants(b *strings.Builder, sets []schema.ProtocolConstantSetData) {
+	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
+	for _, set := range sets {
+		w("    public static class %s", set.Name)
+		w("    {")
+		for _, member := range set.Members {
+			w("        public const string %s = %q;", member.Name, member.Value)
+		}
+		w("    }")
+		w("")
+	}
 }
 
 func writeCSharpHeader(b *strings.Builder, golemImport, namespace string) {
