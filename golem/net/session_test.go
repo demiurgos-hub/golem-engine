@@ -232,6 +232,9 @@ func TestSessionRequestCloseWithReasonIsFailClosedAndNonBlocking(t *testing.T) {
 		close(closeFinished)
 		return nil
 	}
+	if sess.IsClosing() {
+		t.Fatal("new session unexpectedly reports closing")
+	}
 
 	returned := make(chan struct{})
 	go func() {
@@ -243,7 +246,7 @@ func TestSessionRequestCloseWithReasonIsFailClosedAndNonBlocking(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("RequestCloseWithReason blocked on transport close")
 	}
-	if !sess.isClosing() {
+	if !sess.IsClosing() {
 		t.Fatal("session was not marked closing before RequestCloseWithReason returned")
 	}
 	select {

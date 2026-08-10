@@ -831,8 +831,16 @@ func (s *Session) beginClose(reason string) bool {
 	return true
 }
 
-func (s *Session) isClosing() bool {
+// IsClosing reports whether this session has accepted a close request. It
+// becomes true synchronously before a blocking or asynchronous transport close
+// starts and never becomes false, so delayed work can avoid attaching state to
+// a session whose OnDisconnect callback has not run yet.
+func (s *Session) IsClosing() bool {
 	return s.closeState.Load() != nil
+}
+
+func (s *Session) isClosing() bool {
+	return s.IsClosing()
 }
 
 func (s *Session) requestedCloseReason() string {
