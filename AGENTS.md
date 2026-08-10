@@ -28,7 +28,22 @@ Golem Engine is a Go module for building multiplayer game backends. It includes 
 - Tooling is `cmd/`, `schema/`, and `codegen/`. Runtime library code is `golem/`, `golem/registry/`, `golem/world/`, `golem/visibility/`, `golem/footprint/`, and `golem/auth/`.
 - `golem/registry`, `golem/world`, `golem/visibility`, `golem/footprint`, and `golem/auth` do not import `golem`. Prefer depending on `golem/registry` for storage/entity-only work, `golem/world` for world-data-only work, `golem/visibility` for group-policy-only work, `golem/footprint` for collision footprint load/place work, and `golem/auth` for token-query `OnUpgrade` helpers.
 - Consumer repos hold `golem.yaml` and schema YAML at their root. This engine repo may omit them.
-- Cursor subsystem rules live in `.cursor/rules/subsystem-*.mdc` (including `subsystem-integration-unity.mdc` for `golem-unity` / C# client codegen). When a subsystem's layout or responsibilities change, update the matching rule description, boundaries, and globs.
+
+## Shared Cursor and Codex Rules
+
+`.cursor/rules/*.mdc` is the shared source of detailed repository rules for both Cursor and Codex.
+
+- When a subsystem's layout or responsibilities change, update the matching rule's description, boundaries, and globs. This includes cross-cutting rules such as `.cursor/rules/bake-pipeline.mdc`, not only `subsystem-*.mdc` files.
+
+### Codex-only discovery bridge
+
+The instructions in this subsection are for Codex only. Cursor already loads `.cursor/rules` natively and must not manually enumerate or reload `.mdc` files in response to this subsection.
+
+- When running in Codex, at the start of each task enumerate every `.cursor/rules/*.mdc` file from the filesystem and inspect its YAML front matter. Include ignored or untracked `*.local.mdc` files; do not limit discovery to files returned by Git or to `subsystem-*.mdc`.
+- Read and follow the full body of every rule with `alwaysApply: true`.
+- Read and follow the full body of any other rule when its `description` is relevant to the task or its `globs` match a file in the task scope.
+- Re-evaluate applicable rules when the task scope changes or new files enter the scope.
+- Treat an applicable `.mdc` rule as repository instruction. If it conflicts with this `AGENTS.md`, this file takes precedence.
 
 ## Build and Test
 
