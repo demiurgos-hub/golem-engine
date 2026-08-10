@@ -240,8 +240,24 @@ function redactUrl(url: string): string {
     const parsed = new URL(url);
     return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
   } catch {
-    return url;
+    return "<invalid-url>";
   }
+}
+
+class SanitizedTransportError extends Error {}
+
+function sanitizedTransportError(message: string): Error {
+  return new SanitizedTransportError(`golem-js: ${message}`);
+}
+
+function sanitizeDisconnectInfo(transport: string, info: DisconnectInfo): DisconnectInfo {
+  if (info.error == null || info.error instanceof SanitizedTransportError) {
+    return info;
+  }
+  return {
+    ...info,
+    error: sanitizedTransportError(`${transport} transport failed`),
+  };
 }
 
 function logDisconnect(transport: string, info: DisconnectInfo): void {
@@ -560,7 +576,11 @@ class WebSocketReliableChannel implements ReliableMessageChannel {
 
   constructor(url: string) {
     const redacted = redactUrl(url);
-    this._ws = new WebSocket(url);
+    try {
+      this._ws = new WebSocket(url);
+    } catch {
+      throw sanitizedTransportError("websocket connection setup failed");
+    }
     this._ws.binaryType = "arraybuffer";
     this._ws.onopen = () => this._onOpen?.();
     this._ws.onmessage = (ev) => {
@@ -569,8 +589,8 @@ class WebSocketReliableChannel implements ReliableMessageChannel {
       }
     };
     this._ws.onerror = (ev) => {
-      const message = ev instanceof ErrorEvent && ev.message ? ` message=${JSON.stringify(ev.message)}` : "";
-      console.error(`golem-js: websocket error url=${redacted} type=${ev.type}${message}`);
+      // Browser ErrorEvent messages can repeat the full credential-bearing URL.
+      console.error(`golem-js: websocket error url=${redacted} type=${ev.type}`);
     };
     this._ws.onclose = (ev) => {
       const info: DisconnectInfo = {
@@ -596,8 +616,8 @@ class WebSocketReliableChannel implements ReliableMessageChannel {
   send(bytes: Uint8Array): void {
     try {
       this._ws.send(bytes);
-    } catch (error) {
-      this._notifyClose({ wasClean: false, error });
+    } catch {
+      this._notifyClose({ wasClean: false, error: sanitizedTransportError("websocket send failed") });
     }
   }
 
@@ -613,8 +633,9 @@ class WebSocketReliableChannel implements ReliableMessageChannel {
       return;
     }
     this._closedNotified = true;
-    logDisconnect("websocket", info);
-    this._onClose?.(info);
+    const safeInfo = sanitizeDisconnectInfo("websocket", info);
+    logDisconnect("websocket", safeInfo);
+    this._onClose?.(safeInfo);
   }
 }
 
@@ -1051,7 +1072,7 @@ class WebTransportDatagramProtocol {
     }
     const now = Date.now();
     if (this._orderedRecv.expired(now)) {
-      this._notifyClose({ wasClean: false, error: new Error("golem-js: reliable ordered datagram gap expired") });
+      this._notifyClose({ wasClean: false, error: sanitizedTransportError("reliable ordered datagram gap expired") });
       return;
     }
     if (this._ackDirty && now >= this._ackDueAt) {
@@ -1075,7 +1096,7 @@ class WebTransportDatagramProtocol {
   ): "none" | "fresh" | "resend" {
     for (const msg of queue) {
       if (now - msg.queuedAt > datagramReliableMessageTTLms || msg.attempts >= datagramReliableRetryLimit) {
-        this._notifyClose({ wasClean: false, error: new Error("golem-js: reliable datagram delivery stalled") });
+        this._notifyClose({ wasClean: false, error: sanitizedTransportError("reliable datagram delivery stalled") });
         return "none";
       }
       if (msg.inFlight && now < msg.nextSendAt) {
@@ -1146,8 +1167,8 @@ class WebTransportDatagramProtocol {
     this._ackDirty = false;
     this._writeQueue = this._writeQueue
       .then(() => this._writer.write(encoded))
-      .catch((error) => {
-        this._notifyClose({ wasClean: false, error });
+      .catch(() => {
+        this._notifyClose({ wasClean: false, error: sanitizedTransportError("webtransport datagram write failed") });
       });
   }
 
@@ -1227,9 +1248,15 @@ class WebTransportReliableChannel implements ReliableMessageChannel {
 
   constructor(options: WebTransportConnectOptions) {
     this._redactedUrl = redactUrl(options.url);
-    const transport = new WebTransport(options.url, {
-      serverCertificateHashes: options.serverCertificateHashes?.map(normalizeCertificateHash),
-    });
+    const serverCertificateHashes = options.serverCertificateHashes?.map(normalizeCertificateHash);
+    let transport: WebTransport;
+    try {
+      transport = new WebTransport(options.url, {
+        serverCertificateHashes,
+      });
+    } catch {
+      throw sanitizedTransportError("webtransport connection setup failed");
+    }
     this._transport = transport;
     const datagramWriter = transport.datagrams.writable.getWriter();
     this._datagramProtocol = new WebTransportDatagramProtocol(
@@ -1252,7 +1279,13 @@ class WebTransportReliableChannel implements ReliableMessageChannel {
       return;
     }
     this._closeStarted = true;
-    const closeTransport = () => this._transport.close({ closeCode: 0, reason: "client disconnect" });
+    const closeTransport = () => {
+      try {
+        this._transport.close({ closeCode: 0, reason: "client disconnect" });
+      } catch {
+        console.warn("golem-js: webtransport close failed");
+      }
+    };
     if (!this._writer) {
       closeTransport();
       return;
@@ -1270,8 +1303,8 @@ class WebTransportReliableChannel implements ReliableMessageChannel {
     const timeout = setTimeout(finishClose, webTransportCloseFrameTimeoutMs);
     this._writeQueue = this._writeQueue
       .then(() => this._writer?.write(frame))
-      .catch((error) => {
-        console.warn(`golem-js: webtransport close frame write failed error=${String(error)}`);
+      .catch(() => {
+        console.warn("golem-js: webtransport close frame write failed");
       })
       .then(finishClose);
   }
@@ -1284,8 +1317,8 @@ class WebTransportReliableChannel implements ReliableMessageChannel {
     const frame = writeReliableFrame(payload);
     this._writeQueue = this._writeQueue
       .then(() => this._writer?.write(frame))
-      .catch((error) => {
-        this._notifyClose({ wasClean: false, error });
+      .catch(() => {
+        this._notifyClose({ wasClean: false, error: sanitizedTransportError("webtransport stream write failed") });
       });
   }
 
@@ -1312,11 +1345,11 @@ class WebTransportReliableChannel implements ReliableMessageChannel {
       void this._readStream(stream.readable);
       void this._readDatagrams();
       this._watchClosed();
-    } catch (error) {
+    } catch {
       console.error(
-        `golem-js: webtransport connect failed url=${this._redactedUrl} error=${String(error)}`,
+        `golem-js: webtransport connect failed url=${this._redactedUrl}`,
       );
-      this._notifyClose({ wasClean: false, error });
+      this._notifyClose({ wasClean: false, error: sanitizedTransportError("webtransport connect failed") });
     }
   }
 
@@ -1335,8 +1368,8 @@ class WebTransportReliableChannel implements ReliableMessageChannel {
           this._onMessage?.(frame);
         }
       }
-    } catch (error) {
-      this._notifyClose({ wasClean: false, error });
+    } catch {
+      this._notifyClose({ wasClean: false, error: sanitizedTransportError("webtransport stream read failed") });
     } finally {
       reader.releaseLock();
     }
@@ -1350,8 +1383,8 @@ class WebTransportReliableChannel implements ReliableMessageChannel {
         reason: info?.reason,
         wasClean: true,
       });
-    } catch (error) {
-      this._notifyClose({ wasClean: false, error });
+    } catch {
+      this._notifyClose({ wasClean: false, error: sanitizedTransportError("webtransport close failed") });
     }
   }
 
@@ -1376,8 +1409,8 @@ class WebTransportReliableChannel implements ReliableMessageChannel {
           this._onUnreliableStateMessage?.(value);
         }
       }
-    } catch (error) {
-      this._notifyClose({ wasClean: false, error });
+    } catch {
+      this._notifyClose({ wasClean: false, error: sanitizedTransportError("webtransport datagram read failed") });
     } finally {
       reader.releaseLock();
     }
@@ -1390,8 +1423,9 @@ class WebTransportReliableChannel implements ReliableMessageChannel {
     this._closedNotified = true;
     this._connected = false;
     this._datagramProtocol?.close();
-    logDisconnect("webtransport", info);
-    this._onClose?.(info);
+    const safeInfo = sanitizeDisconnectInfo("webtransport", info);
+    logDisconnect("webtransport", safeInfo);
+    this._onClose?.(safeInfo);
   }
 }
 

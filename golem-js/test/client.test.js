@@ -60,6 +60,13 @@ class FakeWebSocket {
   }
 }
 
+class FakeErrorEvent {
+  constructor(type, init = {}) {
+    this.type = type;
+    this.message = init.message ?? "";
+  }
+}
+
 function packetBytes(frames) {
   const w = new PbWriter();
   for (const frame of frames) {
@@ -232,6 +239,35 @@ test("WebSocket unclean close logs code and reason", () => {
   } finally {
     console.error = originalError;
     globalThis.WebSocket = previousWebSocket;
+    FakeWebSocket.instances.length = 0;
+  }
+});
+
+test("WebSocket runtime errors never log credential-bearing ErrorEvent messages", () => {
+  const previousWebSocket = globalThis.WebSocket;
+  const previousErrorEvent = globalThis.ErrorEvent;
+  const originalError = console.error;
+  const logs = [];
+  globalThis.WebSocket = FakeWebSocket;
+  globalThis.ErrorEvent = FakeErrorEvent;
+  console.error = (message) => logs.push(String(message));
+  const secret = "realtime-ticket-secret";
+  const url = `wss://example.test/ws?ticket=${secret}`;
+  try {
+    createChannel({ transport: "websocket", url });
+    const ws = FakeWebSocket.instances.at(-1);
+
+    ws.onerror?.(new FakeErrorEvent("error", {
+      message: `WebSocket connection to '${url}' failed`,
+    }));
+
+    assert.match(logs.join("\n"), /url=wss:\/\/example\.test\/ws/);
+    assert.doesNotMatch(logs.join("\n"), /ticket=/);
+    assert.doesNotMatch(logs.join("\n"), new RegExp(secret));
+  } finally {
+    console.error = originalError;
+    globalThis.WebSocket = previousWebSocket;
+    globalThis.ErrorEvent = previousErrorEvent;
     FakeWebSocket.instances.length = 0;
   }
 });
@@ -571,6 +607,13 @@ class FakeWebTransport {
   }
 }
 
+class RejectingWebTransport extends FakeWebTransport {
+  constructor(url) {
+    super();
+    this.ready = Promise.reject(new Error(`WebTransport connection to '${url}' failed`));
+  }
+}
+
 class BlockingWritableQueue {
   getWriter() {
     return {
@@ -799,6 +842,37 @@ test("WebTransport close writes the Golem close control frame before closing", a
   } finally {
     globalThis.WebTransport = previousWebTransport;
     FakeWebTransport.instances.length = 0;
+  }
+});
+
+test("WebTransport runtime errors are sanitized before logs and disconnect callbacks", async () => {
+  const previousWebTransport = globalThis.WebTransport;
+  const originalError = console.error;
+  const logs = [];
+  const secret = "realtime-ticket-secret";
+  const url = `https://example.test/wt?ticket=${secret}`;
+  globalThis.WebTransport = RejectingWebTransport;
+  console.error = (message) => logs.push(String(message));
+  try {
+    const channel = createChannel({ transport: "webtransport", url });
+    let closeInfo;
+    channel.onClose((info) => {
+      closeInfo = info;
+    });
+
+    await delay(5);
+
+    assert.ok(closeInfo);
+    assert.match(String(closeInfo.error), /webtransport connect failed/);
+    assert.doesNotMatch(String(closeInfo.error), /ticket=/);
+    assert.doesNotMatch(String(closeInfo.error), new RegExp(secret));
+    assert.match(logs.join("\n"), /url=https:\/\/example\.test\/wt/);
+    assert.doesNotMatch(logs.join("\n"), /ticket=/);
+    assert.doesNotMatch(logs.join("\n"), new RegExp(secret));
+  } finally {
+    console.error = originalError;
+    globalThis.WebTransport = previousWebTransport;
+    RejectingWebTransport.instances.length = 0;
   }
 });
 
