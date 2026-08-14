@@ -15,6 +15,8 @@ If a new field, target, branch, helper, import, or generated method is added in 
 
 Prefer focused regression tests that inspect generated output for emitted names, imports, helper functions, method shapes, tags, and format strings; do not rely only on helper-level logic tests.
 
+Entity, command, and event root `tag` values pin fields in their protocol oneof envelopes. Untagged declarations keep the legacy sequential assignment, explicit declarations are additive, and `EntityRemoved` stays immediately after the untagged entity pairs. Validate protobuf field legality and all implicit/explicit overlaps before rendering; never repair envelope tags in generated output.
+
 Be careful with nested formatting in generators: code that emits `fmt` strings or TS/Go source can need a different level of escaping than normal application code.
 
 After schema or codegen changes that affect bake output, verify `go build ./cmd/golem-bake` and targeted generator tests. For cross-target changes, confirm both Go and JS generated outputs still compile.

@@ -14,6 +14,7 @@ import (
 // SchemaFile is the YAML model for one entity schema (e.g. schemas/entities/player.yaml).
 type SchemaFile struct {
 	Entity     string                  `yaml:"entity"`
+	Tag        *int                    `yaml:"tag"`                  // optional EntityUpdate state tag; delta uses tag+1
 	Global     bool                    `yaml:"global"`               // true = always replicated to every client (bypasses FOI)
 	Persistent *bool                   `yaml:"persistent,omitempty"` // nil = default true; false = omit from snapshots
 	Collider   *ColliderDef            `yaml:"collider,omitempty"`   // optional; bake-time / runtime only (not on the wire)
@@ -81,6 +82,7 @@ func (v VarInfo) CSConvert(src string) string {
 // EntityData is the fully-resolved template data for one entity type.
 type EntityData struct {
 	Name            string
+	UpdateTag       int // optional EntityUpdate state tag; delta uses UpdateTag+1
 	LowerName       string
 	Dimensions      int
 	Is3D            bool
@@ -377,6 +379,7 @@ func BuildCustomTypeData(tf TypeSchemaFile) CustomTypeData {
 // CommandSchemaFile is the YAML model for one command (e.g. schemas/commands/move.yaml).
 type CommandSchemaFile struct {
 	Command    string                     `yaml:"command"`
+	Tag        *int                       `yaml:"tag"`         // optional ClientMessage oneof tag
 	Target     string                     `yaml:"target"`      // "entity" or "session"
 	EntityType string                     `yaml:"entity_type"` // required when target is "entity"
 	Fields     map[string]CommandFieldDef `yaml:"fields"`
@@ -417,6 +420,7 @@ type CommandFieldInfo struct {
 // CommandData is the fully-resolved template data for one command type.
 type CommandData struct {
 	Name       string
+	UpdateTag  int // optional ClientMessage oneof tag
 	LowerName  string
 	Target     string // "entity" or "session"
 	EntityType string // PascalCase entity name; set when Target is "entity"
@@ -450,6 +454,9 @@ func LoadSchemas(schemasDir string, dimensions int, customTypes map[string]Custo
 		var sf SchemaFile
 		if err := yaml.Unmarshal(data, &sf); err != nil {
 			return nil, fmt.Errorf("parsing %s: %w", e.Name(), err)
+		}
+		if err := validateExplicitEnvelopeTag("entity", sf.Entity, sf.Tag); err != nil {
+			return nil, fmt.Errorf("%s: %w", e.Name(), err)
 		}
 		entities = append(entities, BuildEntityData(sf, dimensions, customTypes))
 	}
@@ -525,6 +532,7 @@ func BuildEntityData(sf SchemaFile, dimensions int, customTypes map[string]Custo
 
 	ed := EntityData{
 		Name:       sf.Entity,
+		UpdateTag:  optionalEnvelopeTag(sf.Tag),
 		LowerName:  LcFirst(sf.Entity),
 		Dimensions: dimensions,
 		Is3D:       dimensions == 3,
@@ -742,6 +750,9 @@ func LoadCommands(commandsDir string, customTypes map[string]CustomTypeData) ([]
 		if prev, ok := seen[name]; ok {
 			return nil, fmt.Errorf("duplicate command name %q in %s and %s", name, prev, e.Name())
 		}
+		if err := validateExplicitEnvelopeTag("command", name, cf.Tag); err != nil {
+			return nil, fmt.Errorf("%s: %w", e.Name(), err)
+		}
 		seen[name] = e.Name()
 		commands = append(commands, BuildCommandData(cf, customTypes))
 	}
@@ -756,6 +767,7 @@ func LoadCommands(commandsDir string, customTypes map[string]CustomTypeData) ([]
 func BuildCommandData(cf CommandSchemaFile, customTypes map[string]CustomTypeData) CommandData {
 	cd := CommandData{
 		Name:       cf.Command,
+		UpdateTag:  optionalEnvelopeTag(cf.Tag),
 		LowerName:  LcFirst(cf.Command),
 		Target:     cf.Target,
 		EntityType: cf.EntityType,
@@ -847,6 +859,7 @@ func ValidateCommands(commands []CommandData, entities []EntityData) error {
 // EventSchemaFile is the YAML model for one server event (e.g. schemas/events/chat_message.yaml).
 type EventSchemaFile struct {
 	Event      string                   `yaml:"event"`
+	Tag        *int                     `yaml:"tag"`         // optional ServerEvent oneof tag
 	Target     string                   `yaml:"target"`      // required: "global", "session", or "entity"
 	EntityType string                   `yaml:"entity_type"` // PascalCase entity name; required when target is "entity"
 	FOIOnly    bool                     `yaml:"foi_only"`    // deliver only to sessions with entity in FOI; requires target "entity"
@@ -888,6 +901,7 @@ type EventFieldInfo struct {
 // EventData is the fully-resolved template data for one server event type.
 type EventData struct {
 	Name       string
+	UpdateTag  int // optional ServerEvent oneof tag
 	LowerName  string
 	Target     string // "global", "session", or "entity"
 	EntityType string // PascalCase entity name; set when Target is "entity"
@@ -936,6 +950,9 @@ func LoadEvents(eventsDir string, customTypes map[string]CustomTypeData) ([]Even
 		if prev, ok := seen[name]; ok {
 			return nil, fmt.Errorf("duplicate event name %q in %s and %s", name, prev, e.Name())
 		}
+		if err := validateExplicitEnvelopeTag("event", name, ef.Tag); err != nil {
+			return nil, fmt.Errorf("%s: %w", e.Name(), err)
+		}
 		seen[name] = e.Name()
 		events = append(events, BuildEventData(ef, customTypes))
 	}
@@ -952,6 +969,7 @@ func BuildEventData(ef EventSchemaFile, customTypes map[string]CustomTypeData) E
 	}
 	ed := EventData{
 		Name:       ef.Event,
+		UpdateTag:  optionalEnvelopeTag(ef.Tag),
 		LowerName:  LcFirst(ef.Event),
 		Target:     target,
 		EntityType: ef.EntityType,
@@ -1432,6 +1450,9 @@ func BuildProtoData(cfg *Config, entities []EntityData, commands []CommandData, 
 
 	tag := 1
 	for _, e := range entities {
+		if e.UpdateTag != 0 {
+			continue
+		}
 		pd.EntityUpdateFields = append(pd.EntityUpdateFields, EntityUpdateField{
 			MessageType: e.Name + "State",
 			SnakeName:   ToSnakeCase(e.Name) + "_state",
@@ -1446,15 +1467,45 @@ func BuildProtoData(cfg *Config, entities []EntityData, commands []CommandData, 
 		tag++
 	}
 	pd.EntityRemovedTag = tag
+	for _, e := range entities {
+		if e.UpdateTag == 0 {
+			continue
+		}
+		pd.EntityUpdateFields = append(pd.EntityUpdateFields,
+			EntityUpdateField{
+				MessageType: e.Name + "State",
+				SnakeName:   ToSnakeCase(e.Name) + "_state",
+				Tag:         e.UpdateTag,
+			},
+			EntityUpdateField{
+				MessageType: e.Name + "Delta",
+				SnakeName:   ToSnakeCase(e.Name) + "_delta",
+				Tag:         e.UpdateTag + 1,
+			},
+		)
+	}
 
 	cmdTag := 1
 	for _, c := range commands {
+		if c.UpdateTag != 0 {
+			continue
+		}
 		pd.ClientMessageFields = append(pd.ClientMessageFields, ClientMessageField{
 			MessageType: c.Name + "Command",
 			SnakeName:   ToSnakeCase(c.Name),
 			Tag:         cmdTag,
 		})
 		cmdTag++
+	}
+	for _, c := range commands {
+		if c.UpdateTag == 0 {
+			continue
+		}
+		pd.ClientMessageFields = append(pd.ClientMessageFields, ClientMessageField{
+			MessageType: c.Name + "Command",
+			SnakeName:   ToSnakeCase(c.Name),
+			Tag:         c.UpdateTag,
+		})
 	}
 
 	pd.WorldTypes = worldTypes
@@ -1474,12 +1525,25 @@ func BuildProtoData(cfg *Config, entities []EntityData, commands []CommandData, 
 	pd.Events = events
 	evtTag := 1
 	for _, ev := range events {
+		if ev.UpdateTag != 0 {
+			continue
+		}
 		pd.ServerEventFields = append(pd.ServerEventFields, ServerEventField{
 			MessageType: ev.Name + "Event",
 			SnakeName:   ToSnakeCase(ev.Name),
 			Tag:         evtTag,
 		})
 		evtTag++
+	}
+	for _, ev := range events {
+		if ev.UpdateTag == 0 {
+			continue
+		}
+		pd.ServerEventFields = append(pd.ServerEventFields, ServerEventField{
+			MessageType: ev.Name + "Event",
+			SnakeName:   ToSnakeCase(ev.Name),
+			Tag:         ev.UpdateTag,
+		})
 	}
 
 	return pd

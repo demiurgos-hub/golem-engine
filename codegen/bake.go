@@ -66,6 +66,9 @@ func Bake(projectRoot string) error {
 	if err := schema.ValidateEvents(events, entities); err != nil {
 		return err
 	}
+	if err := schema.ValidateEnvelopeTags(entities, commands, events); err != nil {
+		return err
+	}
 
 	var protocolConstantSets []schema.ProtocolConstantSetData
 	if cfg.ProtocolConstants != "" {

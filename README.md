@@ -103,6 +103,13 @@ vars:
   equipment: { type: dict<string, Item>, tag: 3 }
 ```
 
+Entity, command, and event schemas may set an optional root `tag` to pin their
+field in the generated `EntityUpdate`, `ClientMessage`, or `ServerEvent` oneof.
+Declarations without it keep their legacy sequential assignment; use an
+explicit tag when adding a schema without renumbering an already shipped wire
+contract. Entity tags reserve a consecutive state/delta pair, and all explicit
+tags must be legal, non-overlapping protobuf field numbers.
+
 ### Generate
 
 Run the CLI from your project root:

@@ -58,3 +58,43 @@ func TestEntitiesProtoRendersWorldCollectionFields(t *testing.T) {
 		}
 	}
 }
+
+func TestEntitiesProtoRendersExplicitEnvelopeTags(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/proto/entities.proto.tmpl")
+	if err != nil {
+		t.Fatalf("load entities proto template: %v", err)
+	}
+	var out bytes.Buffer
+	err = tmpl.Execute(&out, schema.ProtoTemplateData{
+		Package:   "game",
+		GoPackage: "example.com/game",
+		EntityUpdateFields: []schema.EntityUpdateField{
+			{MessageType: "PlayerState", SnakeName: "player_state", Tag: 1},
+			{MessageType: "InteractableState", SnakeName: "interactable_state", Tag: 8},
+		},
+		EntityRemovedTag: 7,
+		ClientMessageFields: []schema.ClientMessageField{
+			{MessageType: "MoveCommand", SnakeName: "move", Tag: 1},
+			{MessageType: "InteractionCloseCommand", SnakeName: "interaction_close", Tag: 22},
+		},
+		ServerEventFields: []schema.ServerEventField{
+			{MessageType: "DialogMessageEvent", SnakeName: "dialog_message", Tag: 1},
+			{MessageType: "InteractionUpdateEvent", SnakeName: "interaction_update", Tag: 13},
+		},
+	})
+	if err != nil {
+		t.Fatalf("execute entities proto template: %v", err)
+	}
+
+	content := out.String()
+	for _, want := range []string{
+		"InteractableState interactable_state = 8;",
+		"EntityRemoved entity_removed = 7;",
+		"InteractionCloseCommand interaction_close = 22;",
+		"InteractionUpdateEvent interaction_update = 13;",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("generated entities.proto missing %q\n%s", want, content)
+		}
+	}
+}

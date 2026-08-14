@@ -23,6 +23,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Entity, command, and event schema files accept an optional root `tag` that pins their generated `EntityUpdate`, `ClientMessage`, or `ServerEvent` oneof field. Untagged declarations retain legacy sequential assignment, `EntityRemoved` remains directly after untagged entity state/delta pairs, and bake rejects invalid, reserved, overflowing, duplicate, or overlapping explicit tags. Re-run `golem-bake` after opting into pinned envelope tags.
 - `Session.IsClosing()` exposes the monotonic, concurrency-safe close-request state immediately, allowing delayed hydration or other asynchronous work to avoid attaching gameplay state before `OnDisconnect` runs.
 - `Session.RequestCloseWithReason(reason)` atomically marks a session closing, drops later traffic, and signals its write pump before returning, while the clean WebSocket/WebTransport close handshake runs asynchronously with the retained reason. Concurrent/repeated close calls are idempotent and the first close reason wins, so tick and HTTP callbacks can revoke a session without waiting on transport I/O. `CloseWithReason` remains the blocking-handshake API.
 - `golem-phaser` connection-option callbacks may return a `Promise`, allowing each initial connection and reconnect to fetch fresh short-lived authentication or transport configuration. Pending results are ignored after disconnect, plugin destruction, or a newer connection attempt.
