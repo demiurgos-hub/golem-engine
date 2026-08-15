@@ -218,6 +218,24 @@ test("WebSocket close sends the Golem close control frame before closing", () =>
   }
 });
 
+test("WebSocket reliable channel accepts a 150 kB snapshot under the 256 KiB cap", () => {
+  const previousWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = FakeWebSocket;
+  try {
+    const channel = createChannel({ transport: "websocket", url: "ws://example.test" });
+    const ws = FakeWebSocket.instances.at(-1);
+
+    channel.send(new Uint8Array(150000));
+
+    assert.equal(channel.maxMessageBytes, 256 * 1024);
+    assert.equal(ws.sent.length, 1);
+    assert.equal(ws.sent[0].byteLength, 150000);
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+    FakeWebSocket.instances.length = 0;
+  }
+});
+
 test("WebSocket unclean close logs code and reason", () => {
   const previousWebSocket = globalThis.WebSocket;
   const originalError = console.error;
@@ -753,6 +771,30 @@ test("WebTransport stream sends piggyback eventual ACK state", async () => {
       Array.from(streamPayload.slice(23)),
       Array.from(packetBytes([new Uint8Array([9, 8, 7])])),
     );
+    channel.close();
+  } finally {
+    globalThis.WebTransport = previousWebTransport;
+    FakeWebTransport.instances.length = 0;
+  }
+});
+
+test("WebTransport stream receives a 150 kB reliable snapshot", async () => {
+  const previousWebTransport = globalThis.WebTransport;
+  globalThis.WebTransport = FakeWebTransport;
+  try {
+    const channel = createChannel({ transport: "webtransport", url: "https://example.test" });
+    await delay(5);
+    const transport = FakeWebTransport.instances.at(-1);
+    let received;
+    channel.onMessage((bytes) => {
+      received = bytes;
+    });
+
+    transport.streamReadable.push(framedBatchBytes([new Uint8Array(150000)]));
+    await delay(10);
+
+    assert.equal(channel.maxMessageBytes, 256 * 1024);
+    assert.equal(received?.byteLength, 150000);
     channel.close();
   } finally {
     globalThis.WebTransport = previousWebTransport;

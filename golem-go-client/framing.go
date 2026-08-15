@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	maxReliableMessageBytes      = 32000
+	maxReliableMessageBytes      = 256 * 1024
 	maxWebTransportDatagramBytes = 1200
 	reliableFrameHeaderBytes     = 4
 )

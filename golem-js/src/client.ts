@@ -1,7 +1,7 @@
 import { PbReader } from "./codec.js";
 
-const maxReliableMessageBytes = 32000;
-const maxWebSocketPayloadBytes = 32000;
+const maxReliableMessageBytes = 256 * 1024;
+const maxWebSocketPayloadBytes = maxReliableMessageBytes;
 const maxWebTransportDatagramBytes = 1200;
 const datagramAckMaskWordCount = 4;
 const datagramAckMaskWordBytes = 4;

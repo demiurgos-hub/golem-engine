@@ -10,7 +10,7 @@ alwaysApply: false
 
 **Transport boundary:** `reliableMessageChannel` is the transport-neutral reliable stream lane used by `Session.writeBatch`. `datagramChannel` is the raw WebTransport datagram substrate. `Session` owns the datagram reliability protocol on top of that substrate, including ACK packets, resend state, and ordered delivery for reliable datagram lanes. The datagram protocol header now includes a fixed 128-bit selective-ACK field, so payload budgets in `payload.go` and `golem-js/src/client.ts` must stay aligned with the shared header size.
 
-**Reliable batching:** `SendBatch` / `BroadcastBatch` queue one reliable batch per session, which keeps channel pressure low even when many entities update in one tick. WebSocket coalesces raw logical frames into ordered binary messages targeting `32000` bytes each. WebTransport coalesces length-prefixed logical frames into ordered writes on one reliable stream using the same chunk target. `maxReliableMessageBytes` applies per logical frame, not per transport write.
+**Reliable batching:** `SendBatch` / `BroadcastBatch` queue one reliable batch per session, which keeps channel pressure low even when many entities update in one tick. Reliable logical frames are bounded to 256 KiB. WebSocket coalesces raw logical frames into ordered binary messages up to that cap. WebTransport coalesces length-prefixed logical frames into ordered writes targeting 32000-byte chunks; a single larger logical frame remains one write. `maxReliableMessageBytes` applies per logical frame, not per transport write.
 
 **Datagram lanes:** WebTransport now has three logical datagram lanes:
 - raw `unreliable` datagrams exposed through `OnDatagram` and `SendUnreliable`

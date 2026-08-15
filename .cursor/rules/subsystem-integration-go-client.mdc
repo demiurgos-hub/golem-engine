@@ -17,7 +17,7 @@ alwaysApply: false
 
 The `go-client` codegen integration emits generated Go in consumer projects from `codegen/templates/go_client/` plus lightweight protobuf codecs from `codegen/go_proto.go`. Optional checked protocol constant sets are emitted as untyped constants in `entities_pb.go`. Generated files are gofmt'd; there is no compile finalizer like `js-client`.
 
-Keep transport constants and framing aligned with `golem/net` and `golem-js`: reliable frame cap `32000`, WebTransport datagram cap `1200`, datagram header/ACK mask sizes, lane IDs (`1` unreliable, `2` reliable-unordered, `3` reliable-ordered, `4` state-aware datagram delivery), and control frames `0x00 'OGS' 0x01/0x02`.
+Keep transport constants and framing aligned with `golem/net` and `golem-js`: reliable frame cap `256 KiB`, WebTransport datagram cap `1200`, datagram header/ACK mask sizes, lane IDs (`1` unreliable, `2` reliable-unordered, `3` reliable-ordered, `4` state-aware datagram delivery), and control frames `0x00 'OGS' 0x01/0x02`.
 
 `GameClient` exposes two command sends: `Send` uses reliable-unordered datagrams on WebTransport, while `SendOrdered` uses reliable-ordered datagrams. Both use a reliable-stream `ClientPacket` on WebSocket. Keep raw byte sends confined to `ReliableMessageChannel`, enforce each datagram lane's payload budget without stream fallback, and keep generated `Send{Name}` / `Send{Name}Ordered` helpers aligned.
 

@@ -20,7 +20,7 @@ alwaysApply: false
 
 The `js-client` integration emits generated TypeScript in consumer projects from `codegen/templates/js/` plus codec files from `codegen/js_proto.go`. Optional checked protocol constant sets are emitted as `as const` objects plus union types in `entities_pb`. `compileJSIntegration` runs `tsc` in the output dir and removes intermediate `.ts` so consumer output is `.js` plus `.d.ts`.
 
-Transport constants and framing must stay in sync with `golem/net`: reliable frame cap `32000`, WebTransport datagram cap `1200`, datagram header/ACK mask sizes, lane IDs (`1` unreliable, `2` reliable-unordered, `3` reliable-ordered, `4` eventual-state), and control frames `0x00 'OGS' 0x01/0x02`.
+Transport constants and framing must stay in sync with `golem/net`: reliable frame cap `256 KiB`, WebTransport datagram cap `1200`, datagram header/ACK mask sizes, lane IDs (`1` unreliable, `2` reliable-unordered, `3` reliable-ordered, `4` eventual-state), and control frames `0x00 'OGS' 0x01/0x02`.
 
 `GameClient` exposes two command sends: `send` uses reliable-unordered datagrams on WebTransport, while `sendOrdered` uses reliable-ordered datagrams. Both fall back to the shared reliable-stream `ClientPacket` queue on WebSocket. Keep raw byte sends confined to the low-level channel contracts, enforce each datagram lane's payload budget without stream fallback, and keep generated `send{Name}` / `send{Name}Ordered` helpers aligned.
 

@@ -145,7 +145,7 @@ type ServerConfig struct {
 	// (typically via SendWorldData / SendStoredWorldData). NewServer copies and
 	// normalizes the slice (drops empties/duplicates) so later caller mutation
 	// cannot race with snapshot reads. Large embedded maps can exceed the
-	// 32000-byte reliable frame cap — prefer map_url for oversized payloads.
+	// 256 KiB reliable frame cap — prefer map_url for oversized payloads.
 	WorldSnapshotExclude []string
 	// PostQueueCapacity is the bounded capacity of the tick-safe Post queue
 	// (default 1024). Zero selects the default; negative values panic in
@@ -905,7 +905,7 @@ func (s *Server) hasFOI(sessionID int64) bool {
 // PushWorldData broadcasts the current value of a single world data type to
 // all connected sessions. Returns nil if the name is not in the store or the
 // broadcast succeeds. Returns a non-nil error if serialization fails.
-// Reliable frames are capped at 32000 bytes; oversized embedded maps should
+// Reliable frames are capped at 256 KiB; oversized embedded maps should
 // use map_url instead of tile_data.
 func (s *Server) PushWorldData(name string) error {
 	d := s.World.Get(name)
@@ -923,7 +923,7 @@ func (s *Server) PushWorldData(name string) error {
 // sends it on the reliable stream to one session. It does not read or mutate
 // Server.World, so two sessions can receive different generated values that
 // share the same WorldName. Nil and typed-nil data return an error. Marshal
-// failures, oversize reliable frames (32000-byte cap), and disconnected
+// failures, oversize reliable frames (256 KiB cap), and disconnected
 // sessions propagate. Prefer map_url when payloads may exceed the frame cap.
 // Names listed in WorldSnapshotExclude are omitted from connect snapshots;
 // callers own delivering those values (for example via this method).

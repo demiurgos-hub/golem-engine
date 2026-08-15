@@ -28,9 +28,9 @@ const (
 )
 
 const (
-	maxReliableMessageBytes                  = 32000
+	maxReliableMessageBytes                  = 256 * 1024
 	maxReliableChunkBytes                    = 32000
-	maxWebSocketPayloadBytes                 = maxReliableChunkBytes
+	maxWebSocketPayloadBytes                 = maxReliableMessageBytes
 	maxWebTransportDatagramBytes             = 1200
 	reliableFrameHeaderBytes                 = 4
 	maxUnreliableStateDatagramPayloadBytes   = maxWebTransportDatagramBytes

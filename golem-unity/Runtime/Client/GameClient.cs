@@ -6,7 +6,7 @@ namespace GolemEngine.Unity
     /// <summary>Owns a Golem transport connection and routes decoded protocol frames to generated managers.</summary>
     public sealed class GameClient
     {
-        public const int MaxReliableMessageBytes = 32000;
+        public const int MaxReliableMessageBytes = 256 * 1024;
 
         private readonly Func<byte[], object> _decodeEntityUpdate;
         private readonly Func<object, byte[]> _encodeCommand;

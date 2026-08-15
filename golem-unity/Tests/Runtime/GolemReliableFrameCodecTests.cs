@@ -18,16 +18,25 @@ namespace GolemEngine.Unity.Tests
         [Test]
         public void DecodeLengthReadsBigEndianLength()
         {
-            var length = GolemReliableFrameCodec.DecodeLength(new byte[] { 0, 0, 0x7d, 0 });
+            var length = GolemReliableFrameCodec.DecodeLength(new byte[] { 0, 4, 0, 0 });
 
-            Assert.That(length, Is.EqualTo(32000));
+            Assert.That(length, Is.EqualTo(256 * 1024));
         }
 
         [Test]
         public void DecodeLengthRejectsOversizedFrames()
         {
             Assert.Throws<InvalidOperationException>(() =>
-                GolemReliableFrameCodec.DecodeLength(new byte[] { 0, 0, 0x7d, 1 }));
+                GolemReliableFrameCodec.DecodeLength(new byte[] { 0, 4, 0, 1 }));
+        }
+
+        [Test]
+        public void EncodeAcceptsLargeBoundedSnapshot()
+        {
+            var frame = GolemReliableFrameCodec.Encode(new byte[150000]);
+
+            Assert.That(frame.Length, Is.EqualTo(150004));
+            Assert.That(GolemReliableFrameCodec.DecodeLength(frame), Is.EqualTo(150000));
         }
 
         [Test]
