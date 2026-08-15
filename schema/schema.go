@@ -867,9 +867,12 @@ type EventSchemaFile struct {
 }
 
 // EventFieldDef defines a single field in an event schema.
-// Supports scalar shorthand (`damage: int32`) and explicit (`damage: { type: int32 }`) YAML syntax.
+// Supports scalar shorthand (`damage: int32`) and explicit
+// (`damage: { tag: 1, type: int32 }`) YAML syntax. Tag is optional for legacy
+// schemas, but when one event field sets it every field in that event must.
 type EventFieldDef struct {
 	Type string `yaml:"type"`
+	Tag  *int   `yaml:"tag"`
 }
 
 // UnmarshalYAML allows scalar shorthand (`damage: int32`) as well as the explicit
@@ -953,6 +956,9 @@ func LoadEvents(eventsDir string, customTypes map[string]CustomTypeData) ([]Even
 		if err := validateExplicitEnvelopeTag("event", name, ef.Tag); err != nil {
 			return nil, fmt.Errorf("%s: %w", e.Name(), err)
 		}
+		if err := validateEventFieldTags(ef); err != nil {
+			return nil, fmt.Errorf("%s: %w", e.Name(), err)
+		}
 		seen[name] = e.Name()
 		events = append(events, BuildEventData(ef, customTypes))
 	}
@@ -960,8 +966,10 @@ func LoadEvents(eventsDir string, customTypes map[string]CustomTypeData) ([]Even
 }
 
 // BuildEventData converts a parsed event schema file into template-ready data.
-// Fields are sorted alphabetically and assigned proto field numbers starting from 1.
-// For entity-targeted events an offset of 1 is added to reserve proto field 1 for entity_id.
+// Legacy fields are sorted alphabetically and assigned proto field numbers
+// starting from 1. When every field supplies an explicit tag, output is sorted
+// by that direct protobuf field number. Entity-targeted events reserve field 1
+// for entity_id in both modes.
 func BuildEventData(ef EventSchemaFile, customTypes map[string]CustomTypeData) EventData {
 	target := strings.TrimSpace(ef.Target)
 	if target == "" {
@@ -983,9 +991,14 @@ func BuildEventData(ef EventSchemaFile, customTypes map[string]CustomTypeData) E
 	}
 
 	keys := SortedKeys(ef.Fields)
+	explicitTags := eventUsesExplicitFieldTags(ef.Fields)
 
-	// Sort alphabetically for stable, deterministic proto field assignment.
-	slices.SortFunc(keys, func(a, b string) int { return strings.Compare(a, b) })
+	if explicitTags {
+		slices.SortFunc(keys, func(a, b string) int { return *ef.Fields[a].Tag - *ef.Fields[b].Tag })
+	} else {
+		// Preserve legacy alphabetical assignment when no tags are authored.
+		slices.SortFunc(keys, func(a, b string) int { return strings.Compare(a, b) })
+	}
 
 	for i, k := range keys {
 		def := ef.Fields[k]
@@ -999,7 +1012,11 @@ func BuildEventData(ef EventSchemaFile, customTypes map[string]CustomTypeData) E
 		fi.SnakeName = k
 		fi.GoName = SnakeToPascal(k)
 		fi.FieldName = SnakeToCamel(k)
-		fi.ProtoTag = (i + 1) + tagOffset
+		if explicitTags {
+			fi.ProtoTag = *def.Tag
+		} else {
+			fi.ProtoTag = (i + 1) + tagOffset
+		}
 
 		if goType, ok := protoToGo[def.Type]; ok {
 			tsType := protoToTS[def.Type]
@@ -1029,6 +1046,35 @@ func BuildEventData(ef EventSchemaFile, customTypes map[string]CustomTypeData) E
 		ed.Fields = append(ed.Fields, fi)
 	}
 	return ed
+}
+
+func eventUsesExplicitFieldTags(fields map[string]EventFieldDef) bool {
+	for _, def := range fields {
+		if def.Tag != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func validateEventFieldTags(ef EventSchemaFile) error {
+	if !eventUsesExplicitFieldTags(ef.Fields) {
+		return nil
+	}
+	occupied := make(map[int]string, len(ef.Fields)+1)
+	if strings.TrimSpace(ef.Target) == "entity" {
+		occupied[1] = "entity_id"
+	}
+	for _, name := range SortedKeys(ef.Fields) {
+		def := ef.Fields[name]
+		if def.Tag == nil {
+			return fmt.Errorf("event %q: field %q: tag is required when any field sets tag", ef.Event, name)
+		}
+		if err := claimEnvelopeTag(occupied, "event "+ef.Event, name, *def.Tag); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ValidateEvents checks event schemas for consistency: target must be a known
