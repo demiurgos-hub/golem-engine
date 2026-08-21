@@ -38,6 +38,7 @@ func testWSPair(t *testing.T) (serverConn *websocket.Conn, cleanup func()) {
 		srv.Close()
 		t.Fatal(err)
 	}
+	client.SetReadLimit(maxWebSocketPayloadBytes)
 
 	sc := <-ch
 	return sc, func() {
@@ -64,6 +65,7 @@ func testWSPairWithClient(t *testing.T) (serverConn *websocket.Conn, clientConn 
 		srv.Close()
 		t.Fatal(err)
 	}
+	client.SetReadLimit(maxWebSocketPayloadBytes)
 
 	sc := <-ch
 	return sc, client, func() {
@@ -656,8 +658,8 @@ func TestSessionWritePumpSplitsBatchAtPayloadCap(t *testing.T) {
 	defer cancel()
 	go sess.writePump(ctx)
 
-	first := bytes.Repeat([]byte("a"), 20000)
-	second := bytes.Repeat([]byte("b"), 15000)
+	first := bytes.Repeat([]byte("a"), 150*1024)
+	second := bytes.Repeat([]byte("b"), 120*1024)
 	sess.SendBatch([][]byte{first, second})
 
 	_, msg1, err := client.Read(ctx)
@@ -730,6 +732,107 @@ func TestListenerSendUnreliableUnsupportedOnWebSocket(t *testing.T) {
 	}
 	if err := listener.BroadcastUnreliable([]byte("nope")); !errors.Is(err, ErrUnreliableNotSupported) {
 		t.Fatalf("BroadcastUnreliable error = %v, want ErrUnreliableNotSupported", err)
+	}
+}
+
+func TestListenerMixedDatagramBroadcastSkipsWebSocketSessions(t *testing.T) {
+	listener := NewListener(registry.NewRegistry(), Config{Transport: TransportWebTransport})
+	wtSession := newSession(1, &captureReliableChannel{}, &captureDatagramChannel{}, nil)
+	wsSession := newSession(2, &captureReliableChannel{}, nil, nil)
+	listener.addSession(wtSession)
+	listener.addSession(wsSession)
+	defer listener.removeSession(wtSession)
+	defer listener.removeSession(wsSession)
+
+	if err := listener.BroadcastUnreliable([]byte("unreliable")); err != nil {
+		t.Fatalf("BroadcastUnreliable: %v", err)
+	}
+	if err := listener.BroadcastReliableOrdered([]byte("ordered")); err != nil {
+		t.Fatalf("BroadcastReliableOrdered: %v", err)
+	}
+	if err := listener.BroadcastUnreliableStateWrappedBatch([][]byte{[]byte("state")}); err != nil {
+		t.Fatalf("BroadcastUnreliableStateWrappedBatch: %v", err)
+	}
+	if err := listener.BroadcastReliableOrderedBatch([][]byte{[]byte("ordered-state")}); err != nil {
+		t.Fatalf("BroadcastReliableOrderedBatch: %v", err)
+	}
+	if got := len(wtSession.unreliableSend); got != 1 {
+		t.Fatalf("WebTransport unreliable queue = %d, want 1", got)
+	}
+	if got := len(wtSession.rawStateSend); got != 1 {
+		t.Fatalf("WebTransport state queue = %d, want 1", got)
+	}
+	if got := len(wtSession.protocol.pendingOrdered); got != 2 {
+		t.Fatalf("WebTransport reliable ordered queue = %d, want 2", got)
+	}
+	if wsSession.unreliableSend != nil || wsSession.protocol != nil {
+		t.Fatal("WebSocket session unexpectedly acquired datagram queues")
+	}
+	if err := listener.SendUnreliable(wsSession.ID, []byte("targeted")); !errors.Is(err, ErrUnreliableNotSupported) {
+		t.Fatalf("targeted WebSocket unreliable error = %v, want ErrUnreliableNotSupported", err)
+	}
+	if err := listener.SendReliableOrdered(wsSession.ID, []byte("targeted")); !errors.Is(err, ErrReliableDatagramsNotSupported) {
+		t.Fatalf("targeted WebSocket reliable error = %v, want ErrReliableDatagramsNotSupported", err)
+	}
+	if err := listener.SendUnreliableStateBatch(wsSession.ID, [][]byte{[]byte("targeted")}); !errors.Is(err, ErrUnreliableNotSupported) {
+		t.Fatalf("targeted WebSocket state error = %v, want ErrUnreliableNotSupported", err)
+	}
+	if err := listener.SendReliableOrderedBatch(wsSession.ID, [][]byte{[]byte("targeted")}); !errors.Is(err, ErrReliableDatagramsNotSupported) {
+		t.Fatalf("targeted WebSocket ordered batch error = %v, want ErrReliableDatagramsNotSupported", err)
+	}
+	if err := listener.SendUnreliableStateBatch(wsSession.ID, nil); !errors.Is(err, ErrUnreliableNotSupported) {
+		t.Fatalf("empty targeted WebSocket state error = %v, want ErrUnreliableNotSupported", err)
+	}
+	if err := listener.SendReliableOrderedBatch(wsSession.ID, nil); !errors.Is(err, ErrReliableDatagramsNotSupported) {
+		t.Fatalf("empty targeted WebSocket ordered batch error = %v, want ErrReliableDatagramsNotSupported", err)
+	}
+	if err := listener.SendEventualState(wsSession.ID, 1, []byte("targeted")); !errors.Is(err, ErrReliableDatagramsNotSupported) {
+		t.Fatalf("targeted WebSocket eventual state error = %v, want ErrReliableDatagramsNotSupported", err)
+	}
+}
+
+func TestListenerSessionTransportUsesImmutableTransportIdentity(t *testing.T) {
+	listener := NewListener(registry.NewRegistry(), Config{Transport: TransportWebTransport})
+	sess := newSession(1, &captureReliableChannel{}, nil, func() error { return nil })
+	listener.addSession(sess)
+	defer listener.removeSession(sess)
+
+	sess.Transport = TransportWebTransport
+	if got, ok := listener.SessionTransport(sess.ID); !ok || got != TransportWebSocket {
+		t.Fatalf("SessionTransport = %q, %v; want %q, true", got, ok, TransportWebSocket)
+	}
+	if err := listener.SendReliableOrderedBatch(sess.ID, [][]byte{[]byte("state")}); !errors.Is(err, ErrReliableDatagramsNotSupported) {
+		t.Fatalf("SendReliableOrderedBatch error = %v, want ErrReliableDatagramsNotSupported", err)
+	}
+}
+
+func TestListenerCloseSessionsClosesEveryTransport(t *testing.T) {
+	listener := NewListener(registry.NewRegistry(), Config{Transport: TransportWebTransport})
+	var wsClosed, wtClosed atomic.Int32
+	wsSession := newSession(1, &captureReliableChannel{}, nil, func() error {
+		wsClosed.Add(1)
+		return nil
+	})
+	wtSession := newSession(2, &captureReliableChannel{}, &captureDatagramChannel{}, func() error {
+		wtClosed.Add(1)
+		return nil
+	})
+	listener.addSession(wsSession)
+	listener.addSession(wtSession)
+	defer listener.removeSession(wsSession)
+	defer listener.removeSession(wtSession)
+
+	listener.CloseSessions()
+	listener.CloseSessions()
+
+	if got := wsClosed.Load(); got != 1 {
+		t.Fatalf("WebSocket close calls = %d, want 1", got)
+	}
+	if got := wtClosed.Load(); got != 1 {
+		t.Fatalf("WebTransport close calls = %d, want 1", got)
+	}
+	if !wsSession.IsClosing() || !wtSession.IsClosing() {
+		t.Fatal("CloseSessions did not mark both sessions closing")
 	}
 }
 

@@ -25,23 +25,29 @@ type Session struct {
 	ID         int64
 	Data       any       // game-specific state; set from OnUpgrade return value before OnConnect fires
 	RemoteAddr string    // client address from the upgrade request; set before OnConnect
-	Transport  Transport // websocket or webtransport; set before OnConnect
+	// Transport reports the physical transport selected before OnConnect.
+	// Changing it does not alter runtime routing or transport capabilities.
+	Transport Transport
 
-	reliable       reliableMessageChannel
-	datagrams      datagramChannel
-	protocol       *datagramProtocolState
-	protocolMu     sync.Mutex
-	closeTransport func() error
-	streamSend     chan [][]byte
-	unreliableSend chan []byte
-	rawStateSend   chan []byte
-	eventualSend   chan eventualStateDatagram
-	wake           chan struct{}
-	packetScratch  []byte
+	actualTransport Transport
+	reliable        reliableMessageChannel
+	datagrams       datagramChannel
+	protocol        *datagramProtocolState
+	protocolMu      sync.Mutex
+	closeTransport  func() error
+	abortTransport  func()
+	streamSend      chan [][]byte
+	unreliableSend  chan []byte
+	rawStateSend    chan []byte
+	eventualSend    chan eventualStateDatagram
+	wake            chan struct{}
+	packetScratch   []byte
 
 	closeState atomic.Pointer[sessionCloseState]
 	done       chan struct{}
+	closeDone  chan struct{}
 	closeOnce  sync.Once
+	abortOnce  sync.Once
 
 	// Cumulative successful writes (for LogReplicationStats deltas).
 	wireDatagramOK atomic.Uint64
@@ -51,20 +57,31 @@ type Session struct {
 func newSession(id int64, reliable reliableMessageChannel, datagrams datagramChannel, closeTransport func() error) *Session {
 	sess := &Session{
 		ID:             id,
+		Transport:      TransportWebSocket,
 		reliable:       reliable,
 		datagrams:      datagrams,
 		closeTransport: closeTransport,
 		streamSend:     make(chan [][]byte, sendBufSize),
 		wake:           make(chan struct{}, 1),
 		done:           make(chan struct{}),
+		closeDone:      make(chan struct{}),
 	}
 	if datagrams != nil {
+		sess.Transport = TransportWebTransport
 		sess.unreliableSend = make(chan []byte, sendBufSize)
 		sess.rawStateSend = make(chan []byte, sendBufSize)
 		sess.eventualSend = make(chan eventualStateDatagram, sendBufSize)
 		sess.protocol = newDatagramProtocolState()
 	}
+	sess.actualTransport = sess.Transport
 	return sess
+}
+
+func (s *Session) transportKind() Transport {
+	if s.actualTransport != "" {
+		return s.actualTransport
+	}
+	return s.Transport
 }
 
 type datagramDrainBudget struct {
@@ -87,6 +104,9 @@ func newWebSocketSession(id int64, conn *websocket.Conn) *Session {
 	s.closeTransport = func() error {
 		return reliable.CloseWith(websocket.StatusNormalClosure, s.requestedCloseReason())
 	}
+	s.abortTransport = func() {
+		_ = conn.CloseNow()
+	}
 	return s
 }
 
@@ -100,6 +120,9 @@ func newWebTransportSession(id int64, session *webtransport.Session, stream *web
 	)
 	s.closeTransport = func() error {
 		return session.CloseWithError(0, s.requestedCloseReason())
+	}
+	s.abortTransport = func() {
+		_ = session.CloseWithError(0, "server shutdown")
 	}
 	return s
 }
@@ -117,7 +140,7 @@ func (s *Session) writePump(ctx context.Context) {
 		}
 		if err := s.drainOutbound(ctx); err != nil {
 			if !s.isExpectedSessionCloseError(err) {
-				log.Printf("golem/net: session %d write pump closing reason=%s remote=%q transport=%q error=%v", s.ID, classifySessionError(err), s.RemoteAddr, s.Transport, err)
+				log.Printf("golem/net: session %d write pump closing reason=%s remote=%q transport=%q error=%v", s.ID, classifySessionError(err), s.RemoteAddr, s.transportKind(), err)
 			}
 			return
 		}
@@ -421,10 +444,10 @@ func (s *Session) readPump(
 			return
 		}
 		if readPumpErr != nil {
-			log.Printf("golem/net: session %d read pump closing reason=%s remote=%q transport=%q error=%v", s.ID, classifySessionError(readPumpErr), s.RemoteAddr, s.Transport, readPumpErr)
+			log.Printf("golem/net: session %d read pump closing reason=%s remote=%q transport=%q error=%v", s.ID, classifySessionError(readPumpErr), s.RemoteAddr, s.transportKind(), readPumpErr)
 			return
 		}
-		log.Printf("golem/net: session %d read pump closing reason=%q remote=%q transport=%q", s.ID, readPumpReason, s.RemoteAddr, s.Transport)
+		log.Printf("golem/net: session %d read pump closing reason=%q remote=%q transport=%q", s.ID, readPumpReason, s.RemoteAddr, s.transportKind())
 	}()
 
 	var wg sync.WaitGroup
@@ -860,8 +883,20 @@ func (s *Session) shutdown() {
 func (s *Session) closeNow() {
 	s.beginClose("")
 	s.closeOnce.Do(func() {
+		defer close(s.closeDone)
 		if s.closeTransport != nil {
 			_ = s.closeTransport()
 		}
 	})
+}
+
+func (s *Session) waitClosed() {
+	<-s.closeDone
+}
+
+func (s *Session) abortClose() {
+	if s.abortTransport == nil {
+		return
+	}
+	s.abortOnce.Do(s.abortTransport)
 }

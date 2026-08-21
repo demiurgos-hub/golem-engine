@@ -92,6 +92,7 @@ func mustDialGameClient(t *testing.T, url string) *websocket.Conn {
 	if err != nil {
 		t.Fatalf("Dial(%s): %v", url, err)
 	}
+	conn.SetReadLimit(256 * 1024)
 	return conn
 }
 
@@ -324,9 +325,9 @@ func TestRunInterestTickSplitsLargeBatchAtPayloadCap(t *testing.T) {
 		CellSize:        4,
 	})
 
-	anchor := &interestTickEntity{id: 1, x: 0, y: 0, full: bytes.Repeat([]byte("a"), 12000)}
-	otherA := &interestTickEntity{id: 2, x: 1, y: 0, full: bytes.Repeat([]byte("b"), 12000)}
-	otherB := &interestTickEntity{id: 3, x: 2, y: 0, full: bytes.Repeat([]byte("c"), 12000)}
+	anchor := &interestTickEntity{id: 1, x: 0, y: 0, full: bytes.Repeat([]byte("a"), 100*1024)}
+	otherA := &interestTickEntity{id: 2, x: 1, y: 0, full: bytes.Repeat([]byte("b"), 100*1024)}
+	otherB := &interestTickEntity{id: 3, x: 2, y: 0, full: bytes.Repeat([]byte("c"), 100*1024)}
 	for _, e := range []*interestTickEntity{anchor, otherA, otherB} {
 		if err := srv.CreateEntity(e); err != nil {
 			t.Fatalf("CreateEntity(%d): %v", e.id, err)
@@ -363,7 +364,7 @@ func TestRunInterestTickOversizeWrappedFrameFails(t *testing.T) {
 	})
 
 	anchor := &interestTickEntity{id: 1, x: 0, y: 0, full: []byte("anchor-full")}
-	oversized := &interestTickEntity{id: 2, x: 1, y: 0, full: bytes.Repeat([]byte("x"), 33000)}
+	oversized := &interestTickEntity{id: 2, x: 1, y: 0, full: bytes.Repeat([]byte("x"), 256*1024+1)}
 	for _, e := range []*interestTickEntity{anchor, oversized} {
 		if err := srv.CreateEntity(e); err != nil {
 			t.Fatalf("CreateEntity(%d): %v", e.id, err)
@@ -655,12 +656,12 @@ func TestSendDatagramStateIgnoresDisconnectedSession(t *testing.T) {
 	tracker := newEventualStateTracker()
 	tracker.markDirty([]int64{entity.id})
 
-	batched, msgs, err := srv.sendEventualState(999, tracker, nil)
+	stats, err := srv.sendEventualState(999, tracker, nil)
 	if err != nil {
 		t.Fatalf("sendEventualState: %v", err)
 	}
-	if batched != 0 || msgs != 0 {
-		t.Fatalf("sendEventualState counts = %d/%d, want 0/0", batched, msgs)
+	if stats != (eventualStateSendStats{}) {
+		t.Fatalf("sendEventualState stats = %+v, want zero", stats)
 	}
 	if got := tracker.dirtyIDs(); len(got) != 1 || got[0] != entity.id {
 		t.Fatalf("dirty IDs = %v, want [%d]", got, entity.id)

@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { ReadableStream } from "node:stream/web";
 
 import {
+  connectPlanFromRealtimeConfig,
   connectOptionsFromRealtimeConfig,
   fetchRealtimeConfig,
   readBoundedText,
@@ -68,6 +69,78 @@ test("fetchRealtimeConfig decodes success JSON", async () => {
   assert.equal(cfg.eventualAckIntervalMs, 25);
   assert.equal(cfg.serverCertificateHashes?.length, 1);
   assert.equal(cfg.serverCertificateHashes[0].value, hash);
+});
+
+test("fetchRealtimeConfig decodes a WebSocket fallback and builds an ordered plan", async () => {
+  const hash = sha256Hex("cert");
+  const cfg = await fetchRealtimeConfig("https://example.test/api/realtime-config", {
+    fetch: async () => streamResponse(200, JSON.stringify({
+      transport: "webtransport",
+      url: "https://example.com/wt",
+      serverCertificateHashes: [{ algorithm: "sha-256", value: hash }],
+      eventualAckIntervalMs: 25,
+      fallback: {
+        transport: "websocket",
+        url: "wss://example.com/api/ws",
+      },
+    })),
+  });
+
+  assert.deepEqual(cfg.fallback, {
+    transport: "websocket",
+    url: "wss://example.com/api/ws",
+  });
+  const resolver = async (endpoint) => endpoint;
+  const plan = connectPlanFromRealtimeConfig(cfg, resolver);
+  assert.equal(plan.resolveOptions, resolver);
+  assert.equal(plan.candidates.length, 2);
+  assert.equal(plan.candidates[0].transport, "webtransport");
+  assert.equal(plan.candidates[0].eventualAckIntervalMs, 25);
+  assert.equal(plan.candidates[0].serverCertificateHashes.length, 1);
+  assert.deepEqual(plan.candidates[1], {
+    transport: "websocket",
+    url: "wss://example.com/api/ws",
+    serverCertificateHashes: undefined,
+    eventualAckIntervalMs: undefined,
+  });
+
+  cfg.url = "https://mutated.example/wt";
+  cfg.serverCertificateHashes[0].value = "00".repeat(32);
+  cfg.fallback.url = "wss://mutated.example/ws";
+  assert.equal(plan.candidates[0].url, "https://example.com/wt");
+  assert.equal(plan.candidates[0].serverCertificateHashes[0].value, hash);
+  assert.equal(plan.candidates[1].url, "wss://example.com/api/ws");
+});
+
+test("fetchRealtimeConfig rejects invalid fallback shapes and WebTransport settings", async () => {
+  const invalidFallbacks = [
+    "wss://example.com/ws",
+    { transport: "websocket", url: "" },
+    { transport: "webtransport", url: "https://example.com/wt2" },
+    { transport: "websocket", url: "wss://example.com/ws", eventualAckIntervalMs: 1 },
+    { transport: "websocket", url: "wss://example.com/ws", serverCertificateHashes: [] },
+  ];
+  for (const fallback of invalidFallbacks) {
+    await assert.rejects(
+      () => fetchRealtimeConfig("https://example.test/cfg", {
+        fetch: async () => streamResponse(200, JSON.stringify({
+          transport: "webtransport",
+          url: "https://example.com/wt",
+          fallback,
+        })),
+      }),
+      /fallback/,
+    );
+  }
+
+  assert.throws(
+    () => connectPlanFromRealtimeConfig({
+      transport: "websocket",
+      url: "wss://example.com/ws",
+      fallback: { transport: "websocket", url: "wss://example.com/other" },
+    }),
+    /fallback must be webtransport then websocket/,
+  );
 });
 
 test("fetchRealtimeConfig rejects non-2xx with bounded body detail", async () => {
@@ -223,17 +296,39 @@ test("fetchRealtimeConfig forwards AbortSignal with precedence over init.signal"
 });
 
 test("fetchRealtimeConfig surfaces fetch failures without leaking query tokens", async () => {
+  const endpoint = "https://example.test/cfg?token=super-secret";
   await assert.rejects(
     () =>
-      fetchRealtimeConfig("https://example.test/cfg?token=super-secret", {
+      fetchRealtimeConfig(endpoint, {
         fetch: async () => {
-          throw new TypeError("network down");
+          throw new TypeError(`network down for ${endpoint} token=super-secret`);
         },
       }),
     (err) => {
       const text = String(err);
       assert.match(text, /network down/);
       assert.doesNotMatch(text, /super-secret/);
+      assert.doesNotMatch(text, /token=super-secret/);
+      return true;
+    },
+  );
+});
+
+test("fetchRealtimeConfig redacts endpoint query values echoed by an error body", async () => {
+  const endpoint = "https://example.test/cfg?ticket=body-secret";
+  await assert.rejects(
+    () => fetchRealtimeConfig(endpoint, {
+      fetch: async () => streamResponse(
+        502,
+        `upstream rejected ${endpoint}; {"ticket":"body-secret"}`,
+      ),
+    }),
+    (err) => {
+      const text = String(err);
+      assert.match(text, /status 502/);
+      assert.match(text, /upstream rejected/);
+      assert.doesNotMatch(text, /body-secret/);
+      assert.doesNotMatch(text, /ticket=body-secret/);
       return true;
     },
   );

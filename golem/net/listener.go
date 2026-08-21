@@ -22,14 +22,17 @@ import (
 )
 
 // Listener manages client sessions and bridges the game-loop deltas to the
-// active integrated transport.
+// configured primary transport plus any explicitly mounted fallback handler.
 type Listener struct {
 	registry *registry.Registry
 	config   Config
 
-	mu       sync.RWMutex
-	sessions map[int64]*Session
-	nextID   atomic.Int64
+	mu              sync.RWMutex
+	sessions        map[int64]*Session
+	pendingSessions map[*Session]struct{}
+	closing         bool
+	sessionHandlers sync.WaitGroup
+	nextID          atomic.Int64
 
 	interestEnabled         bool // when true, skip entity snapshot on connect (interest system handles it)
 	onUpgrade               func(*http.Request) (any, error)
@@ -76,6 +79,7 @@ func NewListener(reg *registry.Registry, cfg Config) *Listener {
 		registry:           reg,
 		config:             cfg,
 		sessions:           make(map[int64]*Session),
+		pendingSessions:    make(map[*Session]struct{}),
 		wtCheckOrigin:      newWebTransportCheckOrigin(cfg),
 		readyCh:            make(chan struct{}),
 		outboundDgramPrev:  make(map[int64]uint64),
@@ -104,14 +108,22 @@ func (l *Listener) signalReady(err error) {
 	})
 }
 
-// Handler returns the active transport endpoint handler for external mounting
-// on a custom router. When using WebTransport, pair it with WebTransportServer
-// on a caller-owned HTTP/3 server.
+// Handler returns the configured primary transport endpoint handler for
+// external mounting on a custom router. When using WebTransport, pair it with
+// WebTransportServer on a caller-owned HTTP/3 server.
 func (l *Listener) Handler() http.HandlerFunc {
 	if l.config.Transport == TransportWebTransport {
 		l.WebTransportServer(nil)
 		return l.handleWebTransport
 	}
+	return l.handleWS
+}
+
+// WebSocketHandler returns a WebSocket endpoint handler backed by the same
+// session registry and hooks as Handler. It is available regardless of the
+// configured primary transport so WebTransport servers can expose a fallback
+// endpoint on a caller-owned HTTP server.
+func (l *Listener) WebSocketHandler() http.HandlerFunc {
 	return l.handleWS
 }
 
@@ -195,7 +207,12 @@ func (l *Listener) CertificateHashes() []CertificateHash {
 		return nil
 	}
 	out := make([]CertificateHash, len(l.certificateHashes))
-	copy(out, l.certificateHashes)
+	for i, hash := range l.certificateHashes {
+		out[i] = CertificateHash{
+			Algorithm: hash.Algorithm,
+			Value:     append([]byte(nil), hash.Value...),
+		}
+	}
 	return out
 }
 
@@ -265,7 +282,49 @@ func (l *Listener) SessionIDs() []int64 {
 	for id := range l.sessions {
 		ids = append(ids, id)
 	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	return ids
+}
+
+// SessionTransport returns the transport used by a connected session.
+func (l *Listener) SessionTransport(sessionID int64) (Transport, bool) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	s, ok := l.sessions[sessionID]
+	if !ok {
+		return "", false
+	}
+	return s.transportKind(), true
+}
+
+// CloseSessions stops session admission and closes every pending or connected
+// session accepted through any handler. It waits until their
+// handlers and disconnect hooks finish and is safe to call more than once.
+func (l *Listener) CloseSessions() {
+	l.mu.Lock()
+	l.closing = true
+	sessions := make([]*Session, 0, len(l.sessions)+len(l.pendingSessions))
+	for _, sess := range l.sessions {
+		sessions = append(sessions, sess)
+	}
+	for sess := range l.pendingSessions {
+		sessions = append(sessions, sess)
+	}
+	l.mu.Unlock()
+
+	var wg sync.WaitGroup
+	wg.Add(len(sessions))
+	for _, sess := range sessions {
+		go func() {
+			defer wg.Done()
+			sess.beginClose("")
+			sess.abortClose()
+			sess.closeNow()
+			sess.waitClosed()
+		}()
+	}
+	wg.Wait()
+	l.sessionHandlers.Wait()
 }
 
 // OutboundBacklogForLog returns a single-line description of every session's
@@ -385,18 +444,21 @@ func (l *Listener) SendReliableOrderedBatch(sessionID int64, frames [][]byte) er
 	if l.config.Transport != TransportWebTransport {
 		return ErrReliableDatagramsNotSupported
 	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	s, ok := l.sessions[sessionID]
+	if !ok {
+		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
+	}
+	if !s.SupportsReliableDatagrams() {
+		return ErrReliableDatagramsNotSupported
+	}
 	if len(frames) == 0 {
 		return nil
 	}
 	payloads, err := chunkReliableOrderedDatagramFrames(frames)
 	if err != nil {
 		return err
-	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	s, ok := l.sessions[sessionID]
-	if !ok {
-		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
 	}
 	for _, payload := range payloads {
 		if err := s.SendReliableOrdered(payload); err != nil {
@@ -412,18 +474,21 @@ func (l *Listener) SendUnreliableStateBatch(sessionID int64, frames [][]byte) er
 	if l.config.Transport != TransportWebTransport {
 		return ErrUnreliableNotSupported
 	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	s, ok := l.sessions[sessionID]
+	if !ok {
+		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
+	}
+	if !s.SupportsUnreliable() {
+		return ErrUnreliableNotSupported
+	}
 	if len(frames) == 0 {
 		return nil
 	}
 	payloads, err := UnreliableStateDatagramPayloads(frames)
 	if err != nil {
 		return err
-	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	s, ok := l.sessions[sessionID]
-	if !ok {
-		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
 	}
 	for _, payload := range payloads {
 		if err := s.sendUnreliableStateOwned(payload); err != nil {
@@ -439,14 +504,17 @@ func (l *Listener) SendUnreliableStateOwned(sessionID int64, data []byte) error 
 	if l.config.Transport != TransportWebTransport {
 		return ErrUnreliableNotSupported
 	}
-	if err := validateDatagramSize(data); err != nil {
-		return err
-	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	s, ok := l.sessions[sessionID]
 	if !ok {
 		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
+	}
+	if !s.SupportsUnreliable() {
+		return ErrUnreliableNotSupported
+	}
+	if err := validateDatagramSize(data); err != nil {
+		return err
 	}
 	return s.sendUnreliableStateOwned(data)
 }
@@ -475,7 +543,9 @@ func (l *Listener) BroadcastBatch(deltas [][]byte) error {
 
 // BroadcastReliableOrderedBatch wraps all entity frames once, packs them into
 // one or more reliable ordered datagram payloads, and queues every payload for
-// every connected session. Compact state records should use SendReliableOrderedBatch.
+// every datagram-capable session. Compact state records should use
+// SendReliableOrderedBatch. A pure WebSocket listener returns
+// ErrReliableDatagramsNotSupported.
 func (l *Listener) BroadcastReliableOrderedBatch(deltas [][]byte) error {
 	if l.config.Transport != TransportWebTransport {
 		return ErrReliableDatagramsNotSupported
@@ -494,6 +564,9 @@ func (l *Listener) BroadcastReliableOrderedBatch(deltas [][]byte) error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	for _, s := range l.sessions {
+		if !s.SupportsReliableDatagrams() {
+			continue
+		}
 		for _, payload := range payloads {
 			if err := s.SendReliableOrdered(payload); err != nil {
 				return err
@@ -504,7 +577,8 @@ func (l *Listener) BroadcastReliableOrderedBatch(deltas [][]byte) error {
 }
 
 // BroadcastUnreliableStateBatch wraps entity frames once, packs them into raw
-// WebTransport datagrams, and queues every payload for every connected session.
+// WebTransport datagrams, and queues every payload for every datagram-capable
+// session. A pure WebSocket listener returns ErrUnreliableNotSupported.
 func (l *Listener) BroadcastUnreliableStateBatch(deltas [][]byte) error {
 	if l.config.Transport != TransportWebTransport {
 		return ErrUnreliableNotSupported
@@ -520,7 +594,9 @@ func (l *Listener) BroadcastUnreliableStateBatch(deltas [][]byte) error {
 }
 
 // BroadcastUnreliableStateWrappedBatch packs already-framed state records into
-// raw WebTransport datagrams and queues every payload for every connected session.
+// raw WebTransport datagrams and queues every payload for every
+// datagram-capable session. A pure WebSocket listener returns
+// ErrUnreliableNotSupported.
 func (l *Listener) BroadcastUnreliableStateWrappedBatch(frames [][]byte) error {
 	if l.config.Transport != TransportWebTransport {
 		return ErrUnreliableNotSupported
@@ -535,6 +611,9 @@ func (l *Listener) BroadcastUnreliableStateWrappedBatch(frames [][]byte) error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	for _, s := range l.sessions {
+		if !s.SupportsUnreliable() {
+			continue
+		}
 		for _, payload := range payloads {
 			if err := s.sendUnreliableStateOwned(payload); err != nil {
 				return err
@@ -549,19 +628,23 @@ func (l *Listener) SendUnreliable(sessionID int64, data []byte) error {
 	if l.config.Transport != TransportWebTransport {
 		return ErrUnreliableNotSupported
 	}
-	if err := validateDatagramSize(data); err != nil {
-		return err
-	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	s, ok := l.sessions[sessionID]
 	if !ok {
 		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
 	}
+	if !s.SupportsUnreliable() {
+		return ErrUnreliableNotSupported
+	}
+	if err := validateDatagramSize(data); err != nil {
+		return err
+	}
 	return s.SendUnreliable(data)
 }
 
-// BroadcastUnreliable sends one datagram to every connected session when supported.
+// BroadcastUnreliable sends one datagram to every datagram-capable session. A
+// pure WebSocket listener returns ErrUnreliableNotSupported.
 func (l *Listener) BroadcastUnreliable(data []byte) error {
 	if l.config.Transport != TransportWebTransport {
 		return ErrUnreliableNotSupported
@@ -572,6 +655,9 @@ func (l *Listener) BroadcastUnreliable(data []byte) error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	for _, s := range l.sessions {
+		if !s.SupportsUnreliable() {
+			continue
+		}
 		if err := s.SendUnreliable(data); err != nil {
 			return err
 		}
@@ -584,19 +670,24 @@ func (l *Listener) SendReliableUnordered(sessionID int64, data []byte) error {
 	if l.config.Transport != TransportWebTransport {
 		return ErrReliableDatagramsNotSupported
 	}
-	if err := validateReliableDatagramMessageSize(datagramLaneReliableUnordered, data); err != nil {
-		return err
-	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	s, ok := l.sessions[sessionID]
 	if !ok {
 		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
 	}
+	if !s.SupportsReliableDatagrams() {
+		return ErrReliableDatagramsNotSupported
+	}
+	if err := validateReliableDatagramMessageSize(datagramLaneReliableUnordered, data); err != nil {
+		return err
+	}
 	return s.SendReliableUnordered(data)
 }
 
-// BroadcastReliableUnordered sends one reliable unordered datagram to every connected session when supported.
+// BroadcastReliableUnordered sends one reliable unordered datagram to every
+// datagram-capable session. A pure WebSocket listener returns
+// ErrReliableDatagramsNotSupported.
 func (l *Listener) BroadcastReliableUnordered(data []byte) error {
 	if l.config.Transport != TransportWebTransport {
 		return ErrReliableDatagramsNotSupported
@@ -607,6 +698,9 @@ func (l *Listener) BroadcastReliableUnordered(data []byte) error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	for _, s := range l.sessions {
+		if !s.SupportsReliableDatagrams() {
+			continue
+		}
 		if err := s.SendReliableUnordered(data); err != nil {
 			return err
 		}
@@ -619,19 +713,24 @@ func (l *Listener) SendReliableOrdered(sessionID int64, data []byte) error {
 	if l.config.Transport != TransportWebTransport {
 		return ErrReliableDatagramsNotSupported
 	}
-	if err := validateReliableDatagramMessageSize(datagramLaneReliableOrdered, data); err != nil {
-		return err
-	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	s, ok := l.sessions[sessionID]
 	if !ok {
 		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
 	}
+	if !s.SupportsReliableDatagrams() {
+		return ErrReliableDatagramsNotSupported
+	}
+	if err := validateReliableDatagramMessageSize(datagramLaneReliableOrdered, data); err != nil {
+		return err
+	}
 	return s.SendReliableOrdered(data)
 }
 
-// BroadcastReliableOrdered sends one reliable ordered datagram to every connected session when supported.
+// BroadcastReliableOrdered sends one reliable ordered datagram to every
+// datagram-capable session. A pure WebSocket listener returns
+// ErrReliableDatagramsNotSupported.
 func (l *Listener) BroadcastReliableOrdered(data []byte) error {
 	if l.config.Transport != TransportWebTransport {
 		return ErrReliableDatagramsNotSupported
@@ -642,6 +741,9 @@ func (l *Listener) BroadcastReliableOrdered(data []byte) error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	for _, s := range l.sessions {
+		if !s.SupportsReliableDatagrams() {
+			continue
+		}
 		if err := s.SendReliableOrdered(data); err != nil {
 			return err
 		}
@@ -654,14 +756,17 @@ func (l *Listener) SendEventualState(sessionID int64, token uint64, data []byte)
 	if l.config.Transport != TransportWebTransport {
 		return ErrReliableDatagramsNotSupported
 	}
-	if err := validateEventualStateDatagramPayloadSize(data); err != nil {
-		return err
-	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	s, ok := l.sessions[sessionID]
 	if !ok {
 		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
+	}
+	if !s.SupportsReliableDatagrams() {
+		return ErrReliableDatagramsNotSupported
+	}
+	if err := validateEventualStateDatagramPayloadSize(data); err != nil {
+		return err
 	}
 	return s.SendEventualState(token, data)
 }
@@ -672,14 +777,17 @@ func (l *Listener) SendEventualStateOwned(sessionID int64, token uint64, data []
 	if l.config.Transport != TransportWebTransport {
 		return ErrReliableDatagramsNotSupported
 	}
-	if err := validateEventualStateDatagramPayloadSize(data); err != nil {
-		return err
-	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	s, ok := l.sessions[sessionID]
 	if !ok {
 		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
+	}
+	if !s.SupportsReliableDatagrams() {
+		return ErrReliableDatagramsNotSupported
+	}
+	if err := validateEventualStateDatagramPayloadSize(data); err != nil {
+		return err
 	}
 	return s.sendEventualStateOwned(token, data)
 }
@@ -689,6 +797,7 @@ func (l *Listener) SendEventualStateOwned(sessionID int64, token uint64, data []
 // directory. When MapDir is configured, map files are served at /maps/.
 // Blocks until ctx is cancelled, then shuts down gracefully.
 func (l *Listener) ListenAndServe(ctx context.Context) error {
+	defer l.CloseSessions()
 	mux := l.newServeMux()
 	if l.config.Transport == TransportWebTransport {
 		return l.listenAndServeWebTransport(ctx, mux)
@@ -790,10 +899,22 @@ func (l *Listener) newServeMux() *http.ServeMux {
 }
 
 func (l *Listener) handleWS(w http.ResponseWriter, r *http.Request) {
+	if !l.beginSessionHandler() {
+		http.Error(w, "realtime server shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	defer l.sessionHandlers.Done()
 	sessionData, ok := l.authorizeSessionRequest(w, r, TransportWebSocket)
 	if !ok {
 		return
 	}
+
+	// A caller-owned HTTP server may use finite ReadTimeout/WriteTimeout values
+	// for ordinary requests. Those connection deadlines otherwise survive the
+	// WebSocket upgrade and terminate a healthy long-lived realtime session.
+	controller := http.NewResponseController(w)
+	_ = controller.SetReadDeadline(time.Time{})
+	_ = controller.SetWriteDeadline(time.Time{})
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
@@ -813,6 +934,11 @@ func (l *Listener) handleWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (l *Listener) handleWebTransport(w http.ResponseWriter, r *http.Request) {
+	if !l.beginSessionHandler() {
+		http.Error(w, "realtime server shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	defer l.sessionHandlers.Done()
 	sessionData, ok := l.authorizeSessionRequest(w, r, TransportWebTransport)
 	if !ok {
 		return
@@ -919,14 +1045,42 @@ func (l *Listener) wrap(data []byte) []byte {
 	return data
 }
 
-func (l *Listener) addSession(s *Session) {
+func (l *Listener) beginSessionHandler() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.closing {
+		return false
+	}
+	// Add while holding the same gate CloseSessions uses to transition into
+	// closing. Once closing is visible no later Add can race with Wait.
+	l.sessionHandlers.Add(1)
+	return true
+}
+
+func (l *Listener) beginAcceptedSession(s *Session) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closing {
+		return false
+	}
+	l.pendingSessions[s] = struct{}{}
+	return true
+}
+
+func (l *Listener) addSession(s *Session) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.pendingSessions, s)
+	if l.closing {
+		return false
+	}
 	l.sessions[s.ID] = s
+	return true
 }
 
 func (l *Listener) removeSession(s *Session) {
 	l.mu.Lock()
+	delete(l.pendingSessions, s)
 	delete(l.sessions, s.ID)
 	l.mu.Unlock()
 	l.outboundLogMu.Lock()
@@ -966,8 +1120,16 @@ func logSessionRequest(prefix string, r *http.Request, transport Transport, extr
 }
 
 func (l *Listener) serveAcceptedSession(ctx context.Context, sess *Session, r *http.Request) {
+	if !l.beginAcceptedSession(sess) {
+		sess.beginClose("")
+		sess.abortClose()
+		sess.closeNow()
+		return
+	}
+	defer l.removeSession(sess)
+
 	if err := l.sendSnapshot(ctx, sess); err != nil {
-		log.Printf("golem/net: session %d setup failed: snapshot remote=%q transport=%q error=%v", sess.ID, sess.RemoteAddr, sess.Transport, err)
+		log.Printf("golem/net: session %d setup failed: snapshot remote=%q transport=%q error=%v", sess.ID, sess.RemoteAddr, sess.transportKind(), err)
 		sess.Close()
 		return
 	}
@@ -977,15 +1139,17 @@ func (l *Listener) serveAcceptedSession(ctx context.Context, sess *Session, r *h
 		origin = r.Header.Get("Origin")
 		host = r.Host
 	}
-	log.Printf("golem/net: session %d accepted remote=%q origin=%q host=%q transport=%q", sess.ID, sess.RemoteAddr, origin, host, sess.Transport)
-	l.addSession(sess)
+	if !l.addSession(sess) {
+		sess.Close()
+		return
+	}
+	log.Printf("golem/net: session %d accepted remote=%q origin=%q host=%q transport=%q", sess.ID, sess.RemoteAddr, origin, host, sess.transportKind())
 	if l.onConnect != nil {
 		l.onConnect(sess)
 	}
 	go sess.writePump(ctx)
 	sess.readPump(ctx, l.onMessage, l.onDatagram, l.onReliableUnordered, l.onReliableOrdered, l.onEventualStateFeedback)
-	log.Printf("golem/net: session %d disconnected remote=%q transport=%q", sess.ID, sess.RemoteAddr, sess.Transport)
-	l.removeSession(sess)
+	log.Printf("golem/net: session %d disconnected remote=%q transport=%q", sess.ID, sess.RemoteAddr, sess.transportKind())
 	if l.onDisconnect != nil {
 		l.onDisconnect(sess)
 	}

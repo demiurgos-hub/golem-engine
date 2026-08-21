@@ -146,7 +146,7 @@ func TestEntitySnapshotFailureSkipsComplete(t *testing.T) {
 	listener := NewListener(reg, Config{Transport: TransportWebSocket})
 	var completeCalls atomic.Int64
 	listener.SetEntitySnapshotFunc(func(sessionID int64) ([]EntitySnapshot, error) {
-		return []EntitySnapshot{{EntityID: 1, Data: bytes.Repeat([]byte("x"), 40000)}}, nil
+		return []EntitySnapshot{{EntityID: 1, Data: bytes.Repeat([]byte("x"), maxReliableMessageBytes+1)}}, nil
 	})
 	listener.SetEntitySnapshotCompleteFunc(func(sessionID int64, entityIDs []int64) {
 		completeCalls.Add(1)

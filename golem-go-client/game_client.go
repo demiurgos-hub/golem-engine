@@ -29,15 +29,18 @@ type inboundDispatcher struct {
 	once    sync.Once
 }
 
-// newInboundDispatcher starts a serialized inbound event dispatcher.
-func newInboundDispatcher(c *GameClient) *inboundDispatcher {
-	d := &inboundDispatcher{
+// newInboundDispatcher creates a paused serialized inbound event dispatcher.
+func newInboundDispatcher() *inboundDispatcher {
+	return &inboundDispatcher{
 		events:  make(chan inboundEvent, gameClientInboundQueueSize),
 		done:    make(chan struct{}),
 		stopped: make(chan struct{}),
 	}
+}
+
+// start begins delivering queued inbound events.
+func (d *inboundDispatcher) start(c *GameClient) {
 	go d.run(c)
-	return d
 }
 
 // enqueue copies and queues one inbound transport payload for serialized delivery.
@@ -84,15 +87,21 @@ type GameClient struct {
 	encodeCommand func(any) ([]byte, error)
 	encodePacket  func([][]byte) ([]byte, error)
 	createChannel ChannelFactory
+	supports      func(TransportKind) bool
 
-	mu         sync.Mutex
-	dispatchMu sync.Mutex
-	channel    ReliableMessageChannel
-	inbound    *inboundDispatcher
-	onOpen     func()
-	onClose    func(DisconnectInfo)
-	lastErr    error
-	closedCh   chan struct{}
+	mu                 sync.Mutex
+	dispatchMu         sync.Mutex
+	channel            ReliableMessageChannel
+	inbound            *inboundDispatcher
+	onOpen             func()
+	onClose            func(DisconnectInfo)
+	lastErr            error
+	closedCh           chan struct{}
+	generation         uint64
+	attemptCancel      context.CancelFunc
+	connectedTransport TransportKind
+	affinityKey        string
+	affinityTransport  TransportKind
 }
 
 // NewGameClient creates a client wired to generated managers and codecs.
@@ -100,6 +109,10 @@ func NewGameClient(options GameClientOptions) *GameClient {
 	create := options.CreateChannel
 	if create == nil {
 		create = DialChannel
+	}
+	supports := options.SupportsTransport
+	if supports == nil {
+		supports = builtinSupportsTransport
 	}
 	return &GameClient{
 		entities:      options.EntityManager,
@@ -110,6 +123,7 @@ func NewGameClient(options GameClientOptions) *GameClient {
 		encodeCommand: options.EncodeCommand,
 		encodePacket:  options.EncodePacket,
 		createChannel: create,
+		supports:      supports,
 		closedCh:      make(chan struct{}),
 	}
 }
@@ -122,6 +136,18 @@ func (c *GameClient) World() WorldManagerLike { return c.world }
 
 // Events returns the generated event manager, if configured.
 func (c *GameClient) Events() EventManagerLike { return c.events }
+
+// ConnectedTransport returns the transport of the currently open channel, or
+// the empty string while disconnected.
+func (c *GameClient) ConnectedTransport() TransportKind {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.connectedTransport
+}
+
+func (c *GameClient) supportsTransport(transport TransportKind) bool {
+	return c.supports != nil && c.supports(transport)
+}
 
 // OnConnect registers a callback fired when the transport opens.
 func (c *GameClient) OnConnect(fn func()) { c.onOpen = fn }
@@ -141,32 +167,172 @@ func (c *GameClient) ConnectURL(ctx context.Context, url string) error {
 // If a session is already live, Disconnect runs first and emits one clean
 // OnDisconnect for that prior session before the new dial.
 func (c *GameClient) Connect(ctx context.Context, options ConnectOptions) error {
-	c.Disconnect()
 	if options.Transport == "" {
 		options.Transport = TransportWebSocket
 	}
+	ctx, generation, finish := c.beginConnect(ctx, true)
+	defer finish()
+	if err := validateConnectOptions(options); err != nil {
+		return err
+	}
+
 	redacted := RedactURL(options.URL)
-	channel, err := c.createChannel(ctx, options)
+	channel, err := c.dialCandidate(ctx, generation, options)
 	if err != nil {
 		err = sanitizeURLError(err)
 		log.Printf("golem-go-client: connect failed transport=%s url=%q error=%v", options.Transport, redacted, err)
 		return err
 	}
-	log.Printf("golem-go-client: connected transport=%s url=%q", options.Transport, redacted)
-	inbound := newInboundDispatcher(c)
-	c.mu.Lock()
-	c.channel = channel
-	c.inbound = inbound
-	c.closedCh = make(chan struct{})
-	c.mu.Unlock()
+	if err := c.installChannel(generation, channel, options, ""); err != nil {
+		_ = channel.Close()
+		return err
+	}
+	return nil
+}
 
-	channel.OnOpen(func() {
-		if c.onOpen != nil {
-			c.onOpen()
+func (c *GameClient) beginConnect(parent context.Context, resetAffinity bool) (context.Context, uint64, func()) {
+	c.Disconnect()
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	c.mu.Lock()
+	c.generation++
+	generation := c.generation
+	c.attemptCancel = cancel
+	if resetAffinity {
+		c.affinityKey = ""
+		c.affinityTransport = ""
+	}
+	c.mu.Unlock()
+	return ctx, generation, func() {
+		cancel()
+		c.mu.Lock()
+		if c.generation == generation {
+			c.attemptCancel = nil
 		}
-	})
-	channel.OnMessage(func(data []byte) {
-		inbound.enqueue(inboundEventStream, data)
+		c.mu.Unlock()
+	}
+}
+
+type channelDialResult struct {
+	channel ReliableMessageChannel
+	err     error
+}
+
+func (c *GameClient) dialCandidate(ctx context.Context, generation uint64, options ConnectOptions) (ReliableMessageChannel, error) {
+	results := make(chan channelDialResult, 1)
+	go func() {
+		channel, err := c.createChannel(ctx, cloneConnectOptions(options))
+		results <- channelDialResult{channel: channel, err: err}
+	}()
+
+	var result channelDialResult
+	select {
+	case <-ctx.Done():
+		// A custom factory may observe cancellation but return late. Wait for it
+		// and synchronously close any channel it created before a plan advances
+		// to the next resolver or physical dial.
+		result = <-results
+		if result.channel != nil {
+			_ = result.channel.Close()
+		}
+		return nil, sanitizeURLError(ctx.Err())
+	case result = <-results:
+	}
+
+	if err := ctx.Err(); err != nil {
+		if result.channel != nil {
+			_ = result.channel.Close()
+		}
+		return nil, sanitizeURLError(err)
+	}
+	if result.err != nil {
+		if result.channel != nil {
+			_ = result.channel.Close()
+		}
+		return nil, sanitizeURLError(result.err)
+	}
+	if result.channel == nil {
+		return nil, errors.New("golem-go-client: channel factory returned a nil channel")
+	}
+	c.mu.Lock()
+	current := c.generation == generation
+	c.mu.Unlock()
+	if !current {
+		_ = result.channel.Close()
+		return nil, context.Canceled
+	}
+	if !result.channel.Connected() {
+		_ = result.channel.Close()
+		return nil, errors.New("golem-go-client: channel factory returned before the transport opened")
+	}
+	return result.channel, nil
+}
+
+func (c *GameClient) installChannel(generation uint64, channel ReliableMessageChannel, options ConnectOptions, planKey string) error {
+	inbound := newInboundDispatcher()
+	var lifecycleMu sync.Mutex
+	installed := false
+	closed := false
+	opened := false
+	openNotified := false
+	var earlyCloseErr error
+
+	notifyOpen := func() {
+		var onOpen func()
+		c.mu.Lock()
+		if c.generation == generation && c.channel == channel {
+			c.connectedTransport = options.Transport
+			if planKey != "" && options.Transport == TransportWebSocket {
+				c.affinityKey = planKey
+				c.affinityTransport = TransportWebSocket
+			}
+			onOpen = c.onOpen
+		}
+		c.mu.Unlock()
+		if onOpen != nil {
+			onOpen()
+		}
+	}
+
+	channel.OnClose(func(info DisconnectInfo) {
+		info.Err = sanitizeURLError(info.Err)
+		lifecycleMu.Lock()
+		closed = true
+		if earlyCloseErr == nil {
+			earlyCloseErr = info.Err
+		}
+		active := installed
+		lifecycleMu.Unlock()
+		if !active {
+			inbound.stop()
+			return
+		}
+
+		var shouldNotify bool
+		var onClose func(DisconnectInfo)
+		c.mu.Lock()
+		if c.generation == generation && c.channel == channel {
+			c.channel = nil
+			if c.inbound == inbound {
+				c.inbound = nil
+			}
+			c.connectedTransport = ""
+			shouldNotify = true
+			c.lastErr = info.Err
+			closeOnce(&c.closedCh)
+			onClose = c.onClose
+		}
+		c.mu.Unlock()
+		inbound.stop()
+		if shouldNotify {
+			c.clearEntities()
+			log.Printf("golem-go-client: disconnect was_clean=%v error=%v", info.WasClean, info.Err)
+			if onClose != nil {
+				onClose(info)
+			}
+		}
 	})
 	channel.OnUnreliableStateMessage(func(data []byte) {
 		inbound.enqueue(inboundEventCompactState, data)
@@ -177,29 +343,57 @@ func (c *GameClient) Connect(ctx context.Context, options ConnectOptions) error 
 	channel.OnEventualStateMessage(func(data []byte) {
 		inbound.enqueue(inboundEventCompactState, data)
 	})
-	channel.OnClose(func(info DisconnectInfo) {
-		info.Err = sanitizeURLError(info.Err)
-		var shouldNotify bool
-		c.mu.Lock()
-		if c.channel == channel {
-			c.channel = nil
-			if c.inbound == inbound {
-				c.inbound = nil
-			}
-			shouldNotify = true
-			c.lastErr = info.Err
-			closeOnce(&c.closedCh)
-		}
-		c.mu.Unlock()
-		inbound.stop()
+	channel.OnMessage(func(data []byte) {
+		inbound.enqueue(inboundEventStream, data)
+	})
+	channel.OnOpen(func() {
+		lifecycleMu.Lock()
+		opened = true
+		shouldNotify := installed && !closed && !openNotified
 		if shouldNotify {
-			c.clearEntities()
-			log.Printf("golem-go-client: disconnect was_clean=%v error=%v", info.WasClean, info.Err)
-			if c.onClose != nil {
-				c.onClose(info)
-			}
+			openNotified = true
+		}
+		lifecycleMu.Unlock()
+		if shouldNotify {
+			notifyOpen()
 		}
 	})
+
+	lifecycleMu.Lock()
+	if closed || !channel.Connected() {
+		err := earlyCloseErr
+		lifecycleMu.Unlock()
+		inbound.stop()
+		if err != nil {
+			return fmt.Errorf("golem-go-client: transport closed before client callback installation: %w", err)
+		}
+		return errors.New("golem-go-client: transport closed before client callback installation")
+	}
+	c.mu.Lock()
+	if c.generation != generation {
+		c.mu.Unlock()
+		lifecycleMu.Unlock()
+		inbound.stop()
+		return context.Canceled
+	}
+	c.channel = channel
+	c.inbound = inbound
+	c.connectedTransport = options.Transport
+	c.lastErr = nil
+	c.closedCh = make(chan struct{})
+	installed = true
+	shouldNotifyOpen := opened && !openNotified
+	if shouldNotifyOpen {
+		openNotified = true
+	}
+	c.mu.Unlock()
+	lifecycleMu.Unlock()
+
+	inbound.start(c)
+	if shouldNotifyOpen {
+		notifyOpen()
+	}
+	log.Printf("golem-go-client: connected transport=%s url=%q", options.Transport, RedactURL(options.URL))
 	return nil
 }
 
@@ -213,10 +407,14 @@ func (c *GameClient) Connect(ctx context.Context, options ConnectOptions) error 
 // OnDisconnect for the old session before the new dial.
 func (c *GameClient) Disconnect() {
 	c.mu.Lock()
+	c.generation++
+	cancel := c.attemptCancel
+	c.attemptCancel = nil
 	channel := c.channel
 	inbound := c.inbound
 	c.channel = nil
 	c.inbound = nil
+	c.connectedTransport = ""
 	shouldNotify := channel != nil
 	onClose := c.onClose
 	if shouldNotify {
@@ -224,6 +422,9 @@ func (c *GameClient) Disconnect() {
 		closeOnce(&c.closedCh)
 	}
 	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if inbound != nil {
 		inbound.stop()
 	}

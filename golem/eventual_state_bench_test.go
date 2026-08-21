@@ -47,12 +47,12 @@ func BenchmarkSendEventualState(b *testing.B) {
 		clear(tracker.dirtySet)
 		tracker.dirtyQueue = tracker.dirtyQueue[:0]
 		tracker.markDirty(ids)
-		batched, msgs, err := s.sendEventualState(-1, tracker, cache)
+		stats, err := s.sendEventualState(-1, tracker, cache)
 		if err != nil {
 			b.Fatal(err)
 		}
-		if batched != 0 || msgs != 0 {
-			b.Fatalf("sendEventualState disconnected result = %d/%d, want 0/0", batched, msgs)
+		if stats != (eventualStateSendStats{}) {
+			b.Fatalf("sendEventualState disconnected stats = %+v, want zero", stats)
 		}
 	}
 }
@@ -111,12 +111,12 @@ func BenchmarkSendEventualStateChangesDirect(b *testing.B) {
 
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		batched, msgs, err := s.sendEventualStateChanges(-1, tracker, cache, changes)
+		stats, err := s.sendEventualStateChanges(-1, tracker, cache, changes)
 		if err != nil {
 			b.Fatal(err)
 		}
-		if batched != 0 || msgs != 0 {
-			b.Fatalf("sendEventualStateChanges disconnected result = %d/%d, want 0/0", batched, msgs)
+		if stats != (eventualStateSendStats{}) {
+			b.Fatalf("sendEventualStateChanges disconnected stats = %+v, want zero", stats)
 		}
 	}
 }
@@ -146,12 +146,12 @@ func BenchmarkSendPreparedEventualStateFramesDirect(b *testing.B) {
 
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		batched, msgs, err := s.sendPreparedEventualStateFrames(-1, tracker, prepared)
+		stats, err := s.sendPreparedEventualStateFrames(-1, tracker, prepared)
 		if err != nil {
 			b.Fatal(err)
 		}
-		if batched != 0 || msgs != 0 {
-			b.Fatalf("sendPreparedEventualStateFrames disconnected result = %d/%d, want 0/0", batched, msgs)
+		if stats != (eventualStateSendStats{}) {
+			b.Fatalf("sendPreparedEventualStateFrames disconnected stats = %+v, want zero", stats)
 		}
 	}
 }

@@ -328,7 +328,7 @@ func TestBroadcastSnapshotFailureDoesNotCommitKnown(t *testing.T) {
 		}
 		return append(snaps, golemnet.EntitySnapshot{
 			EntityID: 2,
-			Data:     bytes.Repeat([]byte("x"), 40000),
+			Data:     bytes.Repeat([]byte("x"), 256*1024+1),
 		}), nil
 	})
 

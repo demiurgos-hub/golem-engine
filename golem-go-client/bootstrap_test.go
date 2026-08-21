@@ -38,7 +38,8 @@ func TestFetchRealtimeConfigDecodesJSON(t *testing.T) {
 			"transport": "webtransport",
 			"url": "https://example.com/wt",
 			"serverCertificateHashes": [{"algorithm": "sha-256", "value": "` + hex.EncodeToString(sum[:]) + `"}],
-			"eventualAckIntervalMs": 25
+			"eventualAckIntervalMs": 25,
+			"fallback": {"transport": "websocket", "url": "wss://example.com/ws"}
 		}`))
 	}))
 	defer server.Close()
@@ -62,6 +63,9 @@ func TestFetchRealtimeConfigDecodesJSON(t *testing.T) {
 	if got := cfg.ServerCertificateHashes[0].Value; string(got) != string(sum[:]) {
 		t.Fatalf("hash value = %x, want %x", got, sum)
 	}
+	if cfg.Fallback == nil || cfg.Fallback.Transport != TransportWebSocket || cfg.Fallback.URL != "wss://example.com/ws" {
+		t.Fatalf("fallback = %+v", cfg.Fallback)
+	}
 }
 
 func TestFetchRealtimeConfigRejectsInvalidResponses(t *testing.T) {
@@ -77,6 +81,13 @@ func TestFetchRealtimeConfigRejectsInvalidResponses(t *testing.T) {
 		{name: "algorithm", status: http.StatusOK, body: `{"transport":"webtransport","url":"https://example.com/wt","serverCertificateHashes":[{"algorithm":"sha-512","value":"` + hex.EncodeToString(sum[:]) + `"}]}`},
 		{name: "transport", status: http.StatusOK, body: `{"transport":"bad","url":"https://example.com/wt"}`},
 		{name: "url", status: http.StatusOK, body: `{"transport":"websocket","url":""}`},
+		{name: "relative url", status: http.StatusOK, body: `{"transport":"websocket","url":"/api/ws"}`},
+		{name: "websocket scheme", status: http.StatusOK, body: `{"transport":"websocket","url":"https://example.com/ws"}`},
+		{name: "webtransport host", status: http.StatusOK, body: `{"transport":"webtransport","url":"https:///api/wt"}`},
+		{name: "fallback primary", status: http.StatusOK, body: `{"transport":"websocket","url":"wss://example.com/ws","fallback":{"transport":"websocket","url":"wss://example.com/ws2"}}`},
+		{name: "fallback transport", status: http.StatusOK, body: `{"transport":"webtransport","url":"https://example.com/wt","fallback":{"transport":"webtransport","url":"https://example.com/wt2"}}`},
+		{name: "fallback url", status: http.StatusOK, body: `{"transport":"webtransport","url":"https://example.com/wt","fallback":{"transport":"websocket","url":""}}`},
+		{name: "fallback scheme", status: http.StatusOK, body: `{"transport":"webtransport","url":"https://example.com/wt","fallback":{"transport":"websocket","url":"https://example.com/ws"}}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -92,7 +103,7 @@ func TestFetchRealtimeConfigRejectsInvalidResponses(t *testing.T) {
 	}
 }
 
-func TestFetchRealtimeConfigIncludesErrorBodySnippet(t *testing.T) {
+func TestFetchRealtimeConfigDoesNotExposeErrorBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte("missing realtime config"))
@@ -103,8 +114,37 @@ func TestFetchRealtimeConfigIncludesErrorBodySnippet(t *testing.T) {
 	if err == nil {
 		t.Fatal("FetchRealtimeConfig returned nil error")
 	}
-	if !strings.Contains(err.Error(), "status 404") || !strings.Contains(err.Error(), "missing realtime config") {
+	if !strings.Contains(err.Error(), "status 404") {
 		t.Fatalf("error = %v", err)
+	}
+	if strings.Contains(err.Error(), "missing realtime config") || strings.Contains(err.Error(), "body=") {
+		t.Fatalf("error exposed untrusted response body: %v", err)
+	}
+}
+
+func TestFetchRealtimeConfigDoesNotExposeCredentialBearingErrorBody(t *testing.T) {
+	const requestSecret = "request-ticket-secret"
+	const bodySecret = "body-token-secret"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprintf(w, "request https://example.test/realtime?ticket=%s rejected token=%s path=%s", requestSecret, bodySecret, r.URL.String())
+	}))
+	defer server.Close()
+
+	_, err := FetchRealtimeConfig(context.Background(), server.URL+"?ticket="+requestSecret, nil)
+	if err == nil {
+		t.Fatal("FetchRealtimeConfig returned nil error")
+	}
+	if !strings.Contains(err.Error(), "status 401") {
+		t.Fatalf("error lost response status diagnostic: %v", err)
+	}
+	for _, secret := range []string{requestSecret, bodySecret} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("error body leaked credential %q: %v", secret, err)
+		}
+	}
+	if strings.Contains(err.Error(), "ticket=") || strings.Contains(err.Error(), "token=") || strings.Contains(err.Error(), "body=") {
+		t.Fatalf("error exposed credential-bearing response body: %v", err)
 	}
 }
 

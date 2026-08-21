@@ -30,6 +30,7 @@ func DialWebSocket(ctx context.Context, options ConnectOptions) (*WebSocketChann
 		log.Printf("golem-go-client: websocket dial failed url=%q error=%v", redacted, err)
 		return nil, fmt.Errorf("golem-go-client: websocket dial: %w", err)
 	}
+	conn.SetReadLimit(maxReliableMessageBytes)
 	ch := &WebSocketChannel{conn: conn}
 	ch.connected.Store(true)
 	return ch, nil

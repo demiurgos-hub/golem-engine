@@ -2,14 +2,19 @@ package net
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
-	"github.com/quic-go/quic-go/http3"
+	"github.com/coder/websocket"
 	"github.com/demiurgos-hub/golem-engine/golem/registry"
+	"github.com/quic-go/quic-go/http3"
 )
 
 func TestPrepareWebTransportTLSWithDevSelfSignedCert(t *testing.T) {
@@ -132,6 +137,205 @@ func TestListenerWebTransportServerConfiguresProvidedHTTP3Server(t *testing.T) {
 	}
 	if len(h3.AdditionalSettings) == 0 {
 		t.Fatal("WebTransportServer did not configure HTTP/3 settings")
+	}
+}
+
+func TestListenerWebSocketHandlerAvailableForWebTransportPrimary(t *testing.T) {
+	listener := NewListener(registry.NewRegistry(), Config{Transport: TransportWebTransport})
+	connected := make(chan *Session, 1)
+	listener.OnConnect(func(sess *Session) {
+		connected <- sess
+	})
+
+	httpServer := httptest.NewServer(listener.WebSocketHandler())
+	defer httpServer.Close()
+	client, _, err := websocket.Dial(context.Background(), "ws"+httpServer.URL[4:], nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer client.CloseNow()
+
+	select {
+	case sess := <-connected:
+		if sess.Transport != TransportWebSocket {
+			t.Fatalf("session transport = %q, want %q", sess.Transport, TransportWebSocket)
+		}
+		if got, ok := listener.SessionTransport(sess.ID); !ok || got != TransportWebSocket {
+			t.Fatalf("SessionTransport = %q, %v; want %q, true", got, ok, TransportWebSocket)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for WebSocket fallback session")
+	}
+}
+
+func TestListenerWebSocketHandlerClearsHTTPServerDeadlines(t *testing.T) {
+	listener := NewListener(registry.NewRegistry(), Config{Transport: TransportWebTransport})
+	received := make(chan []byte, 1)
+	listener.OnMessage(func(_ *Session, data []byte) {
+		received <- append([]byte(nil), data...)
+	})
+	tcpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	httpServer := &http.Server{
+		Handler:      listener.WebSocketHandler(),
+		ReadTimeout:  40 * time.Millisecond,
+		WriteTimeout: 40 * time.Millisecond,
+	}
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- httpServer.Serve(tcpListener)
+	}()
+	t.Cleanup(func() {
+		_ = httpServer.Close()
+		<-serveDone
+	})
+
+	client, _, err := websocket.Dial(
+		context.Background(),
+		"ws://"+tcpListener.Addr().String(),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer client.CloseNow()
+
+	time.Sleep(120 * time.Millisecond)
+	writeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	want := []byte("still connected")
+	if err := client.Write(writeCtx, websocket.MessageBinary, want); err != nil {
+		t.Fatalf("Write after HTTP deadlines elapsed: %v", err)
+	}
+	select {
+	case got := <-received:
+		if !bytes.Equal(got, want) {
+			t.Fatalf("received %q, want %q", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not receive message after HTTP deadlines elapsed")
+	}
+}
+
+func TestListenerCloseSessionsFencesPendingSnapshotAndFutureUpgrades(t *testing.T) {
+	listener := NewListener(registry.NewRegistry(), Config{Transport: TransportWebTransport})
+	snapshotStarted := make(chan struct{})
+	releaseSnapshot := make(chan struct{})
+	listener.SetEntitySnapshotFunc(func(int64) ([]EntitySnapshot, error) {
+		close(snapshotStarted)
+		<-releaseSnapshot
+		return nil, nil
+	})
+
+	httpServer := httptest.NewServer(listener.WebSocketHandler())
+	defer httpServer.Close()
+	client, _, err := websocket.Dial(context.Background(), "ws"+httpServer.URL[4:], nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer client.CloseNow()
+	select {
+	case <-snapshotStarted:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot did not start")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		listener.CloseSessions()
+		close(closed)
+	}()
+	close(releaseSnapshot)
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("CloseSessions did not wait for pending handler cleanup")
+	}
+	if ids := listener.SessionIDs(); len(ids) != 0 {
+		t.Fatalf("SessionIDs after shutdown = %v, want empty", ids)
+	}
+
+	postShutdown, response, err := websocket.Dial(context.Background(), "ws"+httpServer.URL[4:], nil)
+	if postShutdown != nil {
+		postShutdown.CloseNow()
+	}
+	if err == nil {
+		t.Fatal("post-shutdown WebSocket upgrade unexpectedly succeeded")
+	}
+	if response == nil || response.StatusCode != http.StatusServiceUnavailable {
+		status := 0
+		if response != nil {
+			status = response.StatusCode
+		}
+		t.Fatalf("post-shutdown status = %d, want %d", status, http.StatusServiceUnavailable)
+	}
+}
+
+func TestListenerCloseSessionsWaitsForPreAcceptHandler(t *testing.T) {
+	listener := NewListener(registry.NewRegistry(), Config{Transport: TransportWebTransport})
+	authorizationStarted := make(chan struct{})
+	releaseAuthorization := make(chan struct{})
+	listener.OnUpgrade(func(*http.Request) (any, error) {
+		close(authorizationStarted)
+		<-releaseAuthorization
+		return nil, nil
+	})
+
+	httpServer := httptest.NewServer(listener.WebSocketHandler())
+	defer httpServer.Close()
+	requestDone := make(chan struct{})
+	go func() {
+		defer close(requestDone)
+		response, err := http.Get(httpServer.URL)
+		if err == nil {
+			_ = response.Body.Close()
+		}
+	}()
+	select {
+	case <-authorizationStarted:
+	case <-time.After(time.Second):
+		t.Fatal("authorization did not start")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		listener.CloseSessions()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("CloseSessions returned while a pre-accept handler was still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseAuthorization)
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("pre-accept request did not finish")
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("CloseSessions did not finish after the pre-accept handler returned")
+	}
+}
+
+func TestListenerCertificateHashesReturnsDeepCopy(t *testing.T) {
+	listener := NewListener(registry.NewRegistry(), Config{Transport: TransportWebTransport})
+	listener.certificateHashes = []CertificateHash{{
+		Algorithm: "sha-256",
+		Value:     []byte{1, 2, 3},
+	}}
+
+	first := listener.CertificateHashes()
+	first[0].Algorithm = "changed"
+	first[0].Value[0] = 99
+	second := listener.CertificateHashes()
+	if second[0].Algorithm != "sha-256" || !bytes.Equal(second[0].Value, []byte{1, 2, 3}) {
+		t.Fatalf("CertificateHashes internal value mutated: %+v", second)
 	}
 }
 

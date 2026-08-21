@@ -1,9 +1,13 @@
 package golemebiten
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +21,32 @@ type fakeClient struct {
 	connectOptions []golemclient.ConnectOptions
 	connectErrs    []error
 }
+
+type fakePlanClient struct {
+	fakeClient
+	plans               []golemclient.ConnectionPlan
+	planErrs            []error
+	transport           golemclient.TransportKind
+	disconnectOnConnect *golemclient.DisconnectInfo
+}
+
+func (f *fakePlanClient) ConnectPlan(_ context.Context, plan golemclient.ConnectionPlan) error {
+	f.plans = append(f.plans, plan)
+	if f.disconnectOnConnect != nil && f.onClose != nil {
+		f.onClose(*f.disconnectOnConnect)
+	}
+	if len(f.planErrs) > 0 {
+		err := f.planErrs[0]
+		f.planErrs = f.planErrs[1:]
+		return err
+	}
+	if f.transport == "" {
+		f.transport = plan.Primary.Transport
+	}
+	return nil
+}
+
+func (f *fakePlanClient) ConnectedTransport() golemclient.TransportKind { return f.transport }
 
 func (f *fakeClient) Connect(_ context.Context, options golemclient.ConnectOptions) error {
 	f.connects++
@@ -169,5 +199,219 @@ func TestGameReconnectFailureCallback(t *testing.T) {
 	}
 	if failed != 1 {
 		t.Fatalf("reconnect failures = %d, want 1", failed)
+	}
+}
+
+func TestGameConnectionPlanProviderPrecedesLegacyOptionsAndRefreshes(t *testing.T) {
+	client := &fakePlanClient{transport: golemclient.TransportWebSocket}
+	var planCalls int
+	var optionsCalls int
+	game := NewGame(GameConfig{
+		Client:             client,
+		ReconnectBaseDelay: -time.Second,
+		ConnectionPlan: golemclient.ConnectionPlan{
+			Primary: golemclient.ConnectOptions{Transport: golemclient.TransportWebTransport, URL: "https://static.invalid/wt"},
+		},
+		ConnectionPlanProvider: func(context.Context) (golemclient.ConnectionPlan, error) {
+			planCalls++
+			fallback := golemclient.ConnectOptions{
+				Transport: golemclient.TransportWebSocket,
+				URL:       "wss://example/ws/" + strconv.Itoa(planCalls),
+			}
+			return golemclient.ConnectionPlan{
+				Primary:  golemclient.ConnectOptions{Transport: golemclient.TransportWebTransport, URL: "https://example/wt/" + strconv.Itoa(planCalls)},
+				Fallback: &fallback,
+			}, nil
+		},
+		ConnectionOptions: func(context.Context) (golemclient.ConnectOptions, error) {
+			optionsCalls++
+			return golemclient.ConnectOptions{Transport: golemclient.TransportWebSocket, URL: "wss://legacy.invalid/ws"}, nil
+		},
+	})
+	if err := game.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if got := game.ConnectedTransport(); got != golemclient.TransportWebSocket {
+		t.Fatalf("ConnectedTransport = %q, want websocket", got)
+	}
+	client.onClose(golemclient.DisconnectInfo{WasClean: false})
+	if got := game.ConnectedTransport(); got != "" {
+		t.Fatalf("ConnectedTransport after close = %q, want empty", got)
+	}
+	if err := game.Update(context.Background()); err != nil {
+		t.Fatalf("Update reconnect: %v", err)
+	}
+	if planCalls != 2 || len(client.plans) != 2 {
+		t.Fatalf("plan provider/client calls = %d/%d, want 2/2", planCalls, len(client.plans))
+	}
+	if optionsCalls != 0 || client.connects != 0 {
+		t.Fatalf("legacy options/connect calls = %d/%d, want 0/0", optionsCalls, client.connects)
+	}
+	if client.plans[0].Primary.URL == client.plans[1].Primary.URL {
+		t.Fatalf("plan provider did not refresh endpoint: %q", client.plans[0].Primary.URL)
+	}
+}
+
+func TestGameStaticConnectionPlanPrecedesLegacyOptions(t *testing.T) {
+	client := &fakePlanClient{transport: golemclient.TransportWebTransport}
+	var optionsCalls int
+	plan := golemclient.ConnectionPlan{
+		Primary: golemclient.ConnectOptions{Transport: golemclient.TransportWebTransport, URL: "https://example/wt"},
+	}
+	game := NewGame(GameConfig{
+		Client:         client,
+		ConnectionPlan: plan,
+		ConnectionOptions: func(context.Context) (golemclient.ConnectOptions, error) {
+			optionsCalls++
+			return golemclient.ConnectOptions{}, nil
+		},
+	})
+	if err := game.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if len(client.plans) != 1 || optionsCalls != 0 {
+		t.Fatalf("plan/legacy calls = %d/%d, want 1/0", len(client.plans), optionsCalls)
+	}
+}
+
+func TestGameConnectionPlanRequiresPlanCapableClient(t *testing.T) {
+	client := &fakeClient{}
+	game := NewGame(GameConfig{
+		Client: client,
+		ConnectionPlan: golemclient.ConnectionPlan{
+			Primary: golemclient.ConnectOptions{Transport: golemclient.TransportWebTransport, URL: "https://example/wt"},
+		},
+	})
+	err := game.Connect(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "does not support connection plans") {
+		t.Fatalf("Connect error = %v, want plan-capability error", err)
+	}
+}
+
+func TestGameDisconnectDuringConnectPreservesScheduledReconnect(t *testing.T) {
+	disconnect := golemclient.DisconnectInfo{WasClean: false, Err: errors.New("connection closed")}
+	client := &fakePlanClient{
+		transport:           golemclient.TransportWebSocket,
+		disconnectOnConnect: &disconnect,
+	}
+	var connectCallbacks int
+	game := NewGame(GameConfig{
+		Client:             client,
+		ReconnectBaseDelay: time.Hour,
+		ConnectionPlan: golemclient.ConnectionPlan{
+			Primary: golemclient.ConnectOptions{Transport: golemclient.TransportWebTransport, URL: "https://example/wt"},
+		},
+		OnConnect: func() { connectCallbacks++ },
+	})
+
+	if err := game.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if game.Connected() {
+		t.Fatal("Connected = true after disconnect reported during ConnectPlan")
+	}
+	if got := game.ConnectedTransport(); got != "" {
+		t.Fatalf("ConnectedTransport = %q, want empty", got)
+	}
+	if connectCallbacks != 0 {
+		t.Fatalf("OnConnect callbacks = %d, want 0", connectCallbacks)
+	}
+	game.stateMu.RLock()
+	pending, attempts := game.reconnectPending, game.attempts
+	game.stateMu.RUnlock()
+	if !pending || attempts != 1 {
+		t.Fatalf("reconnect pending/attempts = %v/%d, want true/1", pending, attempts)
+	}
+}
+
+func TestGameCleanReplacementDisconnectAllowsNewConnectCompletion(t *testing.T) {
+	client := &fakePlanClient{transport: golemclient.TransportWebSocket}
+	var connectCallbacks int
+	game := NewGame(GameConfig{
+		Client: client,
+		ConnectionPlan: golemclient.ConnectionPlan{
+			Primary: golemclient.ConnectOptions{Transport: golemclient.TransportWebTransport, URL: "https://example/wt"},
+		},
+		OnConnect: func() { connectCallbacks++ },
+	})
+	if err := game.Connect(context.Background()); err != nil {
+		t.Fatalf("initial Connect: %v", err)
+	}
+
+	clean := golemclient.DisconnectInfo{WasClean: true}
+	client.disconnectOnConnect = &clean
+	if err := game.Connect(context.Background()); err != nil {
+		t.Fatalf("replacement Connect: %v", err)
+	}
+	if !game.Connected() {
+		t.Fatal("Connected = false after successful replacement")
+	}
+	if got := game.ConnectedTransport(); got != golemclient.TransportWebSocket {
+		t.Fatalf("ConnectedTransport = %q, want websocket", got)
+	}
+	if connectCallbacks != 2 {
+		t.Fatalf("OnConnect callbacks = %d, want 2", connectCallbacks)
+	}
+	game.stateMu.RLock()
+	pending := game.reconnectPending
+	game.stateMu.RUnlock()
+	if pending {
+		t.Fatal("reconnect remained pending after clean replacement")
+	}
+}
+
+func TestGameProviderErrorsAreOpaqueBeforeReturnAndLogging(t *testing.T) {
+	const secret = "provider-ticket-secret"
+	tests := []struct {
+		name string
+		cfg  func(error) GameConfig
+	}{
+		{
+			name: "plan",
+			cfg: func(providerErr error) GameConfig {
+				return GameConfig{
+					Client: &fakePlanClient{},
+					ConnectionPlanProvider: func(context.Context) (golemclient.ConnectionPlan, error) {
+						return golemclient.ConnectionPlan{}, providerErr
+					},
+				}
+			},
+		},
+		{
+			name: "options",
+			cfg: func(providerErr error) GameConfig {
+				return GameConfig{
+					Client: &fakeClient{},
+					ConnectionOptions: func(context.Context) (golemclient.ConnectOptions, error) {
+						return golemclient.ConnectOptions{}, providerErr
+					},
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			providerErr := &url.Error{
+				Op:  "fetch",
+				URL: "https://example.test/realtime?ticket=" + secret,
+				Err: errors.New("ticket request failed for " + secret),
+			}
+			var logs bytes.Buffer
+			previousWriter := log.Writer()
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(previousWriter) })
+
+			game := NewGame(tt.cfg(providerErr))
+			err := game.Connect(context.Background())
+			if !errors.Is(err, providerErr) {
+				t.Fatalf("Connect error = %v, want wrapped provider error", err)
+			}
+			for label, text := range map[string]string{"error": err.Error(), "log": logs.String()} {
+				if strings.Contains(text, secret) || strings.Contains(strings.ToLower(text), "ticket=") {
+					t.Fatalf("%s leaked provider credentials: %q", label, text)
+				}
+			}
+		})
 	}
 }

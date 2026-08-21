@@ -1,8 +1,47 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace GolemEngine.Unity
 {
+    /// <summary>Resolves fresh per-dial connection options for a credential-free endpoint candidate.</summary>
+    public delegate Task<GolemConnectOptions> GolemConnectOptionsResolver(
+        GolemConnectOptions baseOptions,
+        CancellationToken cancellationToken);
+
+    /// <summary>Capability checks used by generated clients with the built-in transports.</summary>
+    public static class GolemTransportCapabilities
+    {
+        /// <summary>Reports whether the built-in Unity transport can attempt these options.</summary>
+        public static bool BuiltInTransportSupported(GolemConnectOptions options)
+        {
+            if (options == null)
+            {
+                return false;
+            }
+            switch (options.Transport)
+            {
+                case GolemConnectOptions.TransportWebSocket:
+#if UNITY_WEBGL
+                    return false;
+#else
+                    return true;
+#endif
+                case GolemConnectOptions.TransportWebTransport:
+#if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
+                    return RuntimeInformation.ProcessArchitecture == Architecture.X64 &&
+                           (options.ServerCertificateHashes == null || options.ServerCertificateHashes.Count == 0);
+#else
+                    return false;
+#endif
+                default:
+                    return false;
+            }
+        }
+    }
+
     /// <summary>Certificate hash entry from realtime config or ConnectOptions (hex value on the wire).</summary>
     public readonly struct GolemCertificateHash
     {

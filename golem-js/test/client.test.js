@@ -37,6 +37,66 @@ class MockChannel {
   }
 }
 
+class ControlledChannel {
+  constructor(transport) {
+    this.transport = transport;
+    this.connected = false;
+    this.maxMessageBytes = 32000;
+    this.sent = [];
+    this.closeCalls = 0;
+    this._onOpen = null;
+    this._onClose = null;
+    this._onMessage = null;
+  }
+
+  send(data) {
+    this.sent.push(data);
+  }
+
+  close() {
+    this.closeCalls++;
+    this.connected = false;
+  }
+
+  onOpen(fn) {
+    this._onOpen = fn;
+  }
+
+  onClose(fn) {
+    this._onClose = fn;
+  }
+
+  onMessage(fn) {
+    this._onMessage = fn;
+  }
+
+  open() {
+    this.connected = true;
+    this._onOpen?.();
+  }
+
+  fail(info = { wasClean: false, error: new Error("dial failed") }) {
+    this.connected = false;
+    this._onClose?.(info);
+  }
+}
+
+class AwaitableCloseChannel extends ControlledChannel {
+  constructor(transport) {
+    super(transport);
+    this.closeDeferred = deferred();
+  }
+
+  close() {
+    super.close();
+    return this.closeDeferred.promise;
+  }
+
+  finishClose() {
+    this.closeDeferred.resolve();
+  }
+}
+
 class FakeWebSocket {
   static OPEN = 1;
   static CLOSED = 3;
@@ -99,6 +159,16 @@ function flushMicrotasks() {
   return new Promise((resolve) => queueMicrotask(resolve));
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function makeClient() {
   const channel = new MockChannel();
   const client = new GameClient({
@@ -110,6 +180,430 @@ function makeClient() {
   });
   return { client, channel };
 }
+
+function fallbackPlan(resolveOptions) {
+  return {
+    candidates: [
+      { transport: "webtransport", url: "https://example.test/api/wt" },
+      { transport: "websocket", url: "wss://example.test/api/ws" },
+    ],
+    resolveOptions,
+  };
+}
+
+function fallbackClient(createChannel, supportsTransport = () => true) {
+  return new GameClient({
+    entityManager: { applyUpdate() {}, get() { return undefined; }, clear() {} },
+    decode: (bytes) => bytes,
+    encode: () => new Uint8Array(),
+    encodePacket: (frames) => packetBytes(frames),
+    createChannel,
+    supportsTransport,
+  });
+}
+
+test("GameClient built-in capability detection skips unsupported WebTransport before resolving credentials", () => {
+  const previousWebSocket = globalThis.WebSocket;
+  const previousWebTransport = globalThis.WebTransport;
+  globalThis.WebSocket = FakeWebSocket;
+  globalThis.WebTransport = undefined;
+  FakeWebSocket.instances.length = 0;
+  const resolvedTransports = [];
+  let connected = 0;
+  const client = new GameClient({
+    entityManager: { applyUpdate() {}, get() { return undefined; } },
+    decode: (bytes) => bytes,
+    encode: () => new Uint8Array(),
+    encodePacket: (frames) => packetBytes(frames),
+  });
+  client.onConnect(() => connected++);
+
+  try {
+    client.connect(fallbackPlan((endpoint) => {
+      resolvedTransports.push(endpoint.transport);
+      return { ...endpoint, url: `${endpoint.url}?ticket=ws-ticket` };
+    }));
+
+    assert.deepEqual(resolvedTransports, ["websocket"]);
+    assert.equal(FakeWebSocket.instances.length, 1);
+    FakeWebSocket.instances[0].onopen?.();
+    assert.equal(connected, 1);
+  } finally {
+    client.disconnect();
+    globalThis.WebSocket = previousWebSocket;
+    globalThis.WebTransport = previousWebTransport;
+    FakeWebSocket.instances.length = 0;
+  }
+});
+
+test("GameClient resolves fresh credentials and falls back after a synchronous WebTransport setup failure", () => {
+  const channels = [];
+  const resolved = [];
+  const client = fallbackClient((options) => {
+    if (options.transport === "webtransport") {
+      throw new Error(`failed ${options.url}`);
+    }
+    const channel = new ControlledChannel(options.transport);
+    channels.push(channel);
+    return channel;
+  });
+  let connects = 0;
+  let disconnects = 0;
+  client.onConnect(() => connects++);
+  client.onDisconnect(() => disconnects++);
+
+  client.connect(fallbackPlan((endpoint) => {
+    const ticket = `${endpoint.transport}-ticket-${resolved.length + 1}`;
+    resolved.push(ticket);
+    return { ...endpoint, url: `${endpoint.url}?ticket=${ticket}` };
+  }));
+
+  assert.deepEqual(resolved, [
+    "webtransport-ticket-1",
+    "websocket-ticket-2",
+  ]);
+  assert.equal(channels.length, 1);
+  assert.equal(channels[0].transport, "websocket");
+  channels[0].open();
+  assert.equal(connects, 1);
+  assert.equal(disconnects, 0);
+});
+
+test("GameClient does not fall back after a terminal WebTransport setup response", () => {
+  for (const status of [401, 403, 426]) {
+    const attempts = [];
+    const disconnects = [];
+    const client = fallbackClient((options) => {
+      attempts.push(options.transport);
+      const error = new Error(`HTTP status ${status}`);
+      error.status = status;
+      throw error;
+    });
+    client.onDisconnect((info) => disconnects.push(info));
+
+    client.connect(fallbackPlan());
+
+    assert.deepEqual(attempts, ["webtransport"]);
+    assert.equal(disconnects.length, 1);
+    assert.match(disconnects[0].reason, /authorization or revision rejected/);
+    assert.doesNotMatch(disconnects[0].error.message, new RegExp(String(status)));
+  }
+});
+
+test("GameClient does not fall back after a terminal pre-open close", () => {
+  const channels = [];
+  const disconnects = [];
+  const client = fallbackClient((options) => {
+    const channel = new ControlledChannel(options.transport);
+    channels.push(channel);
+    return channel;
+  });
+  client.onDisconnect((info) => disconnects.push(info));
+
+  client.connect(fallbackPlan());
+  channels[0].fail({ wasClean: false, error: { statusCode: 426 } });
+
+  assert.deepEqual(channels.map((channel) => channel.transport), ["webtransport"]);
+  assert.equal(channels[0].closeCalls, 1);
+  assert.equal(disconnects.length, 1);
+  assert.match(disconnects[0].reason, /authorization or revision rejected/);
+});
+
+test("GameClient treats a resolver rejection as a final logical failure without falling through", async () => {
+  const channels = [];
+  const resolverCalls = [];
+  const disconnects = [];
+  const client = fallbackClient((options) => {
+    channels.push(options.transport);
+    return new ControlledChannel(options.transport);
+  });
+  client.onDisconnect((info) => disconnects.push(info));
+
+  client.connect(fallbackPlan(async (endpoint) => {
+    resolverCalls.push(endpoint.transport);
+    throw new Error("ticket=resolver-secret");
+  }));
+  await flushMicrotasks();
+  await flushMicrotasks();
+
+  assert.deepEqual(resolverCalls, ["webtransport"]);
+  assert.deepEqual(channels, []);
+  assert.equal(disconnects.length, 1);
+  assert.match(disconnects[0].error.message, /connection options resolution failed/);
+  assert.doesNotMatch(disconnects[0].error.message, /resolver-secret|ticket=/);
+});
+
+test("GameClient rejects resolver changes to credential-free endpoint metadata", () => {
+  const attempts = [];
+  const disconnects = [];
+  const client = fallbackClient((options) => {
+    attempts.push(options.transport);
+    return new ControlledChannel(options.transport);
+  });
+  client.onDisconnect((info) => disconnects.push(info));
+  const plan = fallbackPlan((endpoint) => ({
+    ...endpoint,
+    eventualAckIntervalMs: 99,
+  }));
+  plan.candidates[0].eventualAckIntervalMs = 1;
+
+  client.connect(plan);
+
+  assert.deepEqual(attempts, []);
+  assert.equal(disconnects.length, 1);
+  assert.match(disconnects[0].reason, /connection options resolution failed/);
+});
+
+test("GameClient aborts and ignores a pending resolver after disconnect", async () => {
+  const pending = deferred();
+  const channels = [];
+  const disconnects = [];
+  let resolverSignal;
+  const client = fallbackClient((options) => {
+    channels.push(options.transport);
+    return new ControlledChannel(options.transport);
+  });
+  client.onDisconnect((info) => disconnects.push(info));
+
+  client.connect(fallbackPlan((_endpoint, signal) => {
+    resolverSignal = signal;
+    return pending.promise;
+  }));
+  assert.equal(resolverSignal.aborted, false);
+  client.disconnect();
+  assert.equal(resolverSignal.aborted, true);
+  pending.resolve({
+    transport: "webtransport",
+    url: "https://example.test/api/wt?ticket=stale",
+  });
+  await pending.promise;
+  await flushMicrotasks();
+
+  assert.deepEqual(channels, []);
+  assert.deepEqual(disconnects, []);
+});
+
+test("GameClient falls back on a pre-open close and fences late WebTransport events", () => {
+  const channels = [];
+  const client = fallbackClient((options) => {
+    const channel = new ControlledChannel(options.transport);
+    channels.push(channel);
+    return channel;
+  });
+  let connects = 0;
+  let disconnects = 0;
+  client.onConnect(() => connects++);
+  client.onDisconnect(() => disconnects++);
+
+  client.connect(fallbackPlan());
+  const webTransport = channels[0];
+  webTransport.fail();
+  const webSocket = channels[1];
+  assert.equal(webTransport.closeCalls, 1);
+  webTransport.open();
+  webTransport.fail();
+  assert.equal(connects, 0);
+  assert.equal(disconnects, 0);
+
+  webSocket.open();
+  assert.equal(connects, 1);
+  assert.equal(disconnects, 0);
+});
+
+test("GameClient waits for an awaitable close before resolving fallback credentials", async () => {
+  const channels = [];
+  const resolverCalls = [];
+  const client = fallbackClient((options) => {
+    const channel = options.transport === "webtransport"
+      ? new AwaitableCloseChannel(options.transport)
+      : new ControlledChannel(options.transport);
+    channels.push(channel);
+    return channel;
+  });
+
+  client.connect(fallbackPlan((endpoint) => {
+    resolverCalls.push(endpoint.transport);
+    return { ...endpoint, url: `${endpoint.url}?ticket=${resolverCalls.length}` };
+  }));
+  channels[0].fail();
+
+  assert.deepEqual(resolverCalls, ["webtransport"]);
+  assert.deepEqual(channels.map((channel) => channel.transport), ["webtransport"]);
+
+  channels[0].finishClose();
+  await flushMicrotasks();
+  await flushMicrotasks();
+
+  assert.deepEqual(resolverCalls, ["webtransport", "websocket"]);
+  assert.deepEqual(channels.map((channel) => channel.transport), [
+    "webtransport",
+    "websocket",
+  ]);
+});
+
+test("GameClient emits one clean disconnect for established intentional closure and replacement", () => {
+  const channels = [];
+  const disconnects = [];
+  const client = fallbackClient((options) => {
+    const channel = new ControlledChannel(options.transport);
+    channels.push(channel);
+    return channel;
+  });
+  client.onDisconnect((info) => disconnects.push(info));
+
+  client.connect(fallbackPlan());
+  channels[0].open();
+  client.disconnect();
+  channels[0].fail({ wasClean: true, reason: "late close" });
+  client.disconnect();
+
+  assert.equal(disconnects.length, 1);
+  assert.deepEqual(disconnects[0], {
+    code: 1000,
+    reason: "client disconnect",
+    wasClean: true,
+  });
+
+  client.connect(fallbackPlan());
+  channels[1].open();
+  client.connect(fallbackPlan());
+  channels[1].fail({ wasClean: true, reason: "late replacement close" });
+
+  assert.equal(disconnects.length, 2);
+  assert.equal(disconnects[1].wasClean, true);
+  assert.equal(disconnects[1].reason, "client disconnect");
+  client.disconnect();
+});
+
+test("GameClient applies the fixed five-second WebTransport establishment deadline", () => {
+  const previousSetTimeout = globalThis.setTimeout;
+  const previousClearTimeout = globalThis.clearTimeout;
+  const timers = new Map();
+  let nextTimer = 1;
+  globalThis.setTimeout = (fn, delayMs) => {
+    const id = nextTimer++;
+    timers.set(id, { fn, delayMs });
+    return id;
+  };
+  globalThis.clearTimeout = (id) => timers.delete(id);
+  const channels = [];
+  const client = fallbackClient((options) => {
+    const channel = new ControlledChannel(options.transport);
+    channels.push(channel);
+    return channel;
+  });
+
+  try {
+    client.connect(fallbackPlan());
+    assert.equal(channels.length, 1);
+    const timer = [...timers.values()][0];
+    assert.equal(timer.delayMs, 5000);
+    timer.fn();
+    assert.deepEqual(channels.map((channel) => channel.transport), [
+      "webtransport",
+      "websocket",
+    ]);
+    assert.equal(channels[0].closeCalls, 1);
+  } finally {
+    client.disconnect();
+    globalThis.setTimeout = previousSetTimeout;
+    globalThis.clearTimeout = previousClearTimeout;
+  }
+});
+
+test("GameClient never falls back after WebTransport has opened", () => {
+  const channels = [];
+  const disconnects = [];
+  const client = fallbackClient((options) => {
+    const channel = new ControlledChannel(options.transport);
+    channels.push(channel);
+    return channel;
+  });
+  client.onDisconnect((info) => disconnects.push(info));
+
+  client.connect(fallbackPlan());
+  channels[0].open();
+  channels[0].fail({ wasClean: false, error: new Error("post-open") });
+
+  assert.deepEqual(channels.map((channel) => channel.transport), ["webtransport"]);
+  assert.equal(disconnects.length, 1);
+});
+
+test("GameClient keeps an opened WebSocket sticky until the credential-free plan changes", () => {
+  const channels = [];
+  const resolverCalls = [];
+  const client = fallbackClient((options) => {
+    const channel = new ControlledChannel(options.transport);
+    channels.push(channel);
+    return channel;
+  });
+  const resolver = (endpoint) => {
+    resolverCalls.push(endpoint.transport);
+    return { ...endpoint, url: `${endpoint.url}?ticket=${resolverCalls.length}` };
+  };
+  const plan = fallbackPlan(resolver);
+
+  client.connect(plan);
+  channels[0].fail();
+  channels[1].open();
+  channels[1].fail();
+  assert.deepEqual(resolverCalls, ["webtransport", "websocket"]);
+
+  client.connect(fallbackPlan(resolver));
+  assert.equal(channels[2].transport, "websocket");
+  channels[2].open();
+  assert.deepEqual(resolverCalls, ["webtransport", "websocket", "websocket"]);
+
+  client.disconnect();
+  client.connect(fallbackPlan(resolver));
+  assert.equal(channels[3].transport, "websocket");
+  channels[3].fail();
+  assert.deepEqual(resolverCalls, [
+    "webtransport",
+    "websocket",
+    "websocket",
+    "websocket",
+  ]);
+
+  client.connect(fallbackPlan(resolver));
+  assert.equal(channels[4].transport, "websocket");
+  channels[4].fail();
+
+  const changed = fallbackPlan(resolver);
+  changed.candidates[0].url = "https://changed.example.test/api/wt";
+  changed.candidates[1].url = "wss://changed.example.test/api/ws";
+  client.connect(changed);
+  assert.equal(channels[5].transport, "webtransport");
+  assert.deepEqual(resolverCalls, [
+    "webtransport",
+    "websocket",
+    "websocket",
+    "websocket",
+    "websocket",
+    "webtransport",
+  ]);
+  client.disconnect();
+});
+
+test("GameClient reports one final failure after both candidates fail", () => {
+  const channels = [];
+  const disconnects = [];
+  const client = fallbackClient((options) => {
+    const channel = new ControlledChannel(options.transport);
+    channels.push(channel);
+    return channel;
+  });
+  client.onDisconnect((info) => disconnects.push(info));
+
+  client.connect(fallbackPlan());
+  channels[0].fail();
+  channels[1].fail();
+  channels[0].open();
+  channels[1].fail();
+
+  assert.equal(disconnects.length, 1);
+  assert.equal(disconnects[0].wasClean, false);
+});
 
 test("GameClient flushes one small command on the next microtask", async () => {
   const { client, channel } = makeClient();
@@ -286,6 +780,38 @@ test("WebSocket runtime errors never log credential-bearing ErrorEvent messages"
     console.error = originalError;
     globalThis.WebSocket = previousWebSocket;
     globalThis.ErrorEvent = previousErrorEvent;
+    FakeWebSocket.instances.length = 0;
+  }
+});
+
+test("WebSocket close reasons redact ticket-bearing URLs and query values", () => {
+  const previousWebSocket = globalThis.WebSocket;
+  const originalError = console.error;
+  const logs = [];
+  const secret = "close-reason-ticket-secret";
+  globalThis.WebSocket = FakeWebSocket;
+  console.error = (message) => logs.push(String(message));
+  try {
+    const channel = createChannel({ transport: "websocket", url: "wss://example.test/ws" });
+    const ws = FakeWebSocket.instances.at(-1);
+    let closeInfo;
+    channel.onClose((info) => {
+      closeInfo = info;
+    });
+
+    ws.onclose?.({
+      code: 1006,
+      reason: `failed wss://example.test/ws?ticket=${secret} token=${secret}`,
+      wasClean: false,
+    });
+
+    assert.ok(closeInfo);
+    assert.doesNotMatch(closeInfo.reason, new RegExp(secret));
+    assert.doesNotMatch(logs.join("\n"), new RegExp(secret));
+    assert.doesNotMatch(logs.join("\n"), /ticket=close-reason-ticket-secret/);
+  } finally {
+    console.error = originalError;
+    globalThis.WebSocket = previousWebSocket;
     FakeWebSocket.instances.length = 0;
   }
 });
@@ -650,6 +1176,12 @@ class BlockingStreamWriteWebTransport extends FakeWebTransport {
   }
 }
 
+class NeverClosingWebTransport extends FakeWebTransport {
+  close(info = { closeCode: 0, reason: "" }) {
+    this.closeInfo = info;
+  }
+}
+
 test("WebTransport reliable ordered datagrams encode lane metadata and order sequence", async () => {
   const previousWebTransport = globalThis.WebTransport;
   globalThis.WebTransport = FakeWebTransport;
@@ -875,8 +1407,9 @@ test("WebTransport close writes the Golem close control frame before closing", a
     await delay(5);
     const transport = FakeWebTransport.instances.at(-1);
 
-    channel.close();
-    await delay(20);
+    const closeResult = channel.close();
+    assert.equal(typeof closeResult.then, "function");
+    await closeResult;
 
     assert.equal(transport.streamWrites.length, 1);
     assert.deepEqual(Array.from(decodeReliableFrame(transport.streamWrites[0])), [0x00, 0x4f, 0x47, 0x53, 0x01]);
@@ -884,6 +1417,36 @@ test("WebTransport close writes the Golem close control frame before closing", a
   } finally {
     globalThis.WebTransport = previousWebTransport;
     FakeWebTransport.instances.length = 0;
+  }
+});
+
+test("WebTransport awaitable close is bounded when transport.closed never settles", async () => {
+  const previousWebTransport = globalThis.WebTransport;
+  globalThis.WebTransport = NeverClosingWebTransport;
+  try {
+    const channel = createChannel({ transport: "webtransport", url: "https://example.test" });
+    await delay(5);
+    const transport = NeverClosingWebTransport.instances.at(-1);
+
+    let timeout;
+    try {
+      await Promise.race([
+        channel.close(),
+        new Promise((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error("bounded WebTransport close did not complete")),
+            750,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    assert.equal(transport.closeInfo.reason, "client disconnect");
+  } finally {
+    globalThis.WebTransport = previousWebTransport;
+    NeverClosingWebTransport.instances.length = 0;
   }
 });
 

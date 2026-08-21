@@ -1,9 +1,68 @@
-import type { ConnectOptions, TransportKind, WebTransportCertificateHash } from "./client.js";
+import type {
+  ConnectOptions,
+  ConnectOptionsResolver,
+  ConnectPlan,
+  RealtimeEndpoint,
+  TransportKind,
+  WebTransportCertificateHash,
+} from "./client.js";
 
 const certificateHashSHA256 = "sha-256";
 const maxErrorBodyBytes = 512;
 const maxConfigBodyBytes = 64 * 1024;
 const maxInt32 = 0x7fffffff;
+
+function redactURLForError(value: string): string {
+  try {
+    const parsed = new URL(value);
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    return "<invalid-url>";
+  }
+}
+
+function sanitizeFetchErrorText(value: unknown, endpoint: string): string {
+  let text = value instanceof Error ? value.message : String(value);
+  text = text
+    .replace(
+      /\b(?:https?|wss?):\/\/[^\s"'<>]+/gi,
+      (url) => redactURLForError(url),
+    )
+    .replace(
+      /([?&][A-Za-z0-9_.~-]+)=([^&#\s"'<>]*)/g,
+      "$1=<redacted>",
+    )
+    .replace(
+      /\b(ticket|token|access_token|authorization|auth|session|secret|api_key)\s*([=:])\s*[^\s,;"']+/gi,
+      "$1$2<redacted>",
+    )
+    .replace(
+      /(["']?(?:ticket|token|access_token|authorization|auth|session|secret|api_key)["']?\s*:\s*["']?)[^"',}\s]+/gi,
+      "$1<redacted>",
+    );
+
+  try {
+    const parsed = new URL(endpoint);
+    const values = [parsed.username, parsed.password];
+    for (const value of parsed.searchParams.values()) {
+      values.push(value, encodeURIComponent(value));
+    }
+    for (const raw of parsed.search.slice(1).split("&")) {
+      const equals = raw.indexOf("=");
+      if (equals >= 0) {
+        values.push(raw.slice(equals + 1));
+      }
+    }
+    for (const secret of values) {
+      if (secret !== "") {
+        text = text.split(secret).join("<redacted>");
+      }
+    }
+  } catch {
+    // The endpoint itself is never included when it cannot be parsed.
+  }
+  return text;
+}
 
 /** Wire shape served by golem.Server.RealtimeConfigHandler (hex certificate hash values). */
 export interface RealtimeConfig {
@@ -11,6 +70,7 @@ export interface RealtimeConfig {
   url: string;
   serverCertificateHashes?: WebTransportCertificateHash[];
   eventualAckIntervalMs?: number;
+  fallback?: RealtimeEndpoint;
 }
 
 /**
@@ -36,6 +96,7 @@ interface realtimeConfigResponse {
   url?: unknown;
   serverCertificateHashes?: unknown;
   eventualAckIntervalMs?: unknown;
+  fallback?: unknown;
 }
 
 /**
@@ -43,8 +104,8 @@ interface realtimeConfigResponse {
  * Success bodies are capped at 64 KiB; error snippets at 512 bytes via streaming reads.
  * Never includes caller-supplied query token values in thrown errors.
  *
- * Phaser: prefetch once, cache the result (or ConnectOptions), then return it from the synchronous
- * GolemPlugin connectionOptions callback — no Phaser API change is required.
+ * Phaser may return connectPlanFromRealtimeConfig's result from connectionOptions;
+ * credentials should remain in the plan's lazy per-candidate resolver.
  */
 export async function fetchRealtimeConfig(
   endpoint: string,
@@ -59,13 +120,14 @@ export async function fetchRealtimeConfig(
   try {
     response = await fetchImpl(endpoint, init);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = sanitizeFetchErrorText(err, endpoint);
     throw new Error(`golem-js: fetching realtime config: ${message}`);
   }
   if (!response.ok) {
     const snippet = await readBoundedText(response, maxErrorBodyBytes);
     if (snippet.length > 0) {
-      throw new Error(`golem-js: fetching realtime config: status ${response.status} body=${JSON.stringify(snippet)}`);
+      const safeSnippet = sanitizeFetchErrorText(snippet, endpoint);
+      throw new Error(`golem-js: fetching realtime config: status ${response.status} body=${JSON.stringify(safeSnippet)}`);
     }
     throw new Error(`golem-js: fetching realtime config: status ${response.status}`);
   }
@@ -181,6 +243,34 @@ export function connectOptionsFromRealtimeConfig(cfg: RealtimeConfig, ...opts: C
   return options;
 }
 
+/**
+ * Converts realtime config JSON into an ordered, credential-free connection plan.
+ * The optional resolver is invoked lazily before each physical transport dial.
+ */
+export function connectPlanFromRealtimeConfig(
+  cfg: RealtimeConfig,
+  resolveOptions?: ConnectOptionsResolver,
+): ConnectPlan {
+  const primary = connectOptionsFromRealtimeConfig(cfg);
+  const candidates: RealtimeEndpoint[] = [primary];
+  if (cfg.fallback != null) {
+    if (
+      primary.transport !== "webtransport" ||
+      cfg.fallback.transport !== "websocket"
+    ) {
+      throw new Error(
+        "golem-js: realtime config fallback must be webtransport then websocket",
+      );
+    }
+    const fallback = connectOptionsFromRealtimeConfig({
+      transport: cfg.fallback.transport,
+      url: cfg.fallback.url,
+    });
+    candidates.push(fallback);
+  }
+  return { candidates, resolveOptions };
+}
+
 /** Reads a Response body stream up to maxBytes; cancels the reader when the cap is hit. */
 export async function readBoundedText(response: Response, maxBytes: number): Promise<string> {
   const { text } = await readBoundedTextWithFlag(response, maxBytes);
@@ -235,6 +325,41 @@ function parseRealtimeConfig(body: realtimeConfigResponse): RealtimeConfig {
       }
       return decodeCertificateHash(hash.algorithm, hash.value);
     });
+  }
+  if (body.fallback != null) {
+    if (typeof body.fallback !== "object" || Array.isArray(body.fallback)) {
+      throw new Error("golem-js: realtime config fallback must be an object");
+    }
+    const fallback = body.fallback as {
+      transport?: unknown;
+      url?: unknown;
+      serverCertificateHashes?: unknown;
+      eventualAckIntervalMs?: unknown;
+    };
+    if (typeof fallback.transport !== "string" || fallback.transport.trim() === "") {
+      throw new Error("golem-js: realtime config fallback transport is required");
+    }
+    if (typeof fallback.url !== "string" || fallback.url.trim() === "") {
+      throw new Error("golem-js: realtime config fallback url is required");
+    }
+    const fallbackTransport = fallback.transport.trim() as TransportKind;
+    if (transport !== "webtransport" || fallbackTransport !== "websocket") {
+      throw new Error(
+        "golem-js: realtime config fallback must be webtransport then websocket",
+      );
+    }
+    if (
+      fallback.serverCertificateHashes !== undefined ||
+      fallback.eventualAckIntervalMs !== undefined
+    ) {
+      throw new Error(
+        "golem-js: websocket fallback cannot include WebTransport settings",
+      );
+    }
+    cfg.fallback = {
+      transport: fallbackTransport,
+      url: fallback.url,
+    };
   }
   return cfg;
 }

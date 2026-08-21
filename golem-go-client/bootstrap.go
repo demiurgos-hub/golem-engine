@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"net/url"
@@ -26,6 +25,14 @@ type RealtimeConfig struct {
 	URL                     string
 	ServerCertificateHashes []CertificateHash
 	EventualAckIntervalMs   int
+	Fallback                *RealtimeEndpoint
+}
+
+// RealtimeEndpoint is the credential-free nested endpoint shape used for a
+// realtime bootstrap fallback.
+type RealtimeEndpoint struct {
+	Transport TransportKind
+	URL       string
 }
 
 type realtimeConfigResponse struct {
@@ -36,6 +43,10 @@ type realtimeConfigResponse struct {
 		Value     string `json:"value"`
 	} `json:"serverCertificateHashes"`
 	EventualAckIntervalMs *json.Number `json:"eventualAckIntervalMs"`
+	Fallback              *struct {
+		Transport string `json:"transport"`
+		URL       string `json:"url"`
+	} `json:"fallback"`
 }
 
 // FetchRealtimeConfig loads and decodes a realtime config JSON endpoint.
@@ -53,10 +64,6 @@ func FetchRealtimeConfig(ctx context.Context, endpoint string, client *http.Clie
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		if len(snippet) > 0 {
-			return RealtimeConfig{}, fmt.Errorf("golem-go-client: fetching realtime config: status %d body=%q", resp.StatusCode, string(snippet))
-		}
 		return RealtimeConfig{}, fmt.Errorf("golem-go-client: fetching realtime config: status %d", resp.StatusCode)
 	}
 	var body realtimeConfigResponse
@@ -72,8 +79,8 @@ func FetchRealtimeConfig(ctx context.Context, endpoint string, client *http.Clie
 		}
 		return RealtimeConfig{}, fmt.Errorf("golem-go-client: unsupported transport %q", body.Transport)
 	}
-	if strings.TrimSpace(body.URL) == "" {
-		return RealtimeConfig{}, fmt.Errorf("golem-go-client: realtime config url is required")
+	if err := validateRealtimeEndpointURL(transport, body.URL); err != nil {
+		return RealtimeConfig{}, err
 	}
 	cfg := RealtimeConfig{
 		Transport: transport,
@@ -90,6 +97,19 @@ func FetchRealtimeConfig(ctx context.Context, endpoint string, client *http.Clie
 			return RealtimeConfig{}, err
 		}
 		cfg.ServerCertificateHashes = append(cfg.ServerCertificateHashes, decoded)
+	}
+	if body.Fallback != nil {
+		fallback := RealtimeEndpoint{
+			Transport: TransportKind(strings.TrimSpace(body.Fallback.Transport)),
+			URL:       body.Fallback.URL,
+		}
+		if cfg.Transport != TransportWebTransport || fallback.Transport != TransportWebSocket {
+			return RealtimeConfig{}, fmt.Errorf("golem-go-client: fallback must be websocket after a webtransport primary")
+		}
+		if err := validateRealtimeEndpointURL(fallback.Transport, fallback.URL); err != nil {
+			return RealtimeConfig{}, fmt.Errorf("golem-go-client: invalid realtime fallback: %w", err)
+		}
+		cfg.Fallback = &fallback
 	}
 	return cfg, nil
 }
@@ -144,47 +164,36 @@ func WithTLSClientConfig(cfg *tls.Config) ConnectOption {
 
 // ConnectOptionsFromRealtimeConfig converts realtime config JSON into ConnectOptions.
 func ConnectOptionsFromRealtimeConfig(cfg RealtimeConfig, opts ...ConnectOption) (ConnectOptions, error) {
-	switch cfg.Transport {
-	case TransportWebSocket, TransportWebTransport:
-	default:
-		return ConnectOptions{}, fmt.Errorf("golem-go-client: unsupported transport %q", cfg.Transport)
-	}
-	if strings.TrimSpace(cfg.URL) == "" {
-		return ConnectOptions{}, fmt.Errorf("golem-go-client: realtime config url is required")
-	}
-	if err := validateEventualAckIntervalMs(cfg.EventualAckIntervalMs); err != nil {
-		return ConnectOptions{}, err
-	}
 	options := ConnectOptions{
 		Transport:               cfg.Transport,
 		URL:                     cfg.URL,
 		ServerCertificateHashes: cloneCertificateHashes(cfg.ServerCertificateHashes),
 		EventualAckIntervalMs:   cfg.EventualAckIntervalMs,
 	}
-	builder := &connectOptionsBuilder{options: &options}
-	for _, opt := range opts {
-		if opt == nil {
-			continue
-		}
-		if err := opt(builder); err != nil {
-			return ConnectOptions{}, err
+	return ApplyConnectOptions(options, opts...)
+}
+
+func connectOptionsFromRealtimeEndpoint(endpoint RealtimeEndpoint) (ConnectOptions, error) {
+	return ApplyConnectOptions(ConnectOptions{Transport: endpoint.Transport, URL: endpoint.URL})
+}
+
+func applyConnectOptionQuery(options *ConnectOptions, values url.Values) error {
+	if len(values) == 0 {
+		return nil
+	}
+	u, err := url.Parse(options.URL)
+	if err != nil {
+		return fmt.Errorf("golem-go-client: parsing realtime transport URL: %w", sanitizeURLError(err))
+	}
+	query := u.Query()
+	for key, list := range values {
+		for _, value := range list {
+			query.Add(key, value)
 		}
 	}
-	if len(builder.query) > 0 {
-		u, err := url.Parse(options.URL)
-		if err != nil {
-			return ConnectOptions{}, fmt.Errorf("golem-go-client: parsing realtime transport URL: %w", sanitizeURLError(err))
-		}
-		query := u.Query()
-		for key, list := range builder.query {
-			for _, value := range list {
-				query.Add(key, value)
-			}
-		}
-		u.RawQuery = query.Encode()
-		options.URL = u.String()
-	}
-	return options, nil
+	u.RawQuery = query.Encode()
+	options.URL = u.String()
+	return nil
 }
 
 // TLSClientConfigFromCertificateHashes builds a TLS config pinned to certificate hashes.

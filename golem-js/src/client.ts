@@ -32,6 +32,9 @@ const clientCloseControlFrame = new Uint8Array([0x00, 0x4f, 0x47, 0x53, 0x01]);
 const clientReliableAckControlFrame = new Uint8Array([0x00, 0x4f, 0x47, 0x53, 0x02]);
 const clientReliableAckControlHeaderBytes = clientReliableAckControlFrame.byteLength + 2 + datagramAckMaskBytes;
 const webTransportCloseFrameTimeoutMs = 100;
+const webTransportCloseCompletionTimeoutMs = 250;
+const webTransportEstablishmentTimeoutMs = 5000;
+const suppressTransportLogs = Symbol("golem-js.suppressTransportLogs");
 
 const datagramFlagAckOnly = 1;
 
@@ -47,6 +50,25 @@ const scheduleMicrotask =
   typeof queueMicrotask === "function"
     ? queueMicrotask
     : (fn: () => void) => Promise.resolve().then(fn);
+
+function waitForSettlement(
+  promise: Promise<unknown>,
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      resolve();
+    };
+    const timeout = setTimeout(finish, timeoutMs);
+    void promise.then(finish, finish);
+  });
+}
 
 function varintSize(v: number): number {
   let size = 1;
@@ -244,19 +266,96 @@ function redactUrl(url: string): string {
   }
 }
 
-class SanitizedTransportError extends Error {}
+class SanitizedTransportError extends Error {
+  readonly httpStatus?: number;
 
-function sanitizedTransportError(message: string): Error {
-  return new SanitizedTransportError(`golem-js: ${message}`);
+  constructor(message: string, httpStatus?: number) {
+    super(message);
+    this.httpStatus = httpStatus;
+  }
+}
+
+function reportedHTTPStatus(value: unknown, depth = 0): number | undefined {
+  if (depth > 3 || value == null) {
+    return undefined;
+  }
+  if (typeof value === "string") {
+    const match = value.match(
+      /\b(?:http(?:\/[0-9.]+)?|status(?:\s+code)?|response(?:\s+(?:status|code))?|responded(?:\s+with)?)\s*[:=]?\s*(401|403|426)\b/i,
+    );
+    return match ? Number(match[1]) : undefined;
+  }
+  if (typeof value !== "object") {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of ["httpStatus", "status", "statusCode", "closeCode", "code"]) {
+    const candidate = record[key];
+    const status = typeof candidate === "number"
+      ? candidate
+      : typeof candidate === "string" && /^\d{3}$/.test(candidate)
+        ? Number(candidate)
+        : undefined;
+    if (status === 401 || status === 403 || status === 426) {
+      return status;
+    }
+  }
+  for (const key of ["message", "reason", "cause", "error"]) {
+    const status = reportedHTTPStatus(record[key], depth + 1);
+    if (status !== undefined) {
+      return status;
+    }
+  }
+  return undefined;
+}
+
+function isTerminalPreOpenFailure(value: unknown): boolean {
+  return reportedHTTPStatus(value) !== undefined;
+}
+
+function sanitizedTransportError(message: string, source?: unknown): Error {
+  return new SanitizedTransportError(
+    `golem-js: ${message}`,
+    reportedHTTPStatus(source),
+  );
+}
+
+function sanitizeCredentialText(value: string): string {
+  return value
+    .replace(
+      /\b(?:https?|wss?):\/\/[^\s"'<>]+/gi,
+      (url) => redactUrl(url),
+    )
+    .replace(
+      /([?&][A-Za-z0-9_.~-]+)=([^&#\s"'<>]*)/g,
+      "$1=<redacted>",
+    )
+    .replace(
+      /\b(ticket|token|access_token|authorization|auth|session|secret|api_key)\s*([=:])\s*[^\s,;"']+/gi,
+      "$1$2<redacted>",
+    );
+}
+
+function sanitizeDisconnectReason(reason: string | undefined): string | undefined {
+  return reason == null || reason === ""
+    ? reason
+    : sanitizeCredentialText(reason);
 }
 
 function sanitizeDisconnectInfo(transport: string, info: DisconnectInfo): DisconnectInfo {
-  if (info.error == null || info.error instanceof SanitizedTransportError) {
+  const reason = sanitizeDisconnectReason(info.reason);
+  if (
+    (info.error == null || info.error instanceof SanitizedTransportError) &&
+    reason === info.reason
+  ) {
     return info;
   }
   return {
     ...info,
-    error: sanitizedTransportError(`${transport} transport failed`),
+    reason,
+    error: info.error == null || info.error instanceof SanitizedTransportError
+      ? info.error
+      : sanitizedTransportError(`${transport} transport failed`, info.error),
   };
 }
 
@@ -290,14 +389,36 @@ export interface WebTransportConnectOptions {
   eventualAckIntervalMs?: number;
 }
 
-/** Transport-aware connection options for GameClient.connect(). */
-export interface ConnectOptions {
+/** Credential-free realtime endpoint advertised by a Golem server. */
+export interface RealtimeEndpoint {
   transport: TransportKind;
   url: string;
   serverCertificateHashes?: WebTransportCertificateHash[];
   /** Delay before sending standalone eventual-state ACK packets when ACKs are not piggybacked. */
   eventualAckIntervalMs?: number;
 }
+
+/** Transport-aware connection options for GameClient.connect(). */
+export interface ConnectOptions extends RealtimeEndpoint {}
+
+/** Resolves fresh credentials immediately before one physical transport dial. */
+export type ConnectOptionsResolver = (
+  endpoint: RealtimeEndpoint,
+  signal: AbortSignal,
+) => ConnectOptions | Promise<ConnectOptions>;
+
+/** Ordered credential-free endpoints for one logical connection attempt. */
+export interface ConnectPlan {
+  candidates: readonly RealtimeEndpoint[];
+  resolveOptions?: ConnectOptionsResolver;
+}
+
+/** Every connection input accepted by GameClient.connect(). */
+export type ConnectInput = string | ConnectOptions | ConnectPlan;
+
+type InternalConnectOptions = ConnectOptions & {
+  [suppressTransportLogs]?: boolean;
+};
 
 /** Send-only unreliable lane exposed by transports that support datagrams. */
 export interface UnreliableMessageChannel {
@@ -324,7 +445,7 @@ export interface ReliableMessageChannel {
   readonly unreliable?: UnreliableMessageChannel;
   readonly reliableUnordered?: ReliableUnorderedMessageChannel;
   readonly reliableOrdered?: ReliableOrderedMessageChannel;
-  close(): void;
+  close(): void | Promise<void>;
   send(bytes: Uint8Array): void;
   onOpen(fn: () => void): void;
   onMessage(fn: (bytes: Uint8Array) => void): void;
@@ -352,6 +473,188 @@ export interface GameClientOptions {
   eventManager?: EventManagerLike;
   /** Build a reliable transport channel for connect(options). */
   createChannel?: (options: ConnectOptions) => ReliableMessageChannel;
+  /**
+   * Reports whether a custom channel factory can use a transport. When omitted,
+   * custom factories are assumed to support both transports and built-in
+   * factories check the corresponding browser global.
+   */
+  supportsTransport?: (transport: TransportKind) => boolean;
+}
+
+function isConnectPlan(input: ConnectInput): input is ConnectPlan {
+  return typeof input === "object" && input !== null && "candidates" in input;
+}
+
+function cloneClientCertificateHash(
+  hash: WebTransportCertificateHash,
+): WebTransportCertificateHash {
+  if (typeof hash.value === "string") {
+    return { algorithm: hash.algorithm, value: hash.value };
+  }
+  if (ArrayBuffer.isView(hash.value)) {
+    const view = hash.value;
+    const copy = new Uint8Array(view.byteLength);
+    copy.set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+    return { algorithm: hash.algorithm, value: copy.buffer };
+  }
+  const copy = new Uint8Array(hash.value.byteLength);
+  copy.set(new Uint8Array(hash.value));
+  return { algorithm: hash.algorithm, value: copy.buffer };
+}
+
+function cloneRealtimeEndpoint(endpoint: RealtimeEndpoint): RealtimeEndpoint {
+  return {
+    transport: endpoint.transport,
+    url: endpoint.url,
+    serverCertificateHashes: endpoint.serverCertificateHashes?.map(
+      cloneClientCertificateHash,
+    ),
+    eventualAckIntervalMs: endpoint.eventualAckIntervalMs,
+  };
+}
+
+function validateRealtimeEndpoint(
+  endpoint: RealtimeEndpoint,
+  label: string,
+): void {
+  if (endpoint == null || typeof endpoint !== "object") {
+    throw new Error(`golem-js: ${label} must be an object`);
+  }
+  if (endpoint.transport !== "websocket" && endpoint.transport !== "webtransport") {
+    throw new Error(`golem-js: ${label} has an unsupported transport`);
+  }
+  if (typeof endpoint.url !== "string" || endpoint.url.trim() === "") {
+    throw new Error(`golem-js: ${label} url is required`);
+  }
+  try {
+    new URL(endpoint.url);
+  } catch {
+    throw new Error(`golem-js: ${label} url is invalid`);
+  }
+  if (
+    endpoint.eventualAckIntervalMs !== undefined &&
+    (!Number.isInteger(endpoint.eventualAckIntervalMs) ||
+      endpoint.eventualAckIntervalMs < 0 ||
+      endpoint.eventualAckIntervalMs > 0x7fffffff)
+  ) {
+    throw new Error(`golem-js: ${label} eventualAckIntervalMs is invalid`);
+  }
+}
+
+function validateConnectionPlan(plan: ConnectPlan): RealtimeEndpoint[] {
+  if (!Array.isArray(plan.candidates) || plan.candidates.length === 0) {
+    throw new Error("golem-js: connection plan requires at least one candidate");
+  }
+  if (plan.candidates.length > 2) {
+    throw new Error("golem-js: connection plan supports at most two candidates");
+  }
+  const candidates = plan.candidates.map((candidate, index) => {
+    validateRealtimeEndpoint(candidate, `connection plan candidate ${index}`);
+    return cloneRealtimeEndpoint(candidate);
+  });
+  if (
+    candidates.length === 2 &&
+    (candidates[0].transport !== "webtransport" ||
+      candidates[1].transport !== "websocket")
+  ) {
+    throw new Error(
+      "golem-js: connection plan fallback must be webtransport then websocket",
+    );
+  }
+  if (typeof plan.resolveOptions !== "undefined" && typeof plan.resolveOptions !== "function") {
+    throw new Error("golem-js: connection plan resolveOptions must be a function");
+  }
+  return candidates;
+}
+
+function urlWithoutQuery(url: string): string {
+  const parsed = new URL(url);
+  parsed.search = "";
+  return parsed.toString();
+}
+
+function resolvedConnectOptions(
+  endpoint: RealtimeEndpoint,
+  resolved: ConnectOptions,
+): ConnectOptions {
+  if (resolved == null || typeof resolved !== "object") {
+    throw new Error("golem-js: resolved connection options must be an object");
+  }
+  if (resolved.transport !== endpoint.transport) {
+    throw new Error("golem-js: connection options resolver changed transport");
+  }
+  if (typeof resolved.url !== "string" || resolved.url.trim() === "") {
+    throw new Error("golem-js: resolved connection url is required");
+  }
+  try {
+    if (urlWithoutQuery(resolved.url) !== urlWithoutQuery(endpoint.url)) {
+      throw new Error("different endpoint");
+    }
+  } catch {
+    throw new Error(
+      "golem-js: connection options resolver may only change URL query parameters",
+    );
+  }
+  if (
+    resolved.eventualAckIntervalMs !== endpoint.eventualAckIntervalMs ||
+    !sameCertificateHashes(
+      resolved.serverCertificateHashes,
+      endpoint.serverCertificateHashes,
+    )
+  ) {
+    throw new Error(
+      "golem-js: connection options resolver changed credential-free endpoint metadata",
+    );
+  }
+  return {
+    ...cloneRealtimeEndpoint(endpoint),
+    url: resolved.url,
+  };
+}
+
+function sameCertificateHashes(
+  left: readonly WebTransportCertificateHash[] | undefined,
+  right: readonly WebTransportCertificateHash[] | undefined,
+): boolean {
+  const a = left ?? [];
+  const b = right ?? [];
+  return a.length === b.length && a.every(
+    (hash, index) => certificateHashAffinityValue(hash) === certificateHashAffinityValue(b[index]),
+  );
+}
+
+function certificateHashAffinityValue(
+  hash: WebTransportCertificateHash,
+): string {
+  if (typeof hash.value === "string") {
+    return `${hash.algorithm}:${hash.value}`;
+  }
+  const bytes = ArrayBuffer.isView(hash.value)
+    ? new Uint8Array(hash.value.buffer, hash.value.byteOffset, hash.value.byteLength)
+    : new Uint8Array(hash.value);
+  let value = "";
+  for (const byte of bytes) {
+    value += byte.toString(16).padStart(2, "0");
+  }
+  return `${hash.algorithm}:${value}`;
+}
+
+function connectionPlanAffinityKey(candidates: readonly RealtimeEndpoint[]): string {
+  return JSON.stringify(candidates.map((candidate) => ({
+    transport: candidate.transport,
+    url: candidate.url,
+    serverCertificateHashes: candidate.serverCertificateHashes?.map(
+      certificateHashAffinityValue,
+    ) ?? [],
+    eventualAckIntervalMs: candidate.eventualAckIntervalMs ?? 0,
+  })));
+}
+
+function builtInSupportsTransport(transport: TransportKind): boolean {
+  if (transport === "webtransport") {
+    return typeof globalThis.WebTransport === "function";
+  }
+  return typeof globalThis.WebSocket === "function";
 }
 
 /**
@@ -369,11 +672,19 @@ export class GameClient {
   private _encodePacket: (frames: Uint8Array[]) => Uint8Array;
   private _decodeWorld?: (bytes: Uint8Array) => unknown;
   private _createChannel: (options: ConnectOptions) => ReliableMessageChannel;
+  private _supportsTransport: (transport: TransportKind) => boolean;
   private _onConnect?: () => void;
   private _onDisconnect?: (ev: DisconnectInfo) => void;
   private _queuedFrames: Uint8Array[] = [];
   private _queuedBytes = 0;
   private _flushScheduled = false;
+  private _connectionGeneration = 0;
+  private _connectionOpened = false;
+  private _attemptAbort?: AbortController;
+  private _attemptTimeout?: ReturnType<typeof setTimeout>;
+  private _finalizedGeneration = -1;
+  private _planAffinityKey?: string;
+  private _stickyWebSocket = false;
 
   constructor(options: GameClientOptions) {
     this.entities = options.entityManager;
@@ -384,39 +695,494 @@ export class GameClient {
     this._encodePacket = options.encodePacket;
     this._decodeWorld = options.decodeWorld;
     this._createChannel = options.createChannel ?? createChannel;
+    this._supportsTransport = options.supportsTransport ?? (
+      options.createChannel == null
+        ? builtInSupportsTransport
+        : () => true
+    );
   }
 
   /** Open a connection using the built-in transport adapter. */
-  connect(url: string | ConnectOptions): void {
-    this.disconnect();
-    const options: ConnectOptions = typeof url === "string"
-      ? { transport: "websocket", url }
-      : url;
+  connect(input: ConnectInput): void {
+    if (isConnectPlan(input)) {
+      this._connectPlan(input);
+      return;
+    }
+
+    this._planAffinityKey = undefined;
+    this._stickyWebSocket = false;
+    const generation = this._beginConnection();
+    if (!this._isCurrentGeneration(generation)) {
+      return;
+    }
+    const options: ConnectOptions = typeof input === "string"
+      ? { transport: "websocket", url: input }
+      : input;
     console.warn(
       `golem-js: connecting transport=${options.transport} url=${redactUrl(options.url)}`,
     );
     const channel = this._createChannel(options);
-    channel.onOpen(() => this._onConnect?.());
+    this._channel = channel;
     channel.onClose((ev) => {
+      if (!this._isCurrentChannel(generation, channel)) {
+        return;
+      }
+      const safeInfo = sanitizeDisconnectInfo(options.transport, ev);
+      this._connectionOpened = false;
       this._clearQueuedFrames();
       this._clearEntities();
-      if (this._channel === channel) {
-        this._channel = null;
-      }
-      this._onDisconnect?.(ev);
+      this._channel = null;
+      this._onDisconnect?.(safeInfo);
     });
-    channel.onMessage((bytes) => this._handleMessage(bytes));
-    channel.onUnreliableStateMessage?.((bytes) => this._handleCompactStateBatch(bytes));
-    channel.onReliableOrderedMessage?.((bytes) => this._handleCompactStateBatch(bytes));
-    channel.onEventualStateMessage?.((bytes) => this._handleCompactStateBatch(bytes));
-    this._channel = channel;
+    channel.onMessage((bytes) => {
+      if (this._isCurrentChannel(generation, channel)) {
+        this._handleMessage(bytes);
+      }
+    });
+    channel.onUnreliableStateMessage?.((bytes) => {
+      if (this._isCurrentChannel(generation, channel)) {
+        this._handleCompactStateBatch(bytes);
+      }
+    });
+    channel.onReliableOrderedMessage?.((bytes) => {
+      if (this._isCurrentChannel(generation, channel)) {
+        this._handleCompactStateBatch(bytes);
+      }
+    });
+    channel.onEventualStateMessage?.((bytes) => {
+      if (this._isCurrentChannel(generation, channel)) {
+        this._handleCompactStateBatch(bytes);
+      }
+    });
+    channel.onOpen(() => {
+      if (this._isCurrentChannel(generation, channel)) {
+        this._connectionOpened = true;
+        this._onConnect?.();
+      }
+    });
   }
 
   /** Close the current connection, if any. */
   disconnect(): void {
-    this._clearQueuedFrames();
-    this._channel?.close();
+    this._beginConnection();
+  }
+
+  private _connectPlan(plan: ConnectPlan): void {
+    const candidates = validateConnectionPlan(plan);
+    const affinityKey = connectionPlanAffinityKey(candidates);
+    if (this._planAffinityKey !== affinityKey) {
+      this._planAffinityKey = affinityKey;
+      this._stickyWebSocket = false;
+    }
+    const orderedCandidates = this._stickyWebSocket
+      ? candidates.filter((candidate) => candidate.transport === "websocket")
+      : candidates;
+    const generation = this._beginConnection();
+    if (!this._isCurrentGeneration(generation)) {
+      return;
+    }
+    this._attemptAbort = new AbortController();
+    this._tryPlanCandidate(
+      generation,
+      affinityKey,
+      orderedCandidates,
+      plan.resolveOptions,
+      0,
+    );
+  }
+
+  private _tryPlanCandidate(
+    generation: number,
+    affinityKey: string,
+    candidates: RealtimeEndpoint[],
+    resolver: ConnectOptionsResolver | undefined,
+    index: number,
+    attempted = false,
+  ): void {
+    if (!this._isCurrentGeneration(generation)) {
+      return;
+    }
+    if (index >= candidates.length) {
+      this._finishPlanFailure(
+        generation,
+        candidates[candidates.length - 1]?.transport ?? "websocket",
+        attempted
+          ? "all realtime transport candidates failed"
+          : "no supported realtime transport is available",
+      );
+      return;
+    }
+
+    const endpoint = candidates[index];
+    let supported: boolean;
+    try {
+      supported = this._supportsTransport(endpoint.transport);
+    } catch {
+      this._finishPlanFailure(
+        generation,
+        endpoint.transport,
+        "transport capability check failed",
+      );
+      return;
+    }
+    if (!supported) {
+      this._tryPlanCandidate(
+        generation,
+        affinityKey,
+        candidates,
+        resolver,
+        index + 1,
+        attempted,
+      );
+      return;
+    }
+
+    if (!resolver) {
+      this._dialPlanCandidate(
+        generation,
+        affinityKey,
+        candidates,
+        resolver,
+        index,
+        { ...endpoint },
+      );
+      return;
+    }
+
+    const controller = this._attemptAbort;
+    if (!controller) {
+      return;
+    }
+    let result: ConnectOptions | Promise<ConnectOptions>;
+    try {
+      result = resolver(cloneRealtimeEndpoint(endpoint), controller.signal);
+    } catch {
+      this._finishPlanFailure(
+        generation,
+        endpoint.transport,
+        "connection options resolution failed",
+      );
+      return;
+    }
+
+    if (result != null && typeof (result as Promise<ConnectOptions>).then === "function") {
+      void Promise.resolve(result).then(
+        (resolved) => {
+          if (!this._isCurrentGeneration(generation) || controller.signal.aborted) {
+            return;
+          }
+          let options: ConnectOptions;
+          try {
+            options = resolvedConnectOptions(endpoint, resolved);
+          } catch {
+            this._finishPlanFailure(
+              generation,
+              endpoint.transport,
+              "connection options resolution failed",
+            );
+            return;
+          }
+          this._dialPlanCandidate(
+            generation,
+            affinityKey,
+            candidates,
+            resolver,
+            index,
+            options,
+          );
+        },
+        () => {
+          if (!this._isCurrentGeneration(generation) || controller.signal.aborted) {
+            return;
+          }
+          this._finishPlanFailure(
+            generation,
+            endpoint.transport,
+            "connection options resolution failed",
+          );
+        },
+      );
+      return;
+    }
+
+    let options: ConnectOptions;
+    try {
+      options = resolvedConnectOptions(endpoint, result as ConnectOptions);
+    } catch {
+      this._finishPlanFailure(
+        generation,
+        endpoint.transport,
+        "connection options resolution failed",
+      );
+      return;
+    }
+    this._dialPlanCandidate(
+      generation,
+      affinityKey,
+      candidates,
+      resolver,
+      index,
+      options,
+    );
+  }
+
+  private _dialPlanCandidate(
+    generation: number,
+    affinityKey: string,
+    candidates: RealtimeEndpoint[],
+    resolver: ConnectOptionsResolver | undefined,
+    index: number,
+    options: ConnectOptions,
+  ): void {
+    if (!this._isCurrentGeneration(generation)) {
+      return;
+    }
+    const dialOptions: InternalConnectOptions = {
+      ...options,
+      serverCertificateHashes: options.serverCertificateHashes?.map(
+        cloneClientCertificateHash,
+      ),
+      [suppressTransportLogs]: true,
+    };
+    console.warn(
+      `golem-js: connecting transport=${options.transport} url=${redactUrl(options.url)}`,
+    );
+
+    let channel: ReliableMessageChannel;
+    try {
+      channel = this._createChannel(dialOptions);
+    } catch (error) {
+      if (isTerminalPreOpenFailure(error)) {
+        this._finishPlanFailure(
+          generation,
+          options.transport,
+          "realtime authorization or revision rejected",
+        );
+        return;
+      }
+      this._tryPlanCandidate(
+        generation,
+        affinityKey,
+        candidates,
+        resolver,
+        index + 1,
+        true,
+      );
+      return;
+    }
+
+    let phase: "opening" | "open" | "done" = "opening";
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const clearEstablishmentTimeout = () => {
+      if (timeout !== undefined) {
+        clearTimeout(timeout);
+        if (this._attemptTimeout === timeout) {
+          this._attemptTimeout = undefined;
+        }
+        timeout = undefined;
+      }
+    };
+    const closeThen = (continuation?: () => void) => {
+      let result: void | Promise<void>;
+      try {
+        result = channel.close();
+      } catch {
+        continuation?.();
+        return;
+      }
+      if (result != null && typeof (result as Promise<void>).then === "function") {
+        void Promise.resolve(result).then(
+          () => continuation?.(),
+          () => continuation?.(),
+        );
+        return;
+      }
+      continuation?.();
+    };
+    const advanceFallback = () => {
+      if (phase !== "opening" || !this._isCurrentGeneration(generation)) {
+        return;
+      }
+      phase = "done";
+      clearEstablishmentTimeout();
+      if (this._channel === channel) {
+        this._channel = null;
+      }
+      closeThen(() => {
+        if (!this._isCurrentGeneration(generation)) {
+          return;
+        }
+        this._tryPlanCandidate(
+          generation,
+          affinityKey,
+          candidates,
+          resolver,
+          index + 1,
+          true,
+        );
+      });
+    };
+
+    this._channel = channel;
+    channel.onClose((_info) => {
+      if (!this._isCurrentGeneration(generation)) {
+        return;
+      }
+      if (phase === "opening") {
+        if (isTerminalPreOpenFailure(_info)) {
+          phase = "done";
+          clearEstablishmentTimeout();
+          if (this._channel === channel) {
+            this._channel = null;
+          }
+          closeThen(() => this._finishPlanFailure(
+            generation,
+            options.transport,
+            "realtime authorization or revision rejected",
+          ));
+          return;
+        }
+        advanceFallback();
+        return;
+      }
+      if (phase !== "open" || this._channel !== channel) {
+        return;
+      }
+      phase = "done";
+      clearEstablishmentTimeout();
+      this._channel = null;
+      this._connectionOpened = false;
+      this._attemptAbort = undefined;
+      this._clearQueuedFrames();
+      this._clearEntities();
+      const info = sanitizeDisconnectInfo(options.transport, {
+        wasClean: _info.wasClean,
+        code: _info.code,
+        reason: _info.reason,
+        error: _info.error == null
+          ? undefined
+          : sanitizedTransportError(`${options.transport} transport failed`),
+      });
+      logDisconnect(options.transport, info);
+      this._onDisconnect?.(info);
+    });
+    channel.onMessage((bytes) => {
+      if (phase === "open" && this._isCurrentChannel(generation, channel)) {
+        this._handleMessage(bytes);
+      }
+    });
+    channel.onUnreliableStateMessage?.((bytes) => {
+      if (phase === "open" && this._isCurrentChannel(generation, channel)) {
+        this._handleCompactStateBatch(bytes);
+      }
+    });
+    channel.onReliableOrderedMessage?.((bytes) => {
+      if (phase === "open" && this._isCurrentChannel(generation, channel)) {
+        this._handleCompactStateBatch(bytes);
+      }
+    });
+    channel.onEventualStateMessage?.((bytes) => {
+      if (phase === "open" && this._isCurrentChannel(generation, channel)) {
+        this._handleCompactStateBatch(bytes);
+      }
+    });
+    channel.onOpen(() => {
+      if (phase !== "opening" || !this._isCurrentChannel(generation, channel)) {
+        closeThen();
+        return;
+      }
+      phase = "open";
+      clearEstablishmentTimeout();
+      this._attemptAbort = undefined;
+      this._connectionOpened = true;
+      if (options.transport === "websocket" && this._planAffinityKey === affinityKey) {
+        this._stickyWebSocket = true;
+      }
+      this._onConnect?.();
+    });
+
+    if (phase === "opening" && options.transport === "webtransport") {
+      timeout = setTimeout(advanceFallback, webTransportEstablishmentTimeoutMs);
+      this._attemptTimeout = timeout;
+    }
+  }
+
+  private _finishPlanFailure(
+    generation: number,
+    transport: TransportKind,
+    reason: string,
+  ): void {
+    if (
+      !this._isCurrentGeneration(generation) ||
+      this._finalizedGeneration === generation
+    ) {
+      return;
+    }
+    this._finalizedGeneration = generation;
+    this._clearAttemptTimeout();
+    this._attemptAbort = undefined;
     this._channel = null;
+    this._connectionOpened = false;
+    this._clearQueuedFrames();
+    this._clearEntities();
+    const info: DisconnectInfo = {
+      wasClean: false,
+      reason,
+      error: sanitizedTransportError(reason),
+    };
+    logDisconnect(transport, info);
+    this._onDisconnect?.(info);
+  }
+
+  private _beginConnection(): number {
+    const channel = this._channel;
+    const notifyCleanDisconnect = channel != null && this._connectionOpened;
+    const generation = ++this._connectionGeneration;
+    this._attemptAbort?.abort();
+    this._attemptAbort = undefined;
+    this._clearAttemptTimeout();
+    this._channel = null;
+    this._connectionOpened = false;
+    this._clearQueuedFrames();
+    this._clearEntities();
+    try {
+      const closeResult = channel?.close();
+      if (
+        closeResult != null &&
+        typeof (closeResult as Promise<void>).then === "function"
+      ) {
+        void Promise.resolve(closeResult).catch(() => {});
+      }
+    } catch {
+      // Closing a superseded channel must not block the new attempt.
+    }
+    if (notifyCleanDisconnect) {
+      this._onDisconnect?.({
+        code: 1000,
+        reason: "client disconnect",
+        wasClean: true,
+      });
+    }
+    return generation;
+  }
+
+  private _clearAttemptTimeout(): void {
+    if (this._attemptTimeout === undefined) {
+      return;
+    }
+    clearTimeout(this._attemptTimeout);
+    this._attemptTimeout = undefined;
+  }
+
+  private _isCurrentGeneration(generation: number): boolean {
+    return generation === this._connectionGeneration;
+  }
+
+  private _isCurrentChannel(
+    generation: number,
+    channel: ReliableMessageChannel,
+  ): boolean {
+    return this._isCurrentGeneration(generation) && this._channel === channel;
   }
 
   /** Send a command over reliable-unordered datagrams, or the reliable stream when unavailable. */
@@ -476,7 +1242,11 @@ export class GameClient {
       return;
     }
     this._flushScheduled = true;
+    const generation = this._connectionGeneration;
     scheduleMicrotask(() => {
+      if (!this._isCurrentGeneration(generation)) {
+        return;
+      }
       this._flushScheduled = false;
       this._flushQueuedFrames();
     });
@@ -573,8 +1343,10 @@ class WebSocketReliableChannel implements ReliableMessageChannel {
   private _onMessage?: (bytes: Uint8Array) => void;
   private _onClose?: (info: DisconnectInfo) => void;
   private _closedNotified = false;
+  private _logFailures: boolean;
 
-  constructor(url: string) {
+  constructor(url: string, logFailures = true) {
+    this._logFailures = logFailures;
     const redacted = redactUrl(url);
     try {
       this._ws = new WebSocket(url);
@@ -590,7 +1362,9 @@ class WebSocketReliableChannel implements ReliableMessageChannel {
     };
     this._ws.onerror = (ev) => {
       // Browser ErrorEvent messages can repeat the full credential-bearing URL.
-      console.error(`golem-js: websocket error url=${redacted} type=${ev.type}`);
+      if (this._logFailures) {
+        console.error(`golem-js: websocket error url=${redacted} type=${ev.type}`);
+      }
     };
     this._ws.onclose = (ev) => {
       const info: DisconnectInfo = {
@@ -634,7 +1408,9 @@ class WebSocketReliableChannel implements ReliableMessageChannel {
     }
     this._closedNotified = true;
     const safeInfo = sanitizeDisconnectInfo("websocket", info);
-    logDisconnect("websocket", safeInfo);
+    if (this._logFailures) {
+      logDisconnect("websocket", safeInfo);
+    }
     this._onClose?.(safeInfo);
   }
 }
@@ -1243,10 +2019,12 @@ class WebTransportReliableChannel implements ReliableMessageChannel {
   private _connected = false;
   private _writeQueue: Promise<void> = Promise.resolve();
   private _closedNotified = false;
-  private _closeStarted = false;
+  private _closePromise?: Promise<void>;
   private _redactedUrl: string;
+  private _logFailures: boolean;
 
-  constructor(options: WebTransportConnectOptions) {
+  constructor(options: WebTransportConnectOptions, logFailures = true) {
+    this._logFailures = logFailures;
     this._redactedUrl = redactUrl(options.url);
     const serverCertificateHashes = options.serverCertificateHashes?.map(normalizeCertificateHash);
     let transport: WebTransport;
@@ -1254,8 +2032,8 @@ class WebTransportReliableChannel implements ReliableMessageChannel {
       transport = new WebTransport(options.url, {
         serverCertificateHashes,
       });
-    } catch {
-      throw sanitizedTransportError("webtransport connection setup failed");
+    } catch (error) {
+      throw sanitizedTransportError("webtransport connection setup failed", error);
     }
     this._transport = transport;
     const datagramWriter = transport.datagrams.writable.getWriter();
@@ -1274,39 +2052,50 @@ class WebTransportReliableChannel implements ReliableMessageChannel {
     return this._connected;
   }
 
-  close(): void {
-    if (this._closeStarted) {
-      return;
+  close(): Promise<void> {
+    if (this._closePromise) {
+      return this._closePromise;
     }
-    this._closeStarted = true;
+    this._closePromise = this._closeGracefully();
+    return this._closePromise;
+  }
+
+  private async _closeGracefully(): Promise<void> {
+    this._connected = false;
+    this._datagramProtocol?.close();
     const closeTransport = () => {
       try {
         this._transport.close({ closeCode: 0, reason: "client disconnect" });
       } catch {
-        console.warn("golem-js: webtransport close failed");
+        if (this._logFailures) {
+          console.warn("golem-js: webtransport close failed");
+        }
       }
     };
-    if (!this._writer) {
-      closeTransport();
-      return;
+    if (this._writer) {
+      const frame = writeReliableFrame(clientCloseControlFrame);
+      this._writeQueue = this._writeQueue
+        .then(async () => {
+          await this._writer?.write(frame);
+        })
+        .catch(() => {
+          if (this._logFailures) {
+            console.warn("golem-js: webtransport close frame write failed");
+          }
+        });
+      await waitForSettlement(
+        this._writeQueue,
+        webTransportCloseFrameTimeoutMs,
+      );
     }
-    const frame = writeReliableFrame(clientCloseControlFrame);
-    let closed = false;
-    const finishClose = () => {
-      if (closed) {
-        return;
-      }
-      closed = true;
-      clearTimeout(timeout);
-      closeTransport();
-    };
-    const timeout = setTimeout(finishClose, webTransportCloseFrameTimeoutMs);
-    this._writeQueue = this._writeQueue
-      .then(() => this._writer?.write(frame))
-      .catch(() => {
-        console.warn("golem-js: webtransport close frame write failed");
-      })
-      .then(finishClose);
+    closeTransport();
+    await waitForSettlement(
+      Promise.resolve(this._transport.closed).then(
+        () => undefined,
+        () => undefined,
+      ),
+      webTransportCloseCompletionTimeoutMs,
+    );
   }
 
   send(bytes: Uint8Array): void {
@@ -1345,11 +2134,16 @@ class WebTransportReliableChannel implements ReliableMessageChannel {
       void this._readStream(stream.readable);
       void this._readDatagrams();
       this._watchClosed();
-    } catch {
-      console.error(
-        `golem-js: webtransport connect failed url=${this._redactedUrl}`,
-      );
-      this._notifyClose({ wasClean: false, error: sanitizedTransportError("webtransport connect failed") });
+    } catch (error) {
+      if (this._logFailures) {
+        console.error(
+          `golem-js: webtransport connect failed url=${this._redactedUrl}`,
+        );
+      }
+      this._notifyClose({
+        wasClean: false,
+        error: sanitizedTransportError("webtransport connect failed", error),
+      });
     }
   }
 
@@ -1424,17 +2218,20 @@ class WebTransportReliableChannel implements ReliableMessageChannel {
     this._connected = false;
     this._datagramProtocol?.close();
     const safeInfo = sanitizeDisconnectInfo("webtransport", info);
-    logDisconnect("webtransport", safeInfo);
+    if (this._logFailures) {
+      logDisconnect("webtransport", safeInfo);
+    }
     this._onClose?.(safeInfo);
   }
 }
 
 /** Create a built-in reliable channel for the requested transport. */
 export function createChannel(options: ConnectOptions): ReliableMessageChannel {
+  const logFailures = !(options as InternalConnectOptions)[suppressTransportLogs];
   if (options.transport === "webtransport") {
-    return new WebTransportReliableChannel(options);
+    return new WebTransportReliableChannel(options, logFailures);
   }
-  return new WebSocketReliableChannel(options.url);
+  return new WebSocketReliableChannel(options.url, logFailures);
 }
 
 /** Decode a ServerMessage envelope, extracting the inner payload by field tag. */

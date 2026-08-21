@@ -1,3 +1,5 @@
+//go:build !js || !wasm
+
 package golemclient
 
 import (
@@ -6,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -445,7 +448,10 @@ type WebTransportChannel struct {
 // DialWebTransport opens a WebTransport channel and client-initiated reliable stream.
 func DialWebTransport(ctx context.Context, options ConnectOptions) (*WebTransportChannel, error) {
 	redacted := RedactURL(options.URL)
-	log.Printf("golem-go-client: dialing webtransport url=%q", redacted)
+	logAttempt := !intermediateTransportLogsSuppressed(ctx)
+	if logAttempt {
+		log.Printf("golem-go-client: dialing webtransport url=%q", redacted)
+	}
 	tlsConfig := options.TLSClientConfig
 	if tlsConfig == nil && len(options.ServerCertificateHashes) > 0 {
 		serverName, err := serverNameFromEndpointURL(options.URL)
@@ -458,16 +464,28 @@ func DialWebTransport(ctx context.Context, options ConnectOptions) (*WebTranspor
 		}
 	}
 	dialer := &webtransport.Dialer{TLSClientConfig: tlsConfig}
-	_, session, err := dialer.Dial(ctx, options.URL, nil)
+	response, session, err := dialer.Dial(ctx, options.URL, nil)
 	if err != nil {
+		if response != nil {
+			switch response.StatusCode {
+			case http.StatusUnauthorized, http.StatusForbidden:
+				err = fmt.Errorf("%w: %w", ErrRealtimeAuthorizationRejected, err)
+			case http.StatusUpgradeRequired:
+				err = fmt.Errorf("%w: %w", ErrRealtimeRevisionMismatch, err)
+			}
+		}
 		err = sanitizeURLError(err)
-		log.Printf("golem-go-client: webtransport dial failed url=%q error=%v", redacted, err)
+		if logAttempt {
+			log.Printf("golem-go-client: webtransport dial failed url=%q error=%v", redacted, err)
+		}
 		return nil, fmt.Errorf("golem-go-client: webtransport dial: %w", err)
 	}
 	stream, err := session.OpenStreamSync(ctx)
 	if err != nil {
 		err = sanitizeURLError(err)
-		log.Printf("golem-go-client: webtransport open stream failed url=%q error=%v", redacted, err)
+		if logAttempt {
+			log.Printf("golem-go-client: webtransport open stream failed url=%q error=%v", redacted, err)
+		}
 		_ = session.CloseWithError(0, "")
 		return nil, fmt.Errorf("golem-go-client: webtransport open stream: %w", err)
 	}
@@ -475,7 +493,9 @@ func DialWebTransport(ctx context.Context, options ConnectOptions) (*WebTranspor
 	// This does not write a golem reliable frame.
 	if _, err := stream.Write(nil); err != nil {
 		err = sanitizeURLError(err)
-		log.Printf("golem-go-client: webtransport stream header write failed url=%q error=%v", redacted, err)
+		if logAttempt {
+			log.Printf("golem-go-client: webtransport stream header write failed url=%q error=%v", redacted, err)
+		}
 		_ = session.CloseWithError(0, "")
 		return nil, fmt.Errorf("golem-go-client: webtransport stream header write: %w", err)
 	}

@@ -664,6 +664,14 @@ func (s *Server) Handler() http.HandlerFunc {
 	return s.listener.Handler()
 }
 
+// WebSocketHandler returns a WebSocket endpoint handler backed by the same
+// sessions, hooks, snapshots, and game loop as the configured primary
+// transport. Mount it on a caller-owned HTTP server to provide a fallback for
+// a WebTransport primary endpoint.
+func (s *Server) WebSocketHandler() http.HandlerFunc {
+	return s.listener.WebSocketHandler()
+}
+
 // WebTransportServer returns the configured WebTransport server for callers
 // that mount Server.Handler on a caller-owned HTTP/3 server. Callers still
 // own TLS configuration and server startup.
@@ -764,7 +772,8 @@ func (s *Server) SendUnreliable(sessionID int64, data []byte) error {
 	return s.listener.SendUnreliable(sessionID, data)
 }
 
-// BroadcastUnreliable sends one lossy datagram to every connected session.
+// BroadcastUnreliable sends one lossy datagram to every datagram-capable
+// session. A pure WebSocket server returns ErrUnreliableNotSupported.
 func (s *Server) BroadcastUnreliable(data []byte) error {
 	return s.listener.BroadcastUnreliable(data)
 }
@@ -774,7 +783,9 @@ func (s *Server) SendReliableUnordered(sessionID int64, data []byte) error {
 	return s.listener.SendReliableUnordered(sessionID, data)
 }
 
-// BroadcastReliableUnordered sends one reliable unordered datagram to every connected session.
+// BroadcastReliableUnordered sends one reliable unordered datagram to every
+// datagram-capable session. A pure WebSocket server returns
+// ErrReliableDatagramsNotSupported.
 func (s *Server) BroadcastReliableUnordered(data []byte) error {
 	return s.listener.BroadcastReliableUnordered(data)
 }
@@ -784,7 +795,9 @@ func (s *Server) SendReliableOrdered(sessionID int64, data []byte) error {
 	return s.listener.SendReliableOrdered(sessionID, data)
 }
 
-// BroadcastReliableOrdered sends one reliable ordered datagram to every connected session.
+// BroadcastReliableOrdered sends one reliable ordered datagram to every
+// datagram-capable session. A pure WebSocket server returns
+// ErrReliableDatagramsNotSupported.
 func (s *Server) BroadcastReliableOrdered(data []byte) error {
 	return s.listener.BroadcastReliableOrdered(data)
 }
@@ -1163,6 +1176,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	s.runCancel = cancel
 	s.startTaskPool(runCtx)
+	defer s.listener.CloseSessions()
 	// Already-done caller contexts must not briefly expose lifecycleRunning:
 	// context.AfterFunc schedules asynchronously when ctx is already cancelled.
 	if err := ctx.Err(); err != nil {
@@ -1408,59 +1422,112 @@ func (s *Server) runBroadcastTickBlind(result registry.FlushResult, deltasFlushe
 		s.onUpdates(updates)
 	}
 	sessionIDs := s.listener.SessionIDs()
-	nClients := len(sessionIDs)
+	wrappedUpdates := make([][]byte, len(updates))
+	for i, update := range updates {
+		wrappedUpdates[i] = s.listener.Wrap(update)
+	}
 	if !s.usesDatagramStateUpdates() {
-		if err := s.listener.BroadcastBatch(updates); err != nil {
+		// Preserve transport-neutral frame validation even when the recipient
+		// snapshot is empty or every snapshotted session disconnects.
+		if _, err := golemnet.ReliableStreamWriteChunkCount(s.config.Transport, wrappedUpdates); err != nil {
 			return err
+		}
+		var streamBatched, streamMsgs int
+		for _, sessionID := range sessionIDs {
+			transport, connected := s.listener.SessionTransport(sessionID)
+			if !connected {
+				continue
+			}
+			wireMsgs, err := golemnet.ReliableStreamWriteChunkCount(transport, wrappedUpdates)
+			if err != nil {
+				return err
+			}
+			if err := s.listener.SendBatch(sessionID, wrappedUpdates); err != nil {
+				if isDisconnectedSessionSend(err) {
+					continue
+				}
+				return err
+			}
+			streamBatched += len(wrappedUpdates)
+			streamMsgs += wireMsgs
 		}
 		s.applyBlindBroadcastKnown(sessionIDs, result.SpawnIDs, result.Removals)
 		s.cleanupVisibilityForRemovals(result.Removals)
-		s.storeBroadcastStreamOnly(updates, deltasFlushed, nClients)
+		s.storeReplicationSnapshot(streamBatched, streamMsgs, 0, 0, deltasFlushed)
 		return nil
 	}
 
-	if len(streamUpdates) > 0 {
-		if err := s.listener.BroadcastBatch(streamUpdates); err != nil {
-			return err
-		}
+	wrappedStreamUpdates := make([][]byte, len(streamUpdates))
+	for i, update := range streamUpdates {
+		wrappedStreamUpdates[i] = s.listener.Wrap(update)
 	}
-	var datagramBatched, datagramMsgs int
+	var streamBatched, streamMsgs, datagramBatched, datagramMsgs int
 	eventualCache := newEventualStateTickCache()
 	eventualChanges := make([]eventualStateChange, 0, len(result.DeltaIDs))
 	eventualPrepared := make([]eventualPreparedFrame, 0, len(result.DeltaIDs))
-	for _, id := range result.DeltaIDs {
-		ch := s.eventualChangeForDelta(id)
-		eventualChanges = append(eventualChanges, ch)
-		prepared, err := s.eventualPreparedFrameForChange(ch)
-		if err != nil {
-			return err
+	if s.hasDatagramStateSessions(sessionIDs) {
+		for _, id := range result.DeltaIDs {
+			ch := s.eventualChangeForDelta(id)
+			eventualChanges = append(eventualChanges, ch)
+			prepared, err := s.eventualPreparedFrameForChange(ch)
+			if err != nil {
+				return err
+			}
+			eventualPrepared = append(eventualPrepared, prepared)
 		}
-		eventualPrepared = append(eventualPrepared, prepared)
 	}
 	for _, sessionID := range sessionIDs {
+		transport, ok := s.listener.SessionTransport(sessionID)
+		if !ok {
+			continue
+		}
+		if transport != golemnet.TransportWebTransport {
+			if err := s.listener.SendBatch(sessionID, wrappedUpdates); err != nil {
+				if isDisconnectedSessionSend(err) {
+					continue
+				}
+				return err
+			}
+			streamBatched += len(wrappedUpdates)
+			if c, err := golemnet.ReliableStreamWriteChunkCount(transport, wrappedUpdates); err == nil {
+				streamMsgs += c
+			}
+			continue
+		}
+		if len(wrappedStreamUpdates) > 0 {
+			if err := s.listener.SendBatch(sessionID, wrappedStreamUpdates); err != nil {
+				if isDisconnectedSessionSend(err) {
+					continue
+				}
+				return err
+			}
+			streamBatched += len(wrappedStreamUpdates)
+			if c, err := golemnet.ReliableStreamWriteChunkCount(transport, wrappedStreamUpdates); err == nil {
+				streamMsgs += c
+			}
+		}
 		tracker := s.eventualTracker(sessionID)
-		var (
-			batched int
-			msgs    int
-			err     error
-		)
+		var sendStats eventualStateSendStats
+		var err error
 		if !tracker.hasDirty() {
-			batched, msgs, err = s.sendPreparedEventualStateFrames(sessionID, tracker, eventualPrepared)
+			sendStats, err = s.sendPreparedEventualStateFrames(sessionID, tracker, eventualPrepared)
 		} else {
 			for _, ch := range eventualChanges {
 				tracker.markDirtyChange(ch)
 			}
-			batched, msgs, err = s.sendEventualState(sessionID, tracker, eventualCache)
+			sendStats, err = s.sendEventualState(sessionID, tracker, eventualCache)
 		}
 		if err != nil {
 			return err
 		}
-		datagramBatched += batched
-		datagramMsgs += msgs
+		streamBatched += sendStats.streamBatchedFrames
+		streamMsgs += sendStats.streamWireMsgs
+		datagramBatched += sendStats.datagramBatchedFrames
+		datagramMsgs += sendStats.datagramWirePayloads
 	}
 	s.applyBlindBroadcastKnown(sessionIDs, result.SpawnIDs, result.Removals)
 	s.cleanupVisibilityForRemovals(result.Removals)
-	s.storeReplicationSnapshot(len(streamUpdates)*nClients, 0, datagramBatched, datagramMsgs, deltasFlushed)
+	s.storeReplicationSnapshot(streamBatched, streamMsgs, datagramBatched, datagramMsgs, deltasFlushed)
 	return nil
 }
 
@@ -1495,16 +1562,6 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 			eventualChanges[id] = s.eventualChangeForDelta(id)
 		}
 	}
-	if s.usesDatagramStateUpdates() && !ownerScopedDeltas {
-		for id, ch := range eventualChanges {
-			prepared, err := s.eventualPreparedFrameForChange(ch)
-			if err != nil {
-				return err
-			}
-			eventualFrames[id] = prepared
-		}
-	}
-
 	removalData := scratch.removalData
 	wrappedRemovals := scratch.wrappedRemovals
 	for i, id := range result.Removals {
@@ -1531,6 +1588,15 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 	// Capture session IDs before onUpdates so a disconnect during the callback
 	// still observes SendBatch ErrSessionNotFound and can clear known state.
 	sessionIDs := s.listener.SessionIDs()
+	if s.hasDatagramStateSessions(sessionIDs) && !ownerScopedDeltas {
+		for id, ch := range eventualChanges {
+			prepared, err := s.eventualPreparedFrameForChange(ch)
+			if err != nil {
+				return err
+			}
+			eventualFrames[id] = prepared
+		}
+	}
 	if s.onUpdates != nil && len(updates) > 0 {
 		s.onUpdates(updates)
 	}
@@ -1551,6 +1617,12 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 	wrappedDeltas := scratch.wrappedDeltas
 
 	for _, sessionID := range sessionIDs {
+		transport, connected := s.listener.SessionTransport(sessionID)
+		if !connected {
+			s.clearBroadcastKnownSession(sessionID)
+			continue
+		}
+		sessionDatagrams := s.usesDatagramStateUpdates() && transport == golemnet.TransportWebTransport
 		entered, stayed, exited := s.computeBroadcastDiff(sessionID, live)
 
 		var (
@@ -1560,7 +1632,7 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 		)
 
 		for _, id := range entered {
-			if s.usesDatagramStateUpdates() {
+			if sessionDatagrams {
 				s.clearEventualEntity(sessionID, id)
 			}
 			data, ok, err := s.wrappedFullForSession(sessionID, id, spawnData, wrappedFull, wrappedPublicFull)
@@ -1575,7 +1647,7 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 
 		for _, id := range stayed {
 			if authDelta, ok := deltaData[id]; ok {
-				if s.usesDatagramStateUpdates() {
+				if sessionDatagrams {
 					if ch, ok := eventualChanges[id]; ok {
 						sch, send := s.eventualChangeForSession(sessionID, ch)
 						if send {
@@ -1608,7 +1680,7 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 			}
 		}
 		for _, id := range exited {
-			if s.usesDatagramStateUpdates() {
+			if sessionDatagrams {
 				s.clearEventualEntity(sessionID, id)
 			}
 			if data, ok := wrappedRemovals[id]; ok {
@@ -1651,13 +1723,13 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 				return err
 			}
 			// Always accumulate wire chunk counts for ReplicationStats (not only when logging).
-			if c, err := golemnet.ReliableStreamWriteChunkCount(s.config.Transport, streamFrames); err == nil {
+			if c, err := golemnet.ReliableStreamWriteChunkCount(transport, streamFrames); err == nil {
 				streamMsgsSum += c
 			}
 			streamBatchedSum += len(streamFrames)
 		}
-		if s.usesDatagramStateUpdates() {
-			batched, msgs, err := s.sendSessionEventualState(sessionID, eventualDirty, eventualDirectFrames, eventualCache)
+		if sessionDatagrams {
+			sendStats, err := s.sendSessionEventualState(sessionID, eventualDirty, eventualDirectFrames, eventualCache)
 			if err != nil {
 				if isDisconnectedSessionSend(err) {
 					s.clearBroadcastKnownSession(sessionID)
@@ -1665,8 +1737,10 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 				}
 				return err
 			}
-			datagramBatchedSum += batched
-			datagramMsgsSum += msgs
+			streamBatchedSum += sendStats.streamBatchedFrames
+			streamMsgsSum += sendStats.streamWireMsgs
+			datagramBatchedSum += sendStats.datagramBatchedFrames
+			datagramMsgsSum += sendStats.datagramWirePayloads
 		}
 		scratch.eventualDirty = eventualDirty[:0]
 		scratch.eventualPrepared = eventualDirectFrames[:0]
@@ -1684,7 +1758,7 @@ func (s *Server) sendSessionEventualState(
 	eventualDirty []eventualStateChange,
 	eventualDirectFrames []eventualPreparedFrame,
 	eventualCache *eventualStateTickCache,
-) (int, int, error) {
+) (eventualStateSendStats, error) {
 	tracker := s.eventualTracker(sessionID)
 	if len(eventualDirty) > 0 && tracker.hasDirty() {
 		for _, ch := range eventualDirty {
@@ -1897,16 +1971,6 @@ func (s *Server) runInterestTick() error {
 			eventualChanges[id] = s.eventualChangeForDelta(id)
 		}
 	}
-	if s.usesDatagramStateUpdates() && !ownerScopedDeltas {
-		for id, ch := range eventualChanges {
-			prepared, err := s.eventualPreparedFrameForChange(ch)
-			if err != nil {
-				return err
-			}
-			eventualFrames[id] = prepared
-		}
-	}
-
 	removalData := scratch.removalData
 	wrappedRemovals := scratch.wrappedRemovals
 	for i, id := range result.Removals {
@@ -1939,6 +2003,15 @@ func (s *Server) runInterestTick() error {
 	wrappedDeltas := scratch.wrappedDeltas
 
 	sessionIDs := s.listener.SessionIDs()
+	if s.hasDatagramStateSessions(sessionIDs) && !ownerScopedDeltas {
+		for id, ch := range eventualChanges {
+			prepared, err := s.eventualPreparedFrameForChange(ch)
+			if err != nil {
+				return err
+			}
+			eventualFrames[id] = prepared
+		}
+	}
 	var eventualCache *eventualStateTickCache
 	if s.usesDatagramStateUpdates() {
 		eventualCache = newEventualStateTickCache()
@@ -1947,6 +2020,11 @@ func (s *Server) runInterestTick() error {
 	var streamBatchedSum, streamMsgsSum, datagramBatchedSum, datagramMsgsSum int
 
 	for _, sessionID := range sessionIDs {
+		transport, connected := s.listener.SessionTransport(sessionID)
+		if !connected {
+			continue
+		}
+		sessionDatagrams := s.usesDatagramStateUpdates() && transport == golemnet.TransportWebTransport
 		diff, hasDiff := diffs[sessionID]
 		if !hasDiff {
 			continue
@@ -1959,7 +2037,7 @@ func (s *Server) runInterestTick() error {
 		)
 
 		for _, id := range diff.Entered {
-			if s.usesDatagramStateUpdates() {
+			if sessionDatagrams {
 				s.clearEventualEntity(sessionID, id)
 			}
 			data, ok, err := s.wrappedFullForSession(sessionID, id, spawnData, wrappedFull, wrappedPublicFull)
@@ -1974,7 +2052,7 @@ func (s *Server) runInterestTick() error {
 
 		for _, id := range diff.Stayed {
 			if authDelta, ok := deltaData[id]; ok {
-				if s.usesDatagramStateUpdates() {
+				if sessionDatagrams {
 					if ch, ok := eventualChanges[id]; ok {
 						sch, send := s.eventualChangeForSession(sessionID, ch)
 						if send {
@@ -2008,7 +2086,7 @@ func (s *Server) runInterestTick() error {
 		}
 
 		for _, id := range diff.Exited {
-			if s.usesDatagramStateUpdates() {
+			if sessionDatagrams {
 				s.clearEventualEntity(sessionID, id)
 			}
 			if data, ok := wrappedRemovals[id]; ok {
@@ -2049,18 +2127,20 @@ func (s *Server) runInterestTick() error {
 				return err
 			}
 			// Always accumulate wire chunk counts for ReplicationStats (not only when logging).
-			if c, err := golemnet.ReliableStreamWriteChunkCount(s.config.Transport, streamFrames); err == nil {
+			if c, err := golemnet.ReliableStreamWriteChunkCount(transport, streamFrames); err == nil {
 				streamMsgsSum += c
 			}
 			streamBatchedSum += len(streamFrames)
 		}
-		if s.usesDatagramStateUpdates() {
-			batched, msgs, err := s.sendSessionEventualState(sessionID, eventualDirty, eventualDirectFrames, eventualCache)
+		if sessionDatagrams {
+			sendStats, err := s.sendSessionEventualState(sessionID, eventualDirty, eventualDirectFrames, eventualCache)
 			if err != nil {
 				return err
 			}
-			datagramBatchedSum += batched
-			datagramMsgsSum += msgs
+			streamBatchedSum += sendStats.streamBatchedFrames
+			streamMsgsSum += sendStats.streamWireMsgs
+			datagramBatchedSum += sendStats.datagramBatchedFrames
+			datagramMsgsSum += sendStats.datagramWirePayloads
 		}
 		scratch.eventualDirty = eventualDirty[:0]
 		scratch.eventualPrepared = eventualDirectFrames[:0]
@@ -2073,6 +2153,18 @@ func (s *Server) runInterestTick() error {
 
 func (s *Server) usesDatagramStateUpdates() bool {
 	return s.config.StateUpdateLane == StateUpdateLaneDatagram
+}
+
+func (s *Server) hasDatagramStateSessions(sessionIDs []int64) bool {
+	if !s.usesDatagramStateUpdates() {
+		return false
+	}
+	for _, sessionID := range sessionIDs {
+		if transport, ok := s.listener.SessionTransport(sessionID); ok && transport == golemnet.TransportWebTransport {
+			return true
+		}
+	}
+	return false
 }
 
 // isDisconnectedSessionSend reports whether an automatic replication send lost
@@ -2094,18 +2186,6 @@ func (s *Server) storeReplicationSnapshot(streamBatched, streamWireMsgs, datagra
 	s.replStreamMsgs = streamWireMsgs
 	s.replDatagramBatched = datagramBatched
 	s.replDatagramMsgs = datagramWireMsgs
-}
-
-func (s *Server) storeBroadcastStreamOnly(updates [][]byte, deltasFlushed, nClients int) {
-	wrapped := make([][]byte, len(updates))
-	for i, d := range updates {
-		wrapped[i] = s.listener.Wrap(d)
-	}
-	chunkN, err := golemnet.ReliableStreamWriteChunkCount(s.config.Transport, wrapped)
-	if err != nil {
-		chunkN = 0
-	}
-	s.storeReplicationSnapshot(len(updates), chunkN*nClients, 0, 0, deltasFlushed)
 }
 
 func (s *Server) logReplicationStatsLine() {

@@ -1,4 +1,4 @@
-import type { ConnectOptions, DisconnectInfo, GameClient } from "golem-engine";
+import type { ConnectInput, DisconnectInfo, GameClient } from "golem-engine";
 
 /** Connection lifecycle status emitted by the Phaser integration. */
 export type GolemConnectionStatus =
@@ -16,10 +16,7 @@ export interface GolemConnectionConfig<C extends GameClient = GameClient> {
    * Called and awaited for every initial or reconnect attempt. Throwing or
    * rejecting is handled like an unexpected connection failure.
    */
-  connectionOptions: () =>
-    | string
-    | ConnectOptions
-    | Promise<string | ConnectOptions>;
+  connectionOptions: () => ConnectInput | Promise<ConnectInput>;
   /** Maximum reconnect attempts. Zero means unlimited. Defaults to 5. */
   maxReconnectAttempts?: number;
   /** Base reconnect delay in milliseconds. Defaults to 1500. */
@@ -141,10 +138,7 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
     const attempt = this.reconnectAttempts + 1;
     this.emit({ type: "connecting", attempt });
 
-    let options:
-      | string
-      | ConnectOptions
-      | Promise<string | ConnectOptions>;
+    let options: ConnectInput | Promise<ConnectInput>;
     try {
       options = this.config.connectionOptions();
     } catch (error) {
@@ -213,7 +207,7 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
 
   private openConnection(
     connectionAttempt: number,
-    options: string | ConnectOptions,
+    options: ConnectInput,
   ): void {
     if (!this.isCurrentAttempt(connectionAttempt)) {
       return;

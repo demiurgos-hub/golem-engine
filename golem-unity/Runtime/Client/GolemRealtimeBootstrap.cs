@@ -7,6 +7,19 @@ using UnityEngine.Networking;
 
 namespace GolemEngine.Unity
 {
+    /// <summary>Credential-free realtime transport endpoint advertised by the server.</summary>
+    public sealed class GolemRealtimeEndpoint
+    {
+        public GolemRealtimeEndpoint(string transport, string url)
+        {
+            Transport = transport ?? throw new ArgumentNullException(nameof(transport));
+            Url = url ?? throw new ArgumentNullException(nameof(url));
+        }
+
+        public string Transport { get; }
+        public string Url { get; }
+    }
+
     /// <summary>Client-side realtime config JSON served by golem.Server.RealtimeConfigHandler.</summary>
     public sealed class GolemRealtimeConfig
     {
@@ -14,18 +27,36 @@ namespace GolemEngine.Unity
             string transport,
             string url,
             IReadOnlyList<GolemCertificateHash> serverCertificateHashes = null,
-            int? eventualAckIntervalMs = null)
+            int? eventualAckIntervalMs = null,
+            GolemRealtimeEndpoint fallback = null)
         {
             Transport = transport ?? throw new ArgumentNullException(nameof(transport));
             Url = url ?? throw new ArgumentNullException(nameof(url));
-            ServerCertificateHashes = serverCertificateHashes ?? Array.Empty<GolemCertificateHash>();
+            ServerCertificateHashes = CloneHashes(serverCertificateHashes);
             EventualAckIntervalMs = eventualAckIntervalMs;
+            Fallback = fallback;
         }
 
         public string Transport { get; }
         public string Url { get; }
         public IReadOnlyList<GolemCertificateHash> ServerCertificateHashes { get; }
         public int? EventualAckIntervalMs { get; }
+        public GolemRealtimeEndpoint Fallback { get; }
+
+        private static IReadOnlyList<GolemCertificateHash> CloneHashes(
+            IReadOnlyList<GolemCertificateHash> hashes)
+        {
+            if (hashes == null || hashes.Count == 0)
+            {
+                return Array.Empty<GolemCertificateHash>();
+            }
+            var copy = new GolemCertificateHash[hashes.Count];
+            for (var i = 0; i < hashes.Count; i++)
+            {
+                copy[i] = hashes[i];
+            }
+            return copy;
+        }
     }
 
     /// <summary>HTTP response returned by an injectable realtime-config fetch function.</summary>
@@ -106,6 +137,7 @@ namespace GolemEngine.Unity
                 throw new ArgumentNullException(nameof(json));
             }
 
+            ValidateRootObject(json);
             var transport = RequireStringField(json, "transport");
             var url = RequireStringField(json, "url");
             if (string.IsNullOrWhiteSpace(transport))
@@ -122,6 +154,7 @@ namespace GolemEngine.Unity
             {
                 throw new InvalidOperationException($"golem-unity: unsupported transport \"{transport}\"");
             }
+            ValidateEndpointUrl(transport, url, "primary");
 
             int? ack = null;
             if (TryReadEventualAckIntervalMs(json, out var ackValue))
@@ -130,7 +163,25 @@ namespace GolemEngine.Unity
             }
 
             var hashes = ParseCertificateHashes(json);
-            return new GolemRealtimeConfig(transport, url, hashes, ack);
+            GolemRealtimeEndpoint fallback = null;
+            if (TryFindObject(json, "fallback", out var fallbackJson))
+            {
+                var fallbackTransport = RequireStringField(fallbackJson, "transport").Trim();
+                var fallbackUrl = RequireStringField(fallbackJson, "url");
+                if (transport != GolemConnectOptions.TransportWebTransport ||
+                    fallbackTransport != GolemConnectOptions.TransportWebSocket)
+                {
+                    throw new InvalidOperationException(
+                        "golem-unity: realtime fallback must be websocket for a webtransport primary");
+                }
+                if (string.IsNullOrWhiteSpace(fallbackUrl))
+                {
+                    throw new InvalidOperationException("golem-unity: realtime fallback url is required");
+                }
+                ValidateEndpointUrl(fallbackTransport, fallbackUrl, "fallback");
+                fallback = new GolemRealtimeEndpoint(fallbackTransport, fallbackUrl);
+            }
+            return new GolemRealtimeConfig(transport, url, hashes, ack, fallback);
         }
 
         /// <summary>Converts realtime config into connect options, appending query parameters.</summary>
@@ -361,19 +412,10 @@ namespace GolemEngine.Unity
         private static bool TryReadStringField(string json, string field, out string value)
         {
             value = null;
-            var key = "\"" + field + "\"";
-            var keyIndex = IndexOfJsonKey(json, key);
-            if (keyIndex < 0)
+            if (!TryFindRootFieldValue(json, field, out var i))
             {
                 return false;
             }
-            var i = keyIndex + key.Length;
-            i = SkipWs(json, i);
-            if (i >= json.Length || json[i] != ':')
-            {
-                return false;
-            }
-            i = SkipWs(json, i + 1);
             if (i >= json.Length || json[i] != '"')
             {
                 return false;
@@ -384,19 +426,10 @@ namespace GolemEngine.Unity
         private static bool TryReadEventualAckIntervalMs(string json, out int value)
         {
             value = 0;
-            var key = "\"eventualAckIntervalMs\"";
-            var keyIndex = IndexOfJsonKey(json, key);
-            if (keyIndex < 0)
+            if (!TryFindRootFieldValue(json, "eventualAckIntervalMs", out var i))
             {
                 return false;
             }
-            var i = keyIndex + key.Length;
-            i = SkipWs(json, i);
-            if (i >= json.Length || json[i] != ':')
-            {
-                throw new InvalidOperationException("golem-unity: eventualAckIntervalMs must be an integer");
-            }
-            i = SkipWs(json, i + 1);
             var start = i;
             if (i < json.Length && (json[i] == '-' || json[i] == '+'))
             {
@@ -416,6 +449,11 @@ namespace GolemEngine.Unity
             {
                 throw new InvalidOperationException("golem-unity: eventualAckIntervalMs must be an integer");
             }
+            var delimiter = SkipWs(json, i);
+            if (delimiter >= json.Length || (json[delimiter] != ',' && json[delimiter] != '}'))
+            {
+                throw new InvalidOperationException("golem-unity: eventualAckIntervalMs must be an integer");
+            }
             var text = json.Substring(start, i - start);
             if (!long.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
             {
@@ -432,25 +470,32 @@ namespace GolemEngine.Unity
         private static bool TryFindObjectArray(string json, string field, out string arrayJson)
         {
             arrayJson = null;
-            var key = "\"" + field + "\"";
-            var keyIndex = IndexOfJsonKey(json, key);
-            if (keyIndex < 0)
+            if (!TryFindRootFieldValue(json, field, out var i))
             {
                 return false;
             }
-            var i = keyIndex + key.Length;
-            i = SkipWs(json, i);
-            if (i >= json.Length || json[i] != ':')
-            {
-                return false;
-            }
-            i = SkipWs(json, i + 1);
             if (i >= json.Length || json[i] != '[')
             {
                 throw new InvalidOperationException("golem-unity: serverCertificateHashes must be an array");
             }
             var end = FindMatchingBracket(json, i, '[', ']');
             arrayJson = json.Substring(i, end - i + 1);
+            return true;
+        }
+
+        private static bool TryFindObject(string json, string field, out string objectJson)
+        {
+            objectJson = null;
+            if (!TryFindRootFieldValue(json, field, out var i))
+            {
+                return false;
+            }
+            if (i >= json.Length || json[i] != '{')
+            {
+                throw new InvalidOperationException($"golem-unity: {field} must be an object");
+            }
+            var end = FindMatchingBracket(json, i, '{', '}');
+            objectJson = json.Substring(i, end - i + 1);
             return true;
         }
 
@@ -479,28 +524,115 @@ namespace GolemEngine.Unity
             }
         }
 
-        private static int IndexOfJsonKey(string json, string key)
+        private static bool TryFindRootFieldValue(string json, string field, out int valueIndex)
         {
-            var start = 0;
-            while (start < json.Length)
+            valueIndex = -1;
+            var i = SkipWs(json, 0);
+            if (i >= json.Length || json[i] != '{')
             {
-                var index = json.IndexOf(key, start, StringComparison.Ordinal);
-                if (index < 0)
-                {
-                    return -1;
-                }
-                if (index == 0 || IsJsonBoundary(json[index - 1]))
-                {
-                    return index;
-                }
-                start = index + key.Length;
+                throw new InvalidOperationException("golem-unity: realtime config must be a JSON object");
             }
-            return -1;
+            i++;
+            while (true)
+            {
+                i = SkipWs(json, i);
+                if (i >= json.Length)
+                {
+                    throw new InvalidOperationException("golem-unity: malformed JSON while parsing realtime config");
+                }
+                if (json[i] == '}')
+                {
+                    return false;
+                }
+                if (json[i] != '"' || !TryReadJsonString(json, i, out var key, out var keyEnd))
+                {
+                    throw new InvalidOperationException("golem-unity: realtime config object key must be a string");
+                }
+                i = SkipWs(json, keyEnd);
+                if (i >= json.Length || json[i] != ':')
+                {
+                    throw new InvalidOperationException("golem-unity: malformed realtime config object field");
+                }
+                i = SkipWs(json, i + 1);
+                if (string.Equals(key, field, StringComparison.Ordinal))
+                {
+                    valueIndex = i;
+                    return true;
+                }
+                i = SkipJsonValue(json, i);
+                i = SkipWs(json, i);
+                if (i < json.Length && json[i] == ',')
+                {
+                    i++;
+                    continue;
+                }
+                if (i < json.Length && json[i] == '}')
+                {
+                    return false;
+                }
+                throw new InvalidOperationException("golem-unity: malformed realtime config object");
+            }
         }
 
-        private static bool IsJsonBoundary(char ch)
+        private static void ValidateRootObject(string json)
         {
-            return char.IsWhiteSpace(ch) || ch == '{' || ch == ',' || ch == '[';
+            var start = SkipWs(json, 0);
+            if (start >= json.Length || json[start] != '{')
+            {
+                throw new InvalidOperationException("golem-unity: realtime config must be a JSON object");
+            }
+            var end = FindMatchingBracket(json, start, '{', '}');
+            if (SkipWs(json, end + 1) != json.Length)
+            {
+                throw new InvalidOperationException("golem-unity: malformed JSON after realtime config object");
+            }
+        }
+
+        private static void ValidateEndpointUrl(string transport, string url, string label)
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var parsed) ||
+                !string.IsNullOrEmpty(parsed.UserInfo))
+            {
+                throw new InvalidOperationException(
+                    $"golem-unity: realtime {label} URL must be absolute");
+            }
+            var validScheme = transport == GolemConnectOptions.TransportWebTransport
+                ? string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+                : string.Equals(parsed.Scheme, "ws", StringComparison.OrdinalIgnoreCase) ||
+                  string.Equals(parsed.Scheme, "wss", StringComparison.OrdinalIgnoreCase);
+            if (!validScheme)
+            {
+                throw new InvalidOperationException(
+                    $"golem-unity: realtime {label} URL has an invalid scheme for {transport}");
+            }
+        }
+
+        private static int SkipJsonValue(string json, int index)
+        {
+            if (index >= json.Length)
+            {
+                throw new InvalidOperationException("golem-unity: malformed JSON while parsing realtime config");
+            }
+            switch (json[index])
+            {
+                case '"':
+                    if (!TryReadJsonString(json, index, out _, out var stringEnd))
+                    {
+                        throw new InvalidOperationException("golem-unity: malformed JSON string");
+                    }
+                    return stringEnd;
+                case '{':
+                    return FindMatchingBracket(json, index, '{', '}') + 1;
+                case '[':
+                    return FindMatchingBracket(json, index, '[', ']') + 1;
+                default:
+                    var i = index;
+                    while (i < json.Length && json[i] != ',' && json[i] != '}')
+                    {
+                        i++;
+                    }
+                    return i;
+            }
         }
 
         private static bool TryReadJsonString(string json, int startQuote, out string value, out int endExclusive)

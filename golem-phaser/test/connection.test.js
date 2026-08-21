@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { GolemConnectionLifecycle } from "../dist/connection.js";
 
-function fakeClient() {
+function fakeClient({ notifyOnDisconnect = false } = {}) {
   let connectHandler;
   let disconnectHandler;
   return {
@@ -15,6 +15,13 @@ function fakeClient() {
     disconnect() {
       this.disconnectCalls++;
       this.connected = false;
+      if (notifyOnDisconnect) {
+        disconnectHandler?.({
+          code: 1000,
+          reason: "client disconnect",
+          wasClean: true,
+        });
+      }
     },
     onConnect(handler) {
       connectHandler = handler;
@@ -92,6 +99,31 @@ describe("GolemConnectionLifecycle", () => {
 
     client.open();
     assert.equal(lifecycle.connected, true);
+    assert.deepEqual(statuses.at(-1), { type: "connected" });
+  });
+
+  it("forwards a fallback connection plan as one lifecycle attempt", () => {
+    const client = fakeClient();
+    const statuses = [];
+    const plan = {
+      candidates: [
+        { transport: "webtransport", url: "https://localhost/api/wt" },
+        { transport: "websocket", url: "ws://localhost/api/ws" },
+      ],
+      resolveOptions: (endpoint) => endpoint,
+    };
+    const lifecycle = new GolemConnectionLifecycle({
+      createClient: () => client,
+      connectionOptions: () => plan,
+    });
+    lifecycle.onStatus((status) => statuses.push(status));
+
+    lifecycle.start();
+    assert.equal(client.connectCalls.length, 1);
+    assert.equal(client.connectCalls[0], plan);
+    assert.deepEqual(statuses, [{ type: "connecting", attempt: 1 }]);
+
+    client.open();
     assert.deepEqual(statuses.at(-1), { type: "connected" });
   });
 
@@ -258,6 +290,34 @@ describe("GolemConnectionLifecycle", () => {
 
     lifecycle.disconnect();
     client.close({ wasClean: false });
+    assert.equal(scheduler.size, 0);
+  });
+
+  it("reports the GameClient clean close on intentional disconnect without reconnecting", () => {
+    const client = fakeClient({ notifyOnDisconnect: true });
+    const scheduler = fakeScheduler();
+    const statuses = [];
+    const lifecycle = new GolemConnectionLifecycle(
+      {
+        createClient: () => client,
+        connectionOptions: () => "ws://localhost/game",
+      },
+      scheduler,
+    );
+    lifecycle.onStatus((status) => statuses.push(status));
+    lifecycle.start();
+    client.open();
+
+    lifecycle.disconnect();
+
+    assert.deepEqual(statuses.at(-1), {
+      type: "disconnected",
+      info: {
+        code: 1000,
+        reason: "client disconnect",
+        wasClean: true,
+      },
+    });
     assert.equal(scheduler.size, 0);
   });
 

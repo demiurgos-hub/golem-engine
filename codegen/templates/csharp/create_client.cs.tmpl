@@ -9,7 +9,7 @@ namespace {{.GoPackage}}
     {
         public static GameClient CreateClient()
         {
-            return CreateClient(CreateDefaultTransport);
+            return CreateClient(CreateDefaultTransport, GolemTransportCapabilities.BuiltInTransportSupported);
         }
 
         /// <summary>
@@ -58,7 +58,9 @@ namespace {{.GoPackage}}
             );
         }
 
-        public static GameClient CreateClient(Func<GolemConnectOptions, IGolemTransport> transportFactory)
+        public static GameClient CreateClient(
+            Func<GolemConnectOptions, IGolemTransport> transportFactory,
+            Func<GolemConnectOptions, bool> transportSupported = null)
         {
             var entities = new EntityManager();
 {{if .WorldTypes}}
@@ -86,10 +88,11 @@ namespace {{.GoPackage}}
                 null
 {{- end}}
 {{if .Events}},
-                events
+                events,
 {{- else}},
-                null
+                null,
 {{- end}}
+                transportSupported
             );
         }
 

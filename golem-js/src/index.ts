@@ -4,7 +4,10 @@ export {
   createChannel,
   unwrapServerMessage,
   type GameClientOptions,
+  type ConnectInput,
   type ConnectOptions,
+  type ConnectOptionsResolver,
+  type ConnectPlan,
   type DisconnectInfo,
   type EntityManagerLike,
   type EntityLifecycle,
@@ -13,6 +16,7 @@ export {
   type ReliableMessageChannel,
   type ReliableOrderedMessageChannel,
   type ReliableUnorderedMessageChannel,
+  type RealtimeEndpoint,
   type ServerMessage,
   type TransportKind,
   type UnreliableMessageChannel,
@@ -21,6 +25,7 @@ export {
 } from "./client.js";
 export {
   fetchRealtimeConfig,
+  connectPlanFromRealtimeConfig,
   connectOptionsFromRealtimeConfig,
   withQueryParam,
   withQuery,
