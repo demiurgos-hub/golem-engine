@@ -17,7 +17,7 @@ Prefer focused regression tests that inspect generated output for emitted names,
 
 Entity, command, and event root `tag` values pin fields in their protocol oneof envelopes. Untagged declarations keep the legacy sequential assignment, explicit declarations are additive, and `EntityRemoved` stays immediately after the untagged entity pairs. Validate protobuf field legality and all implicit/explicit overlaps before rendering; never repair envelope tags in generated output.
 
-Event payload fields may retain legacy alphabetical numbering, or every field in one event may use `{ tag: N, type: T }` to pin its direct protobuf field number. Never mix tagged and untagged fields in one event; entity-targeted events reserve tag 1 for `entity_id`.
+Command and event payload fields may retain legacy alphabetical numbering, or every field in one command/event may use `{ tag: N, type: T }` to pin its direct protobuf field number. Never mix tagged and untagged fields in one payload; entity-targeted commands/events reserve tag 1 for `entity_id`.
 
 Be careful with nested formatting in generators: code that emits `fmt` strings or TS/Go source can need a different level of escaping than normal application code.
 

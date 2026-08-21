@@ -386,9 +386,12 @@ type CommandSchemaFile struct {
 }
 
 // CommandFieldDef defines a single field in a command schema.
-// Supports scalar shorthand (`dx: float`) and explicit (`dx: { type: float }`) YAML syntax.
+// Supports scalar shorthand (`dx: float`) and explicit
+// (`dx: { tag: 1, type: float }`) YAML syntax. Tag is optional for legacy
+// schemas, but when one command field sets it every field in that command must.
 type CommandFieldDef struct {
 	Type string `yaml:"type"`
+	Tag  *int   `yaml:"tag"`
 }
 
 // UnmarshalYAML allows scalar shorthand (`dx: float`) as well as the explicit
@@ -753,6 +756,9 @@ func LoadCommands(commandsDir string, customTypes map[string]CustomTypeData) ([]
 		if err := validateExplicitEnvelopeTag("command", name, cf.Tag); err != nil {
 			return nil, fmt.Errorf("%s: %w", e.Name(), err)
 		}
+		if err := validateCommandFieldTags(cf); err != nil {
+			return nil, fmt.Errorf("%s: %w", e.Name(), err)
+		}
 		seen[name] = e.Name()
 		commands = append(commands, BuildCommandData(cf, customTypes))
 	}
@@ -760,8 +766,9 @@ func LoadCommands(commandsDir string, customTypes map[string]CustomTypeData) ([]
 }
 
 // BuildCommandData converts a parsed command schema file into template-ready data.
-// Fields are sorted alphabetically and assigned proto field numbers starting from 1.
-// For entity-targeted commands an offset of 1 is added to reserve proto field 1 for entity_id.
+// Fields retain legacy alphabetical proto numbering when untagged. Explicitly
+// tagged commands are sorted by direct proto tag instead. Entity-targeted
+// commands reserve direct proto field 1 for entity_id.
 // customTypes maps type name to resolved CustomTypeData so that command fields
 // may reference custom composite types in addition to proto scalars.
 func BuildCommandData(cf CommandSchemaFile, customTypes map[string]CustomTypeData) CommandData {
@@ -783,9 +790,13 @@ func BuildCommandData(cf CommandSchemaFile, customTypes map[string]CustomTypeDat
 	}
 
 	keys := SortedKeys(cf.Fields)
-
-	// Sort alphabetically for stable, deterministic proto field assignment.
-	slices.SortFunc(keys, func(a, b string) int { return strings.Compare(a, b) })
+	explicitTags := commandUsesExplicitFieldTags(cf.Fields)
+	if explicitTags {
+		slices.SortFunc(keys, func(a, b string) int { return *cf.Fields[a].Tag - *cf.Fields[b].Tag })
+	} else {
+		// Sort alphabetically for stable, deterministic legacy assignment.
+		slices.SortFunc(keys, func(a, b string) int { return strings.Compare(a, b) })
+	}
 
 	for i, k := range keys {
 		def := cf.Fields[k]
@@ -799,7 +810,11 @@ func BuildCommandData(cf CommandSchemaFile, customTypes map[string]CustomTypeDat
 		fi.SnakeName = k
 		fi.GoName = SnakeToPascal(k)
 		fi.FieldName = SnakeToCamel(k)
-		fi.ProtoTag = (i + 1) + tagOffset
+		if explicitTags {
+			fi.ProtoTag = *def.Tag
+		} else {
+			fi.ProtoTag = (i + 1) + tagOffset
+		}
 
 		if goType, ok := protoToGo[def.Type]; ok {
 			// Proto scalar type.
@@ -836,7 +851,36 @@ func BuildCommandData(cf CommandSchemaFile, customTypes map[string]CustomTypeDat
 	return cd
 }
 
-// ValidateCommands checks that entity-targeted commands reference a known entity type.
+func commandUsesExplicitFieldTags(fields map[string]CommandFieldDef) bool {
+	for _, def := range fields {
+		if def.Tag != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func validateCommandFieldTags(cf CommandSchemaFile) error {
+	if !commandUsesExplicitFieldTags(cf.Fields) {
+		return nil
+	}
+	occupied := make(map[int]string, len(cf.Fields)+1)
+	if strings.TrimSpace(cf.Target) == "entity" {
+		occupied[1] = "entity_id"
+	}
+	for _, name := range SortedKeys(cf.Fields) {
+		def := cf.Fields[name]
+		if def.Tag == nil {
+			return fmt.Errorf("command %q: field %q: tag is required when any field sets tag", cf.Command, name)
+		}
+		if err := claimEnvelopeTag(occupied, "command "+cf.Command, name, *def.Tag); err != nil {
+			return err
+		}
+
+		// ValidateCommands checks that entity-targeted commands reference a known entity type.
+	}
+	return nil
+}
 func ValidateCommands(commands []CommandData, entities []EntityData) error {
 	entityNames := make(map[string]bool, len(entities))
 	for _, e := range entities {

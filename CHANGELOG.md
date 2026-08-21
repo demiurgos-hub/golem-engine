@@ -6,6 +6,10 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ## Unreleased
 
+### Added
+
+- Command payload fields can now use all-or-nothing `{ tag: N, type: T }` definitions to preserve direct protobuf field numbers when appending fields; untagged commands keep legacy alphabetical numbering, and entity-targeted commands reserve tag 1 for `entity_id`.
+
 ### Fixed
 
 - Reliable stream frames now support bounded payloads up to 256 KiB across the Go server and JavaScript, native Go, and Unity clients. Transport writes remain chunked where applicable, while larger world snapshots no longer fail session setup at the former 32000-byte logical-message limit. Website framing documentation needs the same limit update.
