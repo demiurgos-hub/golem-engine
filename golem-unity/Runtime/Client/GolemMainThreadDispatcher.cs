@@ -18,7 +18,10 @@ namespace GolemEngine.Unity
             }
 
             var go = new GameObject("GolemMainThreadDispatcher");
-            DontDestroyOnLoad(go);
+            if (Application.isPlaying)
+            {
+                DontDestroyOnLoad(go);
+            }
             _instance = go.AddComponent<GolemMainThreadDispatcher>();
         }
 

@@ -1,6 +1,6 @@
 {
   "name": "golem-engine",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "JavaScript/TypeScript client runtime for Golem Engine: GameClient, protobuf codec, and helpers",
   "type": "module",
   "main": "dist/index.js",

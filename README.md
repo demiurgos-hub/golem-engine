@@ -6,7 +6,7 @@ Golem Engine lets you build server-authoritative multiplayer backends in Go, and
 [![Go Reference](https://pkg.go.dev/badge/github.com/demiurgos-hub/golem-engine.svg)](https://pkg.go.dev/github.com/demiurgos-hub/golem-engine)
 [![Go Version](https://img.shields.io/badge/go-1.25%2B-00ADD8.svg)](go.mod)
 [![npm](https://img.shields.io/npm/v/golem-engine.svg)](https://www.npmjs.com/package/golem-engine)
-[![Release](https://img.shields.io/badge/release-v0.2.1-orange.svg)](CHANGELOG.md)
+[![Release](https://img.shields.io/badge/release-v0.3.0-orange.svg)](CHANGELOG.md)
 
 [Website](https://golemengine.dev/) · [Documentation](https://golemengine.dev/docs/) · [Changelog](CHANGELOG.md)
 
@@ -140,7 +140,7 @@ The nested modules under `golem/collision/` and `golem/nav/` are developed with 
 
 ## Status
 
-Golem Engine is at **v0.2.1**. Public APIs and generated output may still change between releases; see [`CHANGELOG.md`](CHANGELOG.md) for details.
+Golem Engine is at **v0.3.0**. Public APIs and generated output may still change between releases; see [`CHANGELOG.md`](CHANGELOG.md) for details.
 
 ## Contributing
 

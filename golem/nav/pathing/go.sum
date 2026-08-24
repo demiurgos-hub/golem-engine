@@ -1,2 +1,4 @@
+github.com/demiurgos-hub/golem-engine/golem/nav v0.3.0 h1:ZEHTDOBsW1LQQoW0pjNNZUpJEWnPx4ftu/tIheCLdC4=
+github.com/demiurgos-hub/golem-engine/golem/nav v0.3.0/go.mod h1:5IYkLyK2Zkjb1nCwDnobSimNpPJ7XymjIe6PgpUXdE4=
 github.com/quasilyte/pathing v0.0.0-20260407155145-15a3c6ca9abd h1:bAy/eFu8OoG1Do7uN7Str2Xq0oO9+hvCvkh5voL8fow=
 github.com/quasilyte/pathing v0.0.0-20260407155145-15a3c6ca9abd/go.mod h1:fxhN3GI+oH3/CevV4WAvx/TQdfm8FM68CfxdirgfAes=

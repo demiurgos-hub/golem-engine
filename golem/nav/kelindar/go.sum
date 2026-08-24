@@ -1,5 +1,7 @@
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+github.com/demiurgos-hub/golem-engine/golem/nav v0.3.0 h1:ZEHTDOBsW1LQQoW0pjNNZUpJEWnPx4ftu/tIheCLdC4=
+github.com/demiurgos-hub/golem-engine/golem/nav v0.3.0/go.mod h1:5IYkLyK2Zkjb1nCwDnobSimNpPJ7XymjIe6PgpUXdE4=
 github.com/kelindar/intmap v1.5.0 h1:VY+AdO4Wx1sF1vGiTkS8n2lxhmFgOQwCIFuePQP4Iqw=
 github.com/kelindar/intmap v1.5.0/go.mod h1:NkypxhfaklmDTJqwano3Q1BWk6je77qgQwszDwu8Kc8=
 github.com/kelindar/iostream v1.4.0 h1:ELKlinnM/K3GbRp9pYhWuZOyBxMMlYAfsOP+gauvZaY=

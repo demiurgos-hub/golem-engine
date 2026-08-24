@@ -196,7 +196,7 @@ namespace GolemEngine.Unity.Tests
 
             client.Connect("ws://example.invalid/ws");
 
-            client.Send(new byte[31995]);
+            client.Send(new byte[GameClient.MaxReliableMessageBytes - 4]);
             client.Send(new byte[1]);
 
             Flush(client);
