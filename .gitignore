@@ -50,9 +50,6 @@ node_modules/
 /golem-js/dist/
 /golem-phaser/dist/
 
-# Local documentation (e.g. Docusaurus under docs/public)
-docs/
-
 # Debug and misc
 *.tmp
 *.temp
