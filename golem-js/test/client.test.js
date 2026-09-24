@@ -1413,6 +1413,48 @@ test("WebTransport acknowledges continuous 20Hz traffic without outbound command
   }
 });
 
+test("WebTransport ACK zero cannot discard an unsent ordered command", async (t) => {
+  let scheduler;
+  t.mock.method(globalThis, "setInterval", (callback) => {
+    scheduler = callback;
+    return 1;
+  });
+  t.mock.method(globalThis, "clearInterval", () => {});
+  const previousWebTransport = globalThis.WebTransport;
+  globalThis.WebTransport = FakeWebTransport;
+  let channel;
+  try {
+    channel = createChannel({ transport: "webtransport", url: "https://example.test" });
+    await flushMicrotasks();
+    await flushMicrotasks();
+    const transport = FakeWebTransport.instances.at(-1);
+
+    channel.reliableOrdered.send(new Uint8Array([11]));
+    scheduler();
+    await flushMicrotasks();
+    assert.equal(transport.datagramWrites.length, 1);
+    assert.equal(decodeDatagramPacket(transport.datagramWrites[0]).packetSeq, 0);
+
+    // An ACK for the previous command arrives before the next scheduler tick.
+    channel.reliableOrdered.send(new Uint8Array([22]));
+    transport.datagramReadable.push(encodeDatagramPacket({
+      packetSeq: 0, ackSeq: 0, ackMask: [0, 0, 0, 0], flags: 1,
+    }));
+    await flushMicrotasks();
+    scheduler();
+    await flushMicrotasks();
+
+    assert.equal(transport.datagramWrites.length, 2, "the second command must still be sent");
+    const second = decodeDatagramPacket(transport.datagramWrites[1]);
+    assert.equal(second.orderedSeq, 1, "ordered delivery must have no missing command");
+    assert.deepEqual(Array.from(second.payload), [22]);
+  } finally {
+    channel?.close();
+    globalThis.WebTransport = previousWebTransport;
+    FakeWebTransport.instances.length = 0;
+  }
+});
+
 test("WebTransport reliable datagrams piggyback eventual ACK state", async () => {
   const previousWebTransport = globalThis.WebTransport;
   globalThis.WebTransport = FakeWebTransport;

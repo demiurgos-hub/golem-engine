@@ -14,6 +14,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 ### Fixed
 
 - Go and JavaScript WebTransport clients acknowledge sustained incoming state traffic within their configured coalescing interval. Continuous updates no longer postpone acknowledgements indefinitely and disconnect idle clients when the interval matches the server tick rate.
+- JavaScript WebTransport clients retain queued commands that have not been sent when an acknowledgement for an earlier packet arrives, preventing missing ordered commands and subsequent disconnections.
 
 ## [0.3.0] - 2026-08-24
 

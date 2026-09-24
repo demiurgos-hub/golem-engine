@@ -26,6 +26,8 @@ Transport constants and framing must stay in sync with `golem/net`: reliable fra
 
 WebTransport ACK coalescing starts its deadline with the first pending packet. Later arrivals must not postpone that deadline; an idle client receiving continuous state still sends standalone ACKs. Piggybacked or standalone ACK delivery clears the pending deadline.
 
+Peer ACKs only prune reliable commands that are in flight. A newly queued command's placeholder packet sequence is not a sent packet; acknowledging it would discard the command and leave a permanent ordered-sequence gap.
+
 `GameClient` exposes two command sends: `send` uses reliable-unordered datagrams on WebTransport, while `sendOrdered` uses reliable-ordered datagrams. Both fall back to the shared reliable-stream `ClientPacket` queue on WebSocket. Keep raw byte sends confined to the low-level channel contracts, enforce each datagram lane's payload budget without stream fallback, and keep generated `send{Name}` / `send{Name}Ordered` helpers aligned.
 
 `GameClient` treats stream `ServerMessage` frames as wrapped protobuf payloads, while compact state datagrams are framed state records and go directly through `EntityManager.applyCompactUpdate`. Keep world updates and server events on the reliable stream path.

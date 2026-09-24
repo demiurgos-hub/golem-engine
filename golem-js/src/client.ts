@@ -1985,6 +1985,10 @@ class WebTransportDatagramProtocol {
   private _pruneQueue(queue: PendingReliableMessage[], ackSeq: number, ackMask: AckMask, now: number): void {
     for (let i = queue.length - 1; i >= 0; i--) {
       const msg = queue[i];
+      // Queued commands have no packet to acknowledge until their first send.
+      if (!msg.inFlight) {
+        continue;
+      }
       const state = packetAckState(msg.lastPacketSeq, ackSeq, ackMask);
       if (state === "delivered") {
         queue.splice(i, 1);
