@@ -1365,6 +1365,54 @@ test("WebTransport standalone ACK interval is configurable", async () => {
   }
 });
 
+test("WebTransport acknowledges continuous 20Hz traffic without outbound commands", async (t) => {
+  let now = 1000;
+  let scheduler;
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(globalThis, "setInterval", (callback) => {
+    scheduler = callback;
+    return 1;
+  });
+  t.mock.method(globalThis, "clearInterval", () => {});
+  const previousWebTransport = globalThis.WebTransport;
+  globalThis.WebTransport = FakeWebTransport;
+  let channel;
+  try {
+    channel = createChannel({ transport: "webtransport", url: "https://example.test", eventualAckIntervalMs: 50 });
+    await flushMicrotasks();
+    await flushMicrotasks();
+    const transport = FakeWebTransport.instances.at(-1);
+    assert.equal(typeof scheduler, "function");
+
+    // A packet arrives before the ACK scheduler at each 20 Hz boundary.
+    // Advance beyond the server's delivery timeout without any command sends.
+    for (let seq = 0; seq <= 80; seq++) {
+      now = 1000 + seq * 50;
+      transport.datagramReadable.push(encodeDatagramPacket({
+        packetSeq: seq, ackSeq: 0, ackMask: [0, 0, 0, 0], flags: 0,
+        lane: 4, stateToken: BigInt(seq + 1), payload: new Uint8Array(),
+      }));
+      await flushMicrotasks();
+      scheduler();
+      await flushMicrotasks();
+      assert.equal(transport.datagramWrites.length, Math.floor((seq + 1) / 2), `ACKs after packet ${seq}`);
+    }
+    for (const [index, bytes] of transport.datagramWrites.entries()) {
+      const ack = decodeDatagramPacket(bytes);
+      assert.equal(ack.flags, 1);
+      assert.equal(ack.ackSeq, index * 2 + 1);
+    }
+    now += 50;
+    scheduler();
+    await flushMicrotasks();
+    assert.equal(transport.datagramWrites.length, 41);
+  } finally {
+    channel?.close();
+    globalThis.WebTransport = previousWebTransport;
+    FakeWebTransport.instances.length = 0;
+  }
+});
+
 test("WebTransport reliable datagrams piggyback eventual ACK state", async () => {
   const previousWebTransport = globalThis.WebTransport;
   globalThis.WebTransport = FakeWebTransport;

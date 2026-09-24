@@ -1812,7 +1812,8 @@ class WebTransportDatagramProtocol {
       return;
     }
     const accepted = this._recvPackets.accept(packet.packetSeq);
-    if (accepted) {
+    if (accepted && !this._ackDirty) {
+      // Preserve the first pending deadline even while packets keep arriving.
       this._ackDirty = true;
       this._ackDueAt = now + this._ackIntervalMs;
     }

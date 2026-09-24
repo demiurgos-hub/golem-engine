@@ -320,6 +320,11 @@ func (p *datagramProtocol) deliverOrdered(packet datagramPacket, now time.Time, 
 }
 
 func (p *datagramProtocol) scheduleAckLocked(now time.Time) {
+	if p.ackDirty {
+		return
+	}
+	// Coalesce from the first unacknowledged packet; sustained traffic must
+	// not postpone the deadline until the peer declares delivery stalled.
 	p.ackDirty = true
 	p.ackDueAt = now.Add(p.ackInterval)
 }

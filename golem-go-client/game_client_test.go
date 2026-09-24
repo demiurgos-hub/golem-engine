@@ -718,6 +718,45 @@ func TestDatagramProtocolSendsDueAckOnlyPacket(t *testing.T) {
 	}
 }
 
+func TestDatagramProtocolAcksContinuous20HzTraffic(t *testing.T) {
+	var sent [][]byte
+	protocol := newDatagramProtocol(func(data []byte) error {
+		sent = append(sent, append([]byte(nil), data...))
+		return nil
+	}, 50*time.Millisecond)
+	start := time.Unix(1000, 0)
+	// Receive before servicing the scheduler at each 20 Hz boundary. This
+	// reproduces an idle client with no outbound commands to piggyback ACKs.
+	for seq := uint16(0); seq <= 80; seq++ {
+		now := start.Add(time.Duration(seq) * 50 * time.Millisecond)
+		protocol.mu.Lock()
+		protocol.recvPackets.accept(seq)
+		protocol.scheduleAckLocked(now)
+		protocol.mu.Unlock()
+		if err := protocol.sendDueAck(now); err != nil {
+			t.Fatalf("sendDueAck at packet %d: %v", seq, err)
+		}
+		if got, want := len(sent), int(seq+1)/2; got != want {
+			t.Fatalf("ACKs after packet %d = %d, want %d during continuous traffic", seq, got, want)
+		}
+	}
+	for i, data := range sent {
+		packet, err := decodeDatagramPacket(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if packet.flags != datagramFlagAckOnly || packet.ackSeq != uint16(i*2+1) {
+			t.Fatalf("ACK %d = %+v, want latest received packet %d", i, packet, i*2+1)
+		}
+	}
+	if err := protocol.sendDueAck(start.Add(4050 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 41 {
+		t.Fatalf("ACKs after final deadline = %d, want 41", len(sent))
+	}
+}
+
 func TestDatagramProtocolRejectsMalformedDatagrams(t *testing.T) {
 	protocol := newDatagramProtocol(func([]byte) error { return nil }, time.Millisecond)
 
