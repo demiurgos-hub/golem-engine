@@ -8,6 +8,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- `golem-bake --remove-integration <name>` safely removes generated outputs for configured shared-only bridges such as Phaser before a renderer migration. It preserves authored files, rejects output paths outside the project and leaves configuration changes to the caller. The website CLI documentation needs the matching removal workflow.
 - The JavaScript runtime exports GolemConnectionLifecycle and its configuration/status types for persistent connections in any renderer. Phaser retains its existing connection helper as a compatibility re-export. Website integration documentation should describe the new core import.
 
 ## [0.3.0] - 2026-08-24

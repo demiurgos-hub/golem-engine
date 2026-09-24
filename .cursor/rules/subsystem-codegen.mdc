@@ -10,6 +10,8 @@ alwaysApply: false
 
 `Bake` orchestrates proto output plus per-integration generation from `schema` DTOs.
 
+`RemoveIntegration` only supports shared-only targets without extra emitters or finalizers. It preflights known output names, regular files, the generated header and resolved project containment before removing those files. It must never recursively delete an output directory or alter consumer configuration.
+
 Templates live under `codegen/templates/` and are embedded with `go:embed`.
 
 `integration.go` maps config keys to template paths, output filenames, post-process hooks, extra emitters, and finalizers.
