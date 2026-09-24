@@ -6,6 +6,10 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ## Unreleased
 
+### Added
+
+- The JavaScript runtime exports GolemConnectionLifecycle and its configuration/status types for persistent connections in any renderer. Phaser retains its existing connection helper as a compatibility re-export. Website integration documentation should describe the new core import.
+
 ## [0.3.0] - 2026-08-24
 
 ### Added
@@ -112,3 +116,4 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 - **Breaking:** Go module path renamed from `golem-engine` to `github.com/demiurgos-hub/golem-engine`. Update `go.mod` `require` directives and Go import paths in consumer projects, then re-run `golem-bake` so generated Go server, Go client, and Ebiten code uses the new default import paths.
 - **Breaking:** Collision and navigation nested modules renamed from `golem.collision` and `golem.nav` to `github.com/demiurgos-hub/golem-engine/golem/collision` and `github.com/demiurgos-hub/golem-engine/golem/nav`. Projects that import these modules directly must update paths; workspace `replace` directives must use the new module paths.
 - Unity editor default `golem-bake` command is now `go run github.com/demiurgos-hub/golem-engine/cmd/golem-bake`.
+

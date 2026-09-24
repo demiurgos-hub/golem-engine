@@ -34,3 +34,5 @@ export {
   type FetchRealtimeConfigOptions,
   type ConnectOption,
 } from "./bootstrap.js";
+
+export { GolemConnectionLifecycle, type GolemConnectionConfig, type GolemConnectionStatus } from "./connection.js";
