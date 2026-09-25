@@ -8,6 +8,21 @@ import (
 	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
+func TestGenerateJSManagerWithNoEntitySchemas(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/js/manager.ts.tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, schema.SharedData{GolemImport: "golem-engine"}); err != nil {
+		t.Fatal(err)
+	}
+	content := out.String()
+	if !strings.Contains(content, "export type SyncedEntity = never;") || strings.Contains(content, "import {  }") {
+		t.Fatalf("empty entity schema emitted invalid or unnecessary declarations:\n%s", content)
+	}
+}
+
 func TestGenerateJSManagerTemplateUsesRevisionChecksForAllEntityUpdates(t *testing.T) {
 	tmpl, err := loadEmbeddedTemplate("templates/js/manager.ts.tmpl")
 	if err != nil {

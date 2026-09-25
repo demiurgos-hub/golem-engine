@@ -20,6 +20,9 @@ func Bake(projectRoot string) error {
 	if err != nil {
 		return err
 	}
+	if err := validateThrelteIntegration(projectRoot, cfg); err != nil {
+		return err
+	}
 
 	typesDir := filepath.Join(projectRoot, cfg.TypesSchema)
 	customTypesList, err := schema.LoadCustomTypes(typesDir)
@@ -146,6 +149,8 @@ func Bake(projectRoot string) error {
 				golemImport = "GolemEngine.Unity"
 			case "phaser":
 				golemImport = "golem-phaser"
+			case "threlte":
+				golemImport = "golem-threlte"
 			case "unity":
 				golemImport = "GolemEngine.Unity"
 			case "ebiten":

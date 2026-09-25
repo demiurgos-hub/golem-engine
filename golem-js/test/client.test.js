@@ -202,6 +202,199 @@ function fallbackClient(createChannel, supportsTransport = () => true) {
   });
 }
 
+for (const connectionKind of ["direct", "plan"]) {
+  const endpoint = { transport: "websocket", url: "ws://localhost/game" };
+  const input = connectionKind === "plan" ? { candidates: [endpoint] } : endpoint;
+
+  test(`GameClient ${connectionKind} observers can disconnect without a stale connected callback`, () => {
+    const channel = new ControlledChannel("websocket");
+    const client = fallbackClient(() => channel);
+    const legacy = [];
+    client.onConnect(() => legacy.push("connected"));
+    client.onDisconnect(() => legacy.push("disconnected"));
+    client.subscribeConnectionState((state) => {
+      if (state.type === "connected") client.disconnect();
+    });
+    client.connect(input);
+    channel.open();
+    assert.equal(client.connected, false);
+    assert.equal(channel.closeCalls, 1);
+    assert.deepEqual(legacy, ["disconnected"]);
+  });
+
+  for (const intentional of [false, true]) {
+    test(`GameClient ${connectionKind} observers can reconnect during ${intentional ? "intentional" : "transport"} disconnect`, () => {
+      const channels = [];
+      const client = fallbackClient(() => {
+        const channel = new ControlledChannel("websocket");
+        channels.push(channel);
+        return channel;
+      });
+      const legacy = [];
+      client.onConnect(() => legacy.push("connected"));
+      client.onDisconnect(() => legacy.push("disconnected"));
+      let replaced = false;
+      client.subscribeConnectionState((state) => {
+        if (state.type === "disconnected" && !replaced) {
+          replaced = true;
+          client.connect(input);
+        }
+      });
+      client.connect(input);
+      channels[0].open();
+      if (intentional) client.disconnect();
+      else channels[0].fail();
+      assert.equal(channels.length, 2);
+      assert.equal(client.connectionState.type, "connecting");
+      assert.deepEqual(legacy, ["connected"]);
+      channels[1].open();
+      assert.equal(client.connected, true);
+      assert.deepEqual(legacy, ["connected", "connected"]);
+      client.disconnect();
+    });
+  }
+}
+
+test("GameClient terminal-plan observer can replace a failed attempt without a stale disconnect callback", () => {
+  const channels = [];
+  const client = fallbackClient(() => {
+    const channel = new ControlledChannel("websocket");
+    channels.push(channel);
+    return channel;
+  });
+  const legacy = [];
+  client.onDisconnect((info) => legacy.push(info));
+  client.subscribeConnectionState((state) => {
+    if (state.type === "disconnected") client.connect("ws://localhost/replacement");
+  });
+  client.connect({ candidates: [{ transport: "websocket", url: "ws://localhost/game" }] });
+  channels[0].fail();
+  assert.equal(channels.length, 2);
+  assert.equal(client.connectionState.type, "connecting");
+  assert.deepEqual(legacy, []);
+  client.disconnect();
+});
+
+test("GameClient snapshot observers added during a notification replay that state once", () => {
+  const channel = new ControlledChannel("websocket");
+  const client = fallbackClient(() => channel);
+  const added = [];
+  let unsubscribe;
+  client.subscribeConnectionState((state) => {
+    if (state.type === "connecting") {
+      unsubscribe = client.subscribeConnectionState((snapshot) => added.push(snapshot.type));
+    }
+  });
+  client.connect("ws://localhost/game");
+  assert.deepEqual(added, ["connecting"]);
+  channel.open();
+  assert.deepEqual(added, ["connecting", "connected"]);
+  unsubscribe();
+  client.disconnect();
+});
+
+test("GameClient state observers share snapshots without replacing legacy callbacks", () => {
+  const channel = new ControlledChannel("websocket");
+  const client = fallbackClient(() => channel);
+  const first = [];
+  const second = [];
+  const legacy = [];
+  const unsubscribe = client.subscribeConnectionState((state) => first.push(state));
+  client.subscribeConnectionState((state) => second.push(state));
+  assert.deepEqual(first, [{ type: "idle" }]);
+  assert.equal(first[0], client.connectionState);
+
+  client.onConnect(() => legacy.push("replaced"));
+  client.onConnect(() => legacy.push("connected"));
+  client.onDisconnect(() => legacy.push("replaced"));
+  client.onDisconnect(() => legacy.push("disconnected"));
+  client.connect("ws://localhost/game");
+  assert.equal(client.connectionState.type, "connecting");
+  channel.open();
+  assert.equal(client.connectionState.type, "connected");
+  unsubscribe();
+  unsubscribe();
+  client.disconnect();
+
+  assert.deepEqual(first.map((state) => state.type), ["idle", "connecting", "connected"]);
+  assert.deepEqual(second.map((state) => state.type), ["idle", "connecting", "connected", "disconnected"]);
+  assert.equal(second.at(-1), client.connectionState);
+  assert.equal(client.connectionState.info.wasClean, true);
+  assert.deepEqual(legacy, ["connected", "disconnected"]);
+  channel.open();
+  channel.fail();
+  assert.equal(second.length, 4);
+});
+
+test("GameClient pending plan cancellation becomes observable idle without a legacy disconnect", async () => {
+  const pending = deferred();
+  const channels = [];
+  const client = fallbackClient((options) => {
+    const channel = new ControlledChannel(options.transport);
+    channels.push(channel);
+    return channel;
+  });
+  const states = [];
+  let legacyDisconnects = 0;
+  client.subscribeConnectionState((state) => states.push(state.type));
+  client.onDisconnect(() => legacyDisconnects++);
+  client.connect(fallbackPlan(() => pending.promise));
+  client.disconnect();
+  pending.resolve({ transport: "webtransport", url: "https://example.test/api/wt" });
+  await pending.promise;
+  await flushMicrotasks();
+
+  assert.deepEqual(states, ["idle", "connecting", "idle"]);
+  assert.equal(client.connectionState.type, "idle");
+  assert.equal(legacyDisconnects, 0);
+  assert.equal(channels.length, 0);
+});
+
+test("GameClient state follows one logical fallback attempt", async () => {
+  const channels = [];
+  const client = fallbackClient((options) => {
+    const channel = new ControlledChannel(options.transport);
+    channels.push(channel);
+    return channel;
+  });
+  const states = [];
+  client.subscribeConnectionState((state) => states.push(state.type));
+  client.connect(fallbackPlan());
+  channels[0].fail();
+  await flushMicrotasks();
+  assert.deepEqual(states, ["idle", "connecting"]);
+  assert.equal(channels.length, 2);
+  channels[1].open();
+  channels[1].fail({ wasClean: false, reason: "network lost" });
+  assert.deepEqual(states, ["idle", "connecting", "connected", "disconnected"]);
+  assert.equal(client.connectionState.info.wasClean, false);
+});
+
+test("GameClient reports setup failure snapshots while retaining synchronous throw semantics", () => {
+  const failure = new Error("failed wss://localhost/game?ticket=secret");
+  const client = fallbackClient(() => { throw failure; });
+  let legacyDisconnects = 0;
+  client.onDisconnect(() => legacyDisconnects++);
+  assert.throws(() => client.connect("wss://localhost/game?ticket=secret"), failure);
+  assert.equal(client.connectionState.type, "disconnected");
+  assert.doesNotMatch(client.connectionState.info.error.message, /secret/);
+  assert.equal(legacyDisconnects, 0);
+});
+
+test("GameClient allows an observer to cancel before a transport opens", () => {
+  let channels = 0;
+  const client = fallbackClient(() => {
+    channels++;
+    return new ControlledChannel("websocket");
+  });
+  client.subscribeConnectionState((state) => {
+    if (state.type === "connecting") client.disconnect();
+  });
+  client.connect("ws://localhost/game");
+  assert.equal(client.connectionState.type, "idle");
+  assert.equal(channels, 0);
+});
+
 test("GameClient built-in capability detection skips unsupported WebTransport before resolving credentials", () => {
   const previousWebSocket = globalThis.WebSocket;
   const previousWebTransport = globalThis.WebTransport;

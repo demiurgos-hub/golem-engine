@@ -1,0 +1,27 @@
+---
+description: integration/threlte — Svelte reactive context, Threlte entity components, generated adapters, and runnable example.
+globs:
+  - golem-threlte/**/*
+  - examples/threlte/**/*
+  - codegen/templates/threlte/**/*.tmpl
+  - codegen/threlte*.go
+alwaysApply: false
+---
+
+# `integration/threlte`
+
+`golem-threlte` adapts the generated JS managers to Svelte 5 and Threlte 8. The core runtime owns transport, asynchronous connection options, fallback and reconnect; keep framework dependencies out of `golem-js`. Peer dependencies share the application's Svelte/Threlte/Three/runtime instances. Build with `svelte-package`; never hand-edit or commit `dist`.
+
+The root export contains Svelte context and stores, `/core` contains framework-neutral projection/mount controllers, and `/threlte` contains Canvas-scoped components and task/transform helpers. Svelte exports require a Svelte-aware compiler. Imports must not touch browser globals, create renderers or connect. Provider context is instance-local, never a module-level mutable session.
+
+`GolemProvider` takes a generated adapter and exactly one discriminated source: borrowed client, borrowed already-started lifecycle, or explicitly owned lifecycle configuration. Owned startup occurs in `onMount`; only its provider closes it. Source/adapter identity is fixed per provider; use a keyed remount to replace it. Canvas/entity lifetime must never change shared connection ownership.
+
+Entity stores emit fresh notification envelopes containing unchanged generated instance references. Collections/lookups consult the generated manager; the integration owns only projections and presentation records. Do not proxy models or introduce an authoritative replica. Entity removal/reconnect clears presentation; the core's retained world values remain until replaced. Generated command helpers are the command boundary.
+
+The `threlte` target emits one raw `GolemThrelte.ts`, with typed adapters, component props/events and complete component/headless definitions. It depends on `js-client`; outputs must not overlap JS recursive compilation. No codec or model duplication, authored component paths, or visual schema settings. Retirement uses the shared-only removal contract.
+
+Mounts subscribe before backfill, preserve ordinary-update components, fence old incarnation callbacks synchronously, and remount same-ID replacements. Pending events wait for component readiness and are discarded on removal. Multiple mounts/filtering must leave the session and generated managers intact. Component helpers clean up event listeners/tasks, and expose an abort signal/guard for application async continuations.
+
+Use Threlte's scheduler only. Delta and optional interpolation duration are seconds. Transform selectors explicitly map position/quaternion/scale; external ownership bypasses every write. Reset on replacement, teleports, target changes and return from external control. Shared assets belong to their explicit owner; respect Threlte `dispose={false}` and never indiscriminately traverse/dispose a scene.
+
+The example has a nested Go module and local replacements. Its scripts use `GOWORK=off`, generate rather than patch protocol output, and run the real server. Keep gameplay and demonstration assets there. Tests must exercise mounted Svelte reactivity/lifecycle and generated consumer typing, not only inspect implementation details. Build core before package tests; avoid concurrent builds cleaning the same output.

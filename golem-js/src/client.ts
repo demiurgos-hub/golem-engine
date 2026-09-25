@@ -257,6 +257,13 @@ export interface DisconnectInfo {
   error?: unknown;
 }
 
+/** Current transport state, observable without replacing legacy callbacks. */
+export type GameClientConnectionState =
+  | { type: "idle" }
+  | { type: "connecting" }
+  | { type: "connected" }
+  | { type: "disconnected"; info: DisconnectInfo };
+
 function redactUrl(url: string): string {
   try {
     const parsed = new URL(url);
@@ -675,6 +682,10 @@ export class GameClient {
   private _supportsTransport: (transport: TransportKind) => boolean;
   private _onConnect?: () => void;
   private _onDisconnect?: (ev: DisconnectInfo) => void;
+  private _connectionState: GameClientConnectionState = { type: "idle" };
+  private readonly _connectionStateListeners = new Set<
+    (state: GameClientConnectionState) => void
+  >();
   private _queuedFrames: Uint8Array[] = [];
   private _queuedBytes = 0;
   private _flushScheduled = false;
@@ -721,7 +732,22 @@ export class GameClient {
     console.warn(
       `golem-js: connecting transport=${options.transport} url=${redactUrl(options.url)}`,
     );
-    const channel = this._createChannel(options);
+    let channel: ReliableMessageChannel;
+    try {
+      channel = this._createChannel(options);
+    } catch (error) {
+      if (this._isCurrentGeneration(generation)) {
+        this._setConnectionState({
+          type: "disconnected",
+          info: {
+            wasClean: false,
+            reason: `${options.transport} connection setup failed`,
+            error: sanitizedTransportError(`${options.transport} connection setup failed`),
+          },
+        });
+      }
+      throw error;
+    }
     this._channel = channel;
     channel.onClose((ev) => {
       if (!this._isCurrentChannel(generation, channel)) {
@@ -732,7 +758,8 @@ export class GameClient {
       this._clearQueuedFrames();
       this._clearEntities();
       this._channel = null;
-      this._onDisconnect?.(safeInfo);
+      this._setConnectionState({ type: "disconnected", info: safeInfo });
+      if (this._isCurrentGeneration(generation)) this._onDisconnect?.(safeInfo);
     });
     channel.onMessage((bytes) => {
       if (this._isCurrentChannel(generation, channel)) {
@@ -757,14 +784,15 @@ export class GameClient {
     channel.onOpen(() => {
       if (this._isCurrentChannel(generation, channel)) {
         this._connectionOpened = true;
-        this._onConnect?.();
+        this._setConnectionState({ type: "connected" });
+        if (this._isCurrentChannel(generation, channel)) this._onConnect?.();
       }
     });
   }
 
   /** Close the current connection, if any. */
   disconnect(): void {
-    this._beginConnection();
+    this._beginConnection("idle");
   }
 
   private _connectPlan(plan: ConnectPlan): void {
@@ -1064,7 +1092,8 @@ export class GameClient {
           : sanitizedTransportError(`${options.transport} transport failed`),
       });
       logDisconnect(options.transport, info);
-      this._onDisconnect?.(info);
+      this._setConnectionState({ type: "disconnected", info });
+      if (this._isCurrentGeneration(generation)) this._onDisconnect?.(info);
     });
     channel.onMessage((bytes) => {
       if (phase === "open" && this._isCurrentChannel(generation, channel)) {
@@ -1098,7 +1127,8 @@ export class GameClient {
       if (options.transport === "websocket" && this._planAffinityKey === affinityKey) {
         this._stickyWebSocket = true;
       }
-      this._onConnect?.();
+      this._setConnectionState({ type: "connected" });
+      if (this._isCurrentChannel(generation, channel)) this._onConnect?.();
     });
 
     if (phase === "opening" && options.transport === "webtransport") {
@@ -1131,10 +1161,11 @@ export class GameClient {
       error: sanitizedTransportError(reason),
     };
     logDisconnect(transport, info);
-    this._onDisconnect?.(info);
+    this._setConnectionState({ type: "disconnected", info });
+    if (this._isCurrentGeneration(generation)) this._onDisconnect?.(info);
   }
 
-  private _beginConnection(): number {
+  private _beginConnection(nextState: "connecting" | "idle" = "connecting"): number {
     const channel = this._channel;
     const notifyCleanDisconnect = channel != null && this._connectionOpened;
     const generation = ++this._connectionGeneration;
@@ -1157,11 +1188,16 @@ export class GameClient {
       // Closing a superseded channel must not block the new attempt.
     }
     if (notifyCleanDisconnect) {
-      this._onDisconnect?.({
+      const info: DisconnectInfo = {
         code: 1000,
         reason: "client disconnect",
         wasClean: true,
-      });
+      };
+      this._setConnectionState({ type: "disconnected", info });
+      if (this._isCurrentGeneration(generation)) this._onDisconnect?.(info);
+    }
+    if (this._isCurrentGeneration(generation) && (!notifyCleanDisconnect || nextState === "connecting")) {
+      this._setConnectionState({ type: nextState });
     }
     return generation;
   }
@@ -1235,6 +1271,30 @@ export class GameClient {
 
   get connected(): boolean {
     return this._channel?.connected ?? false;
+  }
+
+  /** Current transport state; cancelling a pending connection returns to idle. */
+  get connectionState(): GameClientConnectionState {
+    return this._connectionState;
+  }
+
+  /** Observe current and subsequent transport states; observers may cancel or replace the connection. */
+  subscribeConnectionState(listener: (state: GameClientConnectionState) => void): () => void {
+    this._connectionStateListeners.add(listener);
+    listener(this._connectionState);
+    return () => {
+      this._connectionStateListeners.delete(listener);
+    };
+  }
+
+  private _setConnectionState(state: GameClientConnectionState): void {
+    this._connectionState = state;
+    for (const listener of [...this._connectionStateListeners]) {
+      if (this._connectionState !== state) {
+        break;
+      }
+      if (this._connectionStateListeners.has(listener)) listener(state);
+    }
   }
 
   private _scheduleFlush(): void {
@@ -1329,7 +1389,9 @@ export class GameClient {
     this.entities.clear?.();
   }
 
+  /** Replace the legacy connected callback; multicast observers are unaffected. */
   onConnect(fn: () => void): void { this._onConnect = fn; }
+  /** Replace the legacy disconnected callback; multicast observers are unaffected. */
   onDisconnect(fn: (ev: DisconnectInfo) => void): void { this._onDisconnect = fn; }
 }
 

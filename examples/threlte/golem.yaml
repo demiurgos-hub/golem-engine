@@ -1,0 +1,22 @@
+entity_schema: schemas/entities/
+command_schema: schemas/commands/
+event_schema: schemas/events/
+world_schema: schemas/world/
+
+simulation:
+  dimensions: 3
+
+proto:
+  package: threlteexample
+  go_package: example.com/golem-threlte/internal/generated
+  out: internal/generated/entities.proto
+
+integrations:
+  go-server:
+    out: internal/generated/
+    package: generated
+  js-client:
+    out: web/src/generated/client/
+  threlte:
+    out: web/src/generated/threlte/
+    protocol_import: ../client/

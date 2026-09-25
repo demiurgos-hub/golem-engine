@@ -8,6 +8,9 @@ export type GolemConnectionStatus =
   | { type: "disconnected"; info: DisconnectInfo }
   | { type: "failed"; attempts: number };
 
+/** Observable lifecycle snapshot, including its initial or cancelled idle state. */
+export type GolemConnectionSnapshot = GolemConnectionStatus | { type: "idle" };
+
 /** Configuration for the persistent Golem client connection. */
 export interface GolemConnectionConfig<C extends GameClient = GameClient> {
   /** Called once when the connection lifecycle starts. */
@@ -47,13 +50,17 @@ function isPromise<T>(value: T | Promise<T>): value is Promise<T> {
 /**
  * GolemConnectionLifecycle owns one generated client and reconnects unexpected
  * transport drops independently of renderer or scene lifetimes.
- *
- * @internal
  */
 export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
   private readonly statusListeners = new Set<
     (status: GolemConnectionStatus) => void
   >();
+  private readonly snapshotListeners = new Set<
+    (status: GolemConnectionSnapshot) => void
+  >();
+  private currentStatus: GolemConnectionSnapshot = { type: "idle" };
+  private unsubscribeConnectionState?: () => void;
+  private disconnectNotifications = 0;
   private clientInstance?: C;
   private reconnectAttempts = 0;
   private reconnectTimer?: unknown;
@@ -106,6 +113,11 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
     return this.clientInstance?.connected ?? false;
   }
 
+  /** Current lifecycle status, including idle before connection or after cancellation. */
+  get status(): GolemConnectionSnapshot {
+    return this.currentStatus;
+  }
+
   /** Create and wire the client, then optionally connect. */
   start(): void {
     if (this.destroyed) {
@@ -118,10 +130,24 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
     this.stopped = false;
     const client = this.config.createClient();
     this.clientInstance = client;
-    client.onConnect(() => this.handleConnect());
-    client.onDisconnect((info) => this.handleDisconnect(info));
+    const connectionAttempt = this.connectionAttempt;
+    const unsubscribe = client.subscribeConnectionState((state) => {
+      if (state.type === "connected") {
+        this.handleConnect();
+      } else if (state.type === "disconnected") {
+        this.handleDisconnect(state.info);
+      } else if (state.type === "idle") {
+        this.publishSnapshot({ type: "idle" });
+      }
+    });
+    // Immediate replay may synchronously destroy the lifecycle before subscribe returns.
+    if (this.destroyed) {
+      unsubscribe();
+      return;
+    }
+    this.unsubscribeConnectionState = unsubscribe;
 
-    if (this.config.autoConnect !== false) {
+    if (this.isCurrentAttempt(connectionAttempt) && this.config.autoConnect !== false) {
       this.connect();
     }
   }
@@ -137,6 +163,7 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
 
     const attempt = this.reconnectAttempts + 1;
     this.emit({ type: "connecting", attempt });
+    if (!this.isCurrentAttempt(connectionAttempt)) return;
 
     let options: ConnectInput | Promise<ConnectInput>;
     try {
@@ -169,9 +196,13 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
   /** Stop reconnecting and close the current transport. */
   disconnect(): void {
     this.stopped = true;
-    this.connectionAttempt++;
+    const connectionAttempt = ++this.connectionAttempt;
     this.cancelReconnect();
+    const connected = this.connected;
     this.clientInstance?.disconnect();
+    if (!connected && this.connectionAttempt === connectionAttempt) {
+      this.publishSnapshot({ type: "idle" });
+    }
   }
 
   /** Subscribe to connection status changes. */
@@ -182,6 +213,17 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
     };
   }
 
+  /** Observe current and subsequent status; cancelling from a callback fences the interrupted attempt. */
+  subscribeStatus(listener: (status: GolemConnectionSnapshot) => void): () => void {
+    if (!this.destroyed) {
+      this.snapshotListeners.add(listener);
+    }
+    listener(this.currentStatus);
+    return () => {
+      this.snapshotListeners.delete(listener);
+    };
+  }
+
   /** Permanently stop the connection lifecycle and release listeners. */
   destroy(): void {
     if (this.destroyed) {
@@ -189,7 +231,10 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
     }
     this.destroyed = true;
     this.disconnect();
+    this.unsubscribeConnectionState?.();
+    this.unsubscribeConnectionState = undefined;
     this.statusListeners.clear();
+    this.snapshotListeners.clear();
   }
 
   private handleConnect(): void {
@@ -199,8 +244,11 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
   }
 
   private handleDisconnect(info: DisconnectInfo): void {
-    this.emit({ type: "disconnected", info });
-    if (!this.stopped && !info.wasClean) {
+    this.disconnectNotifications++;
+    const connectionAttempt = this.connectionAttempt;
+    const status: GolemConnectionStatus = { type: "disconnected", info };
+    this.emit(status);
+    if (this.currentStatus === status && this.isCurrentAttempt(connectionAttempt) && !info.wasClean) {
       this.scheduleReconnect();
     }
   }
@@ -213,10 +261,13 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
       return;
     }
 
+    const disconnectNotifications = this.disconnectNotifications;
     try {
       this.client.connect(options);
     } catch (error) {
-      this.handleAttemptFailure(connectionAttempt, error, "connect failed");
+      if (this.disconnectNotifications === disconnectNotifications) {
+        this.handleAttemptFailure(connectionAttempt, error, "connect failed");
+      }
     }
   }
 
@@ -240,6 +291,7 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
   }
 
   private scheduleReconnect(): void {
+    const connectionAttempt = this.connectionAttempt;
     const maximum = this.config.maxReconnectAttempts ?? 5;
     if (maximum > 0 && this.reconnectAttempts >= maximum) {
       this.emit({ type: "failed", attempts: this.reconnectAttempts });
@@ -249,15 +301,19 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
     this.reconnectAttempts++;
     const baseDelay = this.config.reconnectBaseDelay ?? 1500;
     const delayMs = baseDelay * 2 ** (this.reconnectAttempts - 1);
-    this.emit({
+    const status: GolemConnectionStatus = {
       type: "reconnecting",
       attempt: this.reconnectAttempts,
       delayMs,
-    });
-    this.reconnectTimer = this.scheduler.setTimeout(() => {
+    };
+    this.emit(status);
+    if (this.currentStatus !== status || !this.isCurrentAttempt(connectionAttempt)) return;
+    const timer = this.scheduler.setTimeout(() => {
+      if (this.reconnectTimer !== timer || !this.isCurrentAttempt(connectionAttempt)) return;
       this.reconnectTimer = undefined;
       this.connect();
     }, delayMs);
+    this.reconnectTimer = timer;
   }
 
   private cancelReconnect(): void {
@@ -269,8 +325,23 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
   }
 
   private emit(status: GolemConnectionStatus): void {
-    for (const listener of this.statusListeners) {
-      listener(status);
+    this.publishSnapshot(status);
+    for (const listener of [...this.statusListeners]) {
+      if (this.currentStatus !== status) break;
+      if (this.statusListeners.has(listener)) listener(status);
+    }
+  }
+
+  private publishSnapshot(status: GolemConnectionSnapshot): void {
+    if (status.type === "idle" && this.currentStatus.type === "idle") {
+      return;
+    }
+    this.currentStatus = status;
+    for (const listener of [...this.snapshotListeners]) {
+      if (this.currentStatus !== status) {
+        break;
+      }
+      if (this.snapshotListeners.has(listener)) listener(status);
     }
   }
 }

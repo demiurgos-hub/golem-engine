@@ -1,0 +1,3 @@
+command: ToggleBeacon
+target: session
+fields: {}

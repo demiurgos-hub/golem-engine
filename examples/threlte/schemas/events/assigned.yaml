@@ -1,0 +1,5 @@
+event: Assigned
+target: session
+fields:
+  actor_id: { type: int64, tag: 1 }
+  session_id: { type: int64, tag: 2 }

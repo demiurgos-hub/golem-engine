@@ -1,0 +1,5 @@
+entity: SessionStats
+global: true
+vars:
+  connected_count: { type: int32, tag: 1 }
+  uptime_seconds: { type: uint32, tag: 2 }

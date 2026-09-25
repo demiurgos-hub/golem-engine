@@ -1,0 +1,3 @@
+entity: Beacon
+vars:
+  intensity: { type: float, tag: 1 }

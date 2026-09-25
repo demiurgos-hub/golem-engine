@@ -1,0 +1,5 @@
+world: Arena
+fields:
+  title: { type: string }
+  beacon_active: { type: bool }
+  pulse_total: { type: uint32 }

@@ -2,11 +2,13 @@
 import type { EntityLifecycle } from "{{.GolemImport}}";
 import { PbReader } from "{{.GolemImport}}";
 import type { EntityUpdate{{range .Entities}}, {{.Name}}State{{end}}{{if .Commands}}, ClientMessage{{end}}{{range .CustomTypes}}, {{.Name}}{{end}} } from "./entities_pb.js";
+{{- if .Entities}}
 import { {{range $i, $e := .Entities}}{{if $i}}, {{end}}{{.Name}}Delta{{end}} } from "./entities_pb.js";
+{{- end}}
 {{range .Entities -}}
 import { Synced{{.Name}} } from "./{{.Name}}Synced.js";
 {{end}}
-export type SyncedEntity = {{range $i, $e := .Entities}}{{if $i}} | {{end}}Synced{{$e.Name}}{{end}};
+export type SyncedEntity = {{if .Entities}}{{range $i, $e := .Entities}}{{if $i}} | {{end}}Synced{{$e.Name}}{{end}}{{else}}never{{end}};
 
 /** Manages all synced entities and dispatches incoming EntityUpdate messages. */
 export class EntityManager {

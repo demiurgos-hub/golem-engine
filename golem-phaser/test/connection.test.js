@@ -5,23 +5,45 @@ import { GolemConnectionLifecycle } from "../dist/connection.js";
 function fakeClient({ notifyOnDisconnect = false } = {}) {
   let connectHandler;
   let disconnectHandler;
+  let connectionState = { type: "idle" };
+  const stateListeners = new Set();
+  const publish = (state) => {
+    connectionState = state;
+    for (const listener of stateListeners) listener(state);
+  };
   return {
     connected: false,
     connectCalls: [],
     disconnectCalls: 0,
     connect(options) {
       this.connectCalls.push(options);
+      publish({ type: "connecting" });
     },
     disconnect() {
       this.disconnectCalls++;
       this.connected = false;
       if (notifyOnDisconnect) {
-        disconnectHandler?.({
+        const info = {
           code: 1000,
           reason: "client disconnect",
           wasClean: true,
-        });
+        };
+        publish({ type: "disconnected", info });
+        disconnectHandler?.(info);
+      } else {
+        publish({ type: "idle" });
       }
+    },
+    get connectionState() {
+      return connectionState;
+    },
+    get stateListenerCount() {
+      return stateListeners.size;
+    },
+    subscribeConnectionState(listener) {
+      stateListeners.add(listener);
+      listener(connectionState);
+      return () => stateListeners.delete(listener);
     },
     onConnect(handler) {
       connectHandler = handler;
@@ -31,10 +53,12 @@ function fakeClient({ notifyOnDisconnect = false } = {}) {
     },
     open() {
       this.connected = true;
+      publish({ type: "connected" });
       connectHandler?.();
     },
     close(info) {
       this.connected = false;
+      publish({ type: "disconnected", info });
       disconnectHandler?.(info);
     },
   };

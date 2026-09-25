@@ -1,0 +1,5 @@
+entity: Actor
+vars:
+  display_name: { type: string, tag: 1 }
+  pulse_count: { type: uint32, tag: 2 }
+  warp_count: { type: uint32, tag: 3 }

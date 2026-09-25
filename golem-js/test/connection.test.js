@@ -1,27 +1,50 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { GolemConnectionLifecycle } from "../dist/connection.js";
+import { GameClient } from "../dist/client.js";
 
 function fakeClient({ notifyOnDisconnect = false } = {}) {
   let connectHandler;
   let disconnectHandler;
+  let connectionState = { type: "idle" };
+  const stateListeners = new Set();
+  const publish = (state) => {
+    connectionState = state;
+    for (const listener of stateListeners) listener(state);
+  };
   return {
     connected: false,
     connectCalls: [],
     disconnectCalls: 0,
     connect(options) {
       this.connectCalls.push(options);
+      publish({ type: "connecting" });
     },
     disconnect() {
       this.disconnectCalls++;
       this.connected = false;
       if (notifyOnDisconnect) {
-        disconnectHandler?.({
+        const info = {
           code: 1000,
           reason: "client disconnect",
           wasClean: true,
-        });
+        };
+        publish({ type: "disconnected", info });
+        disconnectHandler?.(info);
+      } else {
+        publish({ type: "idle" });
       }
+    },
+    get connectionState() {
+      return connectionState;
+    },
+    get stateListenerCount() {
+      return stateListeners.size;
+    },
+    subscribeConnectionState(listener) {
+      stateListeners.add(listener);
+      listener(connectionState);
+      return () => stateListeners.delete(listener);
     },
     onConnect(handler) {
       connectHandler = handler;
@@ -31,10 +54,12 @@ function fakeClient({ notifyOnDisconnect = false } = {}) {
     },
     open() {
       this.connected = true;
+      publish({ type: "connected" });
       connectHandler?.();
     },
     close(info) {
       this.connected = false;
+      publish({ type: "disconnected", info });
       disconnectHandler?.(info);
     },
   };
@@ -78,6 +103,207 @@ function deferred() {
 }
 
 describe("GolemConnectionLifecycle", () => {
+  it("stops before resolving options when a connecting snapshot cancels the attempt", () => {
+    const client = fakeClient();
+    let optionsCalls = 0;
+    const lifecycle = new GolemConnectionLifecycle({
+      createClient: () => client,
+      connectionOptions: () => { optionsCalls++; return "ws://localhost/game"; },
+    });
+    const legacy = [];
+    lifecycle.onStatus((status) => legacy.push(status.type));
+    lifecycle.subscribeStatus((status) => {
+      if (status.type === "connecting") lifecycle.disconnect();
+    });
+    lifecycle.start();
+    assert.equal(lifecycle.status.type, "idle");
+    assert.equal(optionsCalls, 0);
+    assert.deepEqual(client.connectCalls, []);
+    assert.deepEqual(legacy, []);
+    lifecycle.destroy();
+  });
+
+  for (const action of ["disconnect", "destroy"]) {
+    it(`does not schedule a retry after a reconnecting snapshot calls ${action}`, () => {
+      const client = fakeClient();
+      const scheduler = fakeScheduler();
+      const lifecycle = new GolemConnectionLifecycle({
+        createClient: () => client,
+        connectionOptions: () => "ws://localhost/game",
+      }, scheduler);
+      const legacy = [];
+      lifecycle.onStatus((status) => legacy.push(status.type));
+      lifecycle.subscribeStatus((status) => {
+        if (status.type === "reconnecting") lifecycle[action]();
+      });
+      lifecycle.start();
+      client.close({ wasClean: false });
+      assert.equal(lifecycle.status.type, "idle");
+      assert.equal(scheduler.size, 0);
+      assert.deepEqual(scheduler.delays, []);
+      assert.deepEqual(legacy, ["connecting", "disconnected"]);
+      lifecycle.destroy();
+    });
+  }
+
+  it("does not schedule a stale retry when a disconnect snapshot starts a newer attempt", () => {
+    const client = fakeClient();
+    const scheduler = fakeScheduler();
+    const lifecycle = new GolemConnectionLifecycle({
+      createClient: () => client,
+      connectionOptions: () => "ws://localhost/game",
+    }, scheduler);
+    const legacy = [];
+    lifecycle.onStatus((status) => legacy.push(status.type));
+    lifecycle.subscribeStatus((status) => {
+      if (status.type === "disconnected") lifecycle.connect();
+    });
+    lifecycle.start();
+    client.close({ wasClean: false });
+    assert.equal(client.connectCalls.length, 2);
+    assert.equal(lifecycle.status.type, "connecting");
+    assert.equal(scheduler.size, 0);
+    assert.deepEqual(legacy, ["connecting", "connecting"]);
+    lifecycle.destroy();
+  });
+
+  it("releases subscriptions when immediate client-state replay destroys the lifecycle", () => {
+    const client = fakeClient();
+    client.open();
+    let optionsCalls = 0;
+    const lifecycle = new GolemConnectionLifecycle({
+      createClient: () => client,
+      connectionOptions: () => { optionsCalls++; return "ws://localhost/game"; },
+    });
+    const legacy = [];
+    lifecycle.onStatus((status) => legacy.push(status.type));
+    lifecycle.subscribeStatus((status) => {
+      if (status.type === "connected") lifecycle.destroy();
+    });
+    assert.doesNotThrow(() => lifecycle.start());
+    assert.equal(client.stateListenerCount, 0);
+    assert.equal(optionsCalls, 0);
+    assert.equal(client.disconnectCalls, 1);
+    assert.deepEqual(legacy, []);
+  });
+
+  it("replays once to snapshot observers added during dispatch", () => {
+    const client = fakeClient();
+    const lifecycle = new GolemConnectionLifecycle({
+      createClient: () => client,
+      connectionOptions: () => "ws://localhost/game",
+    });
+    const added = [];
+    lifecycle.subscribeStatus((status) => {
+      if (status.type === "connecting") lifecycle.subscribeStatus((snapshot) => added.push(snapshot.type));
+    });
+    lifecycle.start();
+    assert.deepEqual(added, ["connecting"]);
+    client.open();
+    assert.deepEqual(added, ["connecting", "connected"]);
+    lifecycle.destroy();
+  });
+
+  it("replays status snapshots and observes pending cancellation without changing legacy notifications", async () => {
+    const client = fakeClient();
+    const pending = deferred();
+    const snapshots = [];
+    const legacy = [];
+    const lifecycle = new GolemConnectionLifecycle({
+      createClient: () => client,
+      connectionOptions: () => pending.promise,
+    });
+    const unsubscribe = lifecycle.subscribeStatus((status) => snapshots.push(status));
+    lifecycle.onStatus((status) => legacy.push(status));
+    assert.deepEqual(snapshots, [{ type: "idle" }]);
+    assert.equal(snapshots[0], lifecycle.status);
+    assert.deepEqual(legacy, []);
+    lifecycle.start();
+    assert.equal(lifecycle.status.type, "connecting");
+    lifecycle.disconnect();
+    assert.deepEqual(snapshots.map((status) => status.type), ["idle", "connecting", "idle"]);
+    assert.deepEqual(legacy, [{ type: "connecting", attempt: 1 }]);
+    pending.resolve("ws://localhost/stale");
+    await pending.promise;
+    assert.deepEqual(client.connectCalls, []);
+    unsubscribe();
+    lifecycle.connect();
+    await pending.promise;
+    client.open();
+    assert.equal(snapshots.length, 3);
+    assert.equal(lifecycle.status.type, "connected");
+    lifecycle.destroy();
+  });
+
+  it("preserves application callbacks and reconnects after they are replaced", () => {
+    const scheduler = fakeScheduler();
+    const client = fakeClient({ notifyOnDisconnect: true });
+    const application = [];
+    client.onConnect(() => application.push("first"));
+    const lifecycle = new GolemConnectionLifecycle({
+      createClient: () => client,
+      connectionOptions: () => "ws://localhost/game",
+    }, scheduler);
+    lifecycle.start();
+    client.open();
+    assert.deepEqual(application, ["first"]);
+    client.onConnect(() => application.push("second"));
+    client.onDisconnect(() => application.push("closed"));
+    client.close({ wasClean: false });
+    assert.equal(lifecycle.status.type, "reconnecting");
+    assert.equal(scheduler.size, 1);
+    scheduler.runNext();
+    client.open();
+    assert.equal(lifecycle.status.type, "connected");
+    assert.deepEqual(application, ["first", "closed", "second"]);
+    lifecycle.destroy();
+    assert.equal(client.stateListenerCount, 0);
+    assert.equal(lifecycle.status.type, "disconnected");
+  });
+
+  it("releases the client subscription and every snapshot listener on destroy", () => {
+    const scheduler = fakeScheduler();
+    const client = fakeClient();
+    const lifecycle = new GolemConnectionLifecycle({
+      createClient: () => client,
+      connectionOptions: () => "ws://localhost/game",
+    }, scheduler);
+    const snapshots = [];
+    lifecycle.subscribeStatus((status) => snapshots.push(status));
+    lifecycle.start();
+    assert.equal(client.stateListenerCount, 1);
+    lifecycle.destroy();
+    const count = snapshots.length;
+    assert.equal(client.stateListenerCount, 0);
+    client.open();
+    client.close({ wasClean: false });
+    assert.equal(scheduler.size, 0);
+    assert.equal(snapshots.length, count);
+    assert.equal(lifecycle.status.type, "idle");
+  });
+
+  it("schedules only one retry when GameClient both publishes a setup failure and throws", () => {
+    const scheduler = fakeScheduler();
+    const client = new GameClient({
+      entityManager: { applyUpdate() {}, get() {} },
+      decode: () => ({}),
+      encode: () => new Uint8Array(),
+      encodePacket: () => new Uint8Array(),
+      createChannel: () => { throw new Error("setup failed"); },
+    });
+    const lifecycle = new GolemConnectionLifecycle({
+      createClient: () => client,
+      connectionOptions: () => "ws://localhost/game",
+    }, scheduler);
+    const statuses = [];
+    lifecycle.onStatus((status) => statuses.push(status));
+    lifecycle.start();
+    assert.deepEqual(statuses.map((status) => status.type), ["connecting", "disconnected", "reconnecting"]);
+    assert.equal(scheduler.size, 1);
+    assert.equal(scheduler.delays.length, 1);
+    lifecycle.destroy();
+  });
+
   it("creates one client and auto-connects", () => {
     const client = fakeClient();
     let created = 0;

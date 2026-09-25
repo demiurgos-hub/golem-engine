@@ -49,6 +49,16 @@ Desktop.ini
 node_modules/
 /golem-js/dist/
 /golem-phaser/dist/
+/golem-threlte/dist/
+/golem-threlte/.svelte-kit/
+/golem-threlte/.vitest/
+/examples/threlte/gen/
+/examples/threlte/web/src/gen/
+/examples/threlte/web/src/generated/
+/examples/threlte/web/dist/
+/examples/threlte/bin/
+/golem-threlte/test-results/
+/golem-threlte/playwright-report/
 
 # Debug and misc
 *.tmp

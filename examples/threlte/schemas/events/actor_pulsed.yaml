@@ -1,0 +1,6 @@
+event: ActorPulsed
+target: entity
+entity_type: Actor
+foi_only: true
+fields:
+  strength: { type: float, tag: 2 }

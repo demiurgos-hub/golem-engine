@@ -96,6 +96,13 @@ var builtinIntegrations = map[string]Integration{
 			},
 		},
 	},
+	// threlte is compiled with authored Svelte components by the consumer.
+	"threlte": {
+		Name: "threlte",
+		SharedTemplates: []SharedTemplateEntry{
+			{Template: "threlte/golem_threlte.ts.tmpl", File: "GolemThrelte.ts"},
+		},
+	},
 	"unity": {
 		Name:     "unity",
 		Template: "unity/entity_bridge.cs.tmpl",
@@ -117,7 +124,7 @@ var builtinIntegrations = map[string]Integration{
 func GetIntegration(name string) (Integration, error) {
 	integ, ok := builtinIntegrations[name]
 	if !ok {
-		return Integration{}, fmt.Errorf("unknown integration %q (available: go-server, go-client, js-client, csharp-client, phaser, unity, ebiten)", name)
+		return Integration{}, fmt.Errorf("unknown integration %q (available: go-server, go-client, js-client, csharp-client, phaser, threlte, unity, ebiten)", name)
 	}
 	return integ, nil
 }

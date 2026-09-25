@@ -1,0 +1,33 @@
+{
+  "name": "golem-threlte-example",
+  "version": "0.3.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "node scripts/run.mjs generate",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "build": "npm run generate && npm run check && vite build",
+    "dev": "vite --host 127.0.0.1",
+    "server": "node scripts/run.mjs server",
+    "start": "node scripts/run.mjs server",
+    "test:server": "node scripts/run.mjs test",
+    "test:browser": "playwright test",
+    "prepare:packages": "npm --prefix ../../golem-threlte run build"
+  },
+  "dependencies": {
+    "@threlte/core": "8.6.1",
+    "golem-engine": "file:../../golem-js",
+    "golem-threlte": "file:../../golem-threlte",
+    "svelte": "5.57.1",
+    "three": "0.186.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "@types/node": "^24.0.0",
+    "@types/three": "0.186.0",
+    "svelte-check": "4.7.6",
+    "typescript": "6.0.3",
+    "vite": "8.3.1"
+  }
+}

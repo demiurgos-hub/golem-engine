@@ -24,3 +24,5 @@ Be careful with nested formatting in generators: code that emits `fmt` strings o
 After schema or codegen changes that affect bake output, verify `go build ./cmd/golem-bake` and targeted generator tests. For cross-target changes, confirm both Go and JS generated outputs still compile.
 
 Retire a configured shared-only bridge with `golem-bake --remove-integration <target>` before removing its integration stanza. Removal checks generated headers and confines known outputs to the project; it never deletes authored adapters or recursively removes an output directory.
+
+The `threlte` target emits raw `GolemThrelte.ts` compiled by the consumer's Svelte toolchain. It requires `js-client`, an explicit forward-slash module-prefix `protocol_import` (normalize a missing trailing `/`), and an output directory outside `js-client` output (whose finalizer recursively compiles TypeScript). Validate these requirements before writing any bake output. Keep empty entity/world/event sections valid in both generated JS and the Threlte adapter.

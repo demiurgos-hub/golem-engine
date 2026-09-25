@@ -1,0 +1,4 @@
+command: Warp
+target: entity
+entity_type: Actor
+fields: {}

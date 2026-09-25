@@ -1,0 +1,8 @@
+node_modules/
+web/dist/
+web/src/generated/
+internal/generated/
+bin/
+test-results/
+playwright-report/
+*.log

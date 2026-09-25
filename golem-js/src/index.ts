@@ -4,6 +4,7 @@ export {
   createChannel,
   unwrapServerMessage,
   type GameClientOptions,
+  type GameClientConnectionState,
   type ConnectInput,
   type ConnectOptions,
   type ConnectOptionsResolver,
@@ -35,4 +36,4 @@ export {
   type ConnectOption,
 } from "./bootstrap.js";
 
-export { GolemConnectionLifecycle, type GolemConnectionConfig, type GolemConnectionStatus } from "./connection.js";
+export { GolemConnectionLifecycle, type GolemConnectionConfig, type GolemConnectionStatus, type GolemConnectionSnapshot } from "./connection.js";
