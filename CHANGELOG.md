@@ -12,8 +12,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 - The `threlte` integration generates one `GolemThrelte.ts` adapter beside existing `js-client` output. Every entity requires a typed component or explicit headless registration. Bake validates the JS dependency and separate output directories; `--remove-integration threlte` removes only the recognized generated bridge. Re-run bake and compile the bridge with the application's Svelte toolchain.
 - The JavaScript runtime's `connectionState`/`subscribeConnectionState` and lifecycle `status`/`subscribeStatus` expose current, multicast connection snapshots without replacing application callbacks. `golem-threlte` requires the matching `golem-engine` 0.3.1 runtime; existing Phaser APIs remain compatible.
 - `examples/threlte` demonstrates a real Go server, synchronized scene and HUD, typed commands/events, headless state, scene remounting, shared assets, and explicit transform ownership. The website Threlte guide documents the public contract and setup.
-- `golem-bake --remove-integration <name>` safely removes generated outputs for configured shared-only bridges such as Phaser before a renderer migration. It preserves authored files, rejects output paths outside the project and leaves configuration changes to the caller. The website CLI documentation needs the matching removal workflow.
-- The JavaScript runtime exports GolemConnectionLifecycle and its configuration/status types for persistent connections in any renderer. Phaser retains its existing connection helper as a compatibility re-export. Website integration documentation should describe the new core import.
+- `golem-bake --remove-integration <name>` safely removes generated outputs for configured shared-only bridges such as Phaser before a renderer migration. It preserves authored files, rejects output paths outside the project and leaves configuration changes to the caller.
+- The JavaScript runtime exports `GolemConnectionLifecycle` and its configuration/status types for persistent connections in any renderer. Phaser retains its existing connection helper as a compatibility re-export.
 
 ### Fixed
 
