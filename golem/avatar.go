@@ -22,8 +22,9 @@ type AvatarOptions struct {
 // when opts.FOIRadius > 0, and session↔entity avatar indexes.
 //
 // Duplicate calls for a session that already has a live avatar return an error;
-// a prior avatar is not replaced. Partial failures roll back the entity, FOI, and
-// any reserved index slot where possible. FOI updates go through AssignFOI /
+// a prior avatar is not replaced. Partial failures roll back the entity, its
+// registered colliders, FOI, and any reserved index slot where possible.
+// Colliders are removed before OnRemove. FOI updates go through AssignFOI /
 // RemoveFOI (interestMu); avatar indexes use avatarMu. Lock order when both are
 // needed: interestMu before avatarMu.
 func (s *Server) SpawnAvatar(sess *Session, e Entity, opts AvatarOptions) error {
@@ -47,7 +48,7 @@ func (s *Server) SpawnAvatar(sess *Session, e Entity, opts AvatarOptions) error 
 	foiAssigned := false
 	if opts.FOIRadius > 0 {
 		if s.interest == nil {
-			s.reg.DeleteEntity(entityID)
+			s.DeleteEntity(entityID)
 			s.releaseAvatarReservation(sess.ID)
 			return fmt.Errorf("golem: SpawnAvatar with FOIRadius > 0 requires interest management (CellSize > 0)")
 		}
@@ -59,7 +60,7 @@ func (s *Server) SpawnAvatar(sess *Session, e Entity, opts AvatarOptions) error 
 		if foiAssigned {
 			s.RemoveFOI(sess.ID)
 		}
-		s.reg.DeleteEntity(entityID)
+		s.DeleteEntity(entityID)
 		s.releaseAvatarReservation(sess.ID)
 		return err
 	}
@@ -197,7 +198,7 @@ func (s *Server) cleanupAvatarOnDisconnect(sessionID int64) {
 
 	entityID, had := s.takeAvatarBySession(sessionID)
 	if had {
-		// Indexes already cleared; delete via registry to avoid redundant clear.
-		s.reg.DeleteEntity(entityID)
+		// Canonical teardown also removes provider colliders before OnRemove.
+		s.DeleteEntity(entityID)
 	}
 }

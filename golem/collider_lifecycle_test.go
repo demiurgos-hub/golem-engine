@@ -10,6 +10,107 @@ import (
 	"github.com/demiurgos-hub/golem-engine/golem/snapshot"
 )
 
+type avatarColliderLifecycleEntity struct {
+	dualColliderEntity
+	onSpawn, onRemove func()
+}
+
+func (e *avatarColliderLifecycleEntity) OnSpawn() {
+	if e.onSpawn != nil {
+		e.onSpawn()
+	}
+}
+func (e *avatarColliderLifecycleEntity) OnRemove() {
+	if e.onRemove != nil {
+		e.onRemove()
+	}
+}
+
+func TestAvatarTeardownRemovesProviderColliders(t *testing.T) {
+	for _, providers := range []string{"2d", "3d", "both"} {
+		for _, scenario := range []string{"rollback-no-interest", "rollback-reservation", "disconnect", "disconnect-delete", "disconnect-replace"} {
+			t.Run(providers+"/"+scenario, func(t *testing.T) {
+				cfg := ServerConfig{CellSize: 8}
+				if scenario == "rollback-no-interest" {
+					cfg.CellSize = 0
+				}
+				s := NewServer(cfg)
+				b2, b3 := newRecordingBackend2D(), newRecordingBackend3D()
+				if providers != "3d" {
+					s.SetCollisionLayers(NewCollisionLayers().Bind(b2).Define("Player"))
+				}
+				if providers != "2d" {
+					s.SetCollisionLayers3D(NewCollisionLayers3D().Bind(b3).Define("Player"))
+				}
+				sess := &Session{ID: 7}
+				removed := 0
+				newEntity := func() *avatarColliderLifecycleEntity {
+					e := &avatarColliderLifecycleEntity{}
+					e.onRemove = func() {
+						removed++
+						if _, ok := b2.added[e.id]; ok {
+							t.Error("2D collider remains during OnRemove")
+						}
+						if _, ok := b3.added[e.id]; ok {
+							t.Error("3D collider remains during OnRemove")
+						}
+						if _, ok := s.Get(e.id); ok {
+							t.Error("entity remains during OnRemove")
+						}
+						if _, ok := s.Avatar(sess.ID); ok {
+							t.Error("avatar remains during OnRemove")
+						}
+						s.SessionsKnowing(e.id) // Registry and avatar hooks must not hold interestMu.
+					}
+					return e
+				}
+				e := newEntity()
+				if scenario == "rollback-reservation" {
+					e.onSpawn = func() { s.releaseAvatarReservation(sess.ID) }
+				}
+				err := s.SpawnAvatar(sess, e, AvatarOptions{FOIRadius: 5})
+				rollback := scenario == "rollback-no-interest" || scenario == "rollback-reservation"
+				if (err != nil) != rollback {
+					t.Fatalf("SpawnAvatar: %v", err)
+				}
+				wantRemovals := 1
+				if !rollback {
+					s.OnDisconnect(func(session *Session) {
+						if avatar, ok := s.Avatar(session.ID); !ok || avatar != e || removed != 0 {
+							t.Error("avatar removed before disconnect callback")
+						}
+						if scenario != "disconnect" {
+							s.DeleteEntity(e.id)
+							s.DeleteEntity(e.id)
+						}
+						if scenario == "disconnect-replace" {
+							wantRemovals++
+							if err := s.SpawnAvatar(session, newEntity(), AvatarOptions{FOIRadius: 5}); err != nil {
+								t.Fatal(err)
+							}
+						}
+					})
+					s.enqueueDisconnect(sess)
+					s.drainMessages()
+				}
+				s.DeleteEntity(e.id)
+				if removed != wantRemovals || len(b2.added)+len(b3.added) != 0 || s.Len() != 0 || s.hasFOI(sess.ID) {
+					t.Fatalf("incomplete teardown: callbacks=%d registry=%d", removed, s.Len())
+				}
+				if len(s.sessionAvatar)+len(s.avatarSession) != 0 {
+					t.Fatal("indexes/reservation remain")
+				}
+				if providers != "3d" && len(b2.removed) != wantRemovals {
+					t.Fatal("2D removal count")
+				}
+				if providers != "2d" && len(b3.removed) != wantRemovals {
+					t.Fatal("3D removal count")
+				}
+			})
+		}
+	}
+}
+
 type recordingBackend2D struct {
 	added   map[int64]collision.Shape
 	removed []int64
