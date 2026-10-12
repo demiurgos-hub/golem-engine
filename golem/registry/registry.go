@@ -65,19 +65,15 @@ func (r *Registry) AddOwned(e Entity, ownerSessionID int64) error {
 // flush, but does not call OnSpawn. Server uses this to register colliders
 // between successful insertion and the spawn hook.
 func (r *Registry) AddWithoutSpawn(e Entity) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	id := e.EntityID()
-	if _, exists := r.entities[id]; exists {
-		return fmt.Errorf("entity %d already registered", id)
-	}
-	r.entities[id] = e
-	r.spawned = append(r.spawned, e)
-	return nil
+	return r.insert(e, 0, false)
 }
 
 // AddOwnedWithoutSpawn is AddOwned without calling OnSpawn.
 func (r *Registry) AddOwnedWithoutSpawn(e Entity, ownerSessionID int64) error {
+	return r.insert(e, ownerSessionID, true)
+}
+
+func (r *Registry) insert(e Entity, ownerSessionID int64, hasOwner bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	id := e.EntityID()
@@ -85,7 +81,9 @@ func (r *Registry) AddOwnedWithoutSpawn(e Entity, ownerSessionID int64) error {
 		return fmt.Errorf("entity %d already registered", id)
 	}
 	r.entities[id] = e
-	r.owners[id] = ownerSessionID
+	if hasOwner {
+		r.owners[id] = ownerSessionID
+	}
 	r.spawned = append(r.spawned, e)
 	return nil
 }
@@ -176,14 +174,7 @@ func (r *Registry) All() []Entity {
 // The entity map is snapshotted under a read-lock; individual Tick calls
 // run outside the lock so they may safely call Add/Remove on the registry.
 func (r *Registry) TickAll(dt float64) {
-	r.mu.RLock()
-	snapshot := make([]Entity, 0, len(r.entities))
-	for _, e := range r.entities {
-		snapshot = append(snapshot, e)
-	}
-	r.mu.RUnlock()
-
-	for _, e := range snapshot {
+	for _, e := range r.All() {
 		if t, ok := e.(Ticker); ok {
 			t.Tick(dt)
 		}

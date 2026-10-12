@@ -1,6 +1,91 @@
 package registry
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+type lifecycleTestEntity struct {
+	revisionTestEntity
+	id                  int64
+	spawn, remove, tick func()
+}
+
+func (e *lifecycleTestEntity) EntityID() int64 { return e.id }
+func (e *lifecycleTestEntity) OnSpawn() {
+	if e.spawn != nil {
+		e.spawn()
+	}
+}
+func (e *lifecycleTestEntity) OnRemove() {
+	if e.remove != nil {
+		e.remove()
+	}
+}
+func (e *lifecycleTestEntity) Tick(float64) {
+	if e.tick != nil {
+		e.tick()
+	}
+}
+
+func TestInsertionOwnershipPresenceAndDuplicate(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		owned bool
+		owner int64
+	}{
+		{"unowned", false, 0}, {"owner zero", true, 0}, {"owned", true, 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRegistry()
+			e := &lifecycleTestEntity{id: 1}
+			var err error
+			if tc.owned {
+				err = r.AddOwnedWithoutSpawn(e, tc.owner)
+			} else {
+				err = r.AddWithoutSpawn(e)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sid, owned := r.Owner(1); sid != tc.owner || owned != tc.owned {
+				t.Fatalf("owner = %d/%v", sid, owned)
+			}
+			if err := r.AddOwned(&lifecycleTestEntity{id: 1, spawn: func() { t.Error("duplicate spawn") }}, 99); err == nil {
+				t.Fatal("duplicate accepted")
+			}
+			if got, _ := r.Get(1); got != e {
+				t.Fatal("duplicate replaced entity")
+			}
+			if sid, owned := r.Owner(1); sid != tc.owner || owned != tc.owned {
+				t.Fatal("duplicate changed ownership")
+			}
+			result, err := r.FlushAll()
+			if err != nil || len(result.SpawnIDs) != 1 || result.SpawnIDs[0] != 1 {
+				t.Fatalf("spawns = %+v, %v", result, err)
+			}
+		})
+	}
+}
+
+func TestLifecycleHooksCanReenterRegistry(t *testing.T) {
+	r := NewRegistry()
+	var spawned, ticked, removed bool
+	e := &lifecycleTestEntity{id: 1}
+	e.spawn = func() { _, spawned = r.Get(1) }
+	e.tick = func() { ticked = true; r.DeleteEntity(1); _ = r.Add(&lifecycleTestEntity{id: 2}) }
+	e.remove = func() { _, exists := r.Get(1); removed = !exists }
+	done := make(chan struct{})
+	go func() { _ = r.Add(e); r.TickAll(1); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("registry hook held mutex")
+	}
+	if !spawned || !ticked || !removed || r.Len() != 1 {
+		t.Fatalf("hooks: %v/%v/%v, len %d", spawned, ticked, removed, r.Len())
+	}
+}
 
 type revisionTestEntity struct {
 	revision uint64

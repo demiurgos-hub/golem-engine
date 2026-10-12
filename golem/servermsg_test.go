@@ -7,6 +7,25 @@ import (
 	"github.com/demiurgos-hub/golem-engine/golem/pb"
 )
 
+func TestServerMessageEnvelopes(t *testing.T) {
+	for i, wrap := range []func([]byte) []byte{WrapEntityUpdate, WrapWorldUpdate, WrapServerEvent} {
+		for _, payload := range [][]byte{nil, {}, {0xab, 0xcd}} {
+			input := append([]byte(nil), payload...)
+			got := wrap(input)
+			want := append([]byte{byte((i+1)<<3 | 2), byte(len(payload))}, payload...)
+			if !bytes.Equal(got, want) {
+				t.Fatalf("field %d: %x, want %x", i+1, got, want)
+			}
+			if len(input) > 0 {
+				input[0] ^= 0xff
+				if !bytes.Equal(got, want) {
+					t.Fatal("envelope aliases input")
+				}
+			}
+		}
+	}
+}
+
 func TestWrapEntityUpdate(t *testing.T) {
 	payload := []byte{0xDE, 0xAD, 0xBE, 0xEF}
 	wrapped := WrapEntityUpdate(payload)

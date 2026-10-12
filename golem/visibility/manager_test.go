@@ -2,6 +2,30 @@ package visibility
 
 import "testing"
 
+func TestClearAssignmentKeepsGenerationAndCountInvariants(t *testing.T) {
+	m := NewManager()
+	m.SetEntityGroup(1, "a")
+	if previous := m.SetEntityGroup(1, ""); previous != "a" {
+		t.Fatal(previous)
+	}
+	if m.Generation() != 2 || m.HasGroupedEntities() {
+		t.Fatal("clear must decrement and bump once")
+	}
+	m.RemoveEntity(1)
+	if m.Generation() != 2 {
+		t.Fatal("absent removal mutated generation")
+	}
+	m.entityGroup[2] = "" // Defensive state never produced by SetEntityGroup.
+	m.SetEntityGroup(2, "")
+	if _, ok := m.entityGroup[2]; !ok || m.Generation() != 2 {
+		t.Fatal("empty assignment setter changed defensive no-op")
+	}
+	m.RemoveEntity(2)
+	if _, ok := m.entityGroup[2]; ok || m.Generation() != 3 || m.groupedCount != 0 {
+		t.Fatal("defensive removal invariant")
+	}
+}
+
 func TestPublicDefaultAndJoinLeave(t *testing.T) {
 	m := NewManager()
 	if !m.Allows(1, 10) {

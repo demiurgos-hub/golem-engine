@@ -38,9 +38,7 @@ func (m *Manager) SetEntityGroup(entityID int64, group string) (previous string)
 	previous = m.entityGroup[entityID]
 	if group == "" {
 		if previous != "" {
-			delete(m.entityGroup, entityID)
-			m.groupedCount--
-			m.bump()
+			m.clearEntityAssignment(entityID)
 		}
 		return previous
 	}
@@ -104,16 +102,20 @@ func (m *Manager) RemoveSession(sessionID int64) {
 
 // RemoveEntity clears any group assignment for entityID.
 func (m *Manager) RemoveEntity(entityID int64) {
-	if prev, ok := m.entityGroup[entityID]; ok && prev != "" {
-		delete(m.entityGroup, entityID)
+	m.clearEntityAssignment(entityID)
+}
+
+func (m *Manager) clearEntityAssignment(entityID int64) (previous string, removed bool) {
+	previous, removed = m.entityGroup[entityID]
+	if !removed {
+		return previous, false
+	}
+	delete(m.entityGroup, entityID)
+	if previous != "" {
 		m.groupedCount--
-		m.bump()
-		return
 	}
-	if _, ok := m.entityGroup[entityID]; ok {
-		delete(m.entityGroup, entityID)
-		m.bump()
-	}
+	m.bump()
+	return previous, true
 }
 
 // Allows reports whether sessionID may receive entityID under the current policy.
@@ -124,12 +126,7 @@ func (m *Manager) Allows(sessionID, entityID int64) bool {
 	if !ok || group == "" {
 		return true
 	}
-	groups := m.sessionGroups[sessionID]
-	if groups == nil {
-		return false
-	}
-	_, member := groups[group]
-	return member
+	return m.InGroup(sessionID, group)
 }
 
 // HasGroupedEntities reports whether any live policy assigns a non-empty group.
