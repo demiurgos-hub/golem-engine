@@ -56,11 +56,8 @@ type Listener struct {
 	readyErr          error
 
 	// Deltas for OutboundBacklogForLog: previous cumulative wire counters per session.
-	outboundLogMu      sync.Mutex
-	outboundDgramPrev  map[int64]uint64
-	outboundStreamPrev map[int64]uint64
-	inboundPacketPrev  map[int64]uint64
-	inboundAckPrev     map[int64]uint64
+	outboundLogMu sync.Mutex
+	trafficPrev   map[int64]trafficCounters
 }
 
 const webTransportAcceptStreamTimeout = 10 * time.Second
@@ -76,16 +73,13 @@ func NewListener(reg *registry.Registry, cfg Config) *Listener {
 		}
 	}
 	return &Listener{
-		registry:           reg,
-		config:             cfg,
-		sessions:           make(map[int64]*Session),
-		pendingSessions:    make(map[*Session]struct{}),
-		wtCheckOrigin:      newWebTransportCheckOrigin(cfg),
-		readyCh:            make(chan struct{}),
-		outboundDgramPrev:  make(map[int64]uint64),
-		outboundStreamPrev: make(map[int64]uint64),
-		inboundPacketPrev:  make(map[int64]uint64),
-		inboundAckPrev:     make(map[int64]uint64),
+		registry:        reg,
+		config:          cfg,
+		sessions:        make(map[int64]*Session),
+		trafficPrev:     make(map[int64]trafficCounters),
+		pendingSessions: make(map[*Session]struct{}),
+		wtCheckOrigin:   newWebTransportCheckOrigin(cfg),
+		readyCh:         make(chan struct{}),
 	}
 }
 
@@ -233,22 +227,7 @@ func (l *Listener) BroadcastRaw(data []byte) error {
 // Broadcast sends a set of serialized entity messages to every connected
 // session in a single queued batch.
 func (l *Listener) Broadcast(deltas [][]byte) error {
-	if len(deltas) == 0 {
-		return nil
-	}
-	wrapped := make([][]byte, len(deltas))
-	for i, d := range deltas {
-		wrapped[i] = l.wrap(d)
-	}
-	if err := validateReliableMessageSizes(wrapped); err != nil {
-		return err
-	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	for _, s := range l.sessions {
-		s.SendBatch(wrapped)
-	}
-	return nil
+	return l.BroadcastBatch(deltas)
 }
 
 // Send delivers a single binary message to a specific session without
@@ -356,27 +335,10 @@ func (l *Listener) OutboundBacklogForLog(now time.Time) string {
 	for _, id := range ids {
 		sess := sessionsCopy[id]
 		sn := sess.OutboundSnapshot(now)
-		dTot := sess.wireDatagramOK.Load()
-		stTot := sess.streamBatchOK.Load()
-		pInTot := sn.InboundPackets
-		ackTot := sn.InboundAckOnly
-		d1s, st1s, pin1s, ack1s := uint64(0), uint64(0), uint64(0), uint64(0)
-		if prev, ok := l.outboundDgramPrev[id]; ok {
-			d1s = uint64Delta(dTot, prev)
-		}
-		if prev, ok := l.outboundStreamPrev[id]; ok {
-			st1s = uint64Delta(stTot, prev)
-		}
-		if prev, ok := l.inboundPacketPrev[id]; ok {
-			pin1s = uint64Delta(pInTot, prev)
-		}
-		if prev, ok := l.inboundAckPrev[id]; ok {
-			ack1s = uint64Delta(ackTot, prev)
-		}
-		l.outboundDgramPrev[id] = dTot
-		l.outboundStreamPrev[id] = stTot
-		l.inboundPacketPrev[id] = pInTot
-		l.inboundAckPrev[id] = ackTot
+		delta := l.sampleTrafficCounters(id, trafficCounters{
+			datagrams: sess.wireDatagramOK.Load(), streamBatches: sess.streamBatchOK.Load(),
+			inboundPackets: sn.InboundPackets, inboundACKs: sn.InboundAckOnly,
+		})
 
 		roAge := "-"
 		if sn.PendingOrdered > 0 {
@@ -391,7 +353,7 @@ func (l *Listener) OutboundBacklogForLog(now time.Time) string {
 			sn.EventualQueued, sn.EventualInFlight,
 			sn.PendingOrdered, sn.InFlightOrdered, roAge,
 			sn.PendingUnordered, sn.InFlightUnordered, ruAge,
-			d1s, st1s, pin1s, ack1s,
+			delta.datagrams, delta.streamBatches, delta.inboundPackets, delta.inboundACKs,
 		)
 	}
 	l.outboundLogMu.Unlock()
@@ -401,18 +363,7 @@ func (l *Listener) OutboundBacklogForLog(now time.Time) string {
 // SendWrapped delivers a single entity frame to a specific session, applying
 // the messageWrapper (e.g. WrapEntityUpdate) if one is configured.
 func (l *Listener) SendWrapped(sessionID int64, data []byte) error {
-	wrapped := l.wrap(data)
-	if err := validateReliableMessageSize(wrapped); err != nil {
-		return err
-	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	s, ok := l.sessions[sessionID]
-	if !ok {
-		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
-	}
-	s.Send(wrapped)
-	return nil
+	return l.Send(sessionID, l.wrap(data))
 }
 
 // Wrap applies the messageWrapper if one is set, otherwise returns data as-is.
@@ -441,82 +392,52 @@ func (l *Listener) SendBatch(sessionID int64, frames [][]byte) error {
 // SendReliableOrderedBatch queues a set of already-framed state records to a
 // specific session over one or more reliable ordered datagrams.
 func (l *Listener) SendReliableOrderedBatch(sessionID int64, frames [][]byte) error {
-	if l.config.Transport != TransportWebTransport {
-		return ErrReliableDatagramsNotSupported
-	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	s, ok := l.sessions[sessionID]
-	if !ok {
-		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
-	}
-	if !s.SupportsReliableDatagrams() {
-		return ErrReliableDatagramsNotSupported
-	}
-	if len(frames) == 0 {
-		return nil
-	}
-	payloads, err := chunkReliableOrderedDatagramFrames(frames)
-	if err != nil {
-		return err
-	}
-	for _, payload := range payloads {
-		if err := s.SendReliableOrdered(payload); err != nil {
+	return l.withDatagramSession(sessionID, reliableDatagrams, func(s *Session) error {
+		if len(frames) == 0 {
+			return nil
+		}
+		payloads, err := chunkReliableOrderedDatagramFrames(frames)
+		if err != nil {
 			return err
 		}
-	}
-	return nil
+		for _, payload := range payloads {
+			if err := s.SendReliableOrdered(payload); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // SendUnreliableStateBatch queues already-framed state records to a specific
 // session over one or more raw WebTransport datagrams.
 func (l *Listener) SendUnreliableStateBatch(sessionID int64, frames [][]byte) error {
-	if l.config.Transport != TransportWebTransport {
-		return ErrUnreliableNotSupported
-	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	s, ok := l.sessions[sessionID]
-	if !ok {
-		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
-	}
-	if !s.SupportsUnreliable() {
-		return ErrUnreliableNotSupported
-	}
-	if len(frames) == 0 {
-		return nil
-	}
-	payloads, err := UnreliableStateDatagramPayloads(frames)
-	if err != nil {
-		return err
-	}
-	for _, payload := range payloads {
-		if err := s.sendUnreliableStateOwned(payload); err != nil {
+	return l.withDatagramSession(sessionID, rawDatagrams, func(s *Session) error {
+		if len(frames) == 0 {
+			return nil
+		}
+		payloads, err := UnreliableStateDatagramPayloads(frames)
+		if err != nil {
 			return err
 		}
-	}
-	return nil
+		for _, payload := range payloads {
+			if err := s.sendUnreliableStateOwned(payload); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // SendUnreliableStateOwned queues one already-packed raw state datagram payload.
 // The caller must own data and must not mutate it after this call.
 func (l *Listener) SendUnreliableStateOwned(sessionID int64, data []byte) error {
-	if l.config.Transport != TransportWebTransport {
-		return ErrUnreliableNotSupported
-	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	s, ok := l.sessions[sessionID]
-	if !ok {
-		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
-	}
-	if !s.SupportsUnreliable() {
-		return ErrUnreliableNotSupported
-	}
-	if err := validateDatagramSize(data); err != nil {
-		return err
-	}
-	return s.sendUnreliableStateOwned(data)
+	return l.withDatagramSession(sessionID, rawDatagrams, func(s *Session) error {
+		if err := validateDatagramSize(data); err != nil {
+			return err
+		}
+		return s.sendUnreliableStateOwned(data)
+	})
 }
 
 // BroadcastBatch wraps all entity frames once, validates them against the
@@ -547,8 +468,8 @@ func (l *Listener) BroadcastBatch(deltas [][]byte) error {
 // SendReliableOrderedBatch. A pure WebSocket listener returns
 // ErrReliableDatagramsNotSupported.
 func (l *Listener) BroadcastReliableOrderedBatch(deltas [][]byte) error {
-	if l.config.Transport != TransportWebTransport {
-		return ErrReliableDatagramsNotSupported
+	if err := l.requireDatagramTransport(reliableDatagrams); err != nil {
+		return err
 	}
 	if len(deltas) == 0 {
 		return nil
@@ -561,27 +482,22 @@ func (l *Listener) BroadcastReliableOrderedBatch(deltas [][]byte) error {
 	if err != nil {
 		return err
 	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	for _, s := range l.sessions {
-		if !s.SupportsReliableDatagrams() {
-			continue
-		}
+	return l.forDatagramRecipients(reliableDatagrams, func(s *Session) error {
 		for _, payload := range payloads {
 			if err := s.SendReliableOrdered(payload); err != nil {
 				return err
 			}
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // BroadcastUnreliableStateBatch wraps entity frames once, packs them into raw
 // WebTransport datagrams, and queues every payload for every datagram-capable
 // session. A pure WebSocket listener returns ErrUnreliableNotSupported.
 func (l *Listener) BroadcastUnreliableStateBatch(deltas [][]byte) error {
-	if l.config.Transport != TransportWebTransport {
-		return ErrUnreliableNotSupported
+	if err := l.requireDatagramTransport(rawDatagrams); err != nil {
+		return err
 	}
 	if len(deltas) == 0 {
 		return nil
@@ -598,8 +514,8 @@ func (l *Listener) BroadcastUnreliableStateBatch(deltas [][]byte) error {
 // datagram-capable session. A pure WebSocket listener returns
 // ErrUnreliableNotSupported.
 func (l *Listener) BroadcastUnreliableStateWrappedBatch(frames [][]byte) error {
-	if l.config.Transport != TransportWebTransport {
-		return ErrUnreliableNotSupported
+	if err := l.requireDatagramTransport(rawDatagrams); err != nil {
+		return err
 	}
 	if len(frames) == 0 {
 		return nil
@@ -608,188 +524,86 @@ func (l *Listener) BroadcastUnreliableStateWrappedBatch(frames [][]byte) error {
 	if err != nil {
 		return err
 	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	for _, s := range l.sessions {
-		if !s.SupportsUnreliable() {
-			continue
-		}
+	return l.forDatagramRecipients(rawDatagrams, func(s *Session) error {
 		for _, payload := range payloads {
 			if err := s.sendUnreliableStateOwned(payload); err != nil {
 				return err
 			}
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // SendUnreliable sends a single datagram to a specific session when supported.
 func (l *Listener) SendUnreliable(sessionID int64, data []byte) error {
-	if l.config.Transport != TransportWebTransport {
-		return ErrUnreliableNotSupported
-	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	s, ok := l.sessions[sessionID]
-	if !ok {
-		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
-	}
-	if !s.SupportsUnreliable() {
-		return ErrUnreliableNotSupported
-	}
-	if err := validateDatagramSize(data); err != nil {
-		return err
-	}
-	return s.SendUnreliable(data)
+	return l.withDatagramSession(sessionID, rawDatagrams, func(s *Session) error {
+		if err := validateDatagramSize(data); err != nil {
+			return err
+		}
+		return s.SendUnreliable(data)
+	})
 }
 
 // BroadcastUnreliable sends one datagram to every datagram-capable session. A
 // pure WebSocket listener returns ErrUnreliableNotSupported.
 func (l *Listener) BroadcastUnreliable(data []byte) error {
-	if l.config.Transport != TransportWebTransport {
-		return ErrUnreliableNotSupported
+	if err := l.requireDatagramTransport(rawDatagrams); err != nil {
+		return err
 	}
 	if err := validateDatagramSize(data); err != nil {
 		return err
 	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	for _, s := range l.sessions {
-		if !s.SupportsUnreliable() {
-			continue
-		}
+	return l.forDatagramRecipients(rawDatagrams, func(s *Session) error {
 		if err := s.SendUnreliable(data); err != nil {
 			return err
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // SendReliableUnordered sends one reliable unordered datagram to a specific session when supported.
 func (l *Listener) SendReliableUnordered(sessionID int64, data []byte) error {
-	if l.config.Transport != TransportWebTransport {
-		return ErrReliableDatagramsNotSupported
-	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	s, ok := l.sessions[sessionID]
-	if !ok {
-		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
-	}
-	if !s.SupportsReliableDatagrams() {
-		return ErrReliableDatagramsNotSupported
-	}
-	if err := validateReliableDatagramMessageSize(datagramLaneReliableUnordered, data); err != nil {
-		return err
-	}
-	return s.SendReliableUnordered(data)
+	return l.sendReliableDatagram(sessionID, datagramLaneReliableUnordered, data)
 }
 
 // BroadcastReliableUnordered sends one reliable unordered datagram to every
 // datagram-capable session. A pure WebSocket listener returns
 // ErrReliableDatagramsNotSupported.
 func (l *Listener) BroadcastReliableUnordered(data []byte) error {
-	if l.config.Transport != TransportWebTransport {
-		return ErrReliableDatagramsNotSupported
-	}
-	if err := validateReliableDatagramMessageSize(datagramLaneReliableUnordered, data); err != nil {
-		return err
-	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	for _, s := range l.sessions {
-		if !s.SupportsReliableDatagrams() {
-			continue
-		}
-		if err := s.SendReliableUnordered(data); err != nil {
-			return err
-		}
-	}
-	return nil
+	return l.broadcastReliableDatagram(datagramLaneReliableUnordered, data)
 }
 
 // SendReliableOrdered sends one reliable ordered datagram to a specific session when supported.
 func (l *Listener) SendReliableOrdered(sessionID int64, data []byte) error {
-	if l.config.Transport != TransportWebTransport {
-		return ErrReliableDatagramsNotSupported
-	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	s, ok := l.sessions[sessionID]
-	if !ok {
-		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
-	}
-	if !s.SupportsReliableDatagrams() {
-		return ErrReliableDatagramsNotSupported
-	}
-	if err := validateReliableDatagramMessageSize(datagramLaneReliableOrdered, data); err != nil {
-		return err
-	}
-	return s.SendReliableOrdered(data)
+	return l.sendReliableDatagram(sessionID, datagramLaneReliableOrdered, data)
 }
 
 // BroadcastReliableOrdered sends one reliable ordered datagram to every
 // datagram-capable session. A pure WebSocket listener returns
 // ErrReliableDatagramsNotSupported.
 func (l *Listener) BroadcastReliableOrdered(data []byte) error {
-	if l.config.Transport != TransportWebTransport {
-		return ErrReliableDatagramsNotSupported
-	}
-	if err := validateReliableDatagramMessageSize(datagramLaneReliableOrdered, data); err != nil {
-		return err
-	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	for _, s := range l.sessions {
-		if !s.SupportsReliableDatagrams() {
-			continue
-		}
-		if err := s.SendReliableOrdered(data); err != nil {
-			return err
-		}
-	}
-	return nil
+	return l.broadcastReliableDatagram(datagramLaneReliableOrdered, data)
 }
 
 // SendEventualState sends one state-aware datagram payload with a feedback token.
 func (l *Listener) SendEventualState(sessionID int64, token uint64, data []byte) error {
-	if l.config.Transport != TransportWebTransport {
-		return ErrReliableDatagramsNotSupported
-	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	s, ok := l.sessions[sessionID]
-	if !ok {
-		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
-	}
-	if !s.SupportsReliableDatagrams() {
-		return ErrReliableDatagramsNotSupported
-	}
-	if err := validateEventualStateDatagramPayloadSize(data); err != nil {
-		return err
-	}
-	return s.SendEventualState(token, data)
+	return l.withDatagramSession(sessionID, reliableDatagrams, func(s *Session) error {
+		if err := validateEventualStateDatagramPayloadSize(data); err != nil {
+			return err
+		}
+		return s.SendEventualState(token, data)
+	})
 }
 
 // SendEventualStateOwned sends one state-aware datagram payload without copying
 // data. The caller must own data and must not mutate it after this call.
 func (l *Listener) SendEventualStateOwned(sessionID int64, token uint64, data []byte) error {
-	if l.config.Transport != TransportWebTransport {
-		return ErrReliableDatagramsNotSupported
-	}
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	s, ok := l.sessions[sessionID]
-	if !ok {
-		return fmt.Errorf("%w: %d", ErrSessionNotFound, sessionID)
-	}
-	if !s.SupportsReliableDatagrams() {
-		return ErrReliableDatagramsNotSupported
-	}
-	if err := validateEventualStateDatagramPayloadSize(data); err != nil {
-		return err
-	}
-	return s.sendEventualStateOwned(token, data)
+	return l.withDatagramSession(sessionID, reliableDatagrams, func(s *Session) error {
+		if err := validateEventualStateDatagramPayloadSize(data); err != nil {
+			return err
+		}
+		return s.sendEventualStateOwned(token, data)
+	})
 }
 
 // ListenAndServe starts the configured integrated listener.
@@ -1084,8 +898,7 @@ func (l *Listener) removeSession(s *Session) {
 	delete(l.sessions, s.ID)
 	l.mu.Unlock()
 	l.outboundLogMu.Lock()
-	delete(l.outboundDgramPrev, s.ID)
-	delete(l.outboundStreamPrev, s.ID)
+	delete(l.trafficPrev, s.ID)
 	l.outboundLogMu.Unlock()
 	s.shutdown()
 }
@@ -1306,4 +1119,84 @@ func equalASCIIFold(s string, t string) bool {
 		}
 	}
 	return true
+}
+
+// datagramCapability describes admission to an existing session lane, not payload ownership.
+type datagramCapability uint8
+
+const (
+	rawDatagrams datagramCapability = iota
+	reliableDatagrams
+)
+
+func (c datagramCapability) unsupported() error {
+	if c == rawDatagrams {
+		return ErrUnreliableNotSupported
+	}
+	return ErrReliableDatagramsNotSupported
+}
+
+func (c datagramCapability) supported(s *Session) bool {
+	if c == rawDatagrams {
+		return s.SupportsUnreliable()
+	}
+	return s.SupportsReliableDatagrams()
+}
+
+func (l *Listener) requireDatagramTransport(capability datagramCapability) error {
+	if l.config.Transport != TransportWebTransport {
+		return capability.unsupported()
+	}
+	return nil
+}
+
+func (l *Listener) withDatagramSession(id int64, capability datagramCapability, send func(*Session) error) error {
+	if err := l.requireDatagramTransport(capability); err != nil {
+		return err
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	s, ok := l.sessions[id]
+	if !ok {
+		return fmt.Errorf("%w: %d", ErrSessionNotFound, id)
+	}
+	if !capability.supported(s) {
+		return capability.unsupported()
+	}
+	return send(s)
+}
+
+// forDatagramRecipients runs after caller-specific preparation. The primary
+// transport check must happen before preparation, even with no recipients.
+func (l *Listener) forDatagramRecipients(capability datagramCapability, send func(*Session) error) error {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	for _, s := range l.sessions {
+		if !capability.supported(s) {
+			continue
+		}
+		if err := send(s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (l *Listener) sendReliableDatagram(id int64, lane datagramLane, data []byte) error {
+	return l.withDatagramSession(id, reliableDatagrams, func(s *Session) error {
+		if err := validateReliableDatagramMessageSize(lane, data); err != nil {
+			return err
+		}
+		return s.queueReliable(lane, data)
+	})
+}
+
+func (l *Listener) broadcastReliableDatagram(lane datagramLane, data []byte) error {
+	if err := l.requireDatagramTransport(reliableDatagrams); err != nil {
+		return err
+	}
+	if err := validateReliableDatagramMessageSize(lane, data); err != nil {
+		return err
+	}
+	return l.forDatagramRecipients(reliableDatagrams, func(s *Session) error { return s.queueReliable(lane, data) })
 }

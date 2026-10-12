@@ -23,8 +23,8 @@ type sessionCloseState struct {
 // Session represents a single connected client on the active integrated transport.
 type Session struct {
 	ID         int64
-	Data       any       // game-specific state; set from OnUpgrade return value before OnConnect fires
-	RemoteAddr string    // client address from the upgrade request; set before OnConnect
+	Data       any    // game-specific state; set from OnUpgrade return value before OnConnect fires
+	RemoteAddr string // client address from the upgrade request; set before OnConnect
 	// Transport reports the physical transport selected before OnConnect.
 	// Changing it does not alter runtime routing or transport capabilities.
 	Transport Transport
@@ -371,26 +371,12 @@ func (s *Session) signalWake() {
 }
 
 func (s *Session) writeProtocolDatagram(ctx context.Context, data []byte) error {
-	if s.datagrams == nil {
-		return ErrReliableDatagramsNotSupported
-	}
-	if err := s.datagrams.WriteDatagram(ctx, data); err != nil {
-		return fmt.Errorf("protocol datagram write: %w", err)
-	}
-	s.wireDatagramOK.Add(1)
-	return nil
+	return s.writeCountedDatagram(ctx, data, ErrReliableDatagramsNotSupported, "protocol datagram write")
 }
 
 // writeRawStateDatagram drains one queued state payload directly to WebTransport.
 func (s *Session) writeRawStateDatagram(ctx context.Context, data []byte) error {
-	if s.datagrams == nil {
-		return ErrUnreliableNotSupported
-	}
-	if err := s.datagrams.WriteDatagram(ctx, data); err != nil {
-		return fmt.Errorf("raw state datagram write: %w", err)
-	}
-	s.wireDatagramOK.Add(1)
-	return nil
+	return s.writeCountedDatagram(ctx, data, ErrUnreliableNotSupported, "raw state datagram write")
 }
 
 // writeBatch drains one queued reliable batch to the active reliable channel.
@@ -708,11 +694,9 @@ func (s *Session) queueReliable(lane datagramLane, data []byte) error {
 	err := s.protocol.enqueueReliable(lane, data, time.Now())
 	s.protocolMu.Unlock()
 	if err != nil {
-		if !s.beginClose("") {
+		if !s.closeOnQueueFailure(laneName(lane)+" datagram", -1) {
 			return nil
 		}
-		log.Printf("golem/net: session %d send buffer overflow while queueing %s datagram; closing slow session", s.ID, laneName(lane))
-		go s.closeNow()
 		return err
 	}
 	s.signalWake()
@@ -720,83 +704,19 @@ func (s *Session) queueReliable(lane datagramLane, data []byte) error {
 }
 
 func (s *Session) queueStream(frames [][]byte) {
-	if s.isClosing() {
-		return
-	}
-	for {
-		select {
-		case s.streamSend <- frames:
-			s.signalWake()
-			return
-		default:
-			if !s.beginClose("") {
-				return
-			}
-			log.Printf("golem/net: session %d send buffer overflow while queueing reliable batch (buffer=%d); closing slow session", s.ID, len(s.streamSend))
-			go s.closeNow()
-			return
-		}
-	}
+	enqueueOutbound(s, s.streamSend, frames, "reliable batch")
 }
 
 func (s *Session) queueUnreliable(data []byte) {
-	if s.isClosing() {
-		return
-	}
-	for {
-		select {
-		case s.unreliableSend <- data:
-			s.signalWake()
-			return
-		default:
-			if !s.beginClose("") {
-				return
-			}
-			log.Printf("golem/net: session %d send buffer overflow while queueing unreliable datagram (buffer=%d); closing slow session", s.ID, len(s.unreliableSend))
-			go s.closeNow()
-			return
-		}
-	}
+	enqueueOutbound(s, s.unreliableSend, data, "unreliable datagram")
 }
 
 func (s *Session) queueRawState(data []byte) {
-	if s.isClosing() {
-		return
-	}
-	for {
-		select {
-		case s.rawStateSend <- data:
-			s.signalWake()
-			return
-		default:
-			if !s.beginClose("") {
-				return
-			}
-			log.Printf("golem/net: session %d send buffer overflow while queueing raw state datagram (buffer=%d); closing slow session", s.ID, len(s.rawStateSend))
-			go s.closeNow()
-			return
-		}
-	}
+	enqueueOutbound(s, s.rawStateSend, data, "raw state datagram")
 }
 
 func (s *Session) queueEventualState(msg eventualStateDatagram) {
-	if s.isClosing() {
-		return
-	}
-	for {
-		select {
-		case s.eventualSend <- msg:
-			s.signalWake()
-			return
-		default:
-			if !s.beginClose("") {
-				return
-			}
-			log.Printf("golem/net: session %d send buffer overflow while queueing eventual state datagram (buffer=%d); closing slow session", s.ID, len(s.eventualSend))
-			go s.closeNow()
-			return
-		}
-	}
+	enqueueOutbound(s, s.eventualSend, msg, "eventual state datagram")
 }
 
 func laneName(lane datagramLane) string {
@@ -899,4 +819,42 @@ func (s *Session) abortClose() {
 		return
 	}
 	s.abortOnce.Do(s.abortTransport)
+}
+
+func (s *Session) writeCountedDatagram(ctx context.Context, data []byte, unsupported error, operation string) error {
+	if s.datagrams == nil {
+		return unsupported
+	}
+	if err := s.datagrams.WriteDatagram(ctx, data); err != nil {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	s.wireDatagramOK.Add(1)
+	return nil
+}
+
+func enqueueOutbound[T any](s *Session, queue chan T, value T, label string) {
+	if s.isClosing() {
+		return
+	}
+	select {
+	case queue <- value:
+		s.signalWake()
+	default:
+		s.closeOnQueueFailure(label, len(queue))
+	}
+}
+
+// closeOnQueueFailure returns whether this failure won the first close request.
+// A negative depth denotes a protocol queue, which has its own diagnostic.
+func (s *Session) closeOnQueueFailure(label string, depth int) bool {
+	if !s.beginClose("") {
+		return false
+	}
+	if depth >= 0 {
+		log.Printf("golem/net: session %d send buffer overflow while queueing %s (buffer=%d); closing slow session", s.ID, label, depth)
+	} else {
+		log.Printf("golem/net: session %d send buffer overflow while queueing %s; closing slow session", s.ID, label)
+	}
+	go s.closeNow()
+	return true
 }

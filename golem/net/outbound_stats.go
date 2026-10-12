@@ -77,3 +77,23 @@ func (s *Session) OutboundSnapshot(now time.Time) SessionOutboundSnapshot {
 	s.protocolMu.Unlock()
 	return out
 }
+
+// trafficCounters is one observation of the physical/session counter families.
+type trafficCounters struct {
+	datagrams, streamBatches, inboundPackets, inboundACKs uint64
+}
+
+// sampleTrafficCounters requires outboundLogMu and returns zero on first observation.
+func (l *Listener) sampleTrafficCounters(id int64, current trafficCounters) trafficCounters {
+	previous, seen := l.trafficPrev[id]
+	l.trafficPrev[id] = current
+	if !seen {
+		return trafficCounters{}
+	}
+	return trafficCounters{
+		datagrams:      uint64Delta(current.datagrams, previous.datagrams),
+		streamBatches:  uint64Delta(current.streamBatches, previous.streamBatches),
+		inboundPackets: uint64Delta(current.inboundPackets, previous.inboundPackets),
+		inboundACKs:    uint64Delta(current.inboundACKs, previous.inboundACKs),
+	}
+}

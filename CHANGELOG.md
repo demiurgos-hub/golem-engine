@@ -20,6 +20,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 - Native Go clients wait for the first reliable ordered WebTransport datagram before delivering later messages. An unresolved ordered gap lasting more than three seconds reports a disconnect even when no further datagrams arrive.
 - WebTransport servers coalesce acknowledgements from the first pending packet, so continuous command traffic cannot postpone ACKs indefinitely.
 - Go server datagram sequence comparison treats a separation of exactly 32768 as ambiguous, matching the Go client and preventing false receive-window advances or loss reports.
+- Removing a session clears all of its traffic-counter history, including inbound packet and ACK counters used in replication diagnostics.
 - JavaScript generation emits a valid `never` synchronized-entity union for schemas without entities, including world-only and event-only clients.
 - Go and JavaScript WebTransport clients acknowledge sustained incoming state traffic within their configured coalescing interval. Continuous updates no longer postpone acknowledgements indefinitely and disconnect idle clients when the interval matches the server tick rate.
 - JavaScript WebTransport clients retain queued commands that have not been sent when an acknowledgement for an earlier packet arrives, preventing missing ordered commands and subsequent disconnections.
