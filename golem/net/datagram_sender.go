@@ -53,7 +53,9 @@ func (p *datagramProtocolState) nextAckPacketInto(now time.Time, dst []byte) ([]
 	if !p.ackDirty || (!p.ackDueAt.IsZero() && now.Before(p.ackDueAt)) {
 		return nil, false, nil
 	}
-	packet, err := p.newPacketInto(datagramPacket{flags: datagramFlagAckOnly}, dst)
+	packet, err := p.newPacketInto(datagramPacket{
+		Flags: datagramFlagAckOnly,
+	}, dst)
 	if err != nil {
 		return nil, false, err
 	}
@@ -78,10 +80,10 @@ func (p *datagramProtocolState) nextReliablePacketInto(lane datagramLane, now ti
 			continue
 		}
 		packetBytes, err := p.newPacketInto(datagramPacket{
-			lane:       lane,
-			messageID:  msg.messageID,
-			orderedSeq: msg.orderedSeq,
-			payload:    msg.payload,
+			Lane:            lane,
+			MessageID:       msg.messageID,
+			OrderedSequence: msg.orderedSeq,
+			Payload:         msg.payload,
 		}, dst)
 		if err != nil {
 			return nil, false, false, err
@@ -114,9 +116,9 @@ func (p *datagramProtocolState) nextEventualStatePacketInto(now time.Time, dst [
 	msg := p.popPendingEventual()
 	sentAt := now
 	packetBytes, err := p.newPacketInto(datagramPacket{
-		lane:       datagramLaneEventualState,
-		stateToken: msg.token,
-		payload:    msg.payload,
+		Lane:       datagramLaneEventualState,
+		StateToken: msg.token,
+		Payload:    msg.payload,
 	}, dst)
 	if err != nil {
 		return nil, false, err
@@ -171,8 +173,8 @@ func (p *datagramProtocolState) nextWakeTime(now time.Time) (time.Time, bool) {
 	if !p.eventualExpiry.IsZero() {
 		add(p.eventualExpiry)
 	}
-	if !p.orderedRecv.gapSince.IsZero() {
-		add(p.orderedRecv.gapSince.Add(datagramReliableOrderedGapTimeout))
+	if !p.orderedRecv.GapSince().IsZero() {
+		add(p.orderedRecv.GapSince().Add(datagramReliableOrderedGapTimeout))
 	}
 	return wake, ok
 }
@@ -268,8 +270,8 @@ func (p *datagramProtocolState) newUnreliablePacketInto(payload []byte, dst []by
 		return nil, err
 	}
 	return p.newPacketInto(datagramPacket{
-		lane:    datagramLaneUnreliable,
-		payload: payload,
+		Lane:    datagramLaneUnreliable,
+		Payload: payload,
 	}, dst)
 }
 
@@ -285,33 +287,19 @@ func (p *datagramProtocolState) newPacket(packet datagramPacket) ([]byte, error)
 }
 
 func (p *datagramProtocolState) newPacketInto(packet datagramPacket, dst []byte) ([]byte, error) {
-	packet.packetSeq = p.nextPacketSeq
-	packet.ackSeq = p.recvPackets.latest
-	packet.ackMask = p.recvPackets.mask
+	packet.Sequence = p.nextPacketSeq
+	packet.ACK = p.recvPackets.Snapshot()
 	packetBytes, err := appendDatagramPacket(dst, packet)
 	if err != nil {
 		return nil, err
 	}
 	p.nextPacketSeq++
 	p.ackDirty = false
+	p.ackDueAt = time.Time{}
 	return packetBytes, nil
 }
 
 func (p *datagramProtocolState) applyPeerAcks(ackSeq uint16, ackMask ackMask128, now time.Time) (bool, error) {
-	if !p.peerPackets.init {
-		p.peerPackets.init = true
-		p.peerPackets.latest = ackSeq
-		p.peerPackets.mask = ackMask
-		return p.pruneAckedMessages(ackSeq, ackMask, now)
-	}
-	if seqGreater(ackSeq, p.peerPackets.latest) || ackSeq == p.peerPackets.latest {
-		p.peerPackets.latest = ackSeq
-		p.peerPackets.mask = ackMask
-	}
-	return p.pruneAckedMessages(ackSeq, ackMask, now)
-}
-
-func (p *datagramProtocolState) pruneAckedMessages(ackSeq uint16, ackMask ackMask128, now time.Time) (bool, error) {
 	changedOrdered, errOrdered := pruneReliableQueue(&p.pendingOrdered, ackSeq, ackMask, now)
 	changedUnordered, errUnordered := pruneReliableQueue(&p.pendingUnordered, ackSeq, ackMask, now)
 	changedEventual, errEventual := p.pruneEventualState(ackSeq, ackMask, now)
@@ -423,21 +411,11 @@ const (
 )
 
 func packetAckState(packetSeq uint16, ackSeq uint16, ackMask ackMask128) packetAckStatus {
-	if packetSeq == ackSeq {
+	if (datagramACK{Sequence: ackSeq, Mask: ackMask}).Acknowledges(packetSeq) {
 		return packetAckDelivered
 	}
 	if !seqGreater(ackSeq, packetSeq) {
 		return packetAckPending
-	}
-	delta := seqDistance(packetSeq, ackSeq)
-	if delta == 0 {
-		return packetAckPending
-	}
-	if delta > datagramPacketAckWindow {
-		return packetAckLost
-	}
-	if ackMask.hasBit(int(delta - 1)) {
-		return packetAckDelivered
 	}
 	return packetAckLost
 }

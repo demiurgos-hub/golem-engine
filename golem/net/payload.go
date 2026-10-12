@@ -1,10 +1,11 @@
 package net
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/demiurgos-hub/golem-engine/internal/netwire"
 )
 
 // ErrSessionNotFound reports that a send target disconnected before delivery.
@@ -28,16 +29,16 @@ const (
 )
 
 const (
-	maxReliableMessageBytes                  = 256 * 1024
+	maxReliableMessageBytes                  = netwire.MaxReliableMessageBytes
 	maxReliableChunkBytes                    = 32000
 	maxWebSocketPayloadBytes                 = maxReliableMessageBytes
-	maxWebTransportDatagramBytes             = 1200
-	reliableFrameHeaderBytes                 = 4
+	maxWebTransportDatagramBytes             = netwire.MaxDatagramBytes
+	reliableFrameHeaderBytes                 = netwire.FrameHeaderBytes
 	maxUnreliableStateDatagramPayloadBytes   = maxWebTransportDatagramBytes
-	maxUnreliableDatagramPayloadBytes        = maxWebTransportDatagramBytes - datagramPacketHeaderBytes - datagramLaneHeaderBytes
-	maxReliableUnorderedDatagramPayloadBytes = maxWebTransportDatagramBytes - datagramPacketHeaderBytes - datagramLaneHeaderBytes - datagramReliableMessageIDBytes
-	maxReliableOrderedDatagramPayloadBytes   = maxWebTransportDatagramBytes - datagramPacketHeaderBytes - datagramLaneHeaderBytes - datagramReliableMessageIDBytes - datagramReliableOrderedSequenceBytes
-	maxEventualStateDatagramPayloadBytes     = maxWebTransportDatagramBytes - datagramPacketHeaderBytes - datagramLaneHeaderBytes - datagramEventualStateTokenBytes
+	maxUnreliableDatagramPayloadBytes        = netwire.MaxDatagramBytes - netwire.UnreliableOverhead
+	maxReliableUnorderedDatagramPayloadBytes = netwire.MaxDatagramBytes - netwire.ReliableUnorderedOverhead
+	maxReliableOrderedDatagramPayloadBytes   = netwire.MaxDatagramBytes - netwire.ReliableOrderedOverhead
+	maxEventualStateDatagramPayloadBytes     = netwire.MaxDatagramBytes - netwire.EventualStateOverhead
 )
 
 // CertificateHash identifies a certificate by digest for browser WebTransport.
@@ -101,6 +102,8 @@ func chunkReliableOrderedDatagramFrames(frames [][]byte) ([][]byte, error) {
 
 // UnreliableStateDatagramPayloads packs wrapped entity-update frames into one
 // or more raw WebTransport datagram payloads using length-prefixed framing.
+// Returned payloads own their bytes; inputs remain unchanged. Every encoded
+// frame must fit the payload budget, and an error returns no partial output.
 func UnreliableStateDatagramPayloads(frames [][]byte) ([][]byte, error) {
 	return chunkFrames(frames, maxUnreliableStateDatagramPayloadBytes, lengthPrefixedReliableChunkEncoder, false)
 }
@@ -125,6 +128,8 @@ func AppendUnreliableStateDatagramFrame(dst []byte, frame []byte) []byte {
 
 // EventualStateDatagramPayloads packs wrapped entity-update frames into one or
 // more eventual-state datagram payloads using length-prefixed framing.
+// Returned payloads own their bytes; inputs remain unchanged. Every encoded
+// frame must fit the payload budget, and an error returns no partial output.
 func EventualStateDatagramPayloads(frames [][]byte) ([][]byte, error) {
 	return chunkFrames(frames, maxEventualStateDatagramPayloadBytes, lengthPrefixedReliableChunkEncoder, false)
 }
@@ -168,6 +173,7 @@ func ReliableOrderedStateDatagramPayloadBudget() int {
 // ReliableStreamWriteChunkCount returns how many separate writes the reliable
 // stream lane performs for the given pre-wrapped frames (same rules as
 // WebSocket and WebTransport reliable stream batch writers).
+// It allocates no payload buffers and returns zero on validation failure.
 func ReliableStreamWriteChunkCount(t Transport, frames [][]byte) (int, error) {
 	if len(frames) == 0 {
 		return 0, nil
@@ -185,55 +191,23 @@ func ReliableStreamWriteChunkCount(t Transport, frames [][]byte) (int, error) {
 
 // ReliableOrderedDatagramPayloadCount returns how many reliable-ordered
 // datagram payloads chunkReliableOrderedDatagramFrames would produce.
+// It allocates no payload buffers and returns zero on validation failure.
 func ReliableOrderedDatagramPayloadCount(frames [][]byte) (int, error) {
-	if len(frames) == 0 {
-		return 0, nil
-	}
-	p, err := chunkReliableOrderedDatagramFrames(frames)
-	if err != nil {
-		return 0, err
-	}
-	return len(p), nil
+	return countFrameChunks(frames, maxReliableOrderedDatagramPayloadBytes, lengthPrefixedReliableChunkEncoder, false, "ordered datagram")
 }
 
 // UnreliableStateDatagramPayloadCount returns how many raw unreliable state
 // datagram payloads UnreliableStateDatagramPayloads would produce.
+// It allocates no payload buffers and returns zero on validation failure.
 func UnreliableStateDatagramPayloadCount(frames [][]byte) (int, error) {
-	if len(frames) == 0 {
-		return 0, nil
-	}
-	var (
-		payloads     = 1
-		pendingBytes int
-	)
-	for i, frame := range frames {
-		if err := validateReliableMessageSize(frame); err != nil {
-			return 0, fmt.Errorf("frame %d: %w", i, err)
-		}
-		encodedLen := UnreliableStateDatagramFramePayloadLen(frame)
-		if encodedLen > maxUnreliableStateDatagramPayloadBytes {
-			return 0, fmt.Errorf("frame %d: golem/net: encoded frame size %d exceeds max unreliable state datagram payload %d", i, encodedLen, maxUnreliableStateDatagramPayloadBytes)
-		}
-		if pendingBytes > 0 && pendingBytes+encodedLen > maxUnreliableStateDatagramPayloadBytes {
-			payloads++
-			pendingBytes = 0
-		}
-		pendingBytes += encodedLen
-	}
-	return payloads, nil
+	return countFrameChunks(frames, maxUnreliableStateDatagramPayloadBytes, lengthPrefixedReliableChunkEncoder, false, "unreliable state datagram")
 }
 
 // EventualStateDatagramPayloadCount returns how many eventual-state datagram
 // payloads EventualStateDatagramPayloads would produce.
+// It allocates no payload buffers and returns zero on validation failure.
 func EventualStateDatagramPayloadCount(frames [][]byte) (int, error) {
-	if len(frames) == 0 {
-		return 0, nil
-	}
-	p, err := EventualStateDatagramPayloads(frames)
-	if err != nil {
-		return 0, err
-	}
-	return len(p), nil
+	return countFrameChunks(frames, maxEventualStateDatagramPayloadBytes, lengthPrefixedReliableChunkEncoder, false, "ordered datagram")
 }
 
 // validateWebSocketPayloadSize reports an error when a single WebSocket payload
@@ -266,18 +240,17 @@ func writeReliableFrameChunks(frames [][]byte, maxChunkBytes int, encoder reliab
 	if len(frames) == 0 {
 		return scratch[:0], nil
 	}
-	if maxChunkBytes <= 0 {
-		return scratch[:0], fmt.Errorf("golem/net: invalid reliable chunk size %d", maxChunkBytes)
+	sizer, err := netwire.NewChunkSizer(maxChunkBytes, true)
+	if err != nil {
+		return scratch[:0], chunkSizeError(err, "ordered datagram")
 	}
-
 	buf := scratch[:0]
 	for i, frame := range frames {
-		if err := validateReliableMessageSize(frame); err != nil {
-			return buf[:0], fmt.Errorf("frame %d: %w", i, err)
+		flush, err := sizer.Add(len(frame), encoder.encodedLen(frame))
+		if err != nil {
+			return buf[:0], fmt.Errorf("frame %d: %w", i, chunkSizeError(err, "ordered datagram"))
 		}
-
-		encodedLen := encoder.encodedLen(frame)
-		if len(buf) > 0 && len(buf)+encodedLen > maxChunkBytes {
+		if flush {
 			if err := write(buf); err != nil {
 				return buf[:0], err
 			}
@@ -294,30 +267,28 @@ func writeReliableFrameChunks(frames [][]byte, maxChunkBytes int, encoder reliab
 }
 
 func countReliableFrameChunks(frames [][]byte, maxChunkBytes int, encoder reliableChunkEncoder) (int, error) {
+	return countFrameChunks(frames, maxChunkBytes, encoder, true, "ordered datagram")
+}
+
+func countFrameChunks(frames [][]byte, maxChunkBytes int, encoder reliableChunkEncoder, allowOversizedSingle bool, diagnostic string) (int, error) {
 	if len(frames) == 0 {
 		return 0, nil
 	}
-	if maxChunkBytes <= 0 {
-		return 0, fmt.Errorf("golem/net: invalid reliable chunk size %d", maxChunkBytes)
+	sizer, err := netwire.NewChunkSizer(maxChunkBytes, allowOversizedSingle)
+	if err != nil {
+		return 0, chunkSizeError(err, diagnostic)
 	}
-
-	var (
-		chunks       int
-		pendingBytes int
-	)
+	chunks := 0
 	for i, frame := range frames {
-		if err := validateReliableMessageSize(frame); err != nil {
-			return 0, fmt.Errorf("frame %d: %w", i, err)
+		flush, err := sizer.Add(len(frame), encoder.encodedLen(frame))
+		if err != nil {
+			return 0, fmt.Errorf("frame %d: %w", i, chunkSizeError(err, diagnostic))
 		}
-
-		encodedLen := encoder.encodedLen(frame)
-		if pendingBytes > 0 && pendingBytes+encodedLen > maxChunkBytes {
+		if flush {
 			chunks++
-			pendingBytes = 0
 		}
-		pendingBytes += encodedLen
 	}
-	if pendingBytes > 0 {
+	if sizer.PendingBytes() > 0 {
 		chunks++
 	}
 	return chunks, nil
@@ -327,33 +298,24 @@ func chunkFrames(frames [][]byte, maxChunkBytes int, encoder reliableChunkEncode
 	if len(frames) == 0 {
 		return nil, nil
 	}
-	if maxChunkBytes <= 0 {
-		return nil, fmt.Errorf("golem/net: invalid reliable chunk size %d", maxChunkBytes)
+	sizer, err := netwire.NewChunkSizer(maxChunkBytes, allowOversizedSingle)
+	if err != nil {
+		return nil, chunkSizeError(err, "ordered datagram")
 	}
-
-	var (
-		chunks [][]byte
-		buf    []byte
-	)
+	var chunks [][]byte
+	var buf []byte
 	for i, frame := range frames {
-		if err := validateReliableMessageSize(frame); err != nil {
-			return nil, fmt.Errorf("frame %d: %w", i, err)
-		}
-
 		encodedLen := encoder.encodedLen(frame)
-		if encodedLen > maxChunkBytes && !allowOversizedSingle {
-			return nil, fmt.Errorf("frame %d: golem/net: encoded frame size %d exceeds max ordered datagram payload %d", i, encodedLen, maxChunkBytes)
+		flush, err := sizer.Add(len(frame), encodedLen)
+		if err != nil {
+			return nil, fmt.Errorf("frame %d: %w", i, chunkSizeError(err, "ordered datagram"))
 		}
-		if len(buf) > 0 && len(buf)+encodedLen > maxChunkBytes {
+		if flush {
 			chunks = append(chunks, buf)
 			buf = nil
 		}
 		if buf == nil {
-			chunkCap := maxChunkBytes
-			if allowOversizedSingle && encodedLen > chunkCap {
-				chunkCap = encodedLen
-			}
-			buf = make([]byte, 0, chunkCap)
+			buf = make([]byte, 0, max(maxChunkBytes, encodedLen))
 		}
 		buf = encoder.appendFrame(buf, frame)
 	}
@@ -363,40 +325,40 @@ func chunkFrames(frames [][]byte, maxChunkBytes int, encoder reliableChunkEncode
 	return chunks, nil
 }
 
-// writeReliableFrame writes one length-prefixed reliable message to w.
-func writeReliableFrame(w io.Writer, data []byte) error {
-	if err := validateReliableMessageSize(data); err != nil {
+func chunkSizeError(err error, diagnostic string) error {
+	size, ok := err.(netwire.ChunkSizeError)
+	if !ok {
 		return err
 	}
-	encoded := appendLengthPrefixedReliableFrame(nil, data)
-	_, err := w.Write(encoded)
+	switch size.Kind {
+	case netwire.InvalidChunkTarget:
+		return fmt.Errorf("golem/net: invalid reliable chunk size %d", size.Size)
+	case netwire.LogicalFrameTooLarge:
+		return fmt.Errorf("golem/net: reliable message size %d exceeds max reliable message %d", size.Size, size.Limit)
+	default:
+		return fmt.Errorf("golem/net: encoded frame size %d exceeds max %s payload %d", size.Size, diagnostic, size.Limit)
+	}
+}
+
+// writeReliableFrame writes one length-prefixed reliable message to w.
+func writeReliableFrame(w io.Writer, data []byte) error {
+	err := netwire.WriteFrame(w, data)
+	if size, ok := err.(netwire.SizeError); ok {
+		return fmt.Errorf("golem/net: reliable message size %d exceeds max reliable message %d", size.Size, size.Limit)
+	}
 	return err
 }
 
 // appendLengthPrefixedReliableFrame appends one framed reliable message to dst.
-func appendLengthPrefixedReliableFrame(dst []byte, data []byte) []byte {
-	start := len(dst)
-	dst = append(dst, 0, 0, 0, 0)
-	binary.BigEndian.PutUint32(dst[start:start+reliableFrameHeaderBytes], uint32(len(data)))
-	return append(dst, data...)
+func appendLengthPrefixedReliableFrame(dst, data []byte) []byte {
+	return netwire.AppendFrame(dst, data)
 }
 
 // readReliableFrame reads one length-prefixed reliable message from r.
 func readReliableFrame(r io.Reader) ([]byte, error) {
-	var hdr [reliableFrameHeaderBytes]byte
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return nil, err
+	data, err := netwire.ReadFrame(r)
+	if size, ok := err.(netwire.SizeError); ok {
+		return nil, fmt.Errorf("golem/net: reliable frame length %d exceeds max reliable message %d", size.Size, size.Limit)
 	}
-	n := binary.BigEndian.Uint32(hdr[:])
-	if n > maxReliableMessageBytes {
-		return nil, fmt.Errorf("golem/net: reliable frame length %d exceeds max reliable message %d", n, maxReliableMessageBytes)
-	}
-	if n == 0 {
-		return []byte{}, nil
-	}
-	data := make([]byte, int(n))
-	if _, err := io.ReadFull(r, data); err != nil {
-		return nil, err
-	}
-	return data, nil
+	return data, err
 }

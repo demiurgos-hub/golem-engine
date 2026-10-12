@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
-	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
 func decodeReliableBatchPayload(t *testing.T, payload []byte) [][]byte {
@@ -300,10 +300,10 @@ func TestListenerWebTransportSendReliableOrderedBatchDeliversFramedPayloads(t *t
 	if err != nil {
 		t.Fatalf("decodeDatagramPacket: %v", err)
 	}
-	if packet.lane != datagramLaneReliableOrdered {
-		t.Fatalf("packet lane = %d, want %d", packet.lane, datagramLaneReliableOrdered)
+	if packet.Lane != datagramLaneReliableOrdered {
+		t.Fatalf("packet lane = %d, want %d", packet.Lane, datagramLaneReliableOrdered)
 	}
-	frames := decodeReliableBatchPayload(t, packet.payload)
+	frames := decodeReliableBatchPayload(t, packet.Payload)
 	if got, want := len(frames), 3; got != want {
 		t.Fatalf("frames len = %d, want %d", got, want)
 	}
@@ -330,11 +330,11 @@ func TestListenerWebTransportSendReliableOrderedBatchDeliversFramedPayloads(t *t
 func TestListenerWebTransportReliableDatagramCallbacksPreserveOrder(t *testing.T) {
 	listener := NewListener(registry.NewRegistry(), Config{Transport: TransportWebTransport})
 
-	var sessionID int64
+	connected := make(chan int64, 1)
 	orderedSeen := make(chan []byte, 4)
 	unorderedSeen := make(chan []byte, 4)
 	listener.OnConnect(func(sess *Session) {
-		sessionID = sess.ID
+		connected <- sess.ID
 	})
 	listener.OnReliableOrdered(func(_ *Session, data []byte) {
 		orderedSeen <- append([]byte(nil), data...)
@@ -364,47 +364,40 @@ func TestListenerWebTransportReliableDatagramCallbacksPreserveOrder(t *testing.T
 		t.Fatalf("prime reliable stream: %v", err)
 	}
 
-	deadline := time.After(2 * time.Second)
-	for sessionID == 0 {
-		select {
-		case <-deadline:
-			t.Fatal("session not connected")
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
+	select {
+	case <-connected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session not connected")
 	}
 
 	unorderedPacket, err := encodeDatagramPacket(datagramPacket{
-		packetSeq: 1,
-		ackSeq:    0,
-		ackMask:   ackMask128{},
-		lane:      datagramLaneReliableUnordered,
-		messageID: 1,
-		payload:   []byte("u1"),
+		Sequence:  1,
+		Lane:      datagramLaneReliableUnordered,
+		MessageID: 1,
+		Payload:   []byte("u1"),
+		ACK:       datagramACK{Sequence: 0, Mask: ackMask128{}},
 	})
 	if err != nil {
 		t.Fatalf("encodeDatagramPacket unordered: %v", err)
 	}
 	orderedSecond, err := encodeDatagramPacket(datagramPacket{
-		packetSeq:  2,
-		ackSeq:     0,
-		ackMask:    ackMask128{},
-		lane:       datagramLaneReliableOrdered,
-		messageID:  3,
-		orderedSeq: 1,
-		payload:    []byte("o2"),
+		Sequence:        2,
+		Lane:            datagramLaneReliableOrdered,
+		MessageID:       3,
+		OrderedSequence: 1,
+		Payload:         []byte("o2"),
+		ACK:             datagramACK{Sequence: 0, Mask: ackMask128{}},
 	})
 	if err != nil {
 		t.Fatalf("encodeDatagramPacket ordered second: %v", err)
 	}
 	orderedFirst, err := encodeDatagramPacket(datagramPacket{
-		packetSeq:  3,
-		ackSeq:     0,
-		ackMask:    ackMask128{},
-		lane:       datagramLaneReliableOrdered,
-		messageID:  2,
-		orderedSeq: 0,
-		payload:    []byte("o1"),
+		Sequence:        3,
+		Lane:            datagramLaneReliableOrdered,
+		MessageID:       2,
+		OrderedSequence: 0,
+		Payload:         []byte("o1"),
+		ACK:             datagramACK{Sequence: 0, Mask: ackMask128{}},
 	})
 	if err != nil {
 		t.Fatalf("encodeDatagramPacket ordered first: %v", err)
@@ -487,14 +480,14 @@ func TestListenerWebTransportExpandedAckWindowStopsDeepOrderedResends(t *testing
 		if err != nil {
 			t.Fatalf("decodeDatagramPacket %d: %v", i, err)
 		}
-		if packet.flags&datagramFlagAckOnly != 0 {
+		if packet.Flags&datagramFlagAckOnly != 0 {
 			i--
 			continue
 		}
-		if packet.lane != datagramLaneReliableOrdered {
-			t.Fatalf("packet %d lane = %d, want %d", i, packet.lane, datagramLaneReliableOrdered)
+		if packet.Lane != datagramLaneReliableOrdered {
+			t.Fatalf("packet %d lane = %d, want %d", i, packet.Lane, datagramLaneReliableOrdered)
 		}
-		lastPacketSeq = packet.packetSeq
+		lastPacketSeq = packet.Sequence
 	}
 
 	select {
@@ -508,13 +501,12 @@ func TestListenerWebTransportExpandedAckWindowStopsDeepOrderedResends(t *testing
 
 	var ackMask ackMask128
 	for bit := 0; bit < 63; bit++ {
-		ackMask.setBit(bit)
+		ackMask.SetBit(bit)
 	}
 	ackPacket, err := encodeDatagramPacket(datagramPacket{
-		packetSeq: 1,
-		ackSeq:    lastPacketSeq,
-		ackMask:   ackMask,
-		flags:     datagramFlagAckOnly,
+		Sequence: 1,
+		Flags:    datagramFlagAckOnly,
+		ACK:      datagramACK{Sequence: lastPacketSeq, Mask: ackMask},
 	})
 	if err != nil {
 		t.Fatalf("encodeDatagramPacket ack: %v", err)
@@ -537,9 +529,9 @@ func TestListenerWebTransportExpandedAckWindowStopsDeepOrderedResends(t *testing
 		if err != nil {
 			t.Fatalf("decodeDatagramPacket after ack: %v", err)
 		}
-		if packet.flags&datagramFlagAckOnly != 0 {
+		if packet.Flags&datagramFlagAckOnly != 0 {
 			continue
 		}
-		t.Fatalf("unexpected datagram after deep ack: lane=%d packetSeq=%d", packet.lane, packet.packetSeq)
+		t.Fatalf("unexpected datagram after deep ack: lane=%d packetSeq=%d", packet.Lane, packet.Sequence)
 	}
 }

@@ -11,7 +11,7 @@ import (
 func ackMaskWithBits(bits ...int) ackMask128 {
 	var mask ackMask128
 	for _, bit := range bits {
-		mask.setBit(bit)
+		mask.SetBit(bit)
 	}
 	return mask
 }
@@ -29,10 +29,9 @@ func assertNextWakeTime(t *testing.T, state *datagramProtocolState, now time.Tim
 
 func TestDatagramPacketRoundTripAckOnly(t *testing.T) {
 	packet := datagramPacket{
-		packetSeq: 7,
-		ackSeq:    6,
-		ackMask:   ackMask128{0x01020304, 0x05060708, 0x090a0b0c, 0x0d0e0f10},
-		flags:     datagramFlagAckOnly,
+		Sequence: 7,
+		Flags:    datagramFlagAckOnly,
+		ACK:      datagramACK{Sequence: 6, Mask: ackMask128{0x01020304, 0x05060708, 0x090a0b0c, 0x0d0e0f10}},
 	}
 	encoded, err := encodeDatagramPacket(packet)
 	if err != nil {
@@ -42,20 +41,19 @@ func TestDatagramPacketRoundTripAckOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeDatagramPacket: %v", err)
 	}
-	if decoded.packetSeq != packet.packetSeq || decoded.ackSeq != packet.ackSeq || decoded.ackMask != packet.ackMask || decoded.flags != packet.flags {
+	if decoded.Sequence != packet.Sequence || decoded.ACK.Sequence != packet.ACK.Sequence || decoded.ACK.Mask != packet.ACK.Mask || decoded.Flags != packet.Flags {
 		t.Fatalf("decoded packet = %+v, want %+v", decoded, packet)
 	}
 }
 
 func TestDatagramPacketRoundTripReliableOrdered(t *testing.T) {
 	packet := datagramPacket{
-		packetSeq:  9,
-		ackSeq:     8,
-		ackMask:    ackMask128{0xfeedbeef, 0xdecafbad, 0x01020304, 0xaabbccdd},
-		lane:       datagramLaneReliableOrdered,
-		messageID:  11,
-		orderedSeq: 12,
-		payload:    []byte("hello"),
+		Sequence:        9,
+		Lane:            datagramLaneReliableOrdered,
+		MessageID:       11,
+		OrderedSequence: 12,
+		Payload:         []byte("hello"),
+		ACK:             datagramACK{Sequence: 8, Mask: ackMask128{0xfeedbeef, 0xdecafbad, 0x01020304, 0xaabbccdd}},
 	}
 	encoded, err := encodeDatagramPacket(packet)
 	if err != nil {
@@ -65,7 +63,7 @@ func TestDatagramPacketRoundTripReliableOrdered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeDatagramPacket: %v", err)
 	}
-	if decoded.lane != packet.lane || decoded.messageID != packet.messageID || decoded.orderedSeq != packet.orderedSeq || !bytes.Equal(decoded.payload, packet.payload) {
+	if decoded.Lane != packet.Lane || decoded.MessageID != packet.MessageID || decoded.OrderedSequence != packet.OrderedSequence || !bytes.Equal(decoded.Payload, packet.Payload) {
 		t.Fatalf("decoded packet = %+v, want %+v", decoded, packet)
 	}
 }
@@ -74,10 +72,9 @@ func TestDatagramProtocolAckOnlyDoesNotElicitAck(t *testing.T) {
 	state := newDatagramProtocolState()
 	now := time.UnixMilli(0)
 	packet, err := encodeDatagramPacket(datagramPacket{
-		packetSeq: 100,
-		ackSeq:    7,
-		ackMask:   ackMaskWithBits(0, 2),
-		flags:     datagramFlagAckOnly,
+		Sequence: 100,
+		Flags:    datagramFlagAckOnly,
+		ACK:      datagramACK{Sequence: 7, Mask: ackMaskWithBits(0, 2)},
 	})
 	if err != nil {
 		t.Fatalf("encodeDatagramPacket: %v", err)
@@ -91,7 +88,7 @@ func TestDatagramProtocolAckOnlyDoesNotElicitAck(t *testing.T) {
 	if state.ackDirty {
 		t.Fatal("ackDirty = true after ACK-only packet")
 	}
-	if state.recvPackets.init {
+	if state.recvPackets != (sequenceWindow{}) {
 		t.Fatal("ACK-only packet advanced receive packet window")
 	}
 }
@@ -111,9 +108,9 @@ func TestDatagramProtocolAckOnlyStillPrunesPeerAcks(t *testing.T) {
 		t.Fatalf("decodeDatagramPacket: %v", err)
 	}
 	ack, err := encodeDatagramPacket(datagramPacket{
-		packetSeq: 100,
-		ackSeq:    sent.packetSeq,
-		flags:     datagramFlagAckOnly,
+		Sequence: 100,
+		Flags:    datagramFlagAckOnly,
+		ACK:      datagramACK{Sequence: sent.Sequence},
 	})
 	if err != nil {
 		t.Fatalf("encodeDatagramPacket ACK: %v", err)
@@ -130,7 +127,7 @@ func TestDatagramProtocolAckOnlyStillPrunesPeerAcks(t *testing.T) {
 	if state.ackDirty {
 		t.Fatal("ackDirty = true after ACK-only packet")
 	}
-	if state.recvPackets.init {
+	if state.recvPackets != (sequenceWindow{}) {
 		t.Fatal("ACK-only packet advanced receive packet window")
 	}
 }
@@ -160,12 +157,12 @@ func TestDatagramProtocolReliableUnorderedResendAndAck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeDatagramPacket: %v", err)
 	}
-	state.applyPeerAcks(decoded2.packetSeq, ackMask128{}, now.Add(2*datagramReliableRetryBaseDelay))
+	state.applyPeerAcks(decoded2.Sequence, ackMask128{}, now.Add(2*datagramReliableRetryBaseDelay))
 	if len(state.pendingUnordered) != 0 {
 		t.Fatalf("pendingUnordered len = %d, want 0", len(state.pendingUnordered))
 	}
-	if decoded1.messageID != decoded2.messageID {
-		t.Fatalf("messageID changed across resend: %d vs %d", decoded1.messageID, decoded2.messageID)
+	if decoded1.MessageID != decoded2.MessageID {
+		t.Fatalf("messageID changed across resend: %d vs %d", decoded1.MessageID, decoded2.MessageID)
 	}
 }
 
@@ -183,10 +180,10 @@ func TestDatagramProtocolEventualStateAckFeedback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeDatagramPacket: %v", err)
 	}
-	if decoded.lane != datagramLaneEventualState || decoded.stateToken != 99 {
+	if decoded.Lane != datagramLaneEventualState || decoded.StateToken != 99 {
 		t.Fatalf("decoded eventual packet = %+v", decoded)
 	}
-	if _, err := state.applyPeerAcks(decoded.packetSeq, ackMask128{}, now.Add(time.Millisecond)); err != nil {
+	if _, err := state.applyPeerAcks(decoded.Sequence, ackMask128{}, now.Add(time.Millisecond)); err != nil {
 		t.Fatalf("applyPeerAcks: %v", err)
 	}
 	feedback := state.drainEventualFeedback()
@@ -209,7 +206,7 @@ func TestDatagramProtocolEventualStateLossFeedback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeDatagramPacket: %v", err)
 	}
-	if _, err := state.applyPeerAcks(decoded.packetSeq+1, ackMask128{}, now.Add(time.Millisecond)); err != nil {
+	if _, err := state.applyPeerAcks(decoded.Sequence+1, ackMask128{}, now.Add(time.Millisecond)); err != nil {
 		t.Fatalf("applyPeerAcks: %v", err)
 	}
 	feedback := state.drainEventualFeedback()
@@ -236,8 +233,8 @@ func TestDatagramProtocolPendingEventualQueueFIFOAndReuse(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decodeDatagramPacket token %d: %v", token, err)
 		}
-		if decoded.stateToken != token {
-			t.Fatalf("stateToken = %d, want %d", decoded.stateToken, token)
+		if decoded.StateToken != token {
+			t.Fatalf("stateToken = %d, want %d", decoded.StateToken, token)
 		}
 	}
 	if got, want := state.pendingEventualLen(), 30; got != want {
@@ -258,8 +255,8 @@ func TestDatagramProtocolPendingEventualQueueFIFOAndReuse(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decodeDatagramPacket reused token %d: %v", token, err)
 		}
-		if decoded.stateToken != token {
-			t.Fatalf("reused stateToken = %d, want %d", decoded.stateToken, token)
+		if decoded.StateToken != token {
+			t.Fatalf("reused stateToken = %d, want %d", decoded.StateToken, token)
 		}
 	}
 	if got := state.pendingEventualLen(); got != 0 {
@@ -356,13 +353,12 @@ func TestDatagramProtocolOrderedDeliveryBlocksUntilGapFilled(t *testing.T) {
 	state := newDatagramProtocolState()
 	now := time.UnixMilli(0)
 	p2, err := encodeDatagramPacket(datagramPacket{
-		packetSeq:  2,
-		ackSeq:     0,
-		ackMask:    ackMask128{},
-		lane:       datagramLaneReliableOrdered,
-		messageID:  2,
-		orderedSeq: 1,
-		payload:    []byte("two"),
+		Sequence:        2,
+		Lane:            datagramLaneReliableOrdered,
+		MessageID:       2,
+		OrderedSequence: 1,
+		Payload:         []byte("two"),
+		ACK:             datagramACK{Sequence: 0, Mask: ackMask128{}},
 	})
 	if err != nil {
 		t.Fatalf("encodeDatagramPacket: %v", err)
@@ -375,13 +371,12 @@ func TestDatagramProtocolOrderedDeliveryBlocksUntilGapFilled(t *testing.T) {
 		t.Fatalf("deliveries len = %d, want 0", len(deliveries))
 	}
 	p1, err := encodeDatagramPacket(datagramPacket{
-		packetSeq:  1,
-		ackSeq:     0,
-		ackMask:    ackMask128{},
-		lane:       datagramLaneReliableOrdered,
-		messageID:  1,
-		orderedSeq: 0,
-		payload:    []byte("one"),
+		Sequence:        1,
+		Lane:            datagramLaneReliableOrdered,
+		MessageID:       1,
+		OrderedSequence: 0,
+		Payload:         []byte("one"),
+		ACK:             datagramACK{Sequence: 0, Mask: ackMask128{}},
 	})
 	if err != nil {
 		t.Fatalf("encodeDatagramPacket: %v", err)
@@ -402,13 +397,12 @@ func TestDatagramProtocolOrderedGapExpires(t *testing.T) {
 	state := newDatagramProtocolState()
 	now := time.UnixMilli(0)
 	packet, err := encodeDatagramPacket(datagramPacket{
-		packetSeq:  1,
-		ackSeq:     0,
-		ackMask:    ackMask128{},
-		lane:       datagramLaneReliableOrdered,
-		messageID:  1,
-		orderedSeq: 1,
-		payload:    []byte("late"),
+		Sequence:        1,
+		Lane:            datagramLaneReliableOrdered,
+		MessageID:       1,
+		OrderedSequence: 1,
+		Payload:         []byte("late"),
+		ACK:             datagramACK{Sequence: 0, Mask: ackMask128{}},
 	})
 	if err != nil {
 		t.Fatalf("encodeDatagramPacket: %v", err)
@@ -432,10 +426,9 @@ func TestDatagramProtocolHandleIncomingPropagatesAckPruneStall(t *testing.T) {
 		inFlight:  true,
 	})
 	packet, err := encodeDatagramPacket(datagramPacket{
-		packetSeq: 1,
-		ackSeq:    0,
-		ackMask:   ackMask128{},
-		flags:     datagramFlagAckOnly,
+		Sequence: 1,
+		Flags:    datagramFlagAckOnly,
+		ACK:      datagramACK{Sequence: 0, Mask: ackMask128{}},
 	})
 	if err != nil {
 		t.Fatalf("encodeDatagramPacket: %v", err)
@@ -496,20 +489,19 @@ func TestDatagramProtocolNextWakeTimeEventualStateTTL(t *testing.T) {
 func TestDatagramProtocolNextWakeTimeOrderedGap(t *testing.T) {
 	state := newDatagramProtocolState()
 	now := time.UnixMilli(1000)
-	state.orderedRecv.gapSince = now.Add(-datagramReliableOrderedGapTimeout + 30*time.Millisecond)
+	state.orderedRecv.AcceptCopy(1, nil, now.Add(-datagramReliableOrderedGapTimeout+30*time.Millisecond), 0)
 
 	assertNextWakeTime(t, state, now, now.Add(30*time.Millisecond))
 }
 
 func TestDatagramPacketReliableOrderedMaxPayloadFitsCeiling(t *testing.T) {
 	packet, err := encodeDatagramPacket(datagramPacket{
-		packetSeq:  1,
-		ackSeq:     0,
-		ackMask:    ackMask128{},
-		lane:       datagramLaneReliableOrdered,
-		messageID:  1,
-		orderedSeq: 1,
-		payload:    bytes.Repeat([]byte("x"), maxReliableOrderedDatagramPayloadBytes),
+		Sequence:        1,
+		Lane:            datagramLaneReliableOrdered,
+		MessageID:       1,
+		OrderedSequence: 1,
+		Payload:         bytes.Repeat([]byte("x"), maxReliableOrderedDatagramPayloadBytes),
+		ACK:             datagramACK{Sequence: 0, Mask: ackMask128{}},
 	})
 	if err != nil {
 		t.Fatalf("encodeDatagramPacket: %v", err)
@@ -592,32 +584,32 @@ func TestReliableRetryDelayBackoffCaps(t *testing.T) {
 
 func TestSequenceWindowWraparound(t *testing.T) {
 	var w sequenceWindow
-	if !w.accept(65534) {
+	if !w.Accept(65534) {
 		t.Fatal("accept 65534 = false, want true")
 	}
-	if !w.accept(65535) {
+	if !w.Accept(65535) {
 		t.Fatal("accept 65535 = false, want true")
 	}
-	if !w.accept(0) {
+	if !w.Accept(0) {
 		t.Fatal("accept 0 after wrap = false, want true")
 	}
-	if !w.accept(1) {
+	if !w.Accept(1) {
 		t.Fatal("accept 1 after wrap = false, want true")
 	}
-	if w.accept(65535) {
+	if w.Accept(65535) {
 		t.Fatal("accept duplicate wrapped predecessor = true, want false")
 	}
 }
 
 func TestSequenceWindowTracksBitsBeyondLegacyWindow(t *testing.T) {
 	var w sequenceWindow
-	if !w.accept(1) {
+	if !w.Accept(1) {
 		t.Fatal("accept 1 = false, want true")
 	}
-	if !w.accept(41) {
+	if !w.Accept(41) {
 		t.Fatal("accept 41 = false, want true")
 	}
-	if !w.mask.hasBit(39) {
+	if !w.Snapshot().Mask.HasBit(39) {
 		t.Fatal("bit 39 = false, want true")
 	}
 }

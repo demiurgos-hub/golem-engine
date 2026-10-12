@@ -247,6 +247,22 @@ func TestListenerCloseSessionsFencesPendingSnapshotAndFutureUpgrades(t *testing.
 		listener.CloseSessions()
 		close(closed)
 	}()
+	// Keep the snapshot pending until shutdown has fenced admission. Otherwise
+	// the handler can finish setup first and this tests a different close race.
+	deadline := time.Now().Add(time.Second)
+	for {
+		listener.mu.RLock()
+		closing := listener.closing
+		listener.mu.RUnlock()
+		if closing {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(releaseSnapshot)
+			t.Fatal("shutdown did not fence session admission")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	close(releaseSnapshot)
 	select {
 	case <-closed:

@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/coder/websocket"
-	golemnet "github.com/demiurgos-hub/golem-engine/golem/net"
+	"github.com/demiurgos-hub/golem-engine/internal/netwire"
 )
 
 // WebSocketChannel implements ReliableMessageChannel over WebSocket.
@@ -68,7 +68,7 @@ func (c *WebSocketChannel) SendReliableOrdered(_ []byte) error { return nil }
 // Close closes the WebSocket connection.
 func (c *WebSocketChannel) Close() error {
 	c.closeOnce.Do(func() {
-		_ = c.conn.Write(context.Background(), websocket.MessageBinary, golemnet.ClientCloseControlFrame())
+		_ = c.conn.Write(context.Background(), websocket.MessageBinary, netwire.AppendCloseControl(nil))
 		c.connected.Store(false)
 		c.conn.CloseNow()
 	})

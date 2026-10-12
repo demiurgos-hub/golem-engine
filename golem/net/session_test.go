@@ -603,10 +603,10 @@ func TestListenerSendReliableOrderedBatchSplitsAtPayloadCap(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decodeDatagramPacket %d: %v", i, err)
 		}
-		if packet.lane != datagramLaneReliableOrdered {
-			t.Fatalf("packet %d lane = %d, want %d", i, packet.lane, datagramLaneReliableOrdered)
+		if packet.Lane != datagramLaneReliableOrdered {
+			t.Fatalf("packet %d lane = %d, want %d", i, packet.Lane, datagramLaneReliableOrdered)
 		}
-		got, err := readReliableFrame(bytes.NewReader(packet.payload))
+		got, err := readReliableFrame(bytes.NewReader(packet.Payload))
 		if err != nil {
 			t.Fatalf("readReliableFrame %d: %v", i, err)
 		}
@@ -618,6 +618,9 @@ func TestListenerSendReliableOrderedBatchSplitsAtPayloadCap(t *testing.T) {
 
 func TestListenerSendReliableOrderedBatchRejectsOversizeFrame(t *testing.T) {
 	listener := NewListener(registry.NewRegistry(), Config{Transport: TransportWebTransport})
+	sess := newSession(1, &captureReliableChannel{}, &captureDatagramChannel{}, nil)
+	listener.addSession(sess)
+	defer listener.removeSession(sess)
 	frame := bytes.Repeat([]byte("x"), maxReliableOrderedDatagramPayloadBytes-reliableFrameHeaderBytes+1)
 	if err := listener.SendReliableOrderedBatch(1, [][]byte{frame}); err == nil {
 		t.Fatal("SendReliableOrderedBatch returned nil for oversized frame")
@@ -863,24 +866,22 @@ func TestSessionReliableDatagramCallbacks(t *testing.T) {
 
 	var gotUnordered, gotOrdered atomic.Int32
 	rawUnordered, err := encodeDatagramPacket(datagramPacket{
-		packetSeq: 1,
-		ackSeq:    0,
-		ackMask:   ackMask128{},
-		lane:      datagramLaneReliableUnordered,
-		messageID: 1,
-		payload:   []byte("unordered"),
+		Sequence:  1,
+		Lane:      datagramLaneReliableUnordered,
+		MessageID: 1,
+		Payload:   []byte("unordered"),
+		ACK:       datagramACK{Sequence: 0, Mask: ackMask128{}},
 	})
 	if err != nil {
 		t.Fatalf("encodeDatagramPacket unordered: %v", err)
 	}
 	rawOrdered, err := encodeDatagramPacket(datagramPacket{
-		packetSeq:  2,
-		ackSeq:     0,
-		ackMask:    ackMask128{},
-		lane:       datagramLaneReliableOrdered,
-		messageID:  2,
-		orderedSeq: 0,
-		payload:    []byte("ordered"),
+		Sequence:        2,
+		Lane:            datagramLaneReliableOrdered,
+		MessageID:       2,
+		OrderedSequence: 0,
+		Payload:         []byte("ordered"),
+		ACK:             datagramACK{Sequence: 0, Mask: ackMask128{}},
 	})
 	if err != nil {
 		t.Fatalf("encodeDatagramPacket ordered: %v", err)
@@ -926,11 +927,11 @@ func TestSessionSendEventualStateCopiesPublicPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeDatagramPacket: %v", err)
 	}
-	if packet.lane != datagramLaneEventualState || packet.stateToken != 9 {
+	if packet.Lane != datagramLaneEventualState || packet.StateToken != 9 {
 		t.Fatalf("packet = %+v, want eventual token 9", packet)
 	}
-	if !bytes.Equal(packet.payload, []byte("before")) {
-		t.Fatalf("eventual payload = %q, want %q", packet.payload, "before")
+	if !bytes.Equal(packet.Payload, []byte("before")) {
+		t.Fatalf("eventual payload = %q, want %q", packet.Payload, "before")
 	}
 }
 
@@ -984,19 +985,19 @@ func TestSessionWriteSchedulingPrefersAckThenUnreliableThenReliableThenStream(t 
 		t.Fatalf("stream writes unexpectedly happened early: %d", len(reliable.writes))
 	}
 	packet0, err := decodeDatagramPacket(datagrams.writes[0])
-	if err != nil || packet0.flags != datagramFlagAckOnly {
+	if err != nil || packet0.Flags != datagramFlagAckOnly {
 		t.Fatalf("first datagram = %+v err=%v, want ack-only", packet0, err)
 	}
 	packet1, err := decodeDatagramPacket(datagrams.writes[1])
-	if err != nil || packet1.lane != datagramLaneUnreliable || !bytes.Equal(packet1.payload, []byte("u")) {
+	if err != nil || packet1.Lane != datagramLaneUnreliable || !bytes.Equal(packet1.Payload, []byte("u")) {
 		t.Fatalf("second datagram = %+v err=%v, want unreliable", packet1, err)
 	}
 	packet2, err := decodeDatagramPacket(datagrams.writes[2])
-	if err != nil || packet2.lane != datagramLaneReliableOrdered || !bytes.Equal(packet2.payload, []byte("o")) {
+	if err != nil || packet2.Lane != datagramLaneReliableOrdered || !bytes.Equal(packet2.Payload, []byte("o")) {
 		t.Fatalf("third datagram = %+v err=%v, want reliable ordered", packet2, err)
 	}
 	packet3, err := decodeDatagramPacket(datagrams.writes[3])
-	if err != nil || packet3.lane != datagramLaneReliableUnordered || !bytes.Equal(packet3.payload, []byte("r")) {
+	if err != nil || packet3.Lane != datagramLaneReliableUnordered || !bytes.Equal(packet3.Payload, []byte("r")) {
 		t.Fatalf("fourth datagram = %+v err=%v, want reliable unordered", packet3, err)
 	}
 
@@ -1138,8 +1139,8 @@ func TestSessionWriteOnePrefersFreshReliableDatagramsOverRetries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeDatagramPacket fresh: %v", err)
 	}
-	if !bytes.Equal(packet.payload, []byte("fresh")) {
-		t.Fatalf("second payload = %q, want %q", packet.payload, []byte("fresh"))
+	if !bytes.Equal(packet.Payload, []byte("fresh")) {
+		t.Fatalf("second payload = %q, want %q", packet.Payload, []byte("fresh"))
 	}
 
 	sent, err = sess.writeOne(context.Background(), later, &budget)
@@ -1150,8 +1151,8 @@ func TestSessionWriteOnePrefersFreshReliableDatagramsOverRetries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeDatagramPacket resend: %v", err)
 	}
-	if !bytes.Equal(packet.payload, []byte("old")) {
-		t.Fatalf("third payload = %q, want %q", packet.payload, []byte("old"))
+	if !bytes.Equal(packet.Payload, []byte("old")) {
+		t.Fatalf("third payload = %q, want %q", packet.Payload, []byte("old"))
 	}
 }
 
@@ -1179,16 +1180,15 @@ func TestSessionHandleIncomingDatagramAcksDeepOrderedBurstBeyondLegacyWindow(t *
 	}
 
 	ackPacket, err := encodeDatagramPacket(datagramPacket{
-		packetSeq: 90,
-		ackSeq:    lastPacketSeq,
-		ackMask: func() ackMask128 {
+		Sequence: 90,
+		Flags:    datagramFlagAckOnly,
+		ACK: datagramACK{Sequence: lastPacketSeq, Mask: func() ackMask128 {
 			var mask ackMask128
 			for bit := 0; bit < 63; bit++ {
-				mask.setBit(bit)
+				mask.SetBit(bit)
 			}
 			return mask
-		}(),
-		flags: datagramFlagAckOnly,
+		}()},
 	})
 	if err != nil {
 		t.Fatalf("encodeDatagramPacket ack: %v", err)

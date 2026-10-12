@@ -1,0 +1,20 @@
+---
+description: internal/netwire — shared Go wire metadata, codecs, framing, chunk boundaries, ACK windows, and ordered buffering.
+globs:
+  - internal/netwire/**/*.go
+  - golem/net/**/*.go
+  - golem-go-client/**/*.go
+alwaysApply: false
+---
+
+# `internal/netwire`
+
+This standard-library-only package owns the shared Go wire representation and pure receive algorithms. Both `golem/net` and `golem-go-client` consume it; it must not import either endpoint, the `golem` runtime, protobuf, or transport libraries. JS and Unity keep their own implementations of the same wire format.
+
+**Wire contracts:** keep lane IDs, field order, big-endian encoding, the 128-bit ACK mask, control prefixes, 256 KiB logical frame cap, and 1200-byte built-in datagram limit compatible. `DecodePacket` checks structure and borrows payload bytes; server wrappers enforce lane limits and preserve server error sentinels, while the Go client wrapper copies payloads and preserves its existing receive-size policy. `EncodePacketInto` reuses caller scratch; payload must not overlap it. `PayloadBudget` uses the supplied physical limit without clamping, including negative results when a header cannot fit. Endpoint wrappers retain their validation/error ordering and prefixes.
+
+**Framing and packing:** `ReadFrame` validates before allocation. `WriteFrame` emits one write and preserves the existing short-write convention. `ChunkSizer.Add` validates logical size before strict encoded size and before advancing the greedy boundary. Stream writers allow one frame above their chunk target; datagram packers reject it. Counts, writers, and materializers use the same boundary calculation but keep their own allocation and error behavior. Empty batches retain their early return before target validation. Materialized chunks own independent storage; counts allocate no payload buffers. Replication callers use the existing budget, append, pack, and count APIs in `golem/net`, not another packing algorithm.
+
+**Receive state:** `Newer` treats distance 32768 as ambiguous in both directions. `SequenceWindow` accepts its first observed packet/message ID and tracks its 128 predecessors. `ACK.Acknowledges` reports positive receipt only; endpoint code decides loss and retries. `OrderedBuffer` starts at ordered sequence zero, retains the first unresolved gap time through partial drains, and clears it after the gap is fully drained. `AcceptCopy` is for borrowed server decode bytes; `AcceptOwned` transfers the client's already-copied bytes. Server duplicates keep the first future payload; client duplicates replace it. Both endpoints deliver callbacks outside protocol locks.
+
+**Endpoint responsibilities:** do not move goroutines, locks, queue overflow, close policy, callback dispatch, retry/TTL scheduling, or ACK deadline consumption into this package. Server early ACK-loss detection and client timer retries intentionally differ. The server deduplicates unordered message IDs only; the client deduplicates IDs across both reliable lanes. Keep those differences explicit and covered by endpoint tests. ACK coalescing starts on first pending receipt; ordered gaps expire strictly after three seconds, including client idle scheduler ticks.

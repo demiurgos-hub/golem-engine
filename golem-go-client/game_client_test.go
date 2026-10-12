@@ -612,10 +612,10 @@ func TestDatagramProtocolEncodesStateAwareLane(t *testing.T) {
 		return nil
 	}, 100*time.Millisecond)
 	packet, err := encodeDatagramPacket(datagramPacket{
-		packetSeq:  7,
-		lane:       datagramLaneEventualState,
-		stateToken: 42,
-		payload:    appendLengthPrefixedFrame(nil, []byte("state")),
+		Sequence:   7,
+		Lane:       datagramLaneEventualState,
+		StateToken: 42,
+		Payload:    appendLengthPrefixedFrame(nil, []byte("state")),
 	})
 	if err != nil {
 		t.Fatalf("encodeDatagramPacket: %v", err)
@@ -641,10 +641,10 @@ func TestDatagramProtocolPiggybacksStateAckOnStreamPayload(t *testing.T) {
 		return nil
 	}, time.Hour)
 	packet, err := encodeDatagramPacket(datagramPacket{
-		packetSeq:  9,
-		lane:       datagramLaneEventualState,
-		stateToken: 1,
-		payload:    appendLengthPrefixedFrame(nil, []byte("state")),
+		Sequence:   9,
+		Lane:       datagramLaneEventualState,
+		StateToken: 1,
+		Payload:    appendLengthPrefixedFrame(nil, []byte("state")),
 	})
 	if err != nil {
 		t.Fatalf("encodeDatagramPacket: %v", err)
@@ -657,7 +657,7 @@ func TestDatagramProtocolPiggybacksStateAckOnStreamPayload(t *testing.T) {
 	if len(sent) != 0 {
 		t.Fatalf("ack datagrams = %d, want 0 after stream piggyback", len(sent))
 	}
-	if !bytes.HasPrefix(wrapped, clientReliableAckControlFrame) {
+	if !bytes.HasPrefix(wrapped, []byte(clientReliableAckControlFrame)) {
 		t.Fatalf("wrapped payload missing ACK control frame prefix: %v", wrapped)
 	}
 	offset := len(clientReliableAckControlFrame)
@@ -683,10 +683,10 @@ func TestDatagramProtocolSendsDueAckOnlyPacket(t *testing.T) {
 		return nil
 	}, 50*time.Millisecond)
 	packet, err := encodeDatagramPacket(datagramPacket{
-		packetSeq:  3,
-		lane:       datagramLaneEventualState,
-		stateToken: 1,
-		payload:    appendLengthPrefixedFrame(nil, []byte("state")),
+		Sequence:   3,
+		Lane:       datagramLaneEventualState,
+		StateToken: 1,
+		Payload:    appendLengthPrefixedFrame(nil, []byte("state")),
 	})
 	if err != nil {
 		t.Fatalf("encodeDatagramPacket: %v", err)
@@ -710,11 +710,11 @@ func TestDatagramProtocolSendsDueAckOnlyPacket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode ACK packet: %v", err)
 	}
-	if ack.flags&datagramFlagAckOnly == 0 {
-		t.Fatalf("ack flags = %d, want ACK-only", ack.flags)
+	if ack.Flags&datagramFlagAckOnly == 0 {
+		t.Fatalf("ack flags = %d, want ACK-only", ack.Flags)
 	}
-	if ack.ackSeq != 3 {
-		t.Fatalf("ack seq = %d, want 3", ack.ackSeq)
+	if ack.ACK.Sequence != 3 {
+		t.Fatalf("ack seq = %d, want 3", ack.ACK.Sequence)
 	}
 }
 
@@ -730,7 +730,7 @@ func TestDatagramProtocolAcksContinuous20HzTraffic(t *testing.T) {
 	for seq := uint16(0); seq <= 80; seq++ {
 		now := start.Add(time.Duration(seq) * 50 * time.Millisecond)
 		protocol.mu.Lock()
-		protocol.recvPackets.accept(seq)
+		protocol.recvPackets.Accept(seq)
 		protocol.scheduleAckLocked(now)
 		protocol.mu.Unlock()
 		if err := protocol.sendDueAck(now); err != nil {
@@ -745,7 +745,7 @@ func TestDatagramProtocolAcksContinuous20HzTraffic(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if packet.flags != datagramFlagAckOnly || packet.ackSeq != uint16(i*2+1) {
+		if packet.Flags != datagramFlagAckOnly || packet.ACK.Sequence != uint16(i*2+1) {
 			t.Fatalf("ACK %d = %+v, want latest received packet %d", i, packet, i*2+1)
 		}
 	}

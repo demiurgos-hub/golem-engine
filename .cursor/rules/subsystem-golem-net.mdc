@@ -1,5 +1,5 @@
 ---
-description: golem/net — integrated WebSocket/WebTransport networking, session management, batching, snapshots, and datagrams.
+description: golem/net — integrated WebSocket/WebTransport routing, session queues, batching, snapshots, and datagram scheduling over shared internal/netwire primitives.
 globs: golem/net/**/*.go
 alwaysApply: false
 ---
@@ -8,7 +8,7 @@ alwaysApply: false
 
 **Networking:** `Listener` owns the primary integrated transport selected by `Config.Transport`: WebSocket (`/ws` by default) or WebTransport (`/wt` by default). `WebSocketHandler` is always available so a WebTransport-primary listener can mount a fallback on a caller-owned HTTP server; both handlers share session IDs, hooks, snapshots, sends, statistics, and shutdown. It manages per-client `Session`s, optional static/map file serving, and WebTransport datagrams. Imports **`golem/registry`** for entity snapshots; does **not** import `golem/` (loop/Server). The parent **`golem`** package normally creates and owns the `Listener`, but callers can mount it on custom servers.
 
-**Transport boundary:** `reliableMessageChannel` is the transport-neutral reliable stream lane used by `Session.writeBatch`. `datagramChannel` is the raw WebTransport datagram substrate. `Session` owns the datagram reliability protocol on top of that substrate, including ACK packets, resend state, and ordered delivery for reliable datagram lanes. The datagram protocol header now includes a fixed 128-bit selective-ACK field, so payload budgets in `payload.go` and `golem-js/src/client.ts` must stay aligned with the shared header size.
+**Transport boundary:** `reliableMessageChannel` is the transport-neutral reliable stream lane used by `Session.writeBatch`. `datagramChannel` is the raw WebTransport datagram substrate. `Session` owns scheduling, ACK consumption, resend state, and delivery policy. `internal/netwire` owns shared Go codecs, wire metadata, control frames, stream framing, chunk boundaries, selective ACK windows, and ordered buffering; see `subsystem-netwire.mdc` for contracts and endpoint differences. Server wrappers retain size validation, error sentinels, and borrowed decode semantics. Keep JS/Unity wire budgets aligned with the fixed 128-bit selective ACK field.
 
 **Reliable batching:** `SendBatch` / `BroadcastBatch` queue one reliable batch per session, which keeps channel pressure low even when many entities update in one tick. Reliable logical frames are bounded to 256 KiB. WebSocket coalesces raw logical frames into ordered binary messages up to that cap. WebTransport coalesces length-prefixed logical frames into ordered writes targeting 32000-byte chunks; a single larger logical frame remains one write. `maxReliableMessageBytes` applies per logical frame, not per transport write.
 

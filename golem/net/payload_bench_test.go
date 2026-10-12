@@ -23,7 +23,7 @@ func benchmarkFrames(n, size int) [][]byte {
 func benchmarkAckMask(bits int) ackMask128 {
 	var mask ackMask128
 	for bit := 0; bit < bits; bit++ {
-		mask.setBit(bit)
+		mask.SetBit(bit)
 	}
 	return mask
 }
@@ -42,17 +42,16 @@ func BenchmarkEventualStateDatagramPayloads(b *testing.B) {
 
 func BenchmarkEncodeDatagramPacket(b *testing.B) {
 	packet := datagramPacket{
-		packetSeq:  1,
-		ackSeq:     2,
-		ackMask:    benchmarkAckMask(16),
-		lane:       datagramLaneReliableOrdered,
-		messageID:  3,
-		orderedSeq: 4,
-		payload:    bytes.Repeat([]byte("x"), 256),
+		Sequence:        1,
+		Lane:            datagramLaneReliableOrdered,
+		MessageID:       3,
+		OrderedSequence: 4,
+		Payload:         bytes.Repeat([]byte("x"), 256),
+		ACK:             datagramACK{Sequence: 2, Mask: benchmarkAckMask(16)},
 	}
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		packet.packetSeq = uint16(i)
+		packet.Sequence = uint16(i)
 		out, err := encodeDatagramPacket(packet)
 		if err != nil {
 			b.Fatal(err)
@@ -63,18 +62,17 @@ func BenchmarkEncodeDatagramPacket(b *testing.B) {
 
 func BenchmarkAppendDatagramPacket(b *testing.B) {
 	packet := datagramPacket{
-		packetSeq:  1,
-		ackSeq:     2,
-		ackMask:    benchmarkAckMask(16),
-		lane:       datagramLaneReliableOrdered,
-		messageID:  3,
-		orderedSeq: 4,
-		payload:    bytes.Repeat([]byte("x"), 256),
+		Sequence:        1,
+		Lane:            datagramLaneReliableOrdered,
+		MessageID:       3,
+		OrderedSequence: 4,
+		Payload:         bytes.Repeat([]byte("x"), 256),
+		ACK:             datagramACK{Sequence: 2, Mask: benchmarkAckMask(16)},
 	}
 	buf := make([]byte, 0, maxWebTransportDatagramBytes)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		packet.packetSeq = uint16(i)
+		packet.Sequence = uint16(i)
 		out, err := appendDatagramPacket(buf[:0], packet)
 		if err != nil {
 			b.Fatal(err)

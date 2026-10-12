@@ -3,18 +3,20 @@ package net
 import (
 	"errors"
 	"time"
+
+	"github.com/demiurgos-hub/golem-engine/internal/netwire"
 )
 
 const (
-	datagramAckMaskWordCount             = 4
-	datagramAckMaskWordBytes             = 4
-	datagramAckMaskBytes                 = datagramAckMaskWordCount * datagramAckMaskWordBytes
-	datagramPacketHeaderBytes            = 2 + 2 + datagramAckMaskBytes + 1
-	datagramLaneHeaderBytes              = 1
-	datagramReliableMessageIDBytes       = 2
-	datagramReliableOrderedSequenceBytes = 2
-	datagramEventualStateTokenBytes      = 8
-	datagramPacketAckWindow              = datagramAckMaskWordCount * 32
+	datagramAckMaskWordCount             = netwire.AckMaskWordCount
+	datagramAckMaskWordBytes             = netwire.AckMaskWordBytes
+	datagramAckMaskBytes                 = netwire.AckMaskBytes
+	datagramPacketHeaderBytes            = netwire.PacketHeaderBytes
+	datagramLaneHeaderBytes              = netwire.LaneHeaderBytes
+	datagramReliableMessageIDBytes       = netwire.ReliableMessageIDBytes
+	datagramReliableOrderedSequenceBytes = netwire.OrderedSequenceBytes
+	datagramEventualStateTokenBytes      = netwire.StateTokenBytes
+	datagramPacketAckWindow              = netwire.AckWindow
 	datagramAckCoalesceDelay             = 1 * time.Millisecond
 	datagramSchedulerInterval            = 2 * time.Millisecond
 	datagramReliableRetryBaseDelay       = 75 * time.Millisecond
@@ -31,16 +33,16 @@ const (
 )
 
 const (
-	datagramFlagAckOnly uint8 = 1 << iota
+	datagramFlagAckOnly = netwire.FlagACKOnly
 )
 
-type datagramLane uint8
+type datagramLane = netwire.Lane
 
 const (
-	datagramLaneUnreliable datagramLane = iota + 1
-	datagramLaneReliableUnordered
-	datagramLaneReliableOrdered
-	datagramLaneEventualState
+	datagramLaneUnreliable        = netwire.LaneUnreliable
+	datagramLaneReliableUnordered = netwire.LaneReliableUnordered
+	datagramLaneReliableOrdered   = netwire.LaneReliableOrdered
+	datagramLaneEventualState     = netwire.LaneEventualState
 )
 
 var (
@@ -51,64 +53,9 @@ var (
 	errEventualStateDatagramStalled = errors.New("golem/net: eventual state datagram delivery stalled")
 )
 
-type ackMask128 [datagramAckMaskWordCount]uint32
-
-// setBit marks one zero-based ACK bit inside the selective-ACK window.
-func (m *ackMask128) setBit(bit int) {
-	if bit < 0 || bit >= datagramPacketAckWindow {
-		return
-	}
-	word := bit / 32
-	shift := uint(bit % 32)
-	m[word] |= uint32(1) << shift
-}
-
-// hasBit reports whether one zero-based ACK bit is set.
-func (m ackMask128) hasBit(bit int) bool {
-	if bit < 0 || bit >= datagramPacketAckWindow {
-		return false
-	}
-	word := bit / 32
-	shift := uint(bit % 32)
-	return m[word]&(uint32(1)<<shift) != 0
-}
-
-// shiftLeft moves the selective-ACK window toward older packets.
-func (m *ackMask128) shiftLeft(bits int) {
-	if bits <= 0 {
-		return
-	}
-	if bits >= datagramPacketAckWindow {
-		*m = ackMask128{}
-		return
-	}
-	wordShift := bits / 32
-	bitShift := uint(bits % 32)
-	var shifted ackMask128
-	for i := len(shifted) - 1; i >= 0; i-- {
-		src := i - wordShift
-		if src < 0 {
-			continue
-		}
-		shifted[i] = m[src] << bitShift
-		if bitShift > 0 && src > 0 {
-			shifted[i] |= m[src-1] >> (32 - bitShift)
-		}
-	}
-	*m = shifted
-}
-
-type datagramPacket struct {
-	packetSeq  uint16
-	ackSeq     uint16
-	ackMask    ackMask128
-	flags      uint8
-	lane       datagramLane
-	messageID  uint16
-	orderedSeq uint16
-	stateToken uint64
-	payload    []byte
-}
+type ackMask128 = netwire.AckMask
+type datagramACK = netwire.ACK
+type datagramPacket = netwire.Packet
 
 type reliableDatagramMessage struct {
 	lane       datagramLane
@@ -146,17 +93,7 @@ type pendingEventualStateDatagram struct {
 	sentAt time.Time
 }
 
-type sequenceWindow struct {
-	init   bool
-	latest uint16
-	mask   ackMask128
-}
-
-type orderedReceiveState struct {
-	nextSeq  uint16
-	pending  map[uint16][]byte
-	gapSince time.Time
-}
+type sequenceWindow = netwire.SequenceWindow
 
 // datagramProtocolState tracks protocol headers, resend state, and ordered delivery.
 type datagramProtocolState struct {
@@ -164,12 +101,10 @@ type datagramProtocolState struct {
 	nextMessageID  uint16
 	nextOrderedSeq uint16
 	recvPackets    sequenceWindow
-	peerPackets    sequenceWindow
-	// recvReliableMsgs deduplicates the shared reliable message ID space across
-	// both reliable lanes. Ordered and unordered datagrams intentionally consume
-	// IDs from the same sequence so the dedupe window covers the combined stream.
+	// recvReliableMsgs deduplicates unordered messages. Ordered delivery uses
+	// its own sequence, although both send lanes share the message ID space.
 	recvReliableMsgs sequenceWindow
-	orderedRecv      orderedReceiveState
+	orderedRecv      netwire.OrderedBuffer
 	ackDirty         bool
 	ackDueAt         time.Time
 

@@ -7,16 +7,6 @@ import (
 	"fmt"
 )
 
-const (
-	datagramAckMaskWordCount             = 4
-	datagramAckMaskWordBytes             = 4
-	datagramAckMaskBytes                 = datagramAckMaskWordCount * datagramAckMaskWordBytes
-	datagramPacketHeaderBytes            = 2 + 2 + datagramAckMaskBytes + 1
-	datagramLaneHeaderBytes              = 1
-	datagramReliableMessageIDBytes       = 2
-	datagramReliableOrderedSequenceBytes = 2
-)
-
 // WebTransportChannel is unavailable in Go's js/wasm runtime.
 type WebTransportChannel struct{}
 

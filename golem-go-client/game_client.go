@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"sync"
+
+	"github.com/demiurgos-hub/golem-engine/internal/netwire"
 )
 
 const gameClientInboundQueueSize = 1024
@@ -475,15 +477,13 @@ func (c *GameClient) sendCommand(command any, ordered bool) error {
 	}
 
 	if maxDatagramBytes := channel.MaxDatagramBytes(); maxDatagramBytes > 0 {
-		maxPayloadBytes := maxDatagramBytes -
-			datagramPacketHeaderBytes -
-			datagramLaneHeaderBytes -
-			datagramReliableMessageIDBytes
+		lane := datagramLaneReliableUnordered
 		laneName := "reliable unordered"
 		if ordered {
-			maxPayloadBytes -= datagramReliableOrderedSequenceBytes
+			lane = datagramLaneReliableOrdered
 			laneName = "reliable ordered"
 		}
+		maxPayloadBytes, _ := netwire.PayloadBudget(maxDatagramBytes, lane)
 		if len(frame) > maxPayloadBytes {
 			return fmt.Errorf(
 				"golem-go-client: encoded %s command size %d exceeds max payload %d",

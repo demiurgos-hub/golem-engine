@@ -1,8 +1,10 @@
 package net
 
 import (
-	"encoding/binary"
+	"errors"
 	"fmt"
+
+	"github.com/demiurgos-hub/golem-engine/internal/netwire"
 )
 
 func validateReliableDatagramMessageSize(lane datagramLane, payload []byte) error {
@@ -34,138 +36,48 @@ func validateEventualStateDatagramPayloadSize(payload []byte) error {
 }
 
 func validateDatagramLane(lane datagramLane) error {
-	switch lane {
-	case datagramLaneUnreliable, datagramLaneReliableUnordered, datagramLaneReliableOrdered, datagramLaneEventualState:
-		return nil
-	default:
+	if _, err := netwire.PayloadBudget(0, lane); err != nil {
 		return fmt.Errorf("%w: %d", errDatagramUnknownLane, lane)
 	}
+	return nil
 }
 
 func encodeDatagramPacket(packet datagramPacket) ([]byte, error) {
 	return appendDatagramPacket(nil, packet)
 }
 
-func appendDatagramPacket(dst []byte, packet datagramPacket) ([]byte, error) {
-	baseLen := datagramPacketHeaderBytes
-	if packet.flags&datagramFlagAckOnly == 0 {
-		if err := validateDatagramLane(packet.lane); err != nil {
-			return nil, err
-		}
-		baseLen += datagramLaneHeaderBytes
-		switch packet.lane {
-		case datagramLaneUnreliable:
-			if err := validateUnreliableDatagramPayloadSize(packet.payload); err != nil {
-				return nil, err
-			}
-		case datagramLaneReliableUnordered:
-			if err := validateReliableDatagramMessageSize(packet.lane, packet.payload); err != nil {
-				return nil, err
-			}
-			baseLen += datagramReliableMessageIDBytes
-		case datagramLaneReliableOrdered:
-			if err := validateReliableDatagramMessageSize(packet.lane, packet.payload); err != nil {
-				return nil, err
-			}
-			baseLen += datagramReliableMessageIDBytes + datagramReliableOrderedSequenceBytes
-		case datagramLaneEventualState:
-			if err := validateEventualStateDatagramPayloadSize(packet.payload); err != nil {
-				return nil, err
-			}
-			baseLen += datagramEventualStateTokenBytes
-		}
-		baseLen += len(packet.payload)
+func validatePacketPayload(packet datagramPacket) error {
+	if packet.Flags&datagramFlagAckOnly != 0 {
+		return nil
 	}
-	var out []byte
-	if cap(dst) < baseLen {
-		out = make([]byte, baseLen)
-	} else {
-		out = dst[:baseLen]
+	if err := validateDatagramLane(packet.Lane); err != nil {
+		return err
 	}
-	binary.BigEndian.PutUint16(out[0:2], packet.packetSeq)
-	binary.BigEndian.PutUint16(out[2:4], packet.ackSeq)
-	for i, word := range packet.ackMask {
-		start := 4 + i*datagramAckMaskWordBytes
-		binary.BigEndian.PutUint32(out[start:start+datagramAckMaskWordBytes], word)
-	}
-	out[datagramPacketHeaderBytes-1] = packet.flags
-	if packet.flags&datagramFlagAckOnly != 0 {
-		return out, nil
-	}
-	offset := datagramPacketHeaderBytes
-	out[offset] = byte(packet.lane)
-	offset++
-	switch packet.lane {
-	case datagramLaneReliableUnordered:
-		binary.BigEndian.PutUint16(out[offset:offset+2], packet.messageID)
-		offset += 2
-	case datagramLaneReliableOrdered:
-		binary.BigEndian.PutUint16(out[offset:offset+2], packet.messageID)
-		offset += 2
-		binary.BigEndian.PutUint16(out[offset:offset+2], packet.orderedSeq)
-		offset += 2
+	switch packet.Lane {
+	case datagramLaneUnreliable:
+		return validateUnreliableDatagramPayloadSize(packet.Payload)
 	case datagramLaneEventualState:
-		binary.BigEndian.PutUint64(out[offset:offset+datagramEventualStateTokenBytes], packet.stateToken)
-		offset += datagramEventualStateTokenBytes
+		return validateEventualStateDatagramPayloadSize(packet.Payload)
+	default:
+		return validateReliableDatagramMessageSize(packet.Lane, packet.Payload)
 	}
-	copy(out[offset:], packet.payload)
-	return out, validateDatagramSize(out)
+}
+
+func appendDatagramPacket(dst []byte, packet datagramPacket) ([]byte, error) {
+	if err := validatePacketPayload(packet); err != nil {
+		return nil, err
+	}
+	return netwire.EncodePacketInto(dst, packet)
 }
 
 func decodeDatagramPacket(data []byte) (datagramPacket, error) {
-	if len(data) < datagramPacketHeaderBytes {
+	packet, err := netwire.DecodePacket(data)
+	if err != nil {
+		var laneErr netwire.UnknownLaneError
+		if errors.As(err, &laneErr) {
+			return datagramPacket{}, fmt.Errorf("%w: %d", errDatagramUnknownLane, laneErr.Lane)
+		}
 		return datagramPacket{}, errDatagramPacketTooSmall
 	}
-	packet := datagramPacket{
-		packetSeq: binary.BigEndian.Uint16(data[0:2]),
-		ackSeq:    binary.BigEndian.Uint16(data[2:4]),
-		flags:     data[datagramPacketHeaderBytes-1],
-	}
-	for i := range packet.ackMask {
-		start := 4 + i*datagramAckMaskWordBytes
-		packet.ackMask[i] = binary.BigEndian.Uint32(data[start : start+datagramAckMaskWordBytes])
-	}
-	if packet.flags&datagramFlagAckOnly != 0 {
-		return packet, nil
-	}
-	if len(data) < datagramPacketHeaderBytes+datagramLaneHeaderBytes {
-		return datagramPacket{}, errDatagramPacketTooSmall
-	}
-	offset := datagramPacketHeaderBytes
-	packet.lane = datagramLane(data[offset])
-	offset++
-	if err := validateDatagramLane(packet.lane); err != nil {
-		return datagramPacket{}, err
-	}
-	switch packet.lane {
-	case datagramLaneReliableUnordered:
-		if len(data) < offset+datagramReliableMessageIDBytes {
-			return datagramPacket{}, errDatagramPacketTooSmall
-		}
-		packet.messageID = binary.BigEndian.Uint16(data[offset : offset+2])
-		offset += 2
-	case datagramLaneReliableOrdered:
-		if len(data) < offset+datagramReliableMessageIDBytes+datagramReliableOrderedSequenceBytes {
-			return datagramPacket{}, errDatagramPacketTooSmall
-		}
-		packet.messageID = binary.BigEndian.Uint16(data[offset : offset+2])
-		offset += 2
-		packet.orderedSeq = binary.BigEndian.Uint16(data[offset : offset+2])
-		offset += 2
-	case datagramLaneEventualState:
-		if len(data) < offset+datagramEventualStateTokenBytes {
-			return datagramPacket{}, errDatagramPacketTooSmall
-		}
-		packet.stateToken = binary.BigEndian.Uint64(data[offset : offset+datagramEventualStateTokenBytes])
-		offset += datagramEventualStateTokenBytes
-	}
-	packet.payload = data[offset:]
-	switch packet.lane {
-	case datagramLaneUnreliable:
-		return packet, validateUnreliableDatagramPayloadSize(packet.payload)
-	case datagramLaneEventualState:
-		return packet, validateEventualStateDatagramPayloadSize(packet.payload)
-	default:
-		return packet, validateReliableDatagramMessageSize(packet.lane, packet.payload)
-	}
+	return packet, validatePacketPayload(packet)
 }

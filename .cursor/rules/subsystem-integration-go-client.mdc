@@ -1,5 +1,5 @@
 ---
-description: integration/go-client - Go client runtime and generated client protocol.
+description: integration/go-client - Go client runtime, generated client protocol, and endpoint policy over shared internal/netwire primitives.
 globs:
   - golem-go-client/**/*.go
   - codegen/templates/go_client/**/*.tmpl
@@ -19,9 +19,11 @@ alwaysApply: false
 
 The `go-client` codegen integration emits generated Go in consumer projects from `codegen/templates/go_client/` plus lightweight protobuf codecs from `codegen/go_proto.go`. Optional checked protocol constant sets are emitted as untyped constants in `entities_pb.go`. Generated files are gofmt'd; there is no compile finalizer like `js-client`.
 
-Keep transport constants and framing aligned with `golem/net` and `golem-js`: reliable frame cap `256 KiB`, WebTransport datagram cap `1200`, datagram header/ACK mask sizes, lane IDs (`1` unreliable, `2` reliable-unordered, `3` reliable-ordered, `4` state-aware datagram delivery), and control frames `0x00 'OGS' 0x01/0x02`.
+Use the standard-library-only `internal/netwire` package for Go wire metadata, codecs, framing, control frames, ACK windows, and ordered buffering; see `subsystem-netwire.mdc`. Common constants must build on native Go and `js/wasm` without importing `golem/net`. Preserve the client's owned decoded payloads, timer-driven retry policy, and message-ID deduplication across both reliable lanes. Keep the wire compatible with `golem-js` and Unity: reliable frame cap `256 KiB`, built-in datagram cap `1200`, 128-bit ACK mask, lane IDs `1` through `4`, and control frames `0x00 'OGS' 0x01/0x02`. Command budgets use each channel's dynamic `MaxDatagramBytes()` without clamping to the built-in cap.
 
 WebTransport ACK coalescing starts its deadline with the first pending packet. Later arrivals must not postpone that deadline; an idle client receiving continuous state still sends standalone ACKs. Piggybacked or standalone ACK delivery clears the pending deadline.
+
+Reliable ordered receive starts at sequence zero. Future duplicate sequences replace their buffered payload, while server receivers keep the first. Ordered gaps expire strictly after three seconds on receive and idle scheduler ticks. Packet stamping assigns a fresh sequence and ACK snapshot under the protocol mutex; ACK consumption remains at the send path's existing commit point, especially after a successful retry-collection pass. Keep transport writes and delivery callbacks outside that mutex.
 
 `GameClient` exposes two command sends: `Send` uses reliable-unordered datagrams on WebTransport, while `SendOrdered` uses reliable-ordered datagrams. Both use a reliable-stream `ClientPacket` on WebSocket. Keep raw byte sends confined to `ReliableMessageChannel`, enforce each datagram lane's payload budget without stream fallback, and keep generated `Send{Name}` / `Send{Name}Ordered` helpers aligned.
 
