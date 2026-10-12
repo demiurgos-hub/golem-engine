@@ -48,11 +48,7 @@ func TestDrainMessages_DataCopy(t *testing.T) {
 	srv := NewServer(ServerConfig{TickRate: 20, Transport: golemnet.TransportWebSocket, StateUpdateLane: StateUpdateLaneStream})
 
 	original := []byte{0xAA, 0xBB, 0xCC}
-	cp := make([]byte, len(original))
-	copy(cp, original)
-
-	// Simulate enqueueMessage: the copy must already have been made.
-	srv.msgQueue <- pendingMsg{kind: msgMessage, sess: nil, data: cp}
+	srv.enqueueMessage(nil, original)
 
 	// Mutate the "original" buffer to prove the queued copy is independent.
 	original[0] = 0xFF
@@ -64,6 +60,34 @@ func TestDrainMessages_DataCopy(t *testing.T) {
 	want := []byte{0xAA, 0xBB, 0xCC}
 	if !bytes.Equal(received, want) {
 		t.Errorf("received %v, want %v (copy not independent of original buffer)", received, want)
+	}
+}
+
+func TestPayloadEnqueueKindsAndBufferOwnership(t *testing.T) {
+	s := NewServer(ServerConfig{})
+	sess := &Session{ID: 42}
+	hooks := []struct {
+		kind    msgKind
+		enqueue func(*Session, []byte)
+	}{
+		{msgMessage, s.enqueueMessage},
+		{msgDatagram, s.enqueueDatagram},
+		{msgReliableUnordered, s.enqueueReliableUnordered},
+		{msgReliableOrdered, s.enqueueReliableOrdered},
+	}
+	for _, hook := range hooks {
+		data := []byte{1, 2, 3}
+		hook.enqueue(sess, data)
+		data[0] = 9
+		hook.enqueue(sess, nil)
+	}
+	for _, hook := range hooks {
+		for _, want := range [][]byte{{1, 2, 3}, {}} {
+			m := <-s.msgQueue
+			if m.kind != hook.kind || m.sess != sess || m.data == nil || !bytes.Equal(m.data, want) {
+				t.Fatalf("queued kind=%v session=%v data=%v; want kind=%v data=%v", m.kind, m.sess, m.data, hook.kind, want)
+			}
+		}
 	}
 }
 

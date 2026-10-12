@@ -92,36 +92,28 @@ func (t *eventualStateTracker) markDirtyFull(id int64) {
 	t.markDirtyChange(eventualStateChange{id: id, full: true})
 }
 
+func mergeEventualChange(existing, incoming eventualStateChange) eventualStateChange {
+	// Public is sticky until a full ownership refresh explicitly clears the tracker.
+	existing.public = existing.public || incoming.public
+	if existing.full || incoming.full {
+		existing.full = true
+		existing.mask = 0
+	} else {
+		existing.mask |= incoming.mask
+	}
+	return existing
+}
+
 func (t *eventualStateTracker) markDirtyChange(ch eventualStateChange) {
 	if ch.id == 0 || (!ch.full && ch.mask == 0) {
 		return
 	}
 	if existing, ok := t.dirtySet[ch.id]; ok {
-		// public is per-session tracker state; never clear it once set so a
-		// later full refresh stays redacted for non-owner sessions.
-		existing.public = existing.public || ch.public
-		if existing.full || ch.full {
-			existing.full = true
-			existing.mask = 0
-		} else {
-			existing.mask |= ch.mask
-		}
-		t.dirtySet[ch.id] = existing
+		t.dirtySet[ch.id] = mergeEventualChange(existing, ch)
 		return
 	}
 	if len(t.dirtyQueue) != len(t.dirtySet) {
 		t.compactDirtyQueueNow()
-		if existing, ok := t.dirtySet[ch.id]; ok {
-			existing.public = existing.public || ch.public
-			if existing.full || ch.full {
-				existing.full = true
-				existing.mask = 0
-			} else {
-				existing.mask |= ch.mask
-			}
-			t.dirtySet[ch.id] = existing
-			return
-		}
 	}
 	t.dirtySet[ch.id] = ch
 	t.dirtyQueue = append(t.dirtyQueue, ch.id)
@@ -255,13 +247,7 @@ func (t *eventualStateTracker) compactDirtyQueueNow() {
 		t.dirtyQueue = t.dirtyQueue[:0]
 		return
 	}
-	dst := t.dirtyQueue[:0]
-	for _, id := range t.dirtyQueue {
-		if _, ok := t.dirtySet[id]; ok {
-			dst = append(dst, id)
-		}
-	}
-	t.dirtyQueue = dst
+	t.dirtyQueue = t.dirtyIDsInto(t.dirtyQueue[:0])
 }
 
 func (t *eventualStateTracker) applyFeedback(feedback []golemnet.EventualStateDelivery, isLive func(int64) bool) {
@@ -425,19 +411,10 @@ func (s *Server) eventualFrameForChange(ch eventualStateChange) (eventualStateFr
 		return eventualStateFrame{}, false, nil
 	}
 	if ch.full {
-		var (
-			data []byte
-			err  error
-		)
-		if ch.public {
-			scoped, ok := e.(registry.OwnerScopedEntity)
-			if !ok {
-				return eventualStateFrame{}, true, fmt.Errorf("public full for eventual entity %d: missing OwnerScopedEntity", ch.id)
-			}
-			data, err = scoped.PublicFullUpdate()
-		} else {
-			data, err = e.FullUpdate()
+		if ch.public && !entityIsOwnerScoped(e) {
+			return eventualStateFrame{}, true, fmt.Errorf("public full for eventual entity %d: missing OwnerScopedEntity", ch.id)
 		}
+		data, err := fullUpdateForView(e, recipientView(ch.public))
 		if err != nil {
 			return eventualStateFrame{}, true, fmt.Errorf("full update for eventual entity %d: %w", ch.id, err)
 		}
@@ -483,21 +460,13 @@ func (s *Server) eventualFrameForChange(ch eventualStateChange) (eventualStateFr
 		if data == nil {
 			return eventualStateFrame{}, true, nil
 		}
-	} else if ch.public {
-		scoped, ok := e.(registry.OwnerScopedEntity)
-		if !ok {
-			return eventualStateFrame{}, true, fmt.Errorf("public full for eventual entity %d: missing OwnerScopedEntity", ch.id)
-		}
-		data, err = scoped.PublicFullUpdate()
-		if err != nil {
-			return eventualStateFrame{}, true, fmt.Errorf("full update for eventual entity %d: %w", ch.id, err)
-		}
 	} else {
-		data, err = e.FullUpdate()
+		data, err = fullUpdateForView(e, recipientView(ch.public))
 		if err != nil {
 			return eventualStateFrame{}, true, fmt.Errorf("full update for eventual entity %d: %w", ch.id, err)
 		}
 	}
+
 	f := eventualStateFrame{stream: s.listener.Wrap(data)}
 	return f, true, nil
 }
@@ -525,6 +494,25 @@ func (s *Server) sendEventualStateChanges(sessionID int64, t *eventualStateTrack
 	}
 	if cache == nil {
 		cache = newEventualStateTickCache()
+	}
+	return s.sendEventualFrames(sessionID, t, changes, cache, nil)
+}
+
+// sendPreparedEventualStateFrames sends prebuilt eventual frames for one session.
+func (s *Server) sendPreparedEventualStateFrames(sessionID int64, t *eventualStateTracker, prepared []eventualPreparedFrame) (eventualStateSendStats, error) {
+	return s.sendEventualFrames(sessionID, t, nil, nil, prepared)
+}
+
+// sendEventualFrames owns packing and submission for either cached changes or
+// prepared frames. The two adapters supply mutually exclusive slices. Reading
+// them directly avoids per-frame callback/struct-copy overhead and an extra slice.
+func (s *Server) sendEventualFrames(sessionID int64, t *eventualStateTracker, changes []eventualStateChange, cache *eventualStateTickCache, prepared []eventualPreparedFrame) (eventualStateSendStats, error) {
+	count := len(changes)
+	if prepared != nil {
+		count = len(prepared)
+	}
+	if count == 0 {
+		return eventualStateSendStats{}, nil
 	}
 
 	var (
@@ -564,10 +552,19 @@ func (s *Server) sendEventualStateChanges(sessionID int64, t *eventualStateTrack
 		return false, nil
 	}
 
-	for _, ch := range changes {
-		frame, live, err := cache.frame(s, ch)
-		if err != nil {
-			return stats, err
+	for i := 0; i < count; i++ {
+		var ch eventualStateChange
+		var frame eventualStateFrame
+		var live bool
+		if prepared != nil {
+			ch, frame, live = prepared[i].change, prepared[i].frame, prepared[i].live
+		} else {
+			ch = changes[i]
+			var err error
+			frame, live, err = cache.frame(s, ch)
+			if err != nil {
+				return stats, err
+			}
 		}
 		if !live {
 			t.clearDirty(ch.id)
@@ -601,115 +598,14 @@ func (s *Server) sendEventualStateChanges(sessionID int64, t *eventualStateTrack
 		if !connected {
 			return stats, nil
 		}
-		streamWireMsgs, err := golemnet.ReliableStreamWriteChunkCount(transport, streamFrames)
+		sent, err := s.sendReplicationStream(sessionID, transport, streamFrames, countBeforeSend)
 		if err != nil {
-			return stats, err
-		}
-		if err := s.listener.SendBatch(sessionID, streamFrames); err != nil {
 			if isDisconnectedSessionSend(err) {
 				return stats, nil
 			}
 			return stats, err
 		}
-		stats.streamBatchedFrames += len(streamFrames)
-		stats.streamWireMsgs += streamWireMsgs
-		for _, ch := range streamChanges {
-			t.clearDirty(ch.id)
-		}
-	}
-	return stats, nil
-}
-
-// sendPreparedEventualStateFrames sends prebuilt eventual frames for one session.
-func (s *Server) sendPreparedEventualStateFrames(sessionID int64, t *eventualStateTracker, prepared []eventualPreparedFrame) (eventualStateSendStats, error) {
-	if len(prepared) == 0 {
-		return eventualStateSendStats{}, nil
-	}
-
-	var (
-		scratch        = &s.eventualScratch
-		streamFrames   = scratch.streamFrames[:0]
-		streamChanges  = scratch.streamChanges[:0]
-		pendingChanges = scratch.pendingChanges[:0]
-		payload        = scratch.payload[:0]
-		pendingBytes   int
-		stats          eventualStateSendStats
-	)
-	defer func() {
-		scratch.pendingChanges = pendingChanges[:0]
-		scratch.streamChanges = streamChanges[:0]
-		scratch.streamFrames = streamFrames[:0]
-		scratch.payload = payload[:0]
-	}()
-
-	flushPending := func() (bool, error) {
-		if len(pendingChanges) == 0 {
-			return false, nil
-		}
-		ownedPayload := payload
-		token := s.nextEventualStateToken()
-		if err := s.listener.SendEventualStateOwned(sessionID, token, ownedPayload); err != nil {
-			if isDisconnectedSessionSend(err) {
-				return true, nil
-			}
-			return false, err
-		}
-		t.markSent(token, pendingChanges)
-		stats.datagramBatchedFrames += len(pendingChanges)
-		stats.datagramWirePayloads++
-		pendingChanges = pendingChanges[:0]
-		payload = make([]byte, 0, golemnet.EventualStateDatagramPayloadBudget())
-		pendingBytes = 0
-		return false, nil
-	}
-
-	for _, pf := range prepared {
-		ch := pf.change
-		frame := pf.frame
-		if !pf.live {
-			t.clearDirty(ch.id)
-			continue
-		}
-		if frame.datagram == nil && frame.stream == nil {
-			t.clearDirty(ch.id)
-			continue
-		}
-		if !frame.fitsDatagram {
-			streamFrames = append(streamFrames, frame.stream)
-			streamChanges = append(streamChanges, ch)
-			continue
-		}
-		if pendingBytes > 0 && pendingBytes+frame.payloadLen > golemnet.EventualStateDatagramPayloadBudget() {
-			sessionGone, err := flushPending()
-			if err != nil || sessionGone {
-				return stats, err
-			}
-		}
-		pendingChanges = append(pendingChanges, ch)
-		payload = golemnet.AppendCompactStateDatagramFrame(payload, frame.datagram)
-		pendingBytes += frame.payloadLen
-	}
-	sessionGone, err := flushPending()
-	if err != nil || sessionGone {
-		return stats, err
-	}
-	if len(streamFrames) > 0 {
-		transport, connected := s.listener.SessionTransport(sessionID)
-		if !connected {
-			return stats, nil
-		}
-		streamWireMsgs, err := golemnet.ReliableStreamWriteChunkCount(transport, streamFrames)
-		if err != nil {
-			return stats, err
-		}
-		if err := s.listener.SendBatch(sessionID, streamFrames); err != nil {
-			if isDisconnectedSessionSend(err) {
-				return stats, nil
-			}
-			return stats, err
-		}
-		stats.streamBatchedFrames += len(streamFrames)
-		stats.streamWireMsgs += streamWireMsgs
+		stats.add(sent)
 		for _, ch := range streamChanges {
 			t.clearDirty(ch.id)
 		}

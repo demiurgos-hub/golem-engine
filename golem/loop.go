@@ -49,57 +49,6 @@ type pendingMsg struct {
 	eventualFeedback []golemnet.EventualStateDelivery
 }
 
-// interestTickScratch holds tick-local lookup maps reused by runInterestTick.
-// The cached payload fragments are immutable inputs; only the maps are reset
-// between ticks. Per-session batch buffers are still owned by the send path
-// and must not be reused after SendBatch enqueues them.
-type interestTickScratch struct {
-	spawnData          map[int64][]byte
-	deltaData          map[int64][]byte
-	removalData        map[int64][]byte
-	wrappedSpawns      map[int64][]byte
-	wrappedDeltas      map[int64][]byte
-	wrappedRemovals    map[int64][]byte
-	wrappedFull        map[int64][]byte // authoritative full frames
-	wrappedPublicFull  map[int64][]byte // public/redacted full frames
-	wrappedPublicDelta map[int64][]byte // public/redacted stream deltas (nil value = skip)
-	eventualChanges    map[int64]eventualStateChange
-	eventualFrames     map[int64]eventualPreparedFrame
-	eventualDirty      []eventualStateChange
-	eventualPrepared   []eventualPreparedFrame
-}
-
-// reset clears the reused per-tick lookup maps while preserving capacity.
-func (s *interestTickScratch) reset() {
-	s.eventualDirty = s.eventualDirty[:0]
-	if s.spawnData == nil {
-		s.spawnData = make(map[int64][]byte)
-		s.deltaData = make(map[int64][]byte)
-		s.removalData = make(map[int64][]byte)
-		s.wrappedSpawns = make(map[int64][]byte)
-		s.wrappedDeltas = make(map[int64][]byte)
-		s.wrappedRemovals = make(map[int64][]byte)
-		s.wrappedFull = make(map[int64][]byte)
-		s.wrappedPublicFull = make(map[int64][]byte)
-		s.wrappedPublicDelta = make(map[int64][]byte)
-		s.eventualChanges = make(map[int64]eventualStateChange)
-		s.eventualFrames = make(map[int64]eventualPreparedFrame)
-		return
-	}
-
-	clear(s.spawnData)
-	clear(s.deltaData)
-	clear(s.removalData)
-	clear(s.wrappedSpawns)
-	clear(s.wrappedDeltas)
-	clear(s.wrappedRemovals)
-	clear(s.wrappedFull)
-	clear(s.wrappedPublicFull)
-	clear(s.wrappedPublicDelta)
-	clear(s.eventualChanges)
-	clear(s.eventualFrames)
-}
-
 const msgQueueCap = 4096
 
 // StateUpdateLane selects the transport lane used for incremental entity
@@ -230,7 +179,7 @@ type Server struct {
 	onReliableOrdered    func(*Session, []byte)
 	onDisconnect         func(*Session)
 	msgQueue             chan pendingMsg
-	interestScratch      interestTickScratch
+	replicationScratch   replicationScratch
 	eventualScratch      eventualStateSendScratch
 	eventualTrackers     map[int64]*eventualStateTracker
 	nextEventualToken    uint64
@@ -832,13 +781,7 @@ func (s *Server) SessionsKnowing(entityID int64) []int64 {
 	defer s.interestMu.Unlock()
 	var result []int64
 	for _, sid := range allSessions {
-		var known map[int64]struct{}
-		if s.interest != nil {
-			known = s.interest.Known(sid)
-		} else {
-			known = s.broadcastKnown[sid]
-		}
-		if _, ok := known[entityID]; ok {
+		if s.sessionKnowsEntityLocked(sid, entityID) {
 			result = append(result, sid)
 		}
 	}
@@ -1035,40 +978,39 @@ func (s *Server) enqueueConnect(sess *Session) {
 	s.enqueue(pendingMsg{kind: msgConnect, sess: sess})
 }
 
+// enqueuePayload detaches network-owned bytes before crossing to the tick queue.
+func (s *Server) enqueuePayload(kind msgKind, sess *Session, data []byte) {
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	s.enqueue(pendingMsg{kind: kind, sess: sess, data: cp})
+}
+
 // enqueueMessage is installed on the Listener as the OnMessage hook. It runs
 // on the connection goroutine, copies the payload, and pushes a message event
 // for tick-time dispatch.
 func (s *Server) enqueueMessage(sess *Session, data []byte) {
-	cp := make([]byte, len(data))
-	copy(cp, data)
-	s.enqueue(pendingMsg{kind: msgMessage, sess: sess, data: cp})
+	s.enqueuePayload(msgMessage, sess, data)
 }
 
 // enqueueDatagram is installed on the Listener as the OnDatagram hook. It runs
 // on the connection goroutine, copies the payload, and pushes a datagram event
 // for tick-time dispatch.
 func (s *Server) enqueueDatagram(sess *Session, data []byte) {
-	cp := make([]byte, len(data))
-	copy(cp, data)
-	s.enqueue(pendingMsg{kind: msgDatagram, sess: sess, data: cp})
+	s.enqueuePayload(msgDatagram, sess, data)
 }
 
 // enqueueReliableUnordered is installed on the Listener as the reliable unordered hook.
 // It runs on the connection goroutine, copies the payload, and pushes a datagram event
 // for tick-time dispatch.
 func (s *Server) enqueueReliableUnordered(sess *Session, data []byte) {
-	cp := make([]byte, len(data))
-	copy(cp, data)
-	s.enqueue(pendingMsg{kind: msgReliableUnordered, sess: sess, data: cp})
+	s.enqueuePayload(msgReliableUnordered, sess, data)
 }
 
 // enqueueReliableOrdered is installed on the Listener as the reliable ordered hook.
 // It runs on the connection goroutine, copies the payload, and pushes a datagram event
 // for tick-time dispatch.
 func (s *Server) enqueueReliableOrdered(sess *Session, data []byte) {
-	cp := make([]byte, len(data))
-	copy(cp, data)
-	s.enqueue(pendingMsg{kind: msgReliableOrdered, sess: sess, data: cp})
+	s.enqueuePayload(msgReliableOrdered, sess, data)
 }
 
 // enqueueEventualStateFeedback is installed on the Listener as the eventual state feedback hook.
@@ -1330,10 +1272,10 @@ func (s *Server) runLoop(ctx context.Context) error {
 // runBroadcastTick replicates entities when interest management is not enabled.
 // The blind-vs-filtered decision is linearized under interestMu. When no
 // visibility groups are assigned and every session's known set already matches
-// the live public world, it uses the blind BroadcastBatch fast path while still
+// the live public world, it uses the blind wrap-once fast path while still
 // maintaining per-session known sets. Otherwise it computes per-session
 // known-set diffs (enter/stay/exit). A visibility mutation after this decision
-// takes effect on the next pass; interestMu is never held across BroadcastBatch.
+// takes effect on the next pass; interestMu is never held across sends.
 func (s *Server) runBroadcastTick() error {
 	result, err := s.reg.FlushAll()
 	if err != nil {
@@ -1386,9 +1328,9 @@ func (s *Server) shouldFilterBroadcastLocked(sessionIDs []int64, live []Entity) 
 	return false
 }
 
-// runBroadcastTickBlind is the fast path used when no entity has a visibility
-// group. It preserves blind BroadcastBatch semantics and incrementally updates
-// broadcast known sets so later policy activation is transition-safe.
+// runBroadcastTickBlind wraps updates once and sends them to each session when
+// no visibility or ownership filtering or known-set reconciliation is needed.
+// It updates known sets so later policy activation is transition-safe.
 func (s *Server) runBroadcastTickBlind(result registry.FlushResult, deltasFlushed int) error {
 	var (
 		updates       [][]byte
@@ -1399,12 +1341,9 @@ func (s *Server) runBroadcastTickBlind(result registry.FlushResult, deltasFlushe
 	streamUpdates = append(streamUpdates, result.Spawns...)
 
 	for i, id := range result.Removals {
-		if s.removalSerializer == nil {
-			return fmt.Errorf("entity %d removed but no RemovalSerializer configured", id)
-		}
-		data, err := s.removalSerializer(id, result.RemovalRevisions[i])
+		data, err := s.serializeRemoval(id, result.RemovalRevisions[i], removalDeleted)
 		if err != nil {
-			return fmt.Errorf("serializing removal for entity %d: %w", id, err)
+			return err
 		}
 		updates = append(updates, data)
 		streamUpdates = append(streamUpdates, data)
@@ -1438,18 +1377,15 @@ func (s *Server) runBroadcastTickBlind(result registry.FlushResult, deltasFlushe
 			if !connected {
 				continue
 			}
-			wireMsgs, err := golemnet.ReliableStreamWriteChunkCount(transport, wrappedUpdates)
+			sent, err := s.sendReplicationStream(sessionID, transport, wrappedUpdates, countBeforeSend)
 			if err != nil {
-				return err
-			}
-			if err := s.listener.SendBatch(sessionID, wrappedUpdates); err != nil {
 				if isDisconnectedSessionSend(err) {
 					continue
 				}
 				return err
 			}
-			streamBatched += len(wrappedUpdates)
-			streamMsgs += wireMsgs
+			streamBatched += sent.streamBatchedFrames
+			streamMsgs += sent.streamWireMsgs
 		}
 		s.applyBlindBroadcastKnown(sessionIDs, result.SpawnIDs, result.Removals)
 		s.cleanupVisibilityForRemovals(result.Removals)
@@ -1482,29 +1418,27 @@ func (s *Server) runBroadcastTickBlind(result registry.FlushResult, deltasFlushe
 			continue
 		}
 		if transport != golemnet.TransportWebTransport {
-			if err := s.listener.SendBatch(sessionID, wrappedUpdates); err != nil {
+			sent, err := s.sendReplicationStream(sessionID, transport, wrappedUpdates, countAfterSend)
+			if err != nil {
 				if isDisconnectedSessionSend(err) {
 					continue
 				}
 				return err
 			}
-			streamBatched += len(wrappedUpdates)
-			if c, err := golemnet.ReliableStreamWriteChunkCount(transport, wrappedUpdates); err == nil {
-				streamMsgs += c
-			}
+			streamBatched += sent.streamBatchedFrames
+			streamMsgs += sent.streamWireMsgs
 			continue
 		}
 		if len(wrappedStreamUpdates) > 0 {
-			if err := s.listener.SendBatch(sessionID, wrappedStreamUpdates); err != nil {
+			sent, err := s.sendReplicationStream(sessionID, transport, wrappedStreamUpdates, countAfterSend)
+			if err != nil {
 				if isDisconnectedSessionSend(err) {
 					continue
 				}
 				return err
 			}
-			streamBatched += len(wrappedStreamUpdates)
-			if c, err := golemnet.ReliableStreamWriteChunkCount(transport, wrappedStreamUpdates); err == nil {
-				streamMsgs += c
-			}
+			streamBatched += sent.streamBatchedFrames
+			streamMsgs += sent.streamWireMsgs
 		}
 		tracker := s.eventualTracker(sessionID)
 		var sendStats eventualStateSendStats
@@ -1534,220 +1468,41 @@ func (s *Server) runBroadcastTickBlind(result registry.FlushResult, deltasFlushe
 // runBroadcastTickFiltered performs per-session known-set replication when
 // visibility groups, owner-scoped payloads, or ownership refreshes require it.
 func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlushed int) error {
-	scratch := &s.interestScratch
-	scratch.reset()
-
-	spawnData := scratch.spawnData
-	wrappedSpawns := scratch.wrappedSpawns
-	wrappedFull := scratch.wrappedFull
-	for i, id := range result.SpawnIDs {
-		data := result.Spawns[i]
-		spawnData[id] = data
-		wrapped := s.listener.Wrap(data)
-		wrappedSpawns[id] = wrapped
-		wrappedFull[id] = wrapped
+	tick, err := s.prepareReplicationTick(result)
+	if err != nil {
+		return err
 	}
-
-	deltaData := scratch.deltaData
-	eventualChanges := scratch.eventualChanges
-	eventualFrames := scratch.eventualFrames
-	ownerScopedDeltas := false
-	for i, id := range result.DeltaIDs {
-		data := result.Deltas[i]
-		deltaData[id] = data
-		if e, ok := s.reg.Get(id); ok && entityIsOwnerScoped(e) {
-			ownerScopedDeltas = true
-		}
-		if s.usesDatagramStateUpdates() {
-			eventualChanges[id] = s.eventualChangeForDelta(id)
-		}
-	}
-	removalData := scratch.removalData
-	wrappedRemovals := scratch.wrappedRemovals
-	for i, id := range result.Removals {
-		if s.removalSerializer == nil {
-			return fmt.Errorf("entity %d removed but no RemovalSerializer configured", id)
-		}
-		data, err := s.removalSerializer(id, result.RemovalRevisions[i])
-		if err != nil {
-			return fmt.Errorf("serializing removal for entity %d: %w", id, err)
-		}
-		removalData[id] = data
-		wrappedRemovals[id] = s.listener.Wrap(data)
-	}
-	if s.usesDatagramStateUpdates() {
-		s.clearEventualEntities(result.Removals)
-	}
-
-	var updates [][]byte
-	updates = append(updates, result.Spawns...)
-	updates = append(updates, result.Deltas...)
-	for _, id := range result.Removals {
-		updates = append(updates, removalData[id])
-	}
-	// Capture session IDs before onUpdates so a disconnect during the callback
-	// still observes SendBatch ErrSessionNotFound and can clear known state.
+	// Capture before the callback so a disconnected recipient can lose known state.
 	sessionIDs := s.listener.SessionIDs()
-	if s.hasDatagramStateSessions(sessionIDs) && !ownerScopedDeltas {
-		for id, ch := range eventualChanges {
-			prepared, err := s.eventualPreparedFrameForChange(ch)
-			if err != nil {
-				return err
-			}
-			eventualFrames[id] = prepared
-		}
+	if err := s.prepareEventualFrames(tick, sessionIDs); err != nil {
+		return err
 	}
-	if s.onUpdates != nil && len(updates) > 0 {
-		s.onUpdates(updates)
+	if s.onUpdates != nil && len(tick.updates) > 0 {
+		s.onUpdates(tick.updates)
 	}
-
 	live := s.reg.All()
-	var eventualCache *eventualStateTickCache
-	if s.usesDatagramStateUpdates() {
-		eventualCache = newEventualStateTickCache()
-	}
-
 	s.interestMu.Lock()
 	ownershipPending := s.snapshotOwnershipRefreshLocked()
 	s.interestMu.Unlock()
-
-	var streamBatchedSum, streamMsgsSum, datagramBatchedSum, datagramMsgsSum int
-	wrappedPublicFull := scratch.wrappedPublicFull
-	wrappedPublicDelta := scratch.wrappedPublicDelta
-	wrappedDeltas := scratch.wrappedDeltas
-
-	for _, sessionID := range sessionIDs {
-		transport, connected := s.listener.SessionTransport(sessionID)
+	var total eventualStateSendStats
+	for _, sid := range sessionIDs {
+		transport, connected := s.listener.SessionTransport(sid)
 		if !connected {
-			s.clearBroadcastKnownSession(sessionID)
+			s.clearBroadcastKnownSession(sid)
 			continue
 		}
-		sessionDatagrams := s.usesDatagramStateUpdates() && transport == golemnet.TransportWebTransport
-		entered, stayed, exited := s.computeBroadcastDiff(sessionID, live)
-
-		var (
-			streamFrames         [][]byte
-			eventualDirty        = scratch.eventualDirty[:0]
-			eventualDirectFrames = scratch.eventualPrepared[:0]
-		)
-
-		for _, id := range entered {
-			if sessionDatagrams {
-				s.clearEventualEntity(sessionID, id)
-			}
-			data, ok, err := s.wrappedFullForSession(sessionID, id, spawnData, wrappedFull, wrappedPublicFull)
-			if err != nil {
-				return fmt.Errorf("full update for entity %d entering visibility: %w", id, err)
-			}
-			if !ok {
-				continue
-			}
-			streamFrames = append(streamFrames, data)
-		}
-
-		for _, id := range stayed {
-			if authDelta, ok := deltaData[id]; ok {
-				if sessionDatagrams {
-					if ch, ok := eventualChanges[id]; ok {
-						sch, send := s.eventualChangeForSession(sessionID, ch)
-						if send {
-							eventualDirty = append(eventualDirty, sch)
-							if !sch.public && !ownerScopedDeltas {
-								if prepared, ok := eventualFrames[id]; ok {
-									eventualDirectFrames = append(eventualDirectFrames, prepared)
-								}
-							}
-						}
-					}
-				} else {
-					data, send, err := s.streamDeltaForSession(sessionID, id, authDelta, wrappedDeltas, wrappedPublicDelta)
-					if err != nil {
-						return err
-					}
-					if send {
-						streamFrames = append(streamFrames, data)
-					}
-				}
-			}
-			if _, ok := spawnData[id]; ok {
-				data, ok, err := s.wrappedFullForSession(sessionID, id, spawnData, wrappedFull, wrappedPublicFull)
-				if err != nil {
-					return err
-				}
-				if ok {
-					streamFrames = append(streamFrames, data)
-				}
-			}
-		}
-		for _, id := range exited {
-			if sessionDatagrams {
-				s.clearEventualEntity(sessionID, id)
-			}
-			if data, ok := wrappedRemovals[id]; ok {
-				streamFrames = append(streamFrames, data)
-			} else {
-				if s.removalSerializer == nil {
-					return fmt.Errorf("entity %d exited visibility but no RemovalSerializer configured", id)
-				}
-				// A visibility exit only hides a live entity. Keep its current
-				// revision so a same-revision full state is accepted on re-entry.
-				revision := uint64(0)
-				if e, found := s.reg.Get(id); found {
-					if r, ok := e.(registry.StateRevisioner); ok {
-						revision = r.StateRevision()
-					}
-				}
-				data, err := s.removalSerializer(id, revision)
-				if err != nil {
-					return fmt.Errorf("serializing visibility exit for entity %d: %w", id, err)
-				}
-				removalData[id] = data
-				data = s.listener.Wrap(data)
-				wrappedRemovals[id] = data
-				streamFrames = append(streamFrames, data)
-			}
-		}
-
-		var err error
-		streamFrames, err = s.appendOwnershipRefreshFrames(sessionID, ownershipPending, stayed, wrappedFull, wrappedPublicFull, streamFrames)
+		entered, stayed, exited := s.computeBroadcastDiff(sid, live)
+		sent, disconnected, err := s.deliverReplicationDiff(sid, transport, interest.Diff{Entered: entered, Stayed: stayed, Exited: exited}, tick, ownershipPending, replicationVisibility)
+		total.add(sent)
 		if err != nil {
 			return err
 		}
-
-		if len(streamFrames) > 0 {
-			if err := s.listener.SendBatch(sessionID, streamFrames); err != nil {
-				if isDisconnectedSessionSend(err) {
-					s.clearBroadcastKnownSession(sessionID)
-					continue
-				}
-				return err
-			}
-			// Always accumulate wire chunk counts for ReplicationStats (not only when logging).
-			if c, err := golemnet.ReliableStreamWriteChunkCount(transport, streamFrames); err == nil {
-				streamMsgsSum += c
-			}
-			streamBatchedSum += len(streamFrames)
+		if disconnected {
+			s.clearBroadcastKnownSession(sid)
 		}
-		if sessionDatagrams {
-			sendStats, err := s.sendSessionEventualState(sessionID, eventualDirty, eventualDirectFrames, eventualCache)
-			if err != nil {
-				if isDisconnectedSessionSend(err) {
-					s.clearBroadcastKnownSession(sessionID)
-					continue
-				}
-				return err
-			}
-			streamBatchedSum += sendStats.streamBatchedFrames
-			streamMsgsSum += sendStats.streamWireMsgs
-			datagramBatchedSum += sendStats.datagramBatchedFrames
-			datagramMsgsSum += sendStats.datagramWirePayloads
-		}
-		scratch.eventualDirty = eventualDirty[:0]
-		scratch.eventualPrepared = eventualDirectFrames[:0]
 	}
-
 	s.cleanupVisibilityForRemovals(result.Removals)
-	s.storeReplicationSnapshot(streamBatchedSum, streamMsgsSum, datagramBatchedSum, datagramMsgsSum, deltasFlushed)
+	s.storeReplicationSnapshot(total.streamBatchedFrames, total.streamWireMsgs, total.datagramBatchedFrames, total.datagramWirePayloads, deltasFlushed)
 	return nil
 }
 
@@ -1929,225 +1684,48 @@ func copyInterestDiffs(in map[int64]*interest.Diff) map[int64]*interest.Diff {
 
 // runInterestTick performs per-session interest-filtered sends.
 func (s *Server) runInterestTick() error {
-	// Snapshot interest diffs under interestMu, then release before registry
-	// flush and network sends. Diff storage is reused by the manager, so copy.
-	// Visibility Allows is evaluated under the same lock (no policy mirroring).
+	// Manager diffs are reused: copy while locked, before flushing or callbacks.
 	s.interestMu.Lock()
 	s.interest.UpdateGrid(s.reg)
 	diffs := copyInterestDiffs(s.interest.ComputeDiffsFiltered(s.visibility.Allows))
 	ownershipPending := s.snapshotOwnershipRefreshLocked()
 	s.interestMu.Unlock()
-
 	result, err := s.reg.FlushAll()
 	if err != nil {
 		return err
 	}
-
-	scratch := &s.interestScratch
-	scratch.reset()
-
-	spawnData := scratch.spawnData
-	wrappedSpawns := scratch.wrappedSpawns
-	wrappedFull := scratch.wrappedFull
-	for i, id := range result.SpawnIDs {
-		data := result.Spawns[i]
-		spawnData[id] = data
-		wrapped := s.listener.Wrap(data)
-		wrappedSpawns[id] = wrapped
-		wrappedFull[id] = wrapped
+	tick, err := s.prepareReplicationTick(result)
+	if err != nil {
+		return err
 	}
-
-	deltaData := scratch.deltaData
-	eventualChanges := scratch.eventualChanges
-	eventualFrames := scratch.eventualFrames
-	ownerScopedDeltas := false
-	for i, id := range result.DeltaIDs {
-		data := result.Deltas[i]
-		deltaData[id] = data
-		if e, ok := s.reg.Get(id); ok && entityIsOwnerScoped(e) {
-			ownerScopedDeltas = true
-		}
-		if s.usesDatagramStateUpdates() {
-			eventualChanges[id] = s.eventualChangeForDelta(id)
-		}
+	if s.onUpdates != nil && len(tick.updates) > 0 {
+		s.onUpdates(tick.updates)
 	}
-	removalData := scratch.removalData
-	wrappedRemovals := scratch.wrappedRemovals
-	for i, id := range result.Removals {
-		if s.removalSerializer == nil {
-			return fmt.Errorf("entity %d removed but no RemovalSerializer configured", id)
-		}
-		data, err := s.removalSerializer(id, result.RemovalRevisions[i])
-		if err != nil {
-			return fmt.Errorf("serializing removal for entity %d: %w", id, err)
-		}
-		removalData[id] = data
-		wrappedRemovals[id] = s.listener.Wrap(data)
-	}
-	if s.usesDatagramStateUpdates() {
-		s.clearEventualEntities(result.Removals)
-	}
-
-	var updates [][]byte
-	updates = append(updates, result.Spawns...)
-	updates = append(updates, result.Deltas...)
-	for _, id := range result.Removals {
-		updates = append(updates, removalData[id])
-	}
-	if s.onUpdates != nil && len(updates) > 0 {
-		s.onUpdates(updates)
-	}
-
-	wrappedPublicFull := scratch.wrappedPublicFull
-	wrappedPublicDelta := scratch.wrappedPublicDelta
-	wrappedDeltas := scratch.wrappedDeltas
-
 	sessionIDs := s.listener.SessionIDs()
-	if s.hasDatagramStateSessions(sessionIDs) && !ownerScopedDeltas {
-		for id, ch := range eventualChanges {
-			prepared, err := s.eventualPreparedFrameForChange(ch)
-			if err != nil {
-				return err
-			}
-			eventualFrames[id] = prepared
-		}
+	if err := s.prepareEventualFrames(tick, sessionIDs); err != nil {
+		return err
 	}
-	var eventualCache *eventualStateTickCache
-	if s.usesDatagramStateUpdates() {
-		eventualCache = newEventualStateTickCache()
-	}
-
-	var streamBatchedSum, streamMsgsSum, datagramBatchedSum, datagramMsgsSum int
-
-	for _, sessionID := range sessionIDs {
-		transport, connected := s.listener.SessionTransport(sessionID)
+	var total eventualStateSendStats
+	for _, sid := range sessionIDs {
+		transport, connected := s.listener.SessionTransport(sid)
 		if !connected {
 			continue
 		}
-		sessionDatagrams := s.usesDatagramStateUpdates() && transport == golemnet.TransportWebTransport
-		diff, hasDiff := diffs[sessionID]
-		if !hasDiff {
+		diff, ok := diffs[sid]
+		if !ok {
 			continue
 		}
-
-		var (
-			streamFrames         [][]byte
-			eventualDirty        = scratch.eventualDirty[:0]
-			eventualDirectFrames = scratch.eventualPrepared[:0]
-		)
-
-		for _, id := range diff.Entered {
-			if sessionDatagrams {
-				s.clearEventualEntity(sessionID, id)
-			}
-			data, ok, err := s.wrappedFullForSession(sessionID, id, spawnData, wrappedFull, wrappedPublicFull)
-			if err != nil {
-				return fmt.Errorf("full update for entity %d entering FOI: %w", id, err)
-			}
-			if !ok {
-				continue
-			}
-			streamFrames = append(streamFrames, data)
-		}
-
-		for _, id := range diff.Stayed {
-			if authDelta, ok := deltaData[id]; ok {
-				if sessionDatagrams {
-					if ch, ok := eventualChanges[id]; ok {
-						sch, send := s.eventualChangeForSession(sessionID, ch)
-						if send {
-							eventualDirty = append(eventualDirty, sch)
-							if !sch.public && !ownerScopedDeltas {
-								if prepared, ok := eventualFrames[id]; ok {
-									eventualDirectFrames = append(eventualDirectFrames, prepared)
-								}
-							}
-						}
-					}
-				} else {
-					data, send, err := s.streamDeltaForSession(sessionID, id, authDelta, wrappedDeltas, wrappedPublicDelta)
-					if err != nil {
-						return err
-					}
-					if send {
-						streamFrames = append(streamFrames, data)
-					}
-				}
-			}
-			if _, ok := spawnData[id]; ok {
-				data, ok, err := s.wrappedFullForSession(sessionID, id, spawnData, wrappedFull, wrappedPublicFull)
-				if err != nil {
-					return err
-				}
-				if ok {
-					streamFrames = append(streamFrames, data)
-				}
-			}
-		}
-
-		for _, id := range diff.Exited {
-			if sessionDatagrams {
-				s.clearEventualEntity(sessionID, id)
-			}
-			if data, ok := wrappedRemovals[id]; ok {
-				streamFrames = append(streamFrames, data)
-			} else {
-				if s.removalSerializer == nil {
-					return fmt.Errorf("entity %d exited FOI but no RemovalSerializer configured", id)
-				}
-				// An FOI exit only hides a live entity. Keep its current revision
-				// so a same-revision full state is accepted on re-entry.
-				revision := uint64(0)
-				if e, found := s.reg.Get(id); found {
-					if r, ok := e.(registry.StateRevisioner); ok {
-						revision = r.StateRevision()
-					}
-				}
-				data, err := s.removalSerializer(id, revision)
-				if err != nil {
-					return fmt.Errorf("serializing FOI exit for entity %d: %w", id, err)
-				}
-				removalData[id] = data
-				data = s.listener.Wrap(data)
-				wrappedRemovals[id] = data
-				streamFrames = append(streamFrames, data)
-			}
-		}
-
-		streamFrames, err = s.appendOwnershipRefreshFrames(sessionID, ownershipPending, diff.Stayed, wrappedFull, wrappedPublicFull, streamFrames)
+		sent, disconnected, err := s.deliverReplicationDiff(sid, transport, *diff, tick, ownershipPending, replicationFOI)
+		total.add(sent)
 		if err != nil {
 			return err
 		}
-
-		if len(streamFrames) > 0 {
-			if err := s.listener.SendBatch(sessionID, streamFrames); err != nil {
-				if isDisconnectedSessionSend(err) {
-					continue
-				}
-				return err
-			}
-			// Always accumulate wire chunk counts for ReplicationStats (not only when logging).
-			if c, err := golemnet.ReliableStreamWriteChunkCount(transport, streamFrames); err == nil {
-				streamMsgsSum += c
-			}
-			streamBatchedSum += len(streamFrames)
+		if disconnected {
+			continue
 		}
-		if sessionDatagrams {
-			sendStats, err := s.sendSessionEventualState(sessionID, eventualDirty, eventualDirectFrames, eventualCache)
-			if err != nil {
-				return err
-			}
-			streamBatchedSum += sendStats.streamBatchedFrames
-			streamMsgsSum += sendStats.streamWireMsgs
-			datagramBatchedSum += sendStats.datagramBatchedFrames
-			datagramMsgsSum += sendStats.datagramWirePayloads
-		}
-		scratch.eventualDirty = eventualDirty[:0]
-		scratch.eventualPrepared = eventualDirectFrames[:0]
 	}
-
 	s.cleanupVisibilityForRemovals(result.Removals)
-	s.storeReplicationSnapshot(streamBatchedSum, streamMsgsSum, datagramBatchedSum, datagramMsgsSum, len(result.Deltas))
+	s.storeReplicationSnapshot(total.streamBatchedFrames, total.streamWireMsgs, total.datagramBatchedFrames, total.datagramWirePayloads, len(result.Deltas))
 	return nil
 }
 

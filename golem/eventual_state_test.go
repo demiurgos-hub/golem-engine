@@ -164,6 +164,33 @@ func TestEventualStateTrackerMergesDirtyMasks(t *testing.T) {
 	}
 }
 
+func TestEventualFullMergeRetainsPublicAcrossLoss(t *testing.T) {
+	for _, changes := range [][]eventualStateChange{
+		{{id: 1, mask: 4, public: true}, {id: 1, full: true}, {id: 1, mask: 2}},
+		{{id: 1, full: true}, {id: 1, mask: 4, public: true}, {id: 1, mask: 2}},
+	} {
+		tracker := newEventualStateTracker()
+		for _, ch := range changes {
+			tracker.markDirtyChange(ch)
+		}
+		want := eventualStateChange{id: 1, full: true, public: true}
+		if got := tracker.dirtyChangesInto(nil); len(got) != 1 || got[0] != want {
+			t.Fatalf("public full was weakened by merging: %+v", got)
+		}
+		tracker.markSent(1, []eventualStateChange{want})
+		tracker.markDirtyMask(1, 8)
+		tracker.applyFeedback([]golemnet.EventualStateDelivery{{Token: 1, Delivered: false}}, nil)
+		if got := tracker.dirtyChangesInto(nil); len(got) != 1 || got[0] != want {
+			t.Fatalf("loss retry lost full/public state: %+v", got)
+		}
+		tracker.clearEntity(1)
+		tracker.markDirtyFull(1)
+		if tracker.dirtySet[1].public {
+			t.Fatal("ownership clear did not reset recipient state")
+		}
+	}
+}
+
 func TestEventualStateTrackerLossRequeuesRemainingMask(t *testing.T) {
 	tracker := newEventualStateTracker()
 	old := []eventualStateChange{{id: 1, mask: 0b111}}

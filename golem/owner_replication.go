@@ -6,6 +6,52 @@ import (
 	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
+type recipientView bool
+
+const (
+	authoritativeView recipientView = false
+	publicView        recipientView = true
+)
+
+type fullFrameCache struct {
+	authoritative map[int64][]byte
+	public        map[int64][]byte
+}
+
+func (s *Server) viewForSession(sessionID int64, e Entity) recipientView {
+	return recipientView(entityIsOwnerScoped(e) && !s.sessionOwnsEntity(sessionID, e.EntityID()))
+}
+
+func fullUpdateForView(e Entity, view recipientView) ([]byte, error) {
+	if view == publicView {
+		scoped, ok := e.(registry.OwnerScopedEntity)
+		if !ok {
+			return nil, fmt.Errorf("missing OwnerScopedEntity")
+		}
+		return scoped.PublicFullUpdate()
+	}
+	return e.FullUpdate()
+}
+
+// wrappedFullForView caches only immutable bytes, with separate maps for each view.
+// Serialization errors retain caller-specific context at the call site.
+func (s *Server) wrappedFullForView(e Entity, view recipientView, cache *fullFrameCache) ([]byte, error) {
+	frames := cache.authoritative
+	if view == publicView {
+		frames = cache.public
+	}
+	if frame, ok := frames[e.EntityID()]; ok {
+		return frame, nil
+	}
+	raw, err := fullUpdateForView(e, view)
+	if err != nil {
+		return nil, err
+	}
+	frame := s.listener.Wrap(raw)
+	frames[e.EntityID()] = frame
+	return frame, nil
+}
+
 // ownershipRefresh tracks a coalesced confidentiality transition for one entity
 // until the next replication pass. clearOwner is the pre-change owner that may
 // still hold private client state; newOwner is the final owner after coalescing.
@@ -79,10 +125,7 @@ func (s *Server) hasPendingOwnershipRefreshLocked() bool {
 // fullUpdateForSession returns authoritative FullUpdate for the owner (and for
 // entities without owner-only vars), or PublicFullUpdate for non-owners.
 func (s *Server) fullUpdateForSession(e Entity, sessionID int64) ([]byte, error) {
-	if scoped, ok := e.(registry.OwnerScopedEntity); ok && !s.sessionOwnsEntity(sessionID, e.EntityID()) {
-		return scoped.PublicFullUpdate()
-	}
-	return e.FullUpdate()
+	return fullUpdateForView(e, s.viewForSession(sessionID, e))
 }
 
 // eventualChangeForSession adapts an authoritative eventual change for a
@@ -92,13 +135,13 @@ func (s *Server) eventualChangeForSession(sessionID int64, ch eventualStateChang
 	if !ok {
 		return ch, true
 	}
-	scoped, hasScope := e.(registry.OwnerScopedEntity)
-	if !hasScope || s.sessionOwnsEntity(sessionID, ch.id) {
+	if s.viewForSession(sessionID, e) == authoritativeView {
 		return ch, true
 	}
 	if ch.full {
 		return eventualStateChange{id: ch.id, full: true, public: true}, true
 	}
+	scoped := e.(registry.OwnerScopedEntity)
 	pubMask := scoped.PublicReplicationMask(ch.mask)
 	if pubMask == 0 {
 		return eventualStateChange{}, false
@@ -113,8 +156,7 @@ func (s *Server) streamDeltaForSession(sessionID, entityID int64, authDelta []by
 	if !ok {
 		return nil, false, nil
 	}
-	scoped, hasScope := e.(registry.OwnerScopedEntity)
-	if !hasScope || s.sessionOwnsEntity(sessionID, entityID) {
+	if s.viewForSession(sessionID, e) == authoritativeView {
 		if authDelta == nil {
 			return nil, false, nil
 		}
@@ -131,9 +173,10 @@ func (s *Server) streamDeltaForSession(sessionID, entityID int64, authDelta []by
 		}
 		return wrapped, true, nil
 	}
+	scoped := e.(registry.OwnerScopedEntity)
 	deltaEnt, ok := e.(registry.ReplicationDeltaEntity)
 	if !ok {
-		raw, err := scoped.PublicFullUpdate()
+		raw, err := fullUpdateForView(e, publicView)
 		if err != nil {
 			return nil, false, fmt.Errorf("public full for entity %d: %w", entityID, err)
 		}
@@ -170,33 +213,23 @@ func (s *Server) wrappedFullForSession(
 	if !ok {
 		return nil, false, nil
 	}
-	if scoped, ok := e.(registry.OwnerScopedEntity); ok && !s.sessionOwnsEntity(sessionID, entityID) {
-		if wrapped, hit := publicCache[entityID]; hit {
-			return wrapped, true, nil
+	view := s.viewForSession(sessionID, e)
+	cache := fullFrameCache{authoritative: authCache, public: publicCache}
+	if view == authoritativeView {
+		if _, hit := authCache[entityID]; !hit {
+			if raw, ok := spawnData[entityID]; ok {
+				authCache[entityID] = s.listener.Wrap(raw)
+			}
 		}
-		raw, err := scoped.PublicFullUpdate()
-		if err != nil {
+	}
+	frame, err := s.wrappedFullForView(e, view, &cache)
+	if err != nil {
+		if view == publicView {
 			return nil, false, fmt.Errorf("public full update for entity %d: %w", entityID, err)
 		}
-		wrapped := s.listener.Wrap(raw)
-		publicCache[entityID] = wrapped
-		return wrapped, true, nil
-	}
-	if wrapped, hit := authCache[entityID]; hit {
-		return wrapped, true, nil
-	}
-	if raw, ok := spawnData[entityID]; ok {
-		wrapped := s.listener.Wrap(raw)
-		authCache[entityID] = wrapped
-		return wrapped, true, nil
-	}
-	raw, err := e.FullUpdate()
-	if err != nil {
 		return nil, false, fmt.Errorf("full update for entity %d: %w", entityID, err)
 	}
-	wrapped := s.listener.Wrap(raw)
-	authCache[entityID] = wrapped
-	return wrapped, true, nil
+	return frame, true, nil
 }
 
 // appendOwnershipRefreshFrames appends public/auth full-state frames for a
@@ -222,39 +255,25 @@ func (s *Server) appendOwnershipRefreshFrames(
 		if !ok {
 			continue
 		}
-		scoped, ok := e.(registry.OwnerScopedEntity)
-		if !ok {
+		if !entityIsOwnerScoped(e) {
 			continue
 		}
+		cache := fullFrameCache{authoritative: authCache, public: publicCache}
 		if ref.clearOwner == sessionID {
-			// Full public clear supersedes any pending/in-flight private deltas.
 			s.clearEventualEntity(sessionID, entityID)
-			if wrapped, hit := publicCache[entityID]; hit {
-				streamFrames = append(streamFrames, wrapped)
-			} else {
-				raw, err := scoped.PublicFullUpdate()
-				if err != nil {
-					return streamFrames, fmt.Errorf("ownership clear public full for entity %d: %w", entityID, err)
-				}
-				wrapped := s.listener.Wrap(raw)
-				publicCache[entityID] = wrapped
-				streamFrames = append(streamFrames, wrapped)
+			frame, err := s.wrappedFullForView(e, publicView, &cache)
+			if err != nil {
+				return streamFrames, fmt.Errorf("ownership clear public full for entity %d: %w", entityID, err)
 			}
+			streamFrames = append(streamFrames, frame)
 		}
 		if ref.newOwner == sessionID && ref.newOwner != 0 {
-			// Authoritative grant supersedes pending public/redacted deltas.
 			s.clearEventualEntity(sessionID, entityID)
-			if wrapped, hit := authCache[entityID]; hit {
-				streamFrames = append(streamFrames, wrapped)
-				continue
-			}
-			raw, err := e.FullUpdate()
+			frame, err := s.wrappedFullForView(e, authoritativeView, &cache)
 			if err != nil {
 				return streamFrames, fmt.Errorf("ownership grant full for entity %d: %w", entityID, err)
 			}
-			wrapped := s.listener.Wrap(raw)
-			authCache[entityID] = wrapped
-			streamFrames = append(streamFrames, wrapped)
+			streamFrames = append(streamFrames, frame)
 		}
 	}
 	return streamFrames, nil
