@@ -1,11 +1,127 @@
 package golem
 
 import (
+	"fmt"
+	"reflect"
 	"testing"
 
-	"github.com/demiurgos-hub/golem-engine/golem/registry"
 	"github.com/demiurgos-hub/golem-engine/golem/collision"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
+
+type contactCallbackEntity struct {
+	stubEntity
+	observe func(string, Entity)
+}
+
+func (e *contactCallbackEntity) OnTriggerEnter(other Entity) { e.observe("trigger enter", other) }
+func (e *contactCallbackEntity) OnTriggerStay(other Entity)  { e.observe("trigger stay", other) }
+func (e *contactCallbackEntity) OnTriggerExit(other Entity)  { e.observe("trigger exit", other) }
+func (e *contactCallbackEntity) OnCollisionEnter(other Entity, _ CollisionVec2, _ float64) {
+	e.observe("solid enter", other)
+}
+func (e *contactCallbackEntity) OnCollisionStay(other Entity, _ CollisionVec2, _ float64) {
+	e.observe("solid stay", other)
+}
+func (e *contactCallbackEntity) OnCollisionExit(other Entity) { e.observe("solid exit", other) }
+
+func TestContactDuplicateKeepsLastOrientation(t *testing.T) {
+	a, b := &stubEntity{id: 1}, &stubEntity{id: 2}
+	s := newTestServer(a, b)
+	s.dispatchContactEvents([]collision.Contact{
+		{A: 1, B: 2, Normal: collision.Vec2{X: 1}, Depth: 1},
+		{A: 2, B: 1, Normal: collision.Vec2{Y: 1}, Depth: 2},
+	})
+	if len(a.collisionEnters) != 1 || len(b.collisionEnters) != 1 {
+		t.Fatal("duplicate contacts dispatched more than once")
+	}
+	if a.collisionEnters[0].normal != (CollisionVec2{Y: -1}) || b.collisionEnters[0].normal != (CollisionVec2{Y: 1}) || a.collisionEnters[0].depth != 2 {
+		t.Fatalf("canonical pair changed normal orientation: A=%+v B=%+v", a.collisionEnters, b.collisionEnters)
+	}
+}
+
+func TestContactCallbacksResolveBothEndpointsBeforeDispatch(t *testing.T) {
+	for _, depth := range []float64{0, 1} {
+		t.Run(fmt.Sprint(depth), func(t *testing.T) {
+			s := NewServer(ServerConfig{})
+			s.EnableContactEvents()
+			a := &contactCallbackEntity{stubEntity: stubEntity{id: 1}}
+			b := &contactCallbackEntity{stubEntity: stubEntity{id: 2}}
+			var gotA, gotB []Entity
+			a.observe = func(_ string, other Entity) {
+				gotA = append(gotA, other)
+				s.DeleteEntity(2)
+			}
+			b.observe = func(_ string, other Entity) { gotB = append(gotB, other) }
+			for _, e := range []Entity{a, b} {
+				if err := s.CreateEntity(e); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s.dispatchContactEvents([]collision.Contact{{A: 1, B: 2, Depth: depth}})
+			if len(gotA) != 1 || gotA[0] != b || len(gotB) != 1 || gotB[0] != a {
+				t.Fatalf("deletion changed already resolved endpoints: A=%v B=%v", gotA, gotB)
+			}
+			s.dispatchContactEvents(nil)
+			if len(gotA) != 2 || gotA[1] != nil || len(gotB) != 1 {
+				t.Fatalf("deleted partner exit: A=%v B=%v", gotA, gotB)
+			}
+		})
+	}
+}
+
+func TestContactPhaseOrderAndPairPublication(t *testing.T) {
+	s := NewServer(ServerConfig{})
+	s.EnableContactEvents()
+	var order []string
+	previousCount := 0
+	for _, id := range []int64{1, 2} {
+		e := &contactCallbackEntity{stubEntity: stubEntity{id: id}}
+		e.observe = func(phase string, _ Entity) {
+			order = append(order, fmt.Sprintf("%d %s", id, phase))
+			if len(s.triggerPairs) != previousCount || len(s.solidPairs) != previousCount {
+				t.Error("pair sets published before both phases finished")
+			}
+		}
+		if err := s.CreateEntity(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	solid := collision.Contact{A: 1, B: 2, Depth: 1}
+	s.dispatchContactEvents([]collision.Contact{solid, {A: 1, B: 2}})
+	previousCount = 1
+	s.dispatchContactEvents([]collision.Contact{solid})
+	want := []string{"1 trigger enter", "2 trigger enter", "1 solid enter", "2 solid enter", "1 trigger exit", "2 trigger exit", "1 solid stay", "2 solid stay"}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("order=%v want=%v", order, want)
+	}
+}
+
+func TestContactCallbackCanResetTracking(t *testing.T) {
+	s := NewServer(ServerConfig{})
+	s.EnableContactEvents()
+	var phases []string
+	a := &contactCallbackEntity{stubEntity: stubEntity{id: 1}, observe: func(phase string, _ Entity) {
+		phases = append(phases, phase)
+		if phase == "trigger stay" {
+			s.EnableContactEvents()
+		}
+	}}
+	for _, e := range []Entity{a, &stubEntity{id: 2}, &stubEntity{id: 3}} {
+		if err := s.CreateEntity(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	contacts := []collision.Contact{{A: 1, B: 2}, {A: 1, B: 3}}
+	s.dispatchContactEvents(contacts)
+	phases = nil
+	s.dispatchContactEvents(contacts)
+	// Whichever pair visits first is a stay; its callback resets tracking for
+	// the other pair. Pair iteration order is deliberately not prescribed.
+	if !reflect.DeepEqual(phases, []string{"trigger stay", "trigger enter"}) {
+		t.Fatalf("tracking reset was ignored: %v", phases)
+	}
+}
 
 // stubEntity is a minimal Entity for collision event tests.
 type stubEntity struct {

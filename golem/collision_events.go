@@ -95,114 +95,87 @@ func (s *Server) dispatchContactEvents(contacts []collision.Contact) {
 		}
 	}
 
-	// --- trigger events ---
-	for key, c := range currentTrigger {
-		eA, okA := s.reg.Get(c.A)
-		eB, okB := s.reg.Get(c.B)
-		_, wasActive := s.triggerPairs[key]
-		if wasActive {
-			if okA {
-				if h, ok := eA.(TriggerStay); ok {
-					h.OnTriggerStay(entityOrNil(eB, okB))
-				}
-			}
-			if okB {
-				if h, ok := eB.(TriggerStay); ok {
-					h.OnTriggerStay(entityOrNil(eA, okA))
-				}
-			}
-		} else {
-			if okA {
-				if h, ok := eA.(TriggerEnter); ok {
-					h.OnTriggerEnter(entityOrNil(eB, okB))
-				}
-			}
-			if okB {
-				if h, ok := eB.(TriggerEnter); ok {
-					h.OnTriggerEnter(entityOrNil(eA, okA))
-				}
-			}
+	nextTrigger := s.dispatchPairTransitions(currentTrigger, &s.triggerPairs, emitTriggerContact)
+	nextSolid := s.dispatchPairTransitions(currentSolid, &s.solidPairs, emitSolidContact)
+	s.triggerPairs, s.solidPairs = nextTrigger, nextSolid
+}
+
+type contactPhase uint8
+
+const (
+	contactEnter contactPhase = iota
+	contactStay
+	contactExit
+)
+
+// dispatchPairTransitions resolves both endpoints before invoking either callback.
+// Canonical keys identify pairs; the stored contact keeps its original A/B normal.
+// Read tracking through its field because callbacks can reset EnableContactEvents.
+func (s *Server) dispatchPairTransitions(current map[[2]int64]collision.Contact, previous *map[[2]int64]struct{}, emit func(contactPhase, collision.Contact, Entity, Entity)) map[[2]int64]struct{} {
+	for key, c := range current {
+		phase := contactEnter
+		if _, known := (*previous)[key]; known {
+			phase = contactStay
 		}
+		a, okA := s.reg.Get(c.A)
+		b, okB := s.reg.Get(c.B)
+		emit(phase, c, entityOrNil(a, okA), entityOrNil(b, okB))
 	}
-	for key := range s.triggerPairs {
-		if _, active := currentTrigger[key]; active {
+	for key := range *previous {
+		if _, active := current[key]; active {
 			continue
 		}
-		eA, okA := s.reg.Get(key[0])
-		eB, okB := s.reg.Get(key[1])
-		if okA {
-			if h, ok := eA.(TriggerExit); ok {
-				h.OnTriggerExit(entityOrNil(eB, okB))
-			}
-		}
-		if okB {
-			if h, ok := eB.(TriggerExit); ok {
-				h.OnTriggerExit(entityOrNil(eA, okA))
-			}
-		}
+		a, okA := s.reg.Get(key[0])
+		b, okB := s.reg.Get(key[1])
+		emit(contactExit, collision.Contact{A: key[0], B: key[1]}, entityOrNil(a, okA), entityOrNil(b, okB))
 	}
+	next := make(map[[2]int64]struct{}, len(current))
+	for key := range current {
+		next[key] = struct{}{}
+	}
+	return next
+}
 
-	// --- solid collision events ---
-	for key, c := range currentSolid {
-		eA, okA := s.reg.Get(c.A)
-		eB, okB := s.reg.Get(c.B)
-		// Contact.Normal is the push direction for Contact.A (unit vector pointing from B toward A).
-		// Negate it for entity B so both sides receive a normal pointing away from the other.
-		normalForA := c.Normal
-		normalForB := collision.Vec2{X: -c.Normal.X, Y: -c.Normal.Y}
-		_, wasActive := s.solidPairs[key]
-		if wasActive {
-			if okA {
-				if h, ok := eA.(CollisionStay); ok {
-					h.OnCollisionStay(entityOrNil(eB, okB), normalForA, c.Depth)
-				}
-			}
-			if okB {
-				if h, ok := eB.(CollisionStay); ok {
-					h.OnCollisionStay(entityOrNil(eA, okA), normalForB, c.Depth)
-				}
-			}
-		} else {
-			if okA {
-				if h, ok := eA.(CollisionEnter); ok {
-					h.OnCollisionEnter(entityOrNil(eB, okB), normalForA, c.Depth)
-				}
-			}
-			if okB {
-				if h, ok := eB.(CollisionEnter); ok {
-					h.OnCollisionEnter(entityOrNil(eA, okA), normalForB, c.Depth)
-				}
-			}
-		}
-	}
-	for key := range s.solidPairs {
-		if _, active := currentSolid[key]; active {
-			continue
-		}
-		eA, okA := s.reg.Get(key[0])
-		eB, okB := s.reg.Get(key[1])
-		if okA {
-			if h, ok := eA.(CollisionExit); ok {
-				h.OnCollisionExit(entityOrNil(eB, okB))
-			}
-		}
-		if okB {
-			if h, ok := eB.(CollisionExit); ok {
-				h.OnCollisionExit(entityOrNil(eA, okA))
-			}
-		}
-	}
+func emitTriggerContact(phase contactPhase, _ collision.Contact, a, b Entity) {
+	emitTriggerEndpoint(phase, a, b)
+	emitTriggerEndpoint(phase, b, a)
+}
 
-	// Swap tracking maps for next tick.
-	newTrigger := make(map[[2]int64]struct{}, len(currentTrigger))
-	for key := range currentTrigger {
-		newTrigger[key] = struct{}{}
+func emitTriggerEndpoint(phase contactPhase, receiver, other Entity) {
+	switch phase {
+	case contactEnter:
+		if h, ok := receiver.(TriggerEnter); ok {
+			h.OnTriggerEnter(other)
+		}
+	case contactStay:
+		if h, ok := receiver.(TriggerStay); ok {
+			h.OnTriggerStay(other)
+		}
+	case contactExit:
+		if h, ok := receiver.(TriggerExit); ok {
+			h.OnTriggerExit(other)
+		}
 	}
-	s.triggerPairs = newTrigger
+}
 
-	newSolid := make(map[[2]int64]struct{}, len(currentSolid))
-	for key := range currentSolid {
-		newSolid[key] = struct{}{}
+func emitSolidContact(phase contactPhase, c collision.Contact, a, b Entity) {
+	emitSolidEndpoint(phase, a, b, c.Normal, c.Depth)
+	emitSolidEndpoint(phase, b, a, collision.Vec2{X: -c.Normal.X, Y: -c.Normal.Y}, c.Depth)
+}
+
+func emitSolidEndpoint(phase contactPhase, receiver, other Entity, normal CollisionVec2, depth float64) {
+	switch phase {
+	case contactEnter:
+		if h, ok := receiver.(CollisionEnter); ok {
+			h.OnCollisionEnter(other, normal, depth)
+		}
+	case contactStay:
+		if h, ok := receiver.(CollisionStay); ok {
+			h.OnCollisionStay(other, normal, depth)
+		}
+	case contactExit:
+		if h, ok := receiver.(CollisionExit); ok {
+			h.OnCollisionExit(other)
+		}
 	}
-	s.solidPairs = newSolid
 }

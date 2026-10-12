@@ -336,42 +336,14 @@ func (s *Server) drainAsyncCallbacks() {
 			got  bool
 		)
 		if preferCompletion {
-			if remainC > 0 {
-				select {
-				case comp = <-s.completionQueue:
-					remainC--
-					got = true
-				default:
-					remainC = 0
-				}
-			}
-			if !got && remainP > 0 {
-				select {
-				case post = <-s.postQueue:
-					remainP--
-					got = true
-				default:
-					remainP = 0
-				}
+			comp, got = pollAsyncQueue(s.completionQueue, &remainC)
+			if !got {
+				post, got = pollAsyncQueue(s.postQueue, &remainP)
 			}
 		} else {
-			if remainP > 0 {
-				select {
-				case post = <-s.postQueue:
-					remainP--
-					got = true
-				default:
-					remainP = 0
-				}
-			}
-			if !got && remainC > 0 {
-				select {
-				case comp = <-s.completionQueue:
-					remainC--
-					got = true
-				default:
-					remainC = 0
-				}
+			post, got = pollAsyncQueue(s.postQueue, &remainP)
+			if !got {
+				comp, got = pollAsyncQueue(s.completionQueue, &remainC)
 			}
 		}
 		if got {
@@ -392,29 +364,37 @@ func (s *Server) drainAsyncCallbacks() {
 	}
 }
 
-// discardQueuedPostsLocked drops all queued Post callbacks without running
-// them. Caller must hold lifeMu.
-func (s *Server) discardQueuedPostsLocked() {
-	for {
-		select {
-		case <-s.postQueue:
-		default:
+// pollAsyncQueue consumes only the caller's initial queue-length allowance.
+// Lifecycle locking and callback execution remain with the scheduler.
+func pollAsyncQueue[T any](queue <-chan T, remaining *int) (value T, ok bool) {
+	if *remaining <= 0 {
+		return value, false
+	}
+	select {
+	case value = <-queue:
+		(*remaining)--
+		return value, true
+	default:
+		*remaining = 0
+		return value, false
+	}
+}
+
+// discardAsyncQueue runs after producers stop, under lifeMu; nothing executes.
+func discardAsyncQueue[T any](queue <-chan T) {
+	remaining := len(queue)
+	for remaining > 0 {
+		if _, ok := pollAsyncQueue(queue, &remaining); !ok {
 			return
 		}
 	}
 }
 
-// discardQueuedCompletionsLocked drops all queued task completions without
-// running them. Caller must hold lifeMu.
-func (s *Server) discardQueuedCompletionsLocked() {
-	for {
-		select {
-		case <-s.completionQueue:
-		default:
-			return
-		}
-	}
-}
+// discardQueuedPostsLocked drops all queued Post callbacks. Caller holds lifeMu.
+func (s *Server) discardQueuedPostsLocked() { discardAsyncQueue(s.postQueue) }
+
+// discardQueuedCompletionsLocked drops queued completions. Caller holds lifeMu.
+func (s *Server) discardQueuedCompletionsLocked() { discardAsyncQueue(s.completionQueue) }
 
 // markLifecycleStopping transitions running → stopping under lifeMu so Post
 // and SubmitTask stop accepting as soon as shutdown is linearized.

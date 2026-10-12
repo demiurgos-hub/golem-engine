@@ -3,6 +3,7 @@ package golem
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +11,45 @@ import (
 
 	"github.com/demiurgos-hub/golem-engine/golem/collision"
 )
+
+func TestAsyncDrainDefersCallbackProducedWorkAndGatesShutdown(t *testing.T) {
+	s := NewServer(ServerConfig{AsyncCallbacksPerTick: 10})
+	s.life = lifecycleRunning
+	var order []string
+	s.completionQueue <- taskCompletion{complete: func(s *Server, _ error) {
+		order = append(order, "completion")
+		// Post and TaskStats both take lifeMu: callbacks must execute unlocked.
+		if err := s.Post(func(*Server) { order = append(order, "new post") }); err != nil {
+			t.Fatal(err)
+		}
+		_ = s.TaskStats()
+		s.completionQueue <- taskCompletion{complete: func(*Server, error) { order = append(order, "new completion") }}
+	}}
+	if err := s.Post(func(*Server) { order = append(order, "post") }); err != nil {
+		t.Fatal(err)
+	}
+	s.drainAsyncCallbacks()
+	if !reflect.DeepEqual(order, []string{"completion", "post"}) || len(s.postQueue) != 1 || len(s.completionQueue) != 1 {
+		t.Fatalf("same-drain work escaped initial queue budgets: %v", order)
+	}
+	s.drainAsyncCallbacks()
+	if !reflect.DeepEqual(order, []string{"completion", "post", "new completion", "new post"}) {
+		t.Fatalf("deferred order: %v", order)
+	}
+	s.completionQueue <- taskCompletion{complete: func(s *Server, _ error) { s.markLifecycleStopping() }}
+	if err := s.Post(func(*Server) { t.Error("post executed after shutdown") }); err != nil {
+		t.Fatal(err)
+	}
+	s.drainAsyncCallbacks()
+	s.lifeMu.Lock()
+	s.discardQueuedPostsLocked()
+	s.discardQueuedCompletionsLocked()
+	s.lifeMu.Unlock()
+	stats := s.TaskStats()
+	if stats.PostsExecuted != 2 || stats.TaskCompletionsExecuted != 3 || stats.QueuedPosts != 0 || stats.QueuedCompletions != 0 {
+		t.Fatalf("shutdown/discard counters: %+v", stats)
+	}
+}
 
 func TestPostRejectsBeforeRun(t *testing.T) {
 	srv := NewServer(ServerConfig{TickRate: 1000})
