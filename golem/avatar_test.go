@@ -477,6 +477,32 @@ func TestConcurrentSameSessionSpawnAvatar(t *testing.T) {
 	}
 }
 
+func TestAvatarUnlinkPreservesReservationsAndReplacementIndexes(t *testing.T) {
+	s := NewServer(ServerConfig{})
+	s.sessionAvatar[1] = avatarSpawnPending
+	s.sessionAvatar[2] = 20
+	s.avatarSession[10] = 2
+	s.avatarSession[20] = 2
+	s.avatarMu.Lock()
+	s.unlinkAvatarLocked(1, 10)
+	s.unlinkAvatarLocked(1, avatarSpawnPending)
+	s.unlinkAvatarLocked(2, 10)
+	s.avatarMu.Unlock()
+	if s.sessionAvatar[1] != avatarSpawnPending || s.sessionAvatar[2] != 20 || s.avatarSession[20] != 2 {
+		t.Fatal("unlink damaged reservation or replacement index")
+	}
+	if _, exists := s.avatarSession[10]; exists {
+		t.Fatal("stale reverse index retained")
+	}
+	s.releaseAvatarReservation(2)
+	if s.sessionAvatar[2] != 20 {
+		t.Fatal("reservation release removed committed avatar")
+	}
+	if _, ok := s.takeAvatarBySession(1); ok {
+		t.Fatal("pending reservation returned as avatar")
+	}
+}
+
 func TestSpawnAvatarNilSession(t *testing.T) {
 	srv := NewServer(ServerConfig{})
 	if err := srv.SpawnAvatar(nil, &avatarEntity{}, AvatarOptions{}); err == nil {

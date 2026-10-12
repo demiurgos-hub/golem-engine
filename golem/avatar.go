@@ -116,8 +116,7 @@ func (s *Server) reserveAvatarSlot(sessionID int64) error {
 		// Clear stale mapping, then retry (another SpawnAvatar may have won).
 		s.avatarMu.Lock()
 		if id, still := s.sessionAvatar[sessionID]; still && id == existingID {
-			delete(s.sessionAvatar, sessionID)
-			delete(s.avatarSession, existingID)
+			s.unlinkAvatarLocked(sessionID, existingID)
 		}
 		s.avatarMu.Unlock()
 	}
@@ -157,10 +156,7 @@ func (s *Server) clearAvatarByEntity(entityID int64) {
 	if !ok {
 		return
 	}
-	delete(s.avatarSession, entityID)
-	if id, ok := s.sessionAvatar[sessionID]; ok && id == entityID {
-		delete(s.sessionAvatar, sessionID)
-	}
+	s.unlinkAvatarLocked(sessionID, entityID)
 }
 
 // takeAvatarBySession removes and returns the avatar entity ID for sessionID.
@@ -171,9 +167,22 @@ func (s *Server) takeAvatarBySession(sessionID int64) (entityID int64, ok bool) 
 	if !ok || entityID == avatarSpawnPending {
 		return 0, false
 	}
-	delete(s.sessionAvatar, sessionID)
-	delete(s.avatarSession, entityID)
+	s.unlinkAvatarLocked(sessionID, entityID)
 	return entityID, true
+}
+
+// unlinkAvatarLocked removes only matching live indexes. Caller holds avatarMu;
+// pending reservations are owned by reserve/releaseAvatarReservation.
+func (s *Server) unlinkAvatarLocked(sessionID, entityID int64) {
+	if entityID == avatarSpawnPending {
+		return
+	}
+	if id, ok := s.sessionAvatar[sessionID]; ok && id == entityID {
+		delete(s.sessionAvatar, sessionID)
+	}
+	if sid, ok := s.avatarSession[entityID]; ok && sid == sessionID {
+		delete(s.avatarSession, entityID)
+	}
 }
 
 // cleanupAvatarOnDisconnect runs after the user OnDisconnect hook: RemoveFOI,
