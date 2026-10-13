@@ -678,26 +678,7 @@ export class GameClient {
       this._setConnectionState({ type: "disconnected", info: safeInfo });
       if (this._isCurrentGeneration(generation)) this._onDisconnect?.(safeInfo);
     });
-    channel.onMessage((bytes) => {
-      if (this._isCurrentChannel(generation, channel)) {
-        this._handleMessage(bytes);
-      }
-    });
-    channel.onUnreliableStateMessage?.((bytes) => {
-      if (this._isCurrentChannel(generation, channel)) {
-        this._handleCompactStateBatch(bytes);
-      }
-    });
-    channel.onReliableOrderedMessage?.((bytes) => {
-      if (this._isCurrentChannel(generation, channel)) {
-        this._handleCompactStateBatch(bytes);
-      }
-    });
-    channel.onEventualStateMessage?.((bytes) => {
-      if (this._isCurrentChannel(generation, channel)) {
-        this._handleCompactStateBatch(bytes);
-      }
-    });
+    this._bindMessageCallbacks(channel, () => this._isCurrentChannel(generation, channel));
     channel.onOpen(() => {
       if (this._isCurrentChannel(generation, channel)) {
         this._connectionOpened = true;
@@ -1012,26 +993,7 @@ export class GameClient {
       this._setConnectionState({ type: "disconnected", info });
       if (this._isCurrentGeneration(generation)) this._onDisconnect?.(info);
     });
-    channel.onMessage((bytes) => {
-      if (phase === "open" && this._isCurrentChannel(generation, channel)) {
-        this._handleMessage(bytes);
-      }
-    });
-    channel.onUnreliableStateMessage?.((bytes) => {
-      if (phase === "open" && this._isCurrentChannel(generation, channel)) {
-        this._handleCompactStateBatch(bytes);
-      }
-    });
-    channel.onReliableOrderedMessage?.((bytes) => {
-      if (phase === "open" && this._isCurrentChannel(generation, channel)) {
-        this._handleCompactStateBatch(bytes);
-      }
-    });
-    channel.onEventualStateMessage?.((bytes) => {
-      if (phase === "open" && this._isCurrentChannel(generation, channel)) {
-        this._handleCompactStateBatch(bytes);
-      }
-    });
+    this._bindMessageCallbacks(channel, () => phase === "open" && this._isCurrentChannel(generation, channel));
     channel.onOpen(() => {
       if (phase !== "opening" || !this._isCurrentChannel(generation, channel)) {
         closeThen();
@@ -1271,6 +1233,29 @@ export class GameClient {
     channel.send(packet);
   }
 
+  private _bindMessageCallbacks(channel: ReliableMessageChannel, isActive: () => boolean): void {
+    channel.onMessage((bytes) => {
+      if (isActive()) {
+        this._handleMessage(bytes);
+      }
+    });
+    channel.onUnreliableStateMessage?.((bytes) => {
+      if (isActive()) {
+        this._handleCompactStateBatch(bytes);
+      }
+    });
+    channel.onReliableOrderedMessage?.((bytes) => {
+      if (isActive()) {
+        this._handleCompactStateBatch(bytes);
+      }
+    });
+    channel.onEventualStateMessage?.((bytes) => {
+      if (isActive()) {
+        this._handleCompactStateBatch(bytes);
+      }
+    });
+  }
+
   private _handleMessage(bytes: Uint8Array): void {
     const r = new PbReader(bytes);
     while (!r.done) {
@@ -1394,21 +1379,7 @@ class WebSocketReliableChannel implements ReliableMessageChannel {
   }
 }
 
-class WebTransportDatagramChannel implements UnreliableMessageChannel {
-  readonly maxDatagramBytes: number;
-  private _send: (bytes: Uint8Array) => void;
-
-  constructor(maxDatagramBytes: number, send: (bytes: Uint8Array) => void) {
-    this.maxDatagramBytes = maxDatagramBytes;
-    this._send = send;
-  }
-
-  send(bytes: Uint8Array): void {
-    this._send(bytes);
-  }
-}
-
-class WebTransportReliableDatagramLane implements ReliableUnorderedMessageChannel, ReliableOrderedMessageChannel {
+class DatagramLaneAdapter implements UnreliableMessageChannel, ReliableUnorderedMessageChannel, ReliableOrderedMessageChannel {
   readonly maxDatagramBytes: number;
   private _send: (bytes: Uint8Array) => void;
 
@@ -1726,7 +1697,7 @@ class WebTransportDatagramProtocol {
   private _reliableOrderedMessage?: (bytes: Uint8Array) => void;
   private _eventualStateMessage?: (bytes: Uint8Array) => void;
 
-  readonly unreliable = new WebTransportDatagramChannel(maxUnreliableDatagramPayloadBytes, (bytes) => {
+  readonly unreliable = new DatagramLaneAdapter(maxUnreliableDatagramPayloadBytes, (bytes) => {
     if (bytes.byteLength > maxUnreliableDatagramPayloadBytes) {
       throw new Error(
         `golem-js: datagram size ${bytes.byteLength} exceeds max webtransport datagram payload ${maxUnreliableDatagramPayloadBytes}`,
@@ -1738,12 +1709,12 @@ class WebTransportDatagramProtocol {
     });
   });
 
-  readonly reliableUnordered = new WebTransportReliableDatagramLane(
+  readonly reliableUnordered = new DatagramLaneAdapter(
     maxReliableUnorderedDatagramPayloadBytes,
     (bytes) => this._enqueueReliable(datagramLaneReliableUnordered, bytes),
   );
 
-  readonly reliableOrdered = new WebTransportReliableDatagramLane(
+  readonly reliableOrdered = new DatagramLaneAdapter(
     maxReliableOrderedDatagramPayloadBytes,
     (bytes) => this._enqueueReliable(datagramLaneReliableOrdered, bytes),
   );

@@ -2017,3 +2017,56 @@ for (const interval of [undefined, 0, 7]) {
     }
   });
 }
+
+for (const planned of [false, true]) {
+  test(`all receive routes preserve ${planned ? "candidate" : "direct"} lifecycle guards`, () => {
+    const channels=[];const updates=[];const registrations=[];
+    class Routes extends ControlledChannel {
+      onClose(fn){registrations.push('close');super.onClose(fn);}
+      onMessage(fn){registrations.push('message');super.onMessage(fn);}
+      onUnreliableStateMessage(fn){registrations.push('unreliable');this.unreliableMessage=fn;}
+      onReliableOrderedMessage(fn){registrations.push('ordered');this.orderedMessage=fn;}
+      onEventualStateMessage(fn){registrations.push('eventual');this.eventualMessage=fn;}
+      onOpen(fn){registrations.push('open');super.onOpen(fn);}
+      receive(){
+        this._onMessage(new PbWriter().tag(1,2).bytes(new Uint8Array([1])).finish());
+        this.unreliableMessage(framedBatchBytes([new Uint8Array([2])]));
+        this.orderedMessage(framedBatchBytes([new Uint8Array([3])]));
+        this.eventualMessage(framedBatchBytes([new Uint8Array([4])]));
+      }
+    }
+    const client=new GameClient({entityManager:{applyUpdate:b=>updates.push(...b),applyCompactUpdate:b=>updates.push(...b),get(){}},decode:b=>b,encode:()=>new Uint8Array(),encodePacket:packetBytes,createChannel:o=>{const c=new Routes(o.transport);channels.push(c);return c;}});
+    const connect=()=>client.connect(planned ? {candidates:[{transport:'webtransport',url:'https://example.test'},{transport:'websocket',url:'wss://example.test'}]} : 'wss://example.test');
+    connect();const first=channels[0];
+    assert.deepEqual(registrations,['close','message','unreliable','ordered','eventual','open']);
+    first.receive();assert.deepEqual(updates,planned?[]:[1,2,3,4]);updates.length=0;
+    let active=first;
+    if(planned){ first.fail();first.receive();assert.deepEqual(updates,[]);active=channels[1];active.receive();assert.deepEqual(updates,[]); }
+    active.open();active.receive();assert.deepEqual(updates,[1,2,3,4]);updates.length=0;
+    connect();active.receive();assert.deepEqual(updates,[]);
+    const last=channels.at(-1);last.open();last.fail();last.receive();assert.deepEqual(updates,[]);
+    client.disconnect();first.receive();last.receive();assert.deepEqual(updates,[]);
+  });
+}
+
+test("send-only datagram adapters retain each lane's budget and dispatch", async (t) => {
+  let scheduler;
+  t.mock.method(globalThis,'setInterval',fn=>{scheduler=fn;return 1;});
+  t.mock.method(globalThis,'clearInterval',()=>{});
+  const previous=globalThis.WebTransport;globalThis.WebTransport=FakeWebTransport;
+  const channel=createChannel({transport:'webtransport',url:'https://example.test'});
+  try {
+    await flushMicrotasks();await flushMicrotasks();
+    const transport=FakeWebTransport.instances.at(-1);
+    for(const [name,lane,budget] of [['unreliable',1,1178],['reliableUnordered',2,1176],['reliableOrdered',3,1174]]) {
+      assert.equal(channel[name].maxDatagramBytes,budget);
+      assert.throws(()=>channel[name].send(new Uint8Array(budget+1)),/exceeds/);
+      channel[name].send(new Uint8Array([lane]));
+    }
+    scheduler();for(let i=0;i<20 && transport.datagramWrites.length<3;i++) await flushMicrotasks();
+    const packets=transport.datagramWrites.map(decodeDatagramPacket);
+    assert.deepEqual(packets.map(p=>p.lane),[1,3,2]);
+    assert.deepEqual(packets.map(p=>[...p.payload]),[[1],[3],[2]]);
+    assert.equal(transport.streamWrites.length,0);
+  } finally { channel.close();globalThis.WebTransport=previous;FakeWebTransport.instances.length=0; }
+});
