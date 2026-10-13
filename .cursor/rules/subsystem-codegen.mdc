@@ -22,7 +22,7 @@ Compatibility evidence lives in the resolution baseline, characterization and ge
 
 Templates live under `codegen/templates/` and are embedded with `go:embed`.
 
-`integration_outputs.go` owns integration defaults, output names/roles, optional selection and historical JS intermediate recognition. `integration.go` preserves the public compatibility projection. Keep descriptors read-only and decorate per-integration entity DTO copies. The relative containment predicate is shared; bridge removal resolves symlinks and rejects Rel failures, while Threlte validation remains lexical with its existing error policy.
+`integration_outputs.go` owns integration defaults, output names/roles, optional selection and historical JS intermediate recognition. Successful JS finalization removes only top-level regular recognized intermediates bearing the Golem generated header; preserve declarations, unmarked files, unreadable files and nonregular entries. The temporary compiler config is handled separately. `integration.go` preserves the public compatibility projection. Keep descriptors read-only and decorate per-integration entity DTO copies. The relative containment predicate is shared; bridge removal resolves symlinks and rejects Rel failures, while Threlte validation remains lexical with its existing error policy.
 
 `go_proto.go`, `js_proto.go`, and `csharp_proto.go` generate lightweight codecs for consumers. Optional checked protocol constant sets are emitted in the existing entities outputs as Go untyped constants, TypeScript `as const` objects/unions, and C# static string classes; they are not protobuf fields and do not alter `entities.proto`. Keep Go, JS, and C# client targets conceptually parallel.
 

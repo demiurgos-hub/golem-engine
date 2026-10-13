@@ -19,6 +19,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- JavaScript bake cleanup requires a Golem generated header before deleting recognized intermediate TypeScript files. Authored files with generated-looking names, declarations, and symlinks are preserved; normal generation still overwrites its selected outputs.
+
 - Session avatars remove their registered 2D and 3D colliders before `OnRemove` during disconnect cleanup and failed-spawn rollback, preventing leftover collision shapes.
 - Native Go clients wait for the first reliable ordered WebTransport datagram before delivering later messages. An unresolved ordered gap lasting more than three seconds reports a disconnect even when no further datagrams arrive.
 - WebTransport servers coalesce acknowledgements from the first pending packet, so continuous command traffic cannot postpone ACKs indefinitely.
