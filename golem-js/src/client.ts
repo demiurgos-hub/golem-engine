@@ -1257,19 +1257,13 @@ export class GameClient {
   }
 
   private _handleMessage(bytes: Uint8Array): void {
-    const r = new PbReader(bytes);
-    while (!r.done) {
-      const { field, wire } = r.tag();
-      if (field === 1 && wire === 2) {
-        this.entities.applyUpdate(this._decode(r.bytes()));
-      } else if (field === 2 && wire === 2 && this._decodeWorld && this.world) {
-        this.world.applyUpdate(this._decodeWorld(r.bytes()));
-      } else if (field === 3 && wire === 2 && this.events) {
-        this.events.applyRaw(r.bytes());
-      } else {
-        r.skip(wire);
-      }
-    }
+    visitServerMessage(bytes, {
+      entityUpdate: payload => this.entities.applyUpdate(this._decode(payload)),
+      worldUpdate: this._decodeWorld && this.world
+        ? payload => this.world!.applyUpdate(this._decodeWorld!(payload))
+        : undefined,
+      serverEvent: this.events ? payload => this.events!.applyRaw(payload) : undefined,
+    });
   }
 
   private _handleCompactStateBatch(bytes: Uint8Array): void {
@@ -2189,21 +2183,29 @@ export function createChannel(options: ConnectOptions): ReliableMessageChannel {
   return new WebSocketReliableChannel(options.url, logFailures);
 }
 
-/** Decode a ServerMessage envelope, extracting the inner payload by field tag. */
-export function unwrapServerMessage(bytes: Uint8Array): ServerMessage {
+type ServerMessageHandlers = {
+  [K in keyof ServerMessage]?: (payload: Uint8Array) => void;
+};
+
+function visitServerMessage(bytes: Uint8Array, handlers: ServerMessageHandlers): void {
   const r = new PbReader(bytes);
-  const result: ServerMessage = {};
   while (!r.done) {
     const { field, wire } = r.tag();
-    if (field === 1 && wire === 2) {
-      result.entityUpdate = r.bytes();
-    } else if (field === 2 && wire === 2) {
-      result.worldUpdate = r.bytes();
-    } else if (field === 3 && wire === 2) {
-      result.serverEvent = r.bytes();
-    } else {
-      r.skip(wire);
-    }
+    const handler = field === 1 ? handlers.entityUpdate
+      : field === 2 ? handlers.worldUpdate
+      : field === 3 ? handlers.serverEvent : undefined;
+    if (wire === 2 && handler) handler(r.bytes());
+    else r.skip(wire);
   }
+}
+
+/** Decode a ServerMessage envelope, extracting the inner payload by field tag. */
+export function unwrapServerMessage(bytes: Uint8Array): ServerMessage {
+  const result: ServerMessage = {};
+  visitServerMessage(bytes, {
+    entityUpdate: payload => { result.entityUpdate = payload; },
+    worldUpdate: payload => { result.worldUpdate = payload; },
+    serverEvent: payload => { result.serverEvent = payload; },
+  });
   return result;
 }
