@@ -1,3 +1,6 @@
+import { cloneCertificateHash, normalizeCertificateHash } from "./certificate_hash.js";
+import { classifyAckInterval, isAllowedFallbackPair } from "./realtime_policy.js";
+import { redactURL, sanitizeCredentialText } from "./credential_sanitization.js";
 import { PbReader } from "./codec.js";
 
 const maxReliableMessageBytes = 256 * 1024;
@@ -81,47 +84,6 @@ function varintSize(v: number): number {
 
 function clientPacketEntrySize(frame: Uint8Array): number {
   return 1 + varintSize(frame.byteLength) + frame.byteLength;
-}
-
-function toUint8Array(data: ArrayBuffer | ArrayBufferView): Uint8Array {
-  if (ArrayBuffer.isView(data)) {
-    return new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
-  }
-  return new Uint8Array(data.slice(0));
-}
-
-function toArrayBuffer(data: ArrayBuffer | ArrayBufferView | string): ArrayBuffer {
-  const src = typeof data === "string" ? hexToBytes(data) : toUint8Array(data);
-  const out = new ArrayBuffer(src.byteLength);
-  new Uint8Array(out).set(src);
-  return out;
-}
-
-function hexToBytes(hex: string): Uint8Array {
-  const normalized = hex.replace(/\s+/g, "");
-  if (normalized.length % 2 !== 0) {
-    throw new Error("golem-js: certificate hash hex string must have even length");
-  }
-  if (!/^[0-9a-fA-F]*$/.test(normalized)) {
-    throw new Error("golem-js: certificate hash hex string contains non-hex characters");
-  }
-  const out = new Uint8Array(normalized.length / 2);
-  for (let i = 0; i < normalized.length; i += 2) {
-    out[i / 2] = Number.parseInt(normalized.slice(i, i + 2), 16);
-  }
-  return out;
-}
-
-function normalizeCertificateHash(hash: WebTransportCertificateHash): WebTransportHash {
-  const algorithm = hash.algorithm.trim().toLowerCase();
-  if (algorithm !== "sha-256") {
-    throw new Error(`golem-js: unsupported certificate hash algorithm ${JSON.stringify(hash.algorithm)}`);
-  }
-  const value = toArrayBuffer(hash.value);
-  if (value.byteLength !== 32) {
-    throw new Error(`golem-js: sha-256 certificate hash length ${value.byteLength}, want 32`);
-  }
-  return { algorithm, value };
 }
 
 function writeReliableFrame(frame: Uint8Array): Uint8Array {
@@ -264,15 +226,6 @@ export type GameClientConnectionState =
   | { type: "connected" }
   | { type: "disconnected"; info: DisconnectInfo };
 
-function redactUrl(url: string): string {
-  try {
-    const parsed = new URL(url);
-    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
-  } catch {
-    return "<invalid-url>";
-  }
-}
-
 class SanitizedTransportError extends Error {
   readonly httpStatus?: number;
 
@@ -325,22 +278,6 @@ function sanitizedTransportError(message: string, source?: unknown): Error {
     `golem-js: ${message}`,
     reportedHTTPStatus(source),
   );
-}
-
-function sanitizeCredentialText(value: string): string {
-  return value
-    .replace(
-      /\b(?:https?|wss?):\/\/[^\s"'<>]+/gi,
-      (url) => redactUrl(url),
-    )
-    .replace(
-      /([?&][A-Za-z0-9_.~-]+)=([^&#\s"'<>]*)/g,
-      "$1=<redacted>",
-    )
-    .replace(
-      /\b(ticket|token|access_token|authorization|auth|session|secret|api_key)\s*([=:])\s*[^\s,;"']+/gi,
-      "$1$2<redacted>",
-    );
 }
 
 function sanitizeDisconnectReason(reason: string | undefined): string | undefined {
@@ -492,29 +429,12 @@ function isConnectPlan(input: ConnectInput): input is ConnectPlan {
   return typeof input === "object" && input !== null && "candidates" in input;
 }
 
-function cloneClientCertificateHash(
-  hash: WebTransportCertificateHash,
-): WebTransportCertificateHash {
-  if (typeof hash.value === "string") {
-    return { algorithm: hash.algorithm, value: hash.value };
-  }
-  if (ArrayBuffer.isView(hash.value)) {
-    const view = hash.value;
-    const copy = new Uint8Array(view.byteLength);
-    copy.set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
-    return { algorithm: hash.algorithm, value: copy.buffer };
-  }
-  const copy = new Uint8Array(hash.value.byteLength);
-  copy.set(new Uint8Array(hash.value));
-  return { algorithm: hash.algorithm, value: copy.buffer };
-}
-
 function cloneRealtimeEndpoint(endpoint: RealtimeEndpoint): RealtimeEndpoint {
   return {
     transport: endpoint.transport,
     url: endpoint.url,
     serverCertificateHashes: endpoint.serverCertificateHashes?.map(
-      cloneClientCertificateHash,
+      cloneCertificateHash,
     ),
     eventualAckIntervalMs: endpoint.eventualAckIntervalMs,
   };
@@ -540,9 +460,7 @@ function validateRealtimeEndpoint(
   }
   if (
     endpoint.eventualAckIntervalMs !== undefined &&
-    (!Number.isInteger(endpoint.eventualAckIntervalMs) ||
-      endpoint.eventualAckIntervalMs < 0 ||
-      endpoint.eventualAckIntervalMs > 0x7fffffff)
+    classifyAckInterval(endpoint.eventualAckIntervalMs) !== undefined
   ) {
     throw new Error(`golem-js: ${label} eventualAckIntervalMs is invalid`);
   }
@@ -561,8 +479,7 @@ function validateConnectionPlan(plan: ConnectPlan): RealtimeEndpoint[] {
   });
   if (
     candidates.length === 2 &&
-    (candidates[0].transport !== "webtransport" ||
-      candidates[1].transport !== "websocket")
+    !isAllowedFallbackPair(candidates[0].transport, candidates[1].transport)
   ) {
     throw new Error(
       "golem-js: connection plan fallback must be webtransport then websocket",
@@ -730,7 +647,7 @@ export class GameClient {
       ? { transport: "websocket", url: input }
       : input;
     console.warn(
-      `golem-js: connecting transport=${options.transport} url=${redactUrl(options.url)}`,
+      `golem-js: connecting transport=${options.transport} url=${redactURL(options.url)}`,
     );
     let channel: ReliableMessageChannel;
     try {
@@ -968,12 +885,12 @@ export class GameClient {
     const dialOptions: InternalConnectOptions = {
       ...options,
       serverCertificateHashes: options.serverCertificateHashes?.map(
-        cloneClientCertificateHash,
+        cloneCertificateHash,
       ),
       [suppressTransportLogs]: true,
     };
     console.warn(
-      `golem-js: connecting transport=${options.transport} url=${redactUrl(options.url)}`,
+      `golem-js: connecting transport=${options.transport} url=${redactURL(options.url)}`,
     );
 
     let channel: ReliableMessageChannel;
@@ -1409,7 +1326,7 @@ class WebSocketReliableChannel implements ReliableMessageChannel {
 
   constructor(url: string, logFailures = true) {
     this._logFailures = logFailures;
-    const redacted = redactUrl(url);
+    const redacted = redactURL(url);
     try {
       this._ws = new WebSocket(url);
     } catch {
@@ -2092,7 +2009,7 @@ class WebTransportReliableChannel implements ReliableMessageChannel {
 
   constructor(options: WebTransportConnectOptions, logFailures = true) {
     this._logFailures = logFailures;
-    this._redactedUrl = redactUrl(options.url);
+    this._redactedUrl = redactURL(options.url);
     const serverCertificateHashes = options.serverCertificateHashes?.map(normalizeCertificateHash);
     let transport: WebTransport;
     try {

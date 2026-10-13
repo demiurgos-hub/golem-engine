@@ -39,3 +39,5 @@ Public state update modes are only `stream` and `datagram`. Treat server names s
 Generated managers own client-side state: revisions reject stale updates; full state spawns/registers lifecycle hooks; deltas update existing entities only; collection/map deltas use nil as absent and non-nil empty values as explicit clears.
 
 When changing Go client generated shapes, update `codegen` tests and runtime tests under `golem-go-client/`; generated protocol changes should stay conceptually parallel with JS and C# client paths.
+
+The package-private `validateFallbackPair` owns the WebTransport-to-WebSocket direction rule shared by fetched config and connection plans. Endpoint, ACK and certificate validators remain client-owned; do not import server packages for policy.

@@ -623,3 +623,35 @@ func startGolemNetWebTransportListener(t *testing.T, listener *golemnet.Listener
 	})
 	return "https://" + packetConn.LocalAddr().String() + "/wt"
 }
+
+func TestFallbackPairValidationEntryPoints(t *testing.T) {
+	for _, primary := range []TransportKind{TransportWebTransport, TransportWebSocket} {
+		for _, fallback := range []TransportKind{TransportWebTransport, TransportWebSocket} {
+			t.Run(string(primary)+"/"+string(fallback), func(t *testing.T) {
+				urlFor := func(kind TransportKind) string {
+					if kind == TransportWebSocket {
+						return "wss://example.test"
+					}
+					return "https://example.test"
+				}
+				allowed := primary == TransportWebTransport && fallback == TransportWebSocket
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					fmt.Fprintf(w, `{"transport":%q,"url":%q,"fallback":{"transport":%q,"url":%q}}`, primary, urlFor(primary), fallback, urlFor(fallback))
+				}))
+				defer server.Close()
+				_, err := FetchRealtimeConfig(context.Background(), server.URL, nil)
+				if (err == nil) != allowed {
+					t.Fatalf("fetch: %v", err)
+				}
+				plan := ConnectionPlan{Primary: ConnectOptions{Transport: primary, URL: urlFor(primary)}, Fallback: &ConnectOptions{Transport: fallback, URL: urlFor(fallback)}}
+				if err := validateConnectionPlan(plan); (err == nil) != allowed {
+					t.Fatalf("plan: %v", err)
+				}
+				_, err = ConnectionPlanFromRealtimeConfig(RealtimeConfig{Transport: primary, URL: urlFor(primary), Fallback: &RealtimeEndpoint{Transport: fallback, URL: urlFor(fallback)}})
+				if (err == nil) != allowed {
+					t.Fatalf("builder: %v", err)
+				}
+			})
+		}
+	}
+}

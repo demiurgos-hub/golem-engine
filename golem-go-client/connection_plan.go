@@ -196,8 +196,8 @@ func validateConnectionPlan(plan ConnectionPlan) error {
 	if plan.Fallback == nil {
 		return nil
 	}
-	if plan.Primary.Transport != TransportWebTransport || plan.Fallback.Transport != TransportWebSocket {
-		return fmt.Errorf("golem-go-client: fallback must be websocket after a webtransport primary")
+	if err := validateFallbackPair(plan.Primary.Transport, plan.Fallback.Transport); err != nil {
+		return err
 	}
 	if err := validateConnectOptions(*plan.Fallback); err != nil {
 		return fmt.Errorf("golem-go-client: invalid fallback connection: %w", err)
@@ -280,4 +280,11 @@ func connectionPlanAffinityKey(plan ConnectionPlan) string {
 		writeAffinityCandidate(*plan.Fallback)
 	}
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func validateFallbackPair(primary, fallback TransportKind) error {
+	if primary != TransportWebTransport || fallback != TransportWebSocket {
+		return fmt.Errorf("golem-go-client: fallback must be websocket after a webtransport primary")
+	}
+	return nil
 }

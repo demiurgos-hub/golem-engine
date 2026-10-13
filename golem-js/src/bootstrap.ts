@@ -1,3 +1,6 @@
+import { cloneCertificateHash, normalizeCertificateHash } from "./certificate_hash.js";
+import { classifyAckInterval, isAllowedFallbackPair } from "./realtime_policy.js";
+import { sanitizeEndpointErrorText } from "./credential_sanitization.js";
 import type {
   ConnectOptions,
   ConnectOptionsResolver,
@@ -7,62 +10,8 @@ import type {
   WebTransportCertificateHash,
 } from "./client.js";
 
-const certificateHashSHA256 = "sha-256";
 const maxErrorBodyBytes = 512;
 const maxConfigBodyBytes = 64 * 1024;
-const maxInt32 = 0x7fffffff;
-
-function redactURLForError(value: string): string {
-  try {
-    const parsed = new URL(value);
-    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
-  } catch {
-    return "<invalid-url>";
-  }
-}
-
-function sanitizeFetchErrorText(value: unknown, endpoint: string): string {
-  let text = value instanceof Error ? value.message : String(value);
-  text = text
-    .replace(
-      /\b(?:https?|wss?):\/\/[^\s"'<>]+/gi,
-      (url) => redactURLForError(url),
-    )
-    .replace(
-      /([?&][A-Za-z0-9_.~-]+)=([^&#\s"'<>]*)/g,
-      "$1=<redacted>",
-    )
-    .replace(
-      /\b(ticket|token|access_token|authorization|auth|session|secret|api_key)\s*([=:])\s*[^\s,;"']+/gi,
-      "$1$2<redacted>",
-    )
-    .replace(
-      /(["']?(?:ticket|token|access_token|authorization|auth|session|secret|api_key)["']?\s*:\s*["']?)[^"',}\s]+/gi,
-      "$1<redacted>",
-    );
-
-  try {
-    const parsed = new URL(endpoint);
-    const values = [parsed.username, parsed.password];
-    for (const value of parsed.searchParams.values()) {
-      values.push(value, encodeURIComponent(value));
-    }
-    for (const raw of parsed.search.slice(1).split("&")) {
-      const equals = raw.indexOf("=");
-      if (equals >= 0) {
-        values.push(raw.slice(equals + 1));
-      }
-    }
-    for (const secret of values) {
-      if (secret !== "") {
-        text = text.split(secret).join("<redacted>");
-      }
-    }
-  } catch {
-    // The endpoint itself is never included when it cannot be parsed.
-  }
-  return text;
-}
 
 /** Wire shape served by golem.Server.RealtimeConfigHandler (hex certificate hash values). */
 export interface RealtimeConfig {
@@ -120,13 +69,13 @@ export async function fetchRealtimeConfig(
   try {
     response = await fetchImpl(endpoint, init);
   } catch (err) {
-    const message = sanitizeFetchErrorText(err, endpoint);
+    const message = sanitizeEndpointErrorText(err, endpoint);
     throw new Error(`golem-js: fetching realtime config: ${message}`);
   }
   if (!response.ok) {
     const snippet = await readBoundedText(response, maxErrorBodyBytes);
     if (snippet.length > 0) {
-      const safeSnippet = sanitizeFetchErrorText(snippet, endpoint);
+      const safeSnippet = sanitizeEndpointErrorText(snippet, endpoint);
       throw new Error(`golem-js: fetching realtime config: status ${response.status} body=${JSON.stringify(safeSnippet)}`);
     }
     throw new Error(`golem-js: fetching realtime config: status ${response.status}`);
@@ -255,8 +204,7 @@ export function connectPlanFromRealtimeConfig(
   const candidates: RealtimeEndpoint[] = [primary];
   if (cfg.fallback != null) {
     if (
-      primary.transport !== "webtransport" ||
-      cfg.fallback.transport !== "websocket"
+      !isAllowedFallbackPair(primary.transport, cfg.fallback.transport)
     ) {
       throw new Error(
         "golem-js: realtime config fallback must be webtransport then websocket",
@@ -343,7 +291,7 @@ function parseRealtimeConfig(body: realtimeConfigResponse): RealtimeConfig {
       throw new Error("golem-js: realtime config fallback url is required");
     }
     const fallbackTransport = fallback.transport.trim() as TransportKind;
-    if (transport !== "webtransport" || fallbackTransport !== "websocket") {
+    if (!isAllowedFallbackPair(transport, fallbackTransport)) {
       throw new Error(
         "golem-js: realtime config fallback must be webtransport then websocket",
       );
@@ -365,58 +313,19 @@ function parseRealtimeConfig(body: realtimeConfigResponse): RealtimeConfig {
 }
 
 function assertEventualAckIntervalMs(value: unknown): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
+  const classification = classifyAckInterval(value);
+  if (classification === "not-integer") {
     throw new Error("golem-js: eventualAckIntervalMs must be a finite integer");
   }
-  if (!Number.isInteger(value)) {
-    throw new Error("golem-js: eventualAckIntervalMs must be a finite integer");
-  }
-  if (value < 0 || value > maxInt32) {
+  if (classification === "out-of-range") {
     throw new Error("golem-js: eventualAckIntervalMs out of int32 range");
   }
-  return value;
+  return value as number;
 }
 
 function decodeCertificateHash(algorithm: string, value: string): WebTransportCertificateHash {
-  const normalizedAlgorithm = algorithm.trim().toLowerCase();
-  if (normalizedAlgorithm !== certificateHashSHA256) {
-    throw new Error(`golem-js: unsupported certificate hash algorithm ${JSON.stringify(algorithm)}`);
-  }
-  const bytes = hexToBytes(value);
-  if (bytes.byteLength !== 32) {
-    throw new Error(`golem-js: sha-256 certificate hash length ${bytes.byteLength}, want 32`);
-  }
-  return { algorithm: normalizedAlgorithm, value };
-}
-
-function hexToBytes(hex: string): Uint8Array {
-  const normalized = hex.replace(/\s+/g, "");
-  if (normalized.length % 2 !== 0) {
-    throw new Error("golem-js: certificate hash hex string must have even length");
-  }
-  if (!/^[0-9a-fA-F]*$/.test(normalized)) {
-    throw new Error("golem-js: certificate hash hex string contains non-hex characters");
-  }
-  const out = new Uint8Array(normalized.length / 2);
-  for (let i = 0; i < normalized.length; i += 2) {
-    out[i / 2] = Number.parseInt(normalized.slice(i, i + 2), 16);
-  }
-  return out;
-}
-
-function cloneCertificateHash(hash: WebTransportCertificateHash): WebTransportCertificateHash {
-  if (typeof hash.value === "string") {
-    return { algorithm: hash.algorithm, value: hash.value };
-  }
-  if (ArrayBuffer.isView(hash.value)) {
-    const view = hash.value;
-    const copy = new Uint8Array(view.byteLength);
-    copy.set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
-    return { algorithm: hash.algorithm, value: copy.buffer };
-  }
-  const copy = new Uint8Array(hash.value.byteLength);
-  copy.set(new Uint8Array(hash.value));
-  return { algorithm: hash.algorithm, value: copy.buffer };
+  const normalized = normalizeCertificateHash({ algorithm, value });
+  return { algorithm: normalized.algorithm, value };
 }
 
 async function readBoundedTextWithFlag(

@@ -1,5 +1,5 @@
 ---
-description: integration/js - JavaScript client runtime and generated TypeScript client.
+description: integration/js - JavaScript client runtime, shared configuration primitives, and generated TypeScript client.
 globs:
   - golem-js/package.json
   - golem-js/tsconfig.json
@@ -40,3 +40,5 @@ Generated managers own client-side state: entity revisions reject stale updates;
 When changing JS generated shapes, update `codegen` tests covering emitted TypeScript and runtime tests under `golem-js/test/`; generated protocol changes should stay conceptually parallel with Go proto/runtime paths.
 
 Renderer-independent connection lifecycle lives in golem-js/src/connection.ts and is exported by golem-engine. It owns client creation, asynchronous connection options, bounded reconnect backoff, status subscriptions and cancellation; Phaser and Threlte delegate to this same class. `GameClient.connectionState` / `subscribeConnectionState` expose multicast transport snapshots without replacing the legacy single `onConnect` / `onDisconnect` callbacks. The lifecycle observes that subscription, preserving application callbacks. Its `status` / `subscribeStatus` include immediate `idle` snapshots before connection and after pending cancellation; legacy `onStatus` remains notification-only and cancellation-silent. Destroy must unsubscribe from the client and release status listeners. Keep Svelte, Threlte, and Three.js dependencies outside this core package.
+
+`credential_sanitization.ts`, `certificate_hash.ts`, and `realtime_policy.ts` are internal dependency leaves shared by bootstrap and transport. Keep endpoint-specific redaction and contextual diagnostics separate from the shared patterns; preserve the direct custom-factory synchronous rethrow contract. Certificate normalization validates SHA-256 and produces owned bytes; cloning preserves string representation/algorithm spelling and copies exactly a view's byte range. Validation entrypoints remain independently usable and retain their presence/order rules. These utilities are not root exports.

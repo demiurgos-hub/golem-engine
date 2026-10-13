@@ -103,8 +103,8 @@ func FetchRealtimeConfig(ctx context.Context, endpoint string, client *http.Clie
 			Transport: TransportKind(strings.TrimSpace(body.Fallback.Transport)),
 			URL:       body.Fallback.URL,
 		}
-		if cfg.Transport != TransportWebTransport || fallback.Transport != TransportWebSocket {
-			return RealtimeConfig{}, fmt.Errorf("golem-go-client: fallback must be websocket after a webtransport primary")
+		if err := validateFallbackPair(cfg.Transport, fallback.Transport); err != nil {
+			return RealtimeConfig{}, err
 		}
 		if err := validateRealtimeEndpointURL(fallback.Transport, fallback.URL); err != nil {
 			return RealtimeConfig{}, fmt.Errorf("golem-go-client: invalid realtime fallback: %w", err)
