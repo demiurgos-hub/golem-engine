@@ -2070,3 +2070,62 @@ test("send-only datagram adapters retain each lane's budget and dispatch", async
     assert.equal(transport.streamWrites.length,0);
   } finally { channel.close();globalThis.WebTransport=previous;FakeWebTransport.instances.length=0; }
 });
+
+test("stream framing retains every incomplete header/body split and owns decoded frames", async () => {
+  const previous=globalThis.WebTransport;globalThis.WebTransport=FakeWebTransport;
+  const expected=[[],[1,2,3],[4]];
+  const original=framedBatchBytes(expected.map(bytes=>new Uint8Array(bytes)));
+  try {
+    for(let split=0;split<=original.length;split++) {
+      const channel=createChannel({transport:'webtransport',url:'https://example.test'});
+      const received=[];channel.onMessage(frame=>received.push(frame));
+      try {
+        await flushMicrotasks();await flushMicrotasks();
+        const transport=FakeWebTransport.instances.at(-1);
+        const padded=new Uint8Array(original.length+7).fill(255);padded.set(original,3);
+        transport.streamReadable.push(padded.subarray(3,3+split));
+        await flushMicrotasks();
+        const complete= [4,11,16].filter(end=>end<=split).length;
+        assert.equal(received.length,complete,`split ${split}`);
+        // Mutating consumed input cannot change complete frames or retained bytes.
+        padded.fill(99,3,3+split);
+        transport.streamReadable.push(padded.subarray(3+split,3+original.length));
+        await flushMicrotasks();
+        transport.streamReadable.push(new Uint8Array());await flushMicrotasks();
+        assert.deepEqual(received.map(b=>[...b]),expected,`split ${split}`);
+        padded.fill(0);assert.deepEqual(received.map(b=>[...b]),expected);
+      } finally {channel.close();}
+    }
+  } finally {globalThis.WebTransport=previous;FakeWebTransport.instances.length=0;}
+});
+
+test("batch framing rejects trailing input atomically and retains complete-frame copy isolation", () => {
+  let receive;const applied=[];
+  const client=new GameClient({entityManager:{applyUpdate(){},applyCompactUpdate:b=>applied.push(b),get(){}},decode:b=>b,encode:()=>new Uint8Array(),encodePacket:packetBytes,createChannel:()=>({onMessage(){},onOpen(){},onClose(){},close(){},onUnreliableStateMessage:fn=>receive=fn})});
+  client.connect('wss://example.test');
+  const prefix=framedBatchBytes([new Uint8Array([9])]);const tail=framedBatchBytes([new Uint8Array([1,2,3])]);
+  for(let length=1;length<tail.length;length++) {
+    const bytes=new Uint8Array(prefix.length+length);bytes.set(prefix);bytes.set(tail.subarray(0,length),prefix.length);
+    assert.throws(()=>receive(bytes),/incomplete reliable batch payload/);assert.equal(applied.length,0);
+  }
+  const oversized=new Uint8Array(prefix.length+4);oversized.set(prefix);new DataView(oversized.buffer).setUint32(prefix.length,256*1024+1,false);
+  assert.throws(()=>receive(oversized),/reliable frame length 262145 exceeds max reliable message 262144/);assert.equal(applied.length,0);
+  receive(new Uint8Array());assert.equal(applied.length,0);
+  const frames=[new Uint8Array(),new Uint8Array(256*1024).fill(7)];const bytes=framedBatchBytes(frames);
+  const padded=new Uint8Array(bytes.length+6);padded.set(bytes,3);receive(padded.subarray(3,3+bytes.length));padded.fill(1);
+  assert.equal(applied.length,2);assert.equal(applied[0].length,0);assert.deepEqual(applied[1],frames[1]);client.disconnect();
+});
+
+test("stream framing accepts the maximum and rejects an oversized header before its body", async () => {
+  const previous=globalThis.WebTransport;globalThis.WebTransport=FakeWebTransport;
+  const channel=createChannel({transport:'webtransport',url:'https://example.test'});const received=[];const closed=[];
+  channel.onMessage(frame=>received.push(frame));channel.onClose(info=>closed.push(info));
+  try {
+    await flushMicrotasks();await flushMicrotasks();const transport=FakeWebTransport.instances.at(-1);
+    const maximum=framedBatchBytes([new Uint8Array(256*1024).fill(8)]);
+    transport.streamReadable.push(maximum.subarray(0,maximum.length-1));await flushMicrotasks();assert.equal(received.length,0);
+    transport.streamReadable.push(maximum.subarray(maximum.length-1));await flushMicrotasks();assert.equal(received[0].length,256*1024);
+    const header=new Uint8Array(4);new DataView(header.buffer).setUint32(0,256*1024+1,false);
+    transport.streamReadable.push(header);await flushMicrotasks();assert.equal(closed.length,1);assert.match(closed[0].error.message,/stream read failed/);
+  } finally {channel.close();globalThis.WebTransport=previous;FakeWebTransport.instances.length=0;}
+});

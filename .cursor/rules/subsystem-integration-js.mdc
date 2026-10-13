@@ -48,3 +48,5 @@ Renderer-independent connection lifecycle lives in golem-js/src/connection.ts an
 Private message callback binding shares only the four receive routes. Direct connections retain generation/channel guards; planned candidates also require the open phase. Send-only datagram adapters share capacity/send plumbing, while lane protocol, queues, budgets and closure stay with their owners.
 
 Private `visitServerMessage` owns outer fields 1-3 traversal, separate from generated envelope codecs. Live consumers apply every occurrence immediately; `unwrapServerMessage` retains the last per field. Preserve borrowed views, partial effects before later failures and reader skip behavior for wrong-wire, unknown or unhandled fields.
+
+Private `scanReliableFrames` shares length/cap/copy scanning. Batch parsing rejects every unconsumed suffix before returning any frames; stream parsing retains it for later pushes. Keep oversized-header rejection before the body arrives, zero-length frames and owned frame copies.

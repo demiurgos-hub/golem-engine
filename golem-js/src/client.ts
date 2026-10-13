@@ -99,7 +99,7 @@ function writeReliableFrame(frame: Uint8Array): Uint8Array {
   return out;
 }
 
-function decodeReliableBatchPayload(bytes: Uint8Array): Uint8Array[] {
+function scanReliableFrames(bytes: Uint8Array): { frames: Uint8Array[]; consumed: number } {
   const frames: Uint8Array[] = [];
   let offset = 0;
   while (bytes.byteLength - offset >= 4) {
@@ -111,12 +111,17 @@ function decodeReliableBatchPayload(bytes: Uint8Array): Uint8Array[] {
       );
     }
     if (bytes.byteLength - offset - 4 < frameLen) {
-      throw new Error("golem-js: incomplete reliable batch payload");
+      break;
     }
     frames.push(bytes.slice(offset + 4, offset + 4 + frameLen));
     offset += 4 + frameLen;
   }
-  if (offset !== bytes.byteLength) {
+  return { frames, consumed: offset };
+}
+
+function decodeReliableBatchPayload(bytes: Uint8Array): Uint8Array[] {
+  const { frames, consumed } = scanReliableFrames(bytes);
+  if (consumed !== bytes.byteLength) {
     throw new Error("golem-js: incomplete reliable batch payload");
   }
   return frames;
@@ -146,23 +151,8 @@ class ReliableFrameReader {
     merged.set(chunk, this._buffer.byteLength);
     this._buffer = merged;
 
-    const frames: Uint8Array[] = [];
-    let offset = 0;
-    while (this._buffer.byteLength - offset >= 4) {
-      const view = new DataView(this._buffer.buffer, this._buffer.byteOffset + offset, 4);
-      const frameLen = view.getUint32(0, false);
-      if (frameLen > maxReliableMessageBytes) {
-        throw new Error(
-          `golem-js: reliable frame length ${frameLen} exceeds max reliable message ${maxReliableMessageBytes}`,
-        );
-      }
-      if (this._buffer.byteLength - offset - 4 < frameLen) {
-        break;
-      }
-      frames.push(this._buffer.slice(offset + 4, offset + 4 + frameLen));
-      offset += 4 + frameLen;
-    }
-    this._buffer = this._buffer.slice(offset);
+    const { frames, consumed } = scanReliableFrames(this._buffer);
+    this._buffer = this._buffer.slice(consumed);
     return frames;
   }
 }
