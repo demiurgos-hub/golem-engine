@@ -48,12 +48,7 @@ namespace {{.GoPackage}}
             var ids = new List<long>(_entities.Keys);
             foreach (var id in ids)
             {
-                if (!_entities.TryGetValue(id, out var removed) || !_entities.Remove(id))
-                {
-                    continue;
-                }
-                if (removed is IEntityLifecycle lifecycle) lifecycle.OnRemove();
-                _onRemove?.Invoke(id);
+                RemoveEntity(id);
             }
             _lastRevisions.Clear();
         }
@@ -86,11 +81,7 @@ namespace {{.GoPackage}}
                 var revision = update.EntityRemoved.Revision;
                 if (IsStale(id, revision)) return;
                 _lastRevisions[id] = revision;
-                if (_entities.TryGetValue(id, out var removed) && _entities.Remove(id))
-                {
-                    if (removed is IEntityLifecycle lifecycle) lifecycle.OnRemove();
-                    _onRemove?.Invoke(id);
-                }
+                RemoveEntity(id);
             }
         }
 
@@ -113,6 +104,13 @@ namespace {{.GoPackage}}
                 return;
             }
 {{- end}}
+        }
+
+        private void RemoveEntity(long id)
+        {
+            if (!_entities.TryGetValue(id, out var removed) || !_entities.Remove(id)) return;
+            if (removed is IEntityLifecycle lifecycle) lifecycle.OnRemove();
+            _onRemove?.Invoke(id);
         }
 
         private bool IsStale(long entityId, ulong revision)

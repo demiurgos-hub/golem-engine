@@ -62,10 +62,7 @@ export class EntityManager {
   clear(): void {
     const ids = [...this._entities.keys()];
     for (const id of ids) {
-      const removed = this._entities.get(id);
-      if (!removed || !this._entities.delete(id)) continue;
-      (removed as EntityLifecycle).onRemove?.();
-      for (const fn of this._onRemove) fn(id);
+      this._removeEntity(id);
     }
     this._lastRevisions.clear();
   }
@@ -97,11 +94,7 @@ export class EntityManager {
       const revision = Number(update.entityRemoved.revision);
       if (this._isStale(id, revision)) return;
       this._lastRevisions.set(id, revision);
-      const removed = this._entities.get(id);
-      if (removed && this._entities.delete(id)) {
-        (removed as EntityLifecycle).onRemove?.();
-        for (const fn of this._onRemove) fn(id);
-      }
+      this._removeEntity(id);
     }
   }
 
@@ -124,6 +117,13 @@ export class EntityManager {
       return;
     }
 {{- end}}
+  }
+
+  private _removeEntity(id: number): void {
+    const removed = this._entities.get(id);
+    if (!removed || !this._entities.delete(id)) return;
+    (removed as EntityLifecycle).onRemove?.();
+    for (const fn of this._onRemove) fn(id);
   }
 
   private _isStale(entityId: number, revision: number): boolean {

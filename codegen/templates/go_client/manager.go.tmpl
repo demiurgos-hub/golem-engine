@@ -68,17 +68,7 @@ func (m *EntityManager) Clear() {
 		ids = append(ids, id)
 	}
 	for _, id := range ids {
-		removed, ok := m.entities[id]
-		if !ok {
-			continue
-		}
-		delete(m.entities, id)
-		if life, ok := removed.(golemclient.EntityLifecycle); ok {
-			life.OnRemove()
-		}
-		if m.onRemove != nil {
-			m.onRemove(id)
-		}
+		m.removeEntity(id)
 	}
 	clear(m.lastRevisions)
 }
@@ -123,15 +113,7 @@ func (m *EntityManager) ApplyEntityUpdate(update *EntityUpdate) {
 			return
 		}
 		m.lastRevisions[id] = revision
-		if removed, ok := m.entities[id]; ok {
-			delete(m.entities, id)
-			if lifecycle, ok := removed.(golemclient.EntityLifecycle); ok {
-				lifecycle.OnRemove()
-			}
-			if m.onRemove != nil {
-				m.onRemove(id)
-			}
-		}
+		m.removeEntity(id)
 	}
 }
 
@@ -149,7 +131,7 @@ func (m *EntityManager) ApplyCompactUpdate(frame []byte) {
 		return
 	}
 	body := r.Remaining()
-	switch e := entity.(type) {
+	switch entity.(type) {
 {{- range .Entities}}
 	case {{.Name}}ClientEntity:
 		d := &{{.Name}}Delta{}
@@ -158,12 +140,22 @@ func (m *EntityManager) ApplyCompactUpdate(frame []byte) {
 		}
 		d.EntityId = id
 		d.Revision = revision
-		e.ApplyDelta(d)
-		m.lastRevisions[id] = revision
-		if m.onUpdate != nil {
-			m.onUpdate(e)
-		}
+		m.applyDelta{{.Name}}(d)
 {{- end}}
+	}
+}
+
+func (m *EntityManager) removeEntity(id int64) {
+	removed, ok := m.entities[id]
+	if !ok {
+		return
+	}
+	delete(m.entities, id)
+	if life, ok := removed.(golemclient.EntityLifecycle); ok {
+		life.OnRemove()
+	}
+	if m.onRemove != nil {
+		m.onRemove(id)
 	}
 }
 

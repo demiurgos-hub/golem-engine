@@ -101,6 +101,7 @@ replace github.com/demiurgos-hub/golem-engine/golem/nav => %q
 		if target == "client" {
 			renderConsumerTemplate(t, out, "go_client/manager.go.tmpl", "manager.go", schema.SharedData{GoPackage: "generated", GolemImport: imp, Entities: pd.Entities})
 			writeConsumerFile(t, out, "client_test.go", goClientContract)
+			writeConsumerFile(t, out, "manager_test.go", goManagerContract)
 		} else {
 			writeConsumerFile(t, out, "state_test.go", goFullStateContract)
 		}
@@ -136,11 +137,16 @@ func TestResolutionGeneratedJSConsumer(t *testing.T) {
 	if err := generateJSProto(dir, "golem-engine", pd.Entities, pd.Commands, pd.WorldTypes, pd.Events, pd); err != nil {
 		t.Fatal(err)
 	}
-	renderConsumerTemplate(t, dir, "js/client.ts.tmpl", "ActorSynced.ts", pd.Entities[0])
+	for _, entity := range pd.Entities {
+		renderConsumerTemplate(t, dir, "js/client.ts.tmpl", entity.Name+"Synced.ts", entity)
+	}
 	writeConsumerFile(t, dir, "tsconfig.json", `{"compilerOptions":{"target":"ES2022","module":"NodeNext","moduleResolution":"NodeNext","strict":true,"skipLibCheck":true,"outDir":"out"},"include":["*.ts"]}`)
+	renderConsumerTemplate(t, dir, "js/manager.ts.tmpl", "EntityManager.ts", schema.SharedData{GolemImport: "golem-engine", Entities: pd.Entities})
+	writeConsumerFile(t, dir, "manager.mjs", jsManagerContract)
 	writeConsumerFile(t, dir, "contract.mjs", jsCodecContract)
 	runConsumer(t, dir, "node", tsc, "-p", "tsconfig.json")
 	runConsumer(t, dir, "node", "contract.mjs")
+	runConsumer(t, dir, "node", "manager.mjs")
 }
 
 func TestResolutionGeneratedCSharpConsumer(t *testing.T) {
@@ -159,9 +165,10 @@ func TestResolutionGeneratedCSharpConsumer(t *testing.T) {
 	if err := generateCSharpProto(dir, "GolemEngine.Unity", "Generated", pd.Entities, pd.Commands, pd.WorldTypes, pd.Events, pd); err != nil {
 		t.Fatal(err)
 	}
-	entity := pd.Entities[0]
-	entity.GoPackage = "Generated"
-	renderConsumerTemplate(t, dir, "csharp/client.cs.tmpl", "ActorSynced.cs", entity)
+	for _, entity := range pd.Entities {
+		entity.GoPackage = "Generated"
+		renderConsumerTemplate(t, dir, "csharp/client.cs.tmpl", entity.Name+"Synced.cs", entity)
+	}
 	for _, name := range []string{"PbReader.cs", "PbWriter.cs"} {
 		data, err := os.ReadFile(filepath.Join(root, "golem-unity/Runtime/Codec", name))
 		if err != nil {
@@ -170,6 +177,13 @@ func TestResolutionGeneratedCSharpConsumer(t *testing.T) {
 		writeConsumerFile(t, dir, name, string(data))
 	}
 	writeConsumerFile(t, dir, "consumer.csproj", `<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>disable</Nullable></PropertyGroup></Project>`)
+	renderConsumerTemplate(t, dir, "csharp/manager.cs.tmpl", "EntityManager.cs", schema.SharedData{GoPackage: "Generated", Entities: pd.Entities})
+	contracts, err := os.ReadFile(filepath.Join(root, "golem-unity/Runtime/Client/ClientContracts.cs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeConsumerFile(t, dir, "ClientContracts.cs", string(contracts))
+	writeConsumerFile(t, dir, "ManagerContract.cs", csManagerContract)
 	writeConsumerFile(t, dir, "Program.cs", csCodecContract)
 	runConsumer(t, dir, "dotnet", "run", "--project", "consumer.csproj", "--nologo")
 }
@@ -310,10 +324,10 @@ console.log('generated JS codec contracts passed');
 `
 
 const csCodecContract = `using System;using System.Linq;using System.Collections.Generic;using Generated;using GolemEngine.Unity;
-namespace Generated { public interface ISyncedEntity { long EntityId {get;} ulong Revision {get;} } }
 class Program {
  static void Check(bool condition,string message){if(!condition)throw new Exception(message);}
  static void Main(){
+ ManagerContract.Run();
  var d=new ActorDelta{EntityId=7,Revision=11,PosX=0,Health=-3,Items=new List<Item>(),Scores=new Dictionary<string,int>()};
  var want=new byte[]{8,7,21,0,0,0,0,192,62,11,32,5,82,0,90,0};Check(ActorDelta.Encode(d).SequenceEqual(want),"delta bytes");
  var decoded=ActorDelta.Decode(want);Check(decoded.Secret==null&&decoded.PosX==0&&decoded.Items.Count==0&&decoded.Scores.Count==0,"presence");
