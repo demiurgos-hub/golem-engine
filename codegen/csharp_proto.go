@@ -9,20 +9,6 @@ import (
 	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
-var protoCSDefault = map[string]string{
-	"double": "0",
-	"float":  "0f",
-	"int32":  "0",
-	"int64":  "0",
-	"uint32": "0",
-	"uint64": "0",
-	"sint32": "0",
-	"sint64": "0",
-	"bool":   "false",
-	"string": `""`,
-	"bytes":  "System.Array.Empty<byte>()",
-}
-
 var protoCSZero = map[string]string{
 	"double": "0",
 	"float":  "0f",
@@ -155,39 +141,24 @@ func writeCSharpFooter(b *strings.Builder, namespace string) {
 }
 
 func entityStateCSFields(ent schema.EntityData) []msgField {
-	fields := []msgField{
-		{Name: "EntityId", ProtoType: "int64", Tag: 1},
-		{Name: "PosX", ProtoType: "float", Tag: 2},
-		{Name: "PosY", ProtoType: "float", Tag: 3},
-	}
-	if ent.Is3D {
-		fields = append(fields, msgField{Name: "PosZ", ProtoType: "float", Tag: 4})
-	}
-	fields = append(fields, msgField{Name: "Revision", ProtoType: "uint64", Tag: entityRevisionProtoTag})
-	for _, v := range ent.AllVars {
-		fields = append(fields, varInfoToEntityCSMsgField(ent, v, false))
+	var fields []msgField
+	for _, field := range ent.WireLayout().State {
+		fields = append(fields, varInfoToCSMsgField(field.VarInfo, field.Optional))
 	}
 	return fields
 }
 
 func entityDeltaCSFields(ent schema.EntityData) []msgField {
-	fields := []msgField{
-		{Name: "EntityId", ProtoType: "int64", Tag: 1},
-		{Name: "PosX", ProtoType: "float", Tag: 2, IsOptional: true},
-		{Name: "PosY", ProtoType: "float", Tag: 3, IsOptional: true},
-	}
-	if ent.Is3D {
-		fields = append(fields, msgField{Name: "PosZ", ProtoType: "float", Tag: 4, IsOptional: true})
-	}
-	fields = append(fields, msgField{Name: "Revision", ProtoType: "uint64", Tag: entityRevisionProtoTag})
-	for _, v := range ent.TickVars {
-		fields = append(fields, varInfoToEntityCSMsgField(ent, v, true))
+	var fields []msgField
+	for _, field := range ent.WireLayout().Delta {
+		fields = append(fields, varInfoToCSMsgField(field.VarInfo, field.Optional))
 	}
 	return fields
 }
 
 func varInfoToCSMsgField(v schema.VarInfo, isDelta bool) msgField {
-	return msgField{
+	mf := msgField{
+		CSPresence:      v.DeltaPresenceCS(),
 		Name:            v.CSProtoField,
 		ProtoType:       v.ProtoType,
 		Tag:             v.ProtoTag,
@@ -196,45 +167,25 @@ func varInfoToCSMsgField(v schema.VarInfo, isDelta bool) msgField {
 		MapKeyProtoType: v.MapKeyProtoType,
 		ElemProtoType:   v.ElemProtoType,
 		ElemIsCustom:    v.ElemIsCustom,
-		ElemTSType:      v.ElemCSType,
-		MapKeyTSType:    v.MapKeyCSType,
+		ElemType:        v.ElemCSType,
+		MapKeyType:      v.MapKeyCSType,
 		IsOptional:      isDelta,
 	}
-}
-
-func varInfoToEntityCSMsgField(ent schema.EntityData, v schema.VarInfo, isDelta bool) msgField {
-	mf := varInfoToCSMsgField(v, isDelta)
-	mf.Tag = entityProtoTag(ent, v.UserTag)
+	if c := v.Collection; c != nil {
+		mf.useCollection(c, c.ElemCSType, c.MapKeyCSType)
+	}
 	return mf
 }
 
 func csType(protoType string) string {
-	switch protoType {
-	case "double":
-		return "double"
-	case "float":
-		return "float"
-	case "int32", "sint32":
-		return "int"
-	case "int64", "sint64":
-		return "long"
-	case "uint32":
-		return "uint"
-	case "uint64":
-		return "ulong"
-	case "bool":
-		return "bool"
-	case "string":
-		return "string"
-	case "bytes":
-		return "byte[]"
-	default:
-		return protoType
+	if info, ok := schema.LookupScalar(protoType); ok {
+		return info.CSType
 	}
+	return protoType
 }
 
-func nullableCSType(protoType string) string {
-	if protoType == "bytes" || protoType == "string" {
+func nullableCSType(protoType string, presence schema.CSDeltaPresence) string {
+	if presence == schema.Reference {
 		return csType(protoType)
 	}
 	return csType(protoType) + "?"
@@ -248,23 +199,23 @@ func writeCSMessageClass(b *strings.Builder, name string, fields []msgField) {
 		isEntityID := i == 0 && f.Name == "EntityId"
 		switch {
 		case f.IsRepeated:
-			t := fmt.Sprintf("List<%s>", f.ElemTSType)
+			t := fmt.Sprintf("List<%s>", f.ElemType)
 			if f.IsOptional {
 				w("        public %s %s { get; set; }", t, f.Name)
 			} else {
 				w("        public %s %s { get; set; } = new %s();", t, f.Name, t)
 			}
 		case f.IsMap:
-			t := fmt.Sprintf("Dictionary<%s, %s>", f.MapKeyTSType, f.ElemTSType)
+			t := fmt.Sprintf("Dictionary<%s, %s>", f.MapKeyType, f.ElemType)
 			if f.IsOptional {
 				w("        public %s %s { get; set; }", t, f.Name)
 			} else {
 				w("        public %s %s { get; set; } = new %s();", t, f.Name, t)
 			}
 		case f.IsOptional && !isEntityID:
-			w("        public %s %s { get; set; }", nullableCSType(f.ProtoType), f.Name)
+			w("        public %s %s { get; set; }", nullableCSType(f.ProtoType, f.csPresence()), f.Name)
 		default:
-			w("        public %s %s { get; set; } = %s;", csType(f.ProtoType), f.Name, protoCSDefault[f.ProtoType])
+			w("        public %s %s { get; set; } = %s;", csType(f.ProtoType), f.Name, scalarCSDefault(f.ProtoType))
 		}
 	}
 	w("")
@@ -287,20 +238,12 @@ func writeCSMessageEncode(b *strings.Builder, name string, fields []msgField) {
 			writeCSCollectionEncode(b, f)
 		case f.IsMap:
 			writeCSMapEncode(b, f)
-		case f.IsOptional && !isEntityID:
-			wt := protoWireType[f.ProtoType]
-			wm := protoCSWriterMethod[f.ProtoType]
-			if f.ProtoType == "string" || f.ProtoType == "bytes" {
-				w("            if (m.%s != null) w.Tag(%d, %d).%s(m.%s);", f.Name, f.Tag, wt, wm, f.Name)
-			} else {
-				w("            if (m.%s.HasValue) w.Tag(%d, %d).%s(m.%s.Value);", f.Name, f.Tag, wt, wm, f.Name)
-			}
-		case f.ProtoType == "bytes":
-			w("            if (m.%s.Length > 0) w.Tag(%d, 2).Bytes(m.%s);", f.Name, f.Tag, f.Name)
 		default:
-			wt := protoWireType[f.ProtoType]
-			wm := protoCSWriterMethod[f.ProtoType]
-			w("            if (m.%s != %s) w.Tag(%d, %d).%s(m.%s);", f.Name, protoCSZero[f.ProtoType], f.Tag, wt, wm, f.Name)
+			var presence schema.CSDeltaPresence
+			if f.IsOptional && !isEntityID {
+				presence = f.csPresence()
+			}
+			writeCSScalarEncode(b, f.Name, f.ProtoType, f.Tag, presence)
 		}
 	}
 	w("            return w.Finish();")
@@ -341,7 +284,7 @@ func writeCSCustomType(b *strings.Builder, ct schema.CustomTypeData) {
 	w("    public sealed class %s", ct.Name)
 	w("    {")
 	for _, f := range ct.Fields {
-		w("        public %s %s { get; set; } = %s;", csType(f.ProtoType), schema.SnakeToPascal(f.SnakeName), protoCSDefault[f.ProtoType])
+		w("        public %s %s { get; set; } = %s;", csType(f.ProtoType), schema.SnakeToPascal(f.SnakeName), scalarCSDefault(f.ProtoType))
 	}
 	w("")
 	w("        public static byte[] Encode(%s m)", ct.Name)
@@ -349,13 +292,7 @@ func writeCSCustomType(b *strings.Builder, ct schema.CustomTypeData) {
 	w("            var w = new PbWriter();")
 	for _, f := range ct.Fields {
 		name := schema.SnakeToPascal(f.SnakeName)
-		wt := protoWireType[f.ProtoType]
-		wm := protoCSWriterMethod[f.ProtoType]
-		if f.ProtoType == "bytes" {
-			w("            if (m.%s.Length > 0) w.Tag(%d, %d).%s(m.%s);", name, f.ProtoTag, wt, wm, name)
-		} else {
-			w("            if (m.%s != %s) w.Tag(%d, %d).%s(m.%s);", name, protoCSZero[f.ProtoType], f.ProtoTag, wt, wm, name)
-		}
+		writeCSScalarEncode(b, name, f.ProtoType, f.ProtoTag, "")
 	}
 	w("            return w.Finish();")
 	w("        }")
@@ -405,7 +342,7 @@ func writeCSCollectionElemEncode(b *strings.Builder, f msgField, indent string) 
 		fmt.Fprintf(b, "%sw.Tag(%d, 2).Bytes(%s.Encode(item));\n", indent, f.Tag, f.ElemProtoType)
 		return
 	}
-	wt := protoWireType[f.ElemProtoType]
+	wt := scalarWireType(f.ElemProtoType)
 	wm := protoCSWriterMethod[f.ElemProtoType]
 	if wt == 2 {
 		fmt.Fprintf(b, "%sw.Tag(%d, 2).%s(item);\n", indent, f.Tag, wm)
@@ -419,7 +356,7 @@ func writeCSCollectionDecode(b *strings.Builder, f msgField) {
 	w("                    case %d:", f.Tag)
 	w("                    {")
 	if f.IsOptional {
-		w("                        m.%s ??= new List<%s>();", f.Name, f.ElemTSType)
+		w("                        m.%s ??= new List<%s>();", f.Name, f.ElemType)
 	}
 	w("                        var payload = r.Bytes();")
 	w("                        if (payload.Length > 0)")
@@ -456,11 +393,11 @@ func writeCSMapEncode(b *strings.Builder, f msgField) {
 
 func writeCSMapEntryEncode(b *strings.Builder, f msgField, indent string) {
 	fmt.Fprintf(b, "%svar kv = new PbWriter();\n", indent)
-	fmt.Fprintf(b, "%skv.Tag(1, %d).%s(pair.Key);\n", indent, protoWireType[f.MapKeyProtoType], protoCSWriterMethod[f.MapKeyProtoType])
+	fmt.Fprintf(b, "%skv.Tag(1, %d).%s(pair.Key);\n", indent, scalarWireType(f.MapKeyProtoType), protoCSWriterMethod[f.MapKeyProtoType])
 	if f.ElemIsCustom {
 		fmt.Fprintf(b, "%skv.Tag(2, 2).Bytes(%s.Encode(pair.Value));\n", indent, f.ElemProtoType)
 	} else {
-		fmt.Fprintf(b, "%skv.Tag(2, %d).%s(pair.Value);\n", indent, protoWireType[f.ElemProtoType], protoCSWriterMethod[f.ElemProtoType])
+		fmt.Fprintf(b, "%skv.Tag(2, %d).%s(pair.Value);\n", indent, scalarWireType(f.ElemProtoType), protoCSWriterMethod[f.ElemProtoType])
 	}
 	fmt.Fprintf(b, "%sw.Tag(%d, 2).Bytes(kv.Finish());\n", indent, f.Tag)
 }
@@ -473,7 +410,7 @@ func writeCSMapDecode(b *strings.Builder, f msgField) {
 	w("                        if (payload.Length > 0)")
 	w("                        {")
 	w("                            var itemReader = new PbReader(payload);")
-	w("                            %s key = %s;", csType(f.MapKeyProtoType), protoCSDefault[f.MapKeyProtoType])
+	w("                            %s key = %s;", csType(f.MapKeyProtoType), scalarCSDefault(f.MapKeyProtoType))
 	w("                            var value = %s;", csCollectionValDefault(f))
 	w("                            while (!itemReader.Done)")
 	w("                            {")
@@ -490,14 +427,14 @@ func writeCSMapDecode(b *strings.Builder, f msgField) {
 	w("                                }")
 	w("                            }")
 	if f.IsOptional {
-		w("                            m.%s ??= new Dictionary<%s, %s>();", f.Name, f.MapKeyTSType, f.ElemTSType)
+		w("                            m.%s ??= new Dictionary<%s, %s>();", f.Name, f.MapKeyType, f.ElemType)
 	}
 	w("                            m.%s[key] = value;", f.Name)
 	w("                        }")
 	w("                        else")
 	w("                        {")
 	if f.IsOptional {
-		w("                            m.%s ??= new Dictionary<%s, %s>();", f.Name, f.MapKeyTSType, f.ElemTSType)
+		w("                            m.%s ??= new Dictionary<%s, %s>();", f.Name, f.MapKeyType, f.ElemType)
 	}
 	w("                        }")
 	w("                        break;")
@@ -508,96 +445,19 @@ func csCollectionValDefault(f msgField) string {
 	if f.ElemIsCustom {
 		return "new " + f.ElemProtoType + "()"
 	}
-	return protoCSDefault[f.ElemProtoType]
+	return scalarCSDefault(f.ElemProtoType)
 }
 
 func writeCSEntityUpdateClass(b *strings.Builder, proto schema.ProtoTemplateData) {
-	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
-	w("    public sealed class EntityUpdate")
-	w("    {")
-	for _, uf := range proto.EntityUpdateFields {
-		w("        public %s %s { get; set; }", uf.MessageType, schema.SnakeToPascal(uf.SnakeName))
-	}
-	w("        public EntityRemoved EntityRemoved { get; set; }")
-	w("")
-	w("        public static EntityUpdate Decode(byte[] bytes)")
-	w("        {")
-	w("            var r = new PbReader(bytes);")
-	w("            var m = new EntityUpdate();")
-	w("            while (!r.Done)")
-	w("            {")
-	w("                var tag = r.Tag();")
-	w("                switch (tag.Field)")
-	w("                {")
-	for _, uf := range proto.EntityUpdateFields {
-		w("                    case %d: m.%s = %s.Decode(r.Bytes()); break;", uf.Tag, schema.SnakeToPascal(uf.SnakeName), uf.MessageType)
-	}
-	w("                    case %d: m.EntityRemoved = EntityRemoved.Decode(r.Bytes()); break;", proto.EntityRemovedTag)
-	w("                    default: r.Skip(tag.Wire); break;")
-	w("                }")
-	w("            }")
-	w("            return m;")
-	w("        }")
-	w("    }")
-	w("")
+	writeCSEnvelope(b, proto.EnvelopeLayouts().Entity, false)
 }
 
 func writeCSCommandClass(b *strings.Builder, cmd schema.CommandData) {
-	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
-	w("    public sealed class %sCommand", cmd.Name)
-	w("    {")
-	if cmd.Target == "entity" {
-		w("        public long EntityId { get; set; }")
-	}
-	for _, f := range cmd.Fields {
-		w("        public %s %s { get; set; } = %s;", f.CSType, schema.SnakeToPascal(f.SnakeName), f.CSDefault)
-	}
-	w("")
-	w("        public static byte[] Encode(%sCommand m)", cmd.Name)
-	w("        {")
-	w("            var w = new PbWriter();")
-	if cmd.Target == "entity" {
-		w("            if (m.EntityId != 0) w.Tag(1, 0).Int64(m.EntityId);")
-	}
-	for _, f := range cmd.Fields {
-		name := schema.SnakeToPascal(f.SnakeName)
-		if f.IsCustom {
-			w("            { var bytes = %s.Encode(m.%s); if (bytes.Length > 0) w.Tag(%d, 2).Bytes(bytes); }", f.ProtoType, name, f.ProtoTag)
-			continue
-		}
-		wt := protoWireType[f.ProtoType]
-		wm := protoCSWriterMethod[f.ProtoType]
-		if f.ProtoType == "bytes" {
-			w("            if (m.%s.Length > 0) w.Tag(%d, %d).%s(m.%s);", name, f.ProtoTag, wt, wm, name)
-		} else {
-			w("            if (m.%s != %s) w.Tag(%d, %d).%s(m.%s);", name, protoCSZero[f.ProtoType], f.ProtoTag, wt, wm, name)
-		}
-	}
-	w("            return w.Finish();")
-	w("        }")
-	w("    }")
-	w("")
+	writeCSPayload(b, commandPayload(cmd))
 }
 
 func writeCSClientMessageClass(b *strings.Builder, proto schema.ProtoTemplateData) {
-	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
-	w("    public sealed class ClientMessage")
-	w("    {")
-	for _, cmf := range proto.ClientMessageFields {
-		w("        public %s %s { get; set; }", cmf.MessageType, schema.SnakeToPascal(cmf.SnakeName))
-	}
-	w("")
-	w("        public static byte[] Encode(ClientMessage m)")
-	w("        {")
-	w("            var w = new PbWriter();")
-	for _, cmf := range proto.ClientMessageFields {
-		fieldName := schema.SnakeToPascal(cmf.SnakeName)
-		w("            if (m.%s != null) w.Tag(%d, 2).Bytes(%s.Encode(m.%s));", fieldName, cmf.Tag, cmf.MessageType, fieldName)
-	}
-	w("            return w.Finish();")
-	w("        }")
-	w("    }")
-	w("")
+	writeCSEnvelope(b, proto.EnvelopeLayouts().Command, true)
 }
 
 func writeCSClientPacketClass(b *strings.Builder) {
@@ -639,7 +499,7 @@ func worldDataCSFields(wt schema.WorldTypeData) []msgField {
 }
 
 func worldFieldToCSMsgField(f schema.WorldFieldInfo) msgField {
-	return msgField{
+	mf := msgField{
 		Name:            f.CSProtoField,
 		ProtoType:       f.ProtoType,
 		Tag:             f.ProtoTag,
@@ -648,38 +508,17 @@ func worldFieldToCSMsgField(f schema.WorldFieldInfo) msgField {
 		MapKeyProtoType: f.MapKeyProtoType,
 		ElemProtoType:   f.ElemProtoType,
 		ElemIsCustom:    f.ElemIsCustom,
-		ElemTSType:      f.ElemCSType,
-		MapKeyTSType:    f.MapKeyCSType,
+		ElemType:        f.ElemCSType,
+		MapKeyType:      f.MapKeyCSType,
 	}
+	if c := f.Collection; c != nil {
+		mf.useCollection(c, c.ElemCSType, c.MapKeyCSType)
+	}
+	return mf
 }
 
 func writeCSWorldUpdateClass(b *strings.Builder, proto schema.ProtoTemplateData) {
-	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
-	w("    public sealed class WorldUpdate")
-	w("    {")
-	for _, wuf := range proto.WorldUpdateFields {
-		w("        public %s %s { get; set; }", wuf.MessageType, schema.SnakeToPascal(wuf.SnakeName))
-	}
-	w("")
-	w("        public static WorldUpdate Decode(byte[] bytes)")
-	w("        {")
-	w("            var r = new PbReader(bytes);")
-	w("            var m = new WorldUpdate();")
-	w("            while (!r.Done)")
-	w("            {")
-	w("                var tag = r.Tag();")
-	w("                switch (tag.Field)")
-	w("                {")
-	for _, wuf := range proto.WorldUpdateFields {
-		w("                    case %d: m.%s = %s.Decode(r.Bytes()); break;", wuf.Tag, schema.SnakeToPascal(wuf.SnakeName), wuf.MessageType)
-	}
-	w("                    default: r.Skip(tag.Wire); break;")
-	w("                }")
-	w("            }")
-	w("            return m;")
-	w("        }")
-	w("    }")
-	w("")
+	writeCSEnvelope(b, proto.EnvelopeLayouts().World, false)
 }
 
 func generateCSharpEventProto(outDir, golemImport, namespace string, proto schema.ProtoTemplateData) error {
@@ -698,96 +537,10 @@ func generateCSharpEventProto(outDir, golemImport, namespace string, proto schem
 	return nil
 }
 
-func writeCSEventClass(b *strings.Builder, ev schema.EventData) {
-	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
-	w("    public sealed class %sEvent", ev.Name)
-	w("    {")
-	if ev.EntityType != "" {
-		w("        public long EntityId { get; set; }")
-	}
-	for _, f := range ev.Fields {
-		w("        public %s %s { get; set; } = %s;", f.CSType, schema.SnakeToPascal(f.SnakeName), f.CSDefault)
-	}
-	w("")
-	w("        public static byte[] Encode(%sEvent m)", ev.Name)
-	w("        {")
-	w("            var w = new PbWriter();")
-	if ev.EntityType != "" {
-		w("            if (m.EntityId != 0) w.Tag(1, 0).Int64(m.EntityId);")
-	}
-	for _, f := range ev.Fields {
-		name := schema.SnakeToPascal(f.SnakeName)
-		if f.IsCustom {
-			w("            { var bytes = %s.Encode(m.%s); if (bytes.Length > 0) w.Tag(%d, 2).Bytes(bytes); }", f.ProtoType, name, f.ProtoTag)
-			continue
-		}
-		wt := protoWireType[f.ProtoType]
-		wm := protoCSWriterMethod[f.ProtoType]
-		if f.ProtoType == "bytes" {
-			w("            if (m.%s.Length > 0) w.Tag(%d, %d).%s(m.%s);", name, f.ProtoTag, wt, wm, name)
-		} else {
-			w("            if (m.%s != %s) w.Tag(%d, %d).%s(m.%s);", name, protoCSZero[f.ProtoType], f.ProtoTag, wt, wm, name)
-		}
-	}
-	w("            return w.Finish();")
-	w("        }")
-	w("")
-	w("        public static %sEvent Decode(byte[] bytes)", ev.Name)
-	w("        {")
-	w("            var r = new PbReader(bytes);")
-	w("            var m = new %sEvent();", ev.Name)
-	w("            while (!r.Done)")
-	w("            {")
-	w("                var tag = r.Tag();")
-	w("                switch (tag.Field)")
-	w("                {")
-	if ev.EntityType != "" {
-		w("                    case 1: m.EntityId = r.Int64(); break;")
-	}
-	for _, f := range ev.Fields {
-		name := schema.SnakeToPascal(f.SnakeName)
-		if f.IsCustom {
-			w("                    case %d: m.%s = %s.Decode(r.Bytes()); break;", f.ProtoTag, name, f.ProtoType)
-		} else {
-			w("                    case %d: m.%s = r.%s(); break;", f.ProtoTag, name, protoCSReaderMethod[f.ProtoType])
-		}
-	}
-	w("                    default: r.Skip(tag.Wire); break;")
-	w("                }")
-	w("            }")
-	w("            return m;")
-	w("        }")
-	w("    }")
-	w("")
-}
+func writeCSEventClass(b *strings.Builder, ev schema.EventData) { writeCSPayload(b, eventPayload(ev)) }
 
 func writeCSServerEventClass(b *strings.Builder, proto schema.ProtoTemplateData) {
-	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
-	w("    public sealed class ServerEvent")
-	w("    {")
-	for _, sef := range proto.ServerEventFields {
-		w("        public %s %s { get; set; }", sef.MessageType, schema.SnakeToPascal(sef.SnakeName))
-	}
-	w("")
-	w("        public static ServerEvent Decode(byte[] bytes)")
-	w("        {")
-	w("            var r = new PbReader(bytes);")
-	w("            var m = new ServerEvent();")
-	w("            while (!r.Done)")
-	w("            {")
-	w("                var tag = r.Tag();")
-	w("                switch (tag.Field)")
-	w("                {")
-	for _, sef := range proto.ServerEventFields {
-		w("                    case %d: m.%s = %s.Decode(r.Bytes()); break;", sef.Tag, schema.SnakeToPascal(sef.SnakeName), sef.MessageType)
-	}
-	w("                    default: r.Skip(tag.Wire); break;")
-	w("                }")
-	w("            }")
-	w("            return m;")
-	w("        }")
-	w("    }")
-	w("")
+	writeCSEnvelope(b, proto.EnvelopeLayouts().Event, false)
 }
 
 func csharpNamespace(goPackage string) string {

@@ -26,13 +26,7 @@ func validateExplicitEnvelopeTag(kind, name string, tag *int) error {
 // Untagged declarations retain the legacy sequential assignment. Explicitly tagged
 // declarations are additive and may not overlap those implicit fields.
 func ValidateEnvelopeTags(entities []EntityData, commands []CommandData, events []EventData) error {
-	if err := validateEntityEnvelopeTags(entities); err != nil {
-		return err
-	}
-	if err := validateSingleEnvelopeTags("ClientMessage", commandEnvelopeTags(commands)); err != nil {
-		return err
-	}
-	return validateSingleEnvelopeTags("ServerEvent", eventEnvelopeTags(events))
+	return validateProtocolLayout(allocateProtocolLayout(entities, commands, events, nil))
 }
 
 type namedEnvelopeTag struct {
@@ -56,60 +50,25 @@ func eventEnvelopeTags(events []EventData) []namedEnvelopeTag {
 	return result
 }
 
-func validateEntityEnvelopeTags(entities []EntityData) error {
-	occupied := make(map[int]string, len(entities)*2+1)
-	implicitTag := 1
-	for _, entity := range entities {
-		if entity.UpdateTag != 0 {
-			continue
-		}
-		if err := claimEnvelopeTag(occupied, "EntityUpdate", entity.Name+"State", implicitTag); err != nil {
-			return err
-		}
-		if err := claimEnvelopeTag(occupied, "EntityUpdate", entity.Name+"Delta", implicitTag+1); err != nil {
-			return err
-		}
-		implicitTag += 2
-	}
-	if err := claimEnvelopeTag(occupied, "EntityUpdate", "EntityRemoved", implicitTag); err != nil {
-		return err
-	}
-
-	for _, entity := range entities {
-		if entity.UpdateTag == 0 {
-			continue
-		}
-		if entity.UpdateTag == maxProtoFieldNumber {
-			return fmt.Errorf("EntityUpdate %q state tag %d leaves no valid delta tag", entity.Name, entity.UpdateTag)
-		}
-		if err := claimEnvelopeTag(occupied, "EntityUpdate", entity.Name+"State", entity.UpdateTag); err != nil {
-			return err
-		}
-		if err := claimEnvelopeTag(occupied, "EntityUpdate", entity.Name+"Delta", entity.UpdateTag+1); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func validateSingleEnvelopeTags(scope string, declarations []namedEnvelopeTag) error {
-	occupied := make(map[int]string, len(declarations))
-	implicitTag := 1
-	for _, declaration := range declarations {
-		if declaration.tag != 0 {
-			continue
-		}
-		if err := claimEnvelopeTag(occupied, scope, declaration.name, implicitTag); err != nil {
-			return err
-		}
-		implicitTag++
-	}
-	for _, declaration := range declarations {
-		if declaration.tag == 0 {
-			continue
-		}
-		if err := claimEnvelopeTag(occupied, scope, declaration.name, declaration.tag); err != nil {
-			return err
+func validateProtocolLayout(layout ProtocolLayout) error {
+	for _, envelope := range []EnvelopeLayout{layout.Entity, layout.Command, layout.Event} {
+		occupied := make(map[int]string, len(envelope.Variants))
+		for _, explicit := range []bool{false, true} {
+			for _, v := range envelope.Variants {
+				if v.Explicit != explicit {
+					continue
+				}
+				if v.Role == "state" && explicit && v.Tag == maxProtoFieldNumber {
+					return fmt.Errorf("EntityUpdate %q state tag %d leaves no valid delta tag", v.Declaration, v.Tag)
+				}
+				name := v.Declaration
+				if envelope.Name == "EntityUpdate" {
+					name = v.MessageType
+				}
+				if err := claimEnvelopeTag(occupied, envelope.Name, name, v.Tag); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil

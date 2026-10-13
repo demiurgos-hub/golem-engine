@@ -1,5 +1,5 @@
 ---
-description: bake pipeline — schema/codegen handoff and generator parity checks.
+description: bake pipeline — checked schema resolution, read-only descriptor handoff, codec compatibility, and generated-consumer checks.
 globs:
   - schema/**/*.go
   - codegen/**/*.go
@@ -10,6 +10,10 @@ alwaysApply: false
 # `bake` pipeline
 
 When a schema-driven feature changes, trace it through schema loading, validation, template DTOs, proto generation, Go generation, JS generation, and any affected templates.
+
+At the envelope validation stage, `Bake` calls `ResolveProtoData` once and passes that result to proto rendering and integrations. Catalog metadata is already resolved by world construction; file-content validation remains a separate pre-output step. Consumers must not repeat schema resolution or tag allocation. Keep integration output ownership, manager lifecycle, framework adapters and client runtime changes separate from schema/codec refactors.
+
+The integration handoff consists of ordered envelope variants/tags/roles, ordered entity state/delta fields with presence/visibility/dirty-bit metadata, payload fields plus targeting metadata, collection/custom-type dependencies and catalog item/key metadata. These are read-only after resolution. Legacy flat DTOs remain supported by explicit adapters, not alternate emitter policy.
 
 If a new field, target, branch, helper, import, or generated method is added in one target, check the parallel Go, JS, proto, and template paths for the same behavior.
 
@@ -22,6 +26,8 @@ Command and event payload fields may retain legacy alphabetical numbering, or ev
 Be careful with nested formatting in generators: code that emits `fmt` strings or TS/Go source can need a different level of escaping than normal application code.
 
 After schema or codegen changes that affect bake output, verify `go build ./cmd/golem-bake` and targeted generator tests. For cross-target changes, confirm both Go and JS generated outputs still compile.
+
+For shared codec changes, also compile/run generated C# against the standalone Unity codec sources, exercise generated Go full/public state behavior, and distinguish semantic equivalence, exact bytes and deterministic generated source. Do not impose sorted Go map wire order. Run representative generated consumers in temporary directories; a skipped required consumer check is not acceptance evidence. Preserve exact baseline fingerprints even where their current coverage is incomplete.
 
 Retire a configured shared-only bridge with `golem-bake --remove-integration <target>` before removing its integration stanza. Removal checks generated headers and confines known outputs to the project; it never deletes authored adapters or recursively removes an output directory.
 

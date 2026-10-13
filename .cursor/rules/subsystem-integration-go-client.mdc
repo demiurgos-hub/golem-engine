@@ -4,6 +4,11 @@ globs:
   - golem-go-client/**/*.go
   - codegen/templates/go_client/**/*.tmpl
   - codegen/go_client*.go
+  - codegen/go_proto.go
+  - codegen/go_payload.go
+  - codegen/go_entity_codec.go
+  - codegen/envelope_codecs.go
+  - codegen/codec_metadata.go
 alwaysApply: false
 ---
 

@@ -1,10 +1,20 @@
 ---
-description: schema — golem.yaml and entity/command/event/world YAML loading, template DTOs, naming helpers.
+description: schema — YAML loading, resolved scalar/collection/payload/catalog metadata, protocol layouts, legacy template DTOs, and naming helpers.
 globs: schema/**/*.go
 alwaysApply: false
 ---
 
 # `schema`
+
+Schema resolution owns shared policy. `LookupScalar` returns scalar metadata by value; `CollectionInfo` resolves element/key identities and native types once, with the existing entity scalar-first versus world custom-first precedence. Catalogs explicitly resolve their declared custom type and optional key into `CatalogInfo`; `ValidateCatalogFile` separately validates raw YAML entries without coercion. Flat DTO fields remain compatibility projections (including empty collection `ProtoType` values used by fingerprints).
+
+`payload.go` shares command/event shorthand, ordered field resolution, and explicit direct-tag validation. Keep command target permissiveness/defaults and event target/entity/`foi_only` validation with their owners. Do not extend payloads to collections or recursive custom types through this extraction.
+
+`ResolveProtoData` is the checked production protocol construction path. `BuildProtoData` keeps its legacy unchecked signature, while `ValidateEnvelopeTags` uses the same allocation and claim validation. `EnvelopeLayout` variants carry ordered message identity, assigned tags and roles, including entity removal. `EntityWireLayout` carries ordered state/delta fields, roles, optionality, owner visibility and original tick dirty-bit indices; revision remains tag 1000. `VarInfo.DeltaPresenceCS` supplies the shared C# nullable-value/reference classification. Do not reconstruct these decisions in emitters.
+
+Treat resolved descriptors and their referenced slices/types as read-only. `WireLayout`, `ProtoWireLayout` and `EnvelopeLayouts` adapt legacy DTOs when resolved metadata is absent: codec dimension zero defaults to two, proto fallback uses root dimensions, and legacy entity tags derive from `UserTag`. Keep these adapters at the generation boundary. Package names, imports, destinations and mutable integration settings do not belong in descriptors.
+
+`visitYAMLDirectory` shares filename-ordered, nonrecursive `.yaml` discovery/read/decode and calls validation immediately per file. Caller policy still owns required/nonempty entities, optional directories and nil/empty results, duplicate-name rules, sorting and diagnostic context. Preserve existing validation strictness: entity/custom fields and world envelope tags must not silently acquire the stricter command/event protobuf range rules.
 
 Optional `protocol_constants` points to a checked YAML catalog loaded by `LoadProtocolConstants`. Set/member names must be canonical snake_case; generated names and authored values must be unique within each set. Values are compile-time integration metadata only: they do not alter protobuf tags or the snapshot schema fingerprint.
 

@@ -10,15 +10,7 @@ import (
 	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
-const entityRevisionProtoTag = 1000
-
-func entityProtoTag(ent schema.EntityData, userTag int) int {
-	dimensions := ent.Dimensions
-	if dimensions == 0 {
-		dimensions = 2
-	}
-	return userTag + dimensions + 1
-}
+const entityRevisionProtoTag = schema.EntityRevisionTag
 
 // goWriterMethod maps protobuf scalar type names to pb.Writer method names.
 var goWriterMethod = map[string]string{
@@ -49,21 +41,6 @@ var goZeroExpr = map[string]string{
 	"bool":   "",
 	"string": `""`,
 	"bytes":  "",
-}
-
-// goPointerType maps proto types to the Go pointer-dereference type suffix used
-// in Delta Unmarshal. E.g. for "double" we emit "v := r.Float64(); m.X = &v".
-var goPointerHelper = map[string]string{
-	"double": "Float64",
-	"float":  "Float32",
-	"int32":  "Int32",
-	"int64":  "Int64",
-	"uint32": "Uint32",
-	"uint64": "Uint64",
-	"sint32": "Int32",
-	"sint64": "Int64",
-	"bool":   "Bool",
-	"string": "String",
 }
 
 // generateGoProto writes entities_pb.go into outDir with Go message structs,
@@ -155,156 +132,13 @@ func writeGoProtocolConstants(b *strings.Builder, sets []schema.ProtocolConstant
 // --- State struct (all fields, required) ---
 
 func writeGoStateStruct(b *strings.Builder, ent schema.EntityData) {
-	w := func(f string, a ...any) { fmt.Fprintf(b, f+"\n", a...) }
-
-	w("")
-	w("type %sState struct {", ent.Name)
-	w("\tEntityId int64")
-	w("\tPosX float32")
-	w("\tPosY float32")
-	if ent.Is3D {
-		w("\tPosZ float32")
-	}
-	w("\tRevision uint64")
-	for _, v := range ent.AllVars {
-		w("\t%s %s", v.GoName, v.GoType)
-	}
-	w("}")
-
-	// Marshal
-	w("")
-	w("// Marshal encodes the state to protobuf wire format.")
-	w("func (m *%sState) Marshal() []byte {", ent.Name)
-	w("\tw := &pb.Writer{}")
-	writeGoFieldEncode(b, "EntityId", "int64", 1, false)
-	writeGoFieldEncode(b, "PosX", "float", 2, false)
-	writeGoFieldEncode(b, "PosY", "float", 3, false)
-	if ent.Is3D {
-		writeGoFieldEncode(b, "PosZ", "float", 4, false)
-	}
-	writeGoFieldEncode(b, "Revision", "uint64", entityRevisionProtoTag, false)
-	for _, v := range ent.AllVars {
-		if v.IsRepeated || v.IsMap {
-			writeGoCollectionMarshal(b, v, entityProtoTag(ent, v.UserTag), false)
-		} else {
-			writeGoFieldEncode(b, v.GoName, v.ProtoType, entityProtoTag(ent, v.UserTag), false)
-		}
-	}
-	w("\treturn w.Finish()")
-	w("}")
-
-	// Unmarshal
-	w("")
-	w("// Unmarshal decodes the state from protobuf wire format.")
-	w("func (m *%sState) Unmarshal(data []byte) (retErr error) {", ent.Name)
-	w("\tdefer func() { if r := recover(); r != nil { retErr = fmt.Errorf(\"pb: decode %sState: %%v\", r) } }()", ent.Name)
-	w("\trd := pb.NewReader(data)")
-	w("\tfor !rd.Done() {")
-	w("\t\tfield, wire := rd.Tag()")
-	w("\t\tswitch field {")
-	w("\t\tcase 1: m.EntityId = rd.Int64()")
-	w("\t\tcase 2: m.PosX = rd.Float32()")
-	w("\t\tcase 3: m.PosY = rd.Float32()")
-	if ent.Is3D {
-		w("\t\tcase 4: m.PosZ = rd.Float32()")
-	}
-	w("\t\tcase %d: m.Revision = rd.Uint64()", entityRevisionProtoTag)
-	for _, v := range ent.AllVars {
-		if v.IsRepeated || v.IsMap {
-			writeGoCollectionUnmarshal(b, v, entityProtoTag(ent, v.UserTag), false)
-		} else {
-			w("\t\tcase %d: m.%s = rd.%s()", entityProtoTag(ent, v.UserTag), v.GoName, goWriterMethod[v.ProtoType])
-		}
-	}
-	w("\t\tdefault: rd.Skip(wire)")
-	w("\t\t}")
-	w("\t}")
-	w("\treturn nil")
-	w("}")
+	writeGoEntityMessage(b, ent.Name+"State", ent.WireLayout().State)
 }
 
 // --- Delta struct (tick vars as pointers for optional semantics) ---
 
 func writeGoDeltaStruct(b *strings.Builder, ent schema.EntityData) {
-	w := func(f string, a ...any) { fmt.Fprintf(b, f+"\n", a...) }
-
-	w("")
-	w("type %sDelta struct {", ent.Name)
-	w("\tEntityId int64")
-	w("\tPosX *float32")
-	w("\tPosY *float32")
-	if ent.Is3D {
-		w("\tPosZ *float32")
-	}
-	w("\tRevision uint64")
-	for _, v := range ent.TickVars {
-		if v.IsRepeated || v.IsMap {
-			// nil slice/map = absent; non-nil (even empty) = field was changed this tick
-			w("\t%s %s", v.GoName, v.GoType)
-		} else {
-			w("\t%s *%s", v.GoName, v.GoType)
-		}
-	}
-	w("}")
-
-	// Marshal
-	w("")
-	w("// Marshal encodes the delta to protobuf wire format.")
-	w("func (m *%sDelta) Marshal() []byte {", ent.Name)
-	w("\tw := &pb.Writer{}")
-	writeGoFieldEncode(b, "EntityId", "int64", 1, false)
-	writeGoFieldEncode(b, "PosX", "float", 2, true)
-	writeGoFieldEncode(b, "PosY", "float", 3, true)
-	if ent.Is3D {
-		writeGoFieldEncode(b, "PosZ", "float", 4, true)
-	}
-	writeGoFieldEncode(b, "Revision", "uint64", entityRevisionProtoTag, false)
-	for _, v := range ent.TickVars {
-		if v.IsRepeated || v.IsMap {
-			writeGoCollectionMarshal(b, v, entityProtoTag(ent, v.UserTag), true)
-		} else {
-			writeGoFieldEncode(b, v.GoName, v.ProtoType, entityProtoTag(ent, v.UserTag), true)
-		}
-	}
-	w("\treturn w.Finish()")
-	w("}")
-
-	// Unmarshal
-	w("")
-	w("// Unmarshal decodes the delta from protobuf wire format.")
-	w("func (m *%sDelta) Unmarshal(data []byte) (retErr error) {", ent.Name)
-	w("\tdefer func() { if r := recover(); r != nil { retErr = fmt.Errorf(\"pb: decode %sDelta: %%v\", r) } }()", ent.Name)
-	w("\trd := pb.NewReader(data)")
-	w("\tfor !rd.Done() {")
-	w("\t\tfield, wire := rd.Tag()")
-	w("\t\tswitch field {")
-	w("\t\tcase 1: m.EntityId = rd.Int64()")
-	w("\t\tcase 2:")
-	w("\t\t\tv := rd.Float32()")
-	w("\t\t\tm.PosX = &v")
-	w("\t\tcase 3:")
-	w("\t\t\tv := rd.Float32()")
-	w("\t\t\tm.PosY = &v")
-	if ent.Is3D {
-		w("\t\tcase 4:")
-		w("\t\t\tv := rd.Float32()")
-		w("\t\t\tm.PosZ = &v")
-	}
-	w("\t\tcase %d: m.Revision = rd.Uint64()", entityRevisionProtoTag)
-	for _, v := range ent.TickVars {
-		if v.IsRepeated || v.IsMap {
-			writeGoCollectionUnmarshal(b, v, entityProtoTag(ent, v.UserTag), true)
-		} else {
-			w("\t\tcase %d:", entityProtoTag(ent, v.UserTag))
-			w("\t\t\tv := rd.%s()", goWriterMethod[v.ProtoType])
-			w("\t\t\tm.%s = &v", v.GoName)
-		}
-	}
-	w("\t\tdefault: rd.Skip(wire)")
-	w("\t\t}")
-	w("\t}")
-	w("\treturn nil")
-	w("}")
+	writeGoEntityMessage(b, ent.Name+"Delta", ent.WireLayout().Delta)
 }
 
 // --- EntityRemoved ---
@@ -345,185 +179,19 @@ func writeGoEntityRemoved(b *strings.Builder) {
 // --- EntityUpdate (oneof: State/Delta per entity + EntityRemoved) ---
 
 func writeGoEntityUpdate(b *strings.Builder, proto schema.ProtoTemplateData) {
-	w := func(f string, a ...any) { fmt.Fprintf(b, f+"\n", a...) }
-
-	// Interface
-	w("")
-	w("type isEntityUpdatePayload interface { isEntityUpdatePayload() }")
-	w("")
-	w("// EntityUpdate wraps a single State, Delta, or EntityRemoved payload.")
-	w("type EntityUpdate struct { Payload isEntityUpdatePayload }")
-
-	// Variant types
-	for _, uf := range proto.EntityUpdateFields {
-		w("")
-		w("// EntityUpdate_%s is the oneof wrapper for %s.", uf.MessageType, uf.MessageType)
-		w("type EntityUpdate_%s struct { %s *%s }", uf.MessageType, uf.MessageType, uf.MessageType)
-		w("func (*EntityUpdate_%s) isEntityUpdatePayload() {}", uf.MessageType)
-	}
-	w("")
-	w("// EntityUpdate_EntityRemoved is the oneof wrapper for EntityRemoved.")
-	w("type EntityUpdate_EntityRemoved struct { EntityRemoved *EntityRemoved }")
-	w("func (*EntityUpdate_EntityRemoved) isEntityUpdatePayload() {}")
-
-	// Marshal
-	w("")
-	w("// Marshal encodes the update to protobuf wire format.")
-	w("func (m *EntityUpdate) Marshal() []byte {")
-	w("\tw := &pb.Writer{}")
-	w("\tswitch p := m.Payload.(type) {")
-	for _, uf := range proto.EntityUpdateFields {
-		w("\tcase *EntityUpdate_%s:", uf.MessageType)
-		w("\t\tw.Tag(%d, 2).Bytes(p.%s.Marshal())", uf.Tag, uf.MessageType)
-	}
-	w("\tcase *EntityUpdate_EntityRemoved:")
-	w("\t\tw.Tag(%d, 2).Bytes(p.EntityRemoved.Marshal())", proto.EntityRemovedTag)
-	w("\t}")
-	w("\treturn w.Finish()")
-	w("}")
-
-	// Unmarshal
-	w("")
-	w("// Unmarshal decodes the update from protobuf wire format.")
-	w("func (m *EntityUpdate) Unmarshal(data []byte) (retErr error) {")
-	w("\tdefer func() { if r := recover(); r != nil { retErr = fmt.Errorf(\"pb: decode EntityUpdate: %%v\", r) } }()")
-	w("\trd := pb.NewReader(data)")
-	w("\tfor !rd.Done() {")
-	w("\t\tfield, wire := rd.Tag()")
-	w("\t\tswitch field {")
-	for _, uf := range proto.EntityUpdateFields {
-		w("\t\tcase %d:", uf.Tag)
-		w("\t\t\tsub := &%s{}", uf.MessageType)
-		w("\t\t\tif err := sub.Unmarshal(rd.Bytes()); err != nil { return err }")
-		w("\t\t\tm.Payload = &EntityUpdate_%s{%s: sub}", uf.MessageType, uf.MessageType)
-	}
-	w("\t\tcase %d:", proto.EntityRemovedTag)
-	w("\t\t\tsub := &EntityRemoved{}")
-	w("\t\t\tif err := sub.Unmarshal(rd.Bytes()); err != nil { return err }")
-	w("\t\t\tm.Payload = &EntityUpdate_EntityRemoved{EntityRemoved: sub}")
-	w("\t\tdefault: rd.Skip(wire)")
-	w("\t\t}")
-	w("\t}")
-	w("\treturn nil")
-	w("}")
+	writeGoEnvelope(b, proto.EnvelopeLayouts().Entity)
 }
 
 // --- Command structs ---
 
 func writeGoCommandStruct(b *strings.Builder, cmd schema.CommandData) {
-	w := func(f string, a ...any) { fmt.Fprintf(b, f+"\n", a...) }
-
-	w("")
-	w("type %sCommand struct {", cmd.Name)
-	if cmd.Target == "entity" {
-		w("\tEntityId int64")
-	}
-	for _, f := range cmd.Fields {
-		w("\t%s %s", f.GoName, f.GoType)
-	}
-	w("}")
-
-	// Marshal
-	w("")
-	w("// Marshal encodes the command to protobuf wire format.")
-	w("func (m *%sCommand) Marshal() []byte {", cmd.Name)
-	w("\tw := &pb.Writer{}")
-	if cmd.Target == "entity" {
-		writeGoFieldEncode(b, "EntityId", "int64", 1, false)
-	}
-	for _, f := range cmd.Fields {
-		if f.IsCustom {
-			w("\tif _b := m.%s.Marshal(); len(_b) > 0 { w.Tag(%d, 2).Bytes(_b) }", f.GoName, f.ProtoTag)
-		} else {
-			writeGoFieldEncode(b, f.GoName, f.ProtoType, f.ProtoTag, false)
-		}
-	}
-	w("\treturn w.Finish()")
-	w("}")
-
-	// Unmarshal
-	w("")
-	w("// Unmarshal decodes the command from protobuf wire format.")
-	w("func (m *%sCommand) Unmarshal(data []byte) (retErr error) {", cmd.Name)
-	w("\tdefer func() { if r := recover(); r != nil { retErr = fmt.Errorf(\"pb: decode %sCommand: %%v\", r) } }()", cmd.Name)
-	w("\trd := pb.NewReader(data)")
-	w("\tfor !rd.Done() {")
-	w("\t\tfield, wire := rd.Tag()")
-	w("\t\tswitch field {")
-	if cmd.Target == "entity" {
-		w("\t\tcase 1: m.EntityId = rd.Int64()")
-	}
-	for _, f := range cmd.Fields {
-		if f.IsCustom {
-			w("\t\tcase %d:", f.ProtoTag)
-			w("\t\t\tvar _sub %s", f.GoType)
-			w("\t\t\tif _err := _sub.Unmarshal(rd.Bytes()); _err != nil { return _err }")
-			w("\t\t\tm.%s = _sub", f.GoName)
-		} else {
-			w("\t\tcase %d: m.%s = rd.%s()", f.ProtoTag, f.GoName, goWriterMethod[f.ProtoType])
-		}
-	}
-	w("\t\tdefault: rd.Skip(wire)")
-	w("\t\t}")
-	w("\t}")
-	w("\treturn nil")
-	w("}")
+	writeGoPayload(b, commandPayload(cmd))
 }
 
 // --- ClientMessage (oneof wrapper for commands) ---
 
 func writeGoClientMessage(b *strings.Builder, proto schema.ProtoTemplateData) {
-	w := func(f string, a ...any) { fmt.Fprintf(b, f+"\n", a...) }
-
-	// Interface
-	w("")
-	w("type isClientMessagePayload interface { isClientMessagePayload() }")
-	w("")
-	w("// ClientMessage wraps a single command payload sent by the client.")
-	w("type ClientMessage struct { Payload isClientMessagePayload }")
-
-	// Variant types
-	for _, cmf := range proto.ClientMessageFields {
-		w("")
-		w("// ClientMessage_%s is the oneof wrapper for %s.", cmf.MessageType, cmf.MessageType)
-		w("type ClientMessage_%s struct { %s *%s }", cmf.MessageType, cmf.MessageType, cmf.MessageType)
-		w("func (*ClientMessage_%s) isClientMessagePayload() {}", cmf.MessageType)
-	}
-
-	// Marshal
-	w("")
-	w("// Marshal encodes the client message to protobuf wire format.")
-	w("func (m *ClientMessage) Marshal() []byte {")
-	w("\tw := &pb.Writer{}")
-	w("\tswitch p := m.Payload.(type) {")
-	for _, cmf := range proto.ClientMessageFields {
-		w("\tcase *ClientMessage_%s:", cmf.MessageType)
-		w("\t\tw.Tag(%d, 2).Bytes(p.%s.Marshal())", cmf.Tag, cmf.MessageType)
-	}
-	w("\t}")
-	w("\treturn w.Finish()")
-	w("}")
-
-	// Unmarshal
-	w("")
-	w("// Unmarshal decodes a client message from protobuf wire format.")
-	w("func (m *ClientMessage) Unmarshal(data []byte) (retErr error) {")
-	w("\tdefer func() { if r := recover(); r != nil { retErr = fmt.Errorf(\"pb: decode ClientMessage: %%v\", r) } }()")
-	w("\trd := pb.NewReader(data)")
-	w("\tfor !rd.Done() {")
-	w("\t\tfield, wire := rd.Tag()")
-	w("\t\tswitch field {")
-	for _, cmf := range proto.ClientMessageFields {
-		w("\t\tcase %d:", cmf.Tag)
-		w("\t\t\tsub := &%s{}", cmf.MessageType)
-		w("\t\t\tif err := sub.Unmarshal(rd.Bytes()); err != nil { return err }")
-		w("\t\t\tm.Payload = &ClientMessage_%s{%s: sub}", cmf.MessageType, cmf.MessageType)
-	}
-	w("\t\tdefault: rd.Skip(wire)")
-	w("\t\t}")
-	w("\t}")
-	w("\treturn nil")
-	w("}")
+	writeGoEnvelope(b, proto.EnvelopeLayouts().Command)
 }
 
 // writeGoClientPacket emits a transport envelope that batches multiple encoded
@@ -600,118 +268,11 @@ func generateGoEventProto(outDir, golemImport, goPackage string, proto schema.Pr
 
 // writeGoEventStruct emits a struct with Marshal/Unmarshal for a single event type.
 // When EntityType is set, EntityId is the first field (proto tag 1) and user fields start at 2.
-func writeGoEventStruct(b *strings.Builder, ev schema.EventData) {
-	w := func(f string, a ...any) { fmt.Fprintf(b, f+"\n", a...) }
-	structName := ev.Name + "Event"
-
-	w("")
-	w("type %s struct {", structName)
-	if ev.EntityType != "" {
-		w("\tEntityId int64")
-	}
-	for _, f := range ev.Fields {
-		w("\t%s %s", f.GoName, f.GoType)
-	}
-	w("}")
-
-	// Marshal
-	w("")
-	w("// Marshal encodes the event to protobuf wire format.")
-	w("func (m *%s) Marshal() []byte {", structName)
-	w("\tw := &pb.Writer{}")
-	if ev.EntityType != "" {
-		writeGoFieldEncode(b, "EntityId", "int64", 1, false)
-	}
-	for _, f := range ev.Fields {
-		if f.IsCustom {
-			w("\tif _b := m.%s.Marshal(); len(_b) > 0 { w.Tag(%d, 2).Bytes(_b) }", f.GoName, f.ProtoTag)
-		} else {
-			writeGoFieldEncode(b, f.GoName, f.ProtoType, f.ProtoTag, false)
-		}
-	}
-	w("\treturn w.Finish()")
-	w("}")
-
-	// Unmarshal
-	w("")
-	w("// Unmarshal decodes the event from protobuf wire format.")
-	w("func (m *%s) Unmarshal(data []byte) (retErr error) {", structName)
-	w("\tdefer func() { if r := recover(); r != nil { retErr = fmt.Errorf(\"pb: decode %s: %%v\", r) } }()", structName)
-	w("\trd := pb.NewReader(data)")
-	w("\tfor !rd.Done() {")
-	w("\t\tfield, wire := rd.Tag()")
-	w("\t\tswitch field {")
-	if ev.EntityType != "" {
-		w("\t\tcase 1: m.EntityId = rd.Int64()")
-	}
-	for _, f := range ev.Fields {
-		if f.IsCustom {
-			w("\t\tcase %d:", f.ProtoTag)
-			w("\t\t\tvar _sub %s", f.GoType)
-			w("\t\t\tif _err := _sub.Unmarshal(rd.Bytes()); _err != nil { return _err }")
-			w("\t\t\tm.%s = _sub", f.GoName)
-		} else {
-			w("\t\tcase %d: m.%s = rd.%s()", f.ProtoTag, f.GoName, goWriterMethod[f.ProtoType])
-		}
-	}
-	w("\t\tdefault: rd.Skip(wire)")
-	w("\t\t}")
-	w("\t}")
-	w("\treturn nil")
-	w("}")
-}
+func writeGoEventStruct(b *strings.Builder, ev schema.EventData) { writeGoPayload(b, eventPayload(ev)) }
 
 // writeGoServerEvent emits the ServerEvent oneof struct (Marshal/Unmarshal).
 func writeGoServerEvent(b *strings.Builder, proto schema.ProtoTemplateData) {
-	w := func(f string, a ...any) { fmt.Fprintf(b, f+"\n", a...) }
-
-	w("")
-	w("type isServerEventPayload interface { isServerEventPayload() }")
-	w("")
-	w("// ServerEvent wraps a single server-to-client event payload.")
-	w("type ServerEvent struct { Payload isServerEventPayload }")
-
-	for _, sef := range proto.ServerEventFields {
-		w("")
-		w("// ServerEvent_%s is the oneof wrapper for %s.", sef.MessageType, sef.MessageType)
-		w("type ServerEvent_%s struct { %s *%s }", sef.MessageType, sef.MessageType, sef.MessageType)
-		w("func (*ServerEvent_%s) isServerEventPayload() {}", sef.MessageType)
-	}
-
-	// Marshal
-	w("")
-	w("// Marshal encodes the server event to protobuf wire format.")
-	w("func (m *ServerEvent) Marshal() []byte {")
-	w("\tw := &pb.Writer{}")
-	w("\tswitch p := m.Payload.(type) {")
-	for _, sef := range proto.ServerEventFields {
-		w("\tcase *ServerEvent_%s:", sef.MessageType)
-		w("\t\tw.Tag(%d, 2).Bytes(p.%s.Marshal())", sef.Tag, sef.MessageType)
-	}
-	w("\t}")
-	w("\treturn w.Finish()")
-	w("}")
-
-	// Unmarshal
-	w("")
-	w("// Unmarshal decodes a server event from protobuf wire format.")
-	w("func (m *ServerEvent) Unmarshal(data []byte) (retErr error) {")
-	w("\tdefer func() { if r := recover(); r != nil { retErr = fmt.Errorf(\"pb: decode ServerEvent: %%v\", r) } }()")
-	w("\trd := pb.NewReader(data)")
-	w("\tfor !rd.Done() {")
-	w("\t\tfield, wire := rd.Tag()")
-	w("\t\tswitch field {")
-	for _, sef := range proto.ServerEventFields {
-		w("\t\tcase %d:", sef.Tag)
-		w("\t\t\tsub := &%s{}", sef.MessageType)
-		w("\t\t\tif err := sub.Unmarshal(rd.Bytes()); err != nil { return err }")
-		w("\t\t\tm.Payload = &ServerEvent_%s{%s: sub}", sef.MessageType, sef.MessageType)
-	}
-	w("\t\tdefault: rd.Skip(wire)")
-	w("\t\t}")
-	w("\t}")
-	w("\treturn nil")
-	w("}")
+	writeGoEnvelope(b, proto.EnvelopeLayouts().Event)
 }
 
 // --- World data structs ---
@@ -773,14 +334,24 @@ func generateGoWorldProto(outDir, golemImport, goPackage string, proto schema.Pr
 	}
 	w(")")
 
+	worldLayout := proto.EnvelopeLayouts().World
 	for i, wt := range proto.WorldTypes {
-		writeGoWorldDataStruct(&b, wt, proto.WorldUpdateFields[i])
+		writeGoWorldDataStruct(&b, wt, worldLayout.Variants[i].Tag)
 		if wt.Source != nil {
-			customTypesMap := make(map[string]schema.CustomTypeData, len(proto.CustomTypes))
-			for _, ct := range proto.CustomTypes {
-				customTypesMap[ct.Name] = ct
+			if wt.IsCatalog || wt.Source.Format == "catalog" {
+				if wt.Catalog == nil {
+					types := make(map[string]schema.CustomTypeData, len(proto.CustomTypes))
+					for _, ct := range proto.CustomTypes {
+						types[ct.Name] = ct
+					}
+					catalog, err := schema.ResolveCatalog(wt.Name, wt.Source, types)
+					if err != nil {
+						return err
+					}
+					wt.Catalog = catalog
+				}
 			}
-			writeGoWorldLoader(&b, wt, customTypesMap)
+			writeGoWorldLoader(&b, wt)
 		}
 	}
 
@@ -799,8 +370,8 @@ func generateGoWorldProto(outDir, golemImport, goPackage string, proto schema.Pr
 }
 
 // writeGoWorldDataStruct emits a world data struct with Marshal, MarshalUpdate,
-// Unmarshal, and WorldName. wuf.Tag is the oneof tag inside WorldUpdate.
-func writeGoWorldDataStruct(b *strings.Builder, wt schema.WorldTypeData, wuf schema.WorldUpdateField) {
+// Unmarshal, and WorldName. updateTag is the oneof tag inside WorldUpdate.
+func writeGoWorldDataStruct(b *strings.Builder, wt schema.WorldTypeData, updateTag int) {
 	w := func(f string, a ...any) { fmt.Fprintf(b, f+"\n", a...) }
 
 	w("")
@@ -836,7 +407,7 @@ func writeGoWorldDataStruct(b *strings.Builder, wt schema.WorldTypeData, wuf sch
 	w("func (m *%s) MarshalUpdate() ([]byte, error) {", wt.DataName)
 	w("\tinner := m.Marshal()")
 	w("\tw := &pb.Writer{}")
-	w("\tw.Tag(%d, 2).Bytes(inner)", wuf.Tag)
+	w("\tw.Tag(%d, 2).Bytes(inner)", updateTag)
 	w("\treturn w.Finish(), nil")
 	w("}")
 
@@ -865,75 +436,12 @@ func writeGoWorldDataStruct(b *strings.Builder, wt schema.WorldTypeData, wuf sch
 
 // writeGoWorldFieldCollectionMarshal emits marshal code for a collection WorldFieldInfo.
 func writeGoWorldFieldCollectionMarshal(b *strings.Builder, f schema.WorldFieldInfo) {
-	w := func(fmt_ string, a ...any) { fmt.Fprintf(b, fmt_+"\n", a...) }
-	tag := f.ProtoTag
-	if f.IsRepeated {
-		w("\tfor _, _elem := range m.%s {", f.GoName)
-		if f.ElemIsCustom {
-			fmt.Fprintf(b, "\t\tw.Tag(%d, 2).Bytes(_elem.Marshal())\n", tag)
-		} else {
-			fmt.Fprintf(b, "{ _inner := &pb.Writer{}; _inner.%s(_elem); w.Tag(%d, 2).Bytes(_inner.Finish()) }\n",
-				goWriterMethod[f.ElemProtoType], tag)
-		}
-		w("\t}")
-	} else { // IsMap
-		w("\tfor _k, _v := range m.%s {", f.GoName)
-		keyWT := protoWireType[f.MapKeyProtoType]
-		keyWM := goWriterMethod[f.MapKeyProtoType]
-		w("\t\t_kv := &pb.Writer{}")
-		w("\t\t_kv.Tag(1, %d).%s(_k)", keyWT, keyWM)
-		if f.ElemIsCustom {
-			w("\t\t_kv.Tag(2, 2).Bytes(_v.Marshal())")
-		} else {
-			valWT := protoWireType[f.ElemProtoType]
-			valWM := goWriterMethod[f.ElemProtoType]
-			w("\t\t_kv.Tag(2, %d).%s(_v)", valWT, valWM)
-		}
-		w("\t\tw.Tag(%d, 2).Bytes(_kv.Finish())", tag)
-		w("\t}")
-	}
+	writeGoCollectionMarshal(b, goWorldCollection(f), f.ProtoTag, false)
 }
 
 // writeGoWorldFieldCollectionUnmarshal emits unmarshal case code for a collection WorldFieldInfo.
 func writeGoWorldFieldCollectionUnmarshal(b *strings.Builder, f schema.WorldFieldInfo) {
-	w := func(fmt_ string, a ...any) { fmt.Fprintf(b, fmt_+"\n", a...) }
-	w("\t\tcase %d:", f.ProtoTag)
-	if f.IsRepeated {
-		w("\t\t\t_b := rd.Bytes()")
-		w("\t\t\tif len(_b) > 0 {")
-		if f.ElemIsCustom {
-			w("\t\t\t\tvar _elem %s", f.ElemProtoType)
-			w("\t\t\t\tif _err := _elem.Unmarshal(_b); _err != nil { return _err }")
-			w("\t\t\t\tm.%s = append(m.%s, _elem)", f.GoName, f.GoName)
-		} else {
-			w("\t\t\t\t_inner := pb.NewReader(_b)")
-			w("\t\t\t\tm.%s = append(m.%s, _inner.%s())", f.GoName, f.GoName, goWriterMethod[f.ElemProtoType])
-		}
-		w("\t\t\t}")
-	} else { // IsMap
-		w("\t\t\t_b := rd.Bytes()")
-		w("\t\t\tif len(_b) > 0 {")
-		w("\t\t\t\t_rd := pb.NewReader(_b)")
-		w("\t\t\t\tvar _k %s", f.MapKeyGoType)
-		w("\t\t\t\tvar _v %s", f.ElemGoType)
-		w("\t\t\t\tfor !_rd.Done() {")
-		w("\t\t\t\t\t_f, _ := _rd.Tag()")
-		w("\t\t\t\t\tswitch _f {")
-		w("\t\t\t\t\tcase 1: _k = _rd.%s()", goWriterMethod[f.MapKeyProtoType])
-		if f.ElemIsCustom {
-			w("\t\t\t\t\tcase 2:")
-			w("\t\t\t\t\t\tif _err := _v.Unmarshal(_rd.Bytes()); _err != nil { return _err }")
-		} else {
-			w("\t\t\t\t\tcase 2: _v = _rd.%s()", goWriterMethod[f.ElemProtoType])
-		}
-		w("\t\t\t\t\t}")
-		w("\t\t\t\t}")
-		w("\t\t\t\tif m.%s == nil { m.%s = %s{} }", f.GoName, f.GoName, f.GoType)
-		w("\t\t\t\tm.%s[_k] = _v", f.GoName)
-		w("\t\t\t} else {")
-		w("\t\t\t\tif m.%s == nil { m.%s = %s{} }", f.GoName, f.GoName, f.GoType)
-		w("\t\t\t}")
-	}
+	writeGoCollectionUnmarshal(b, goWorldCollection(f), f.ProtoTag, false)
 }
 
 // writeGoWorldLoader emits a LoadXxxData(path string) helper for world types
@@ -942,12 +450,12 @@ func writeGoWorldFieldCollectionUnmarshal(b *strings.Builder, f schema.WorldFiel
 // For catalog sources, entries are read from a YAML sequence and populated into
 // a list or dict field. When url_prefix is set, MapUrl is populated and raw
 // bytes are not embedded; otherwise TileData receives the full raw file contents.
-func writeGoWorldLoader(b *strings.Builder, wt schema.WorldTypeData, customTypes map[string]schema.CustomTypeData) {
+func writeGoWorldLoader(b *strings.Builder, wt schema.WorldTypeData) {
 	w := func(f string, a ...any) { fmt.Fprintf(b, f+"\n", a...) }
 	src := wt.Source
 
 	if src.Format == "catalog" {
-		writeGoWorldCatalogLoader(b, wt, customTypes)
+		writeGoWorldCatalogLoader(b, wt)
 		return
 	}
 
@@ -982,13 +490,13 @@ func writeGoWorldLoader(b *strings.Builder, wt schema.WorldTypeData, customTypes
 		switch src.Format {
 		case "tiled":
 			w("\tif p, ok := m.PropertyByName(%q); ok {", ex.Name)
-			w("\t\td.%s = %s", goName, tiledPropertyConvert(ex.Type, "p"))
+			w("\t\td.%s = %s", goName, goSourcePropertyExpr(ex.Type, "p"))
 			w("\t}")
 		case "ldtk":
 			w("\tlevels := proj.AllLevels()")
 			w("\tif len(levels) > 0 {")
 			w("\t\tif f := levels[0].FieldByIdentifier(%q); f != nil {", ex.Name)
-			w("\t\t\td.%s = %s", goName, ldtkFieldConvert(ex.Type, "f"))
+			w("\t\t\td.%s = %s", goName, goSourcePropertyExpr(ex.Type, "f"))
 			w("\t\t}")
 			w("\t}")
 		}
@@ -1001,11 +509,10 @@ func writeGoWorldLoader(b *strings.Builder, wt schema.WorldTypeData, customTypes
 // writeGoWorldCatalogLoader emits a LoadXxxData(path string) helper for catalog
 // world types. It reads a YAML sequence, converts each entry map to the custom
 // type struct, and appends to a list or inserts into a map.
-func writeGoWorldCatalogLoader(b *strings.Builder, wt schema.WorldTypeData, customTypes map[string]schema.CustomTypeData) {
+func writeGoWorldCatalogLoader(b *strings.Builder, wt schema.WorldTypeData) {
 	w := func(f string, a ...any) { fmt.Fprintf(b, f+"\n", a...) }
-	src := wt.Source
-
-	ct := customTypes[src.Type]
+	ct := wt.Catalog.Item
+	collection := wt.Catalog.Collection
 
 	w("")
 	w("// Load%s reads the catalog YAML at path and returns a %s ready to store in the world.Store.", wt.DataName, wt.DataName)
@@ -1015,28 +522,20 @@ func writeGoWorldCatalogLoader(b *strings.Builder, wt schema.WorldTypeData, cust
 	w("\tvar _rows []map[string]any")
 	w("\tif err := yaml.Unmarshal(raw, &_rows); err != nil { return nil, err }")
 	w("\td := &%s{}", wt.DataName)
-	if src.Key != "" {
-		// Determine key Go type for make()
-		keyGoType := ""
-		for _, cf := range ct.Fields {
-			if cf.SnakeName == src.Key {
-				keyGoType = cf.GoType
-				break
-			}
-		}
-		w("\td.Items = make(map[%s]%s, len(_rows))", keyGoType, src.Type)
+	if collection.IsMap {
+		w("\td.Items = make(map[%s]%s, len(_rows))", collection.MapKeyGoType, collection.ElemGoType)
 	}
 	w("\tfor _, _row := range _rows {")
-	w("\t\t_elem := %s{}", src.Type)
+	w("\t\t_elem := %s{}", collection.ElemGoType)
 	for _, cf := range ct.Fields {
 		w("\t\tif _fv, _ok := _row[%q]; _ok {", cf.SnakeName)
 		w("\t\t\t%s", catalogYAMLConvert(cf.ProtoType, "_elem."+cf.GoName, "_fv"))
 		w("\t\t}")
 	}
-	if src.Key == "" {
+	if !collection.IsMap {
 		w("\t\td.Items = append(d.Items, _elem)")
 	} else {
-		keyGoName := schema.SnakeToPascal(src.Key)
+		keyGoName := wt.Catalog.Key.GoName
 		w("\t\td.Items[_elem.%s] = _elem", keyGoName)
 	}
 	w("\t}")
@@ -1069,34 +568,9 @@ func catalogYAMLConvert(protoType, target, src string) string {
 	}
 }
 
-// tiledPropertyConvert returns a Go expression that converts a tiled.Property
-// variable (named by varName) to the given proto type.
-func tiledPropertyConvert(protoType, varName string) string {
-	switch protoType {
-	case "bool":
-		return varName + ".BoolValue()"
-	case "string":
-		return varName + ".StringValue()"
-	case "double":
-		return varName + ".FloatValue()"
-	case "float":
-		return fmt.Sprintf("float32(%s.FloatValue())", varName)
-	case "int32", "sint32":
-		return fmt.Sprintf("int32(%s.IntValue())", varName)
-	case "int64", "sint64":
-		return fmt.Sprintf("int64(%s.IntValue())", varName)
-	case "uint32":
-		return fmt.Sprintf("uint32(%s.IntValue())", varName)
-	case "uint64":
-		return fmt.Sprintf("uint64(%s.IntValue())", varName)
-	default:
-		return fmt.Sprintf("/* unsupported type %s */ %s.StringValue()", protoType, varName)
-	}
-}
-
-// ldtkFieldConvert returns a Go expression that converts an *ldtk.FieldInstance
-// pointer (named by varName) to the given proto type.
-func ldtkFieldConvert(protoType, varName string) string {
+// goSourcePropertyExpr converts either a Tiled property or an LDtk field through
+// their matching typed accessors. Catalog YAML conversions have a different contract.
+func goSourcePropertyExpr(protoType, varName string) string {
 	switch protoType {
 	case "bool":
 		return varName + ".BoolValue()"
@@ -1121,55 +595,7 @@ func ldtkFieldConvert(protoType, varName string) string {
 
 // writeGoWorldUpdate emits the WorldUpdate oneof struct with Marshal/Unmarshal.
 func writeGoWorldUpdate(b *strings.Builder, proto schema.ProtoTemplateData) {
-	w := func(f string, a ...any) { fmt.Fprintf(b, f+"\n", a...) }
-
-	w("")
-	w("type isWorldUpdatePayload interface { isWorldUpdatePayload() }")
-	w("")
-	w("// WorldUpdate wraps a single world data payload.")
-	w("type WorldUpdate struct { Payload isWorldUpdatePayload }")
-
-	for _, wuf := range proto.WorldUpdateFields {
-		w("")
-		w("// WorldUpdate_%s is the oneof wrapper for %s.", wuf.MessageType, wuf.MessageType)
-		w("type WorldUpdate_%s struct { %s *%s }", wuf.MessageType, wuf.MessageType, wuf.MessageType)
-		w("func (*WorldUpdate_%s) isWorldUpdatePayload() {}", wuf.MessageType)
-	}
-
-	// Marshal
-	w("")
-	w("// Marshal encodes the world update to protobuf wire format.")
-	w("func (m *WorldUpdate) Marshal() []byte {")
-	w("\tw := &pb.Writer{}")
-	w("\tswitch p := m.Payload.(type) {")
-	for _, wuf := range proto.WorldUpdateFields {
-		w("\tcase *WorldUpdate_%s:", wuf.MessageType)
-		w("\t\tw.Tag(%d, 2).Bytes(p.%s.Marshal())", wuf.Tag, wuf.MessageType)
-	}
-	w("\t}")
-	w("\treturn w.Finish()")
-	w("}")
-
-	// Unmarshal
-	w("")
-	w("// Unmarshal decodes the world update from protobuf wire format.")
-	w("func (m *WorldUpdate) Unmarshal(data []byte) (retErr error) {")
-	w("\tdefer func() { if r := recover(); r != nil { retErr = fmt.Errorf(\"pb: decode WorldUpdate: %%v\", r) } }()")
-	w("\trd := pb.NewReader(data)")
-	w("\tfor !rd.Done() {")
-	w("\t\tfield, wire := rd.Tag()")
-	w("\t\tswitch field {")
-	for _, wuf := range proto.WorldUpdateFields {
-		w("\t\tcase %d:", wuf.Tag)
-		w("\t\t\tsub := &%s{}", wuf.MessageType)
-		w("\t\t\tif err := sub.Unmarshal(rd.Bytes()); err != nil { return err }")
-		w("\t\t\tm.Payload = &WorldUpdate_%s{%s: sub}", wuf.MessageType, wuf.MessageType)
-	}
-	w("\t\tdefault: rd.Skip(wire)")
-	w("\t\t}")
-	w("\t}")
-	w("\treturn nil")
-	w("}")
+	writeGoEnvelope(b, proto.EnvelopeLayouts().World)
 }
 
 // writeGoCustomTypeStruct emits the struct definition plus Marshal/Unmarshal for one custom type.
@@ -1214,7 +640,7 @@ func writeGoCustomTypeStruct(b *strings.Builder, ct schema.CustomTypeData) {
 
 // writeGoCollectionMarshal emits the marshal code for a list or map field.
 // optional=true skips encoding when the field is nil (used for delta fields).
-func writeGoCollectionMarshal(b *strings.Builder, v schema.VarInfo, tag int, optional bool) {
+func writeGoCollectionMarshal(b *strings.Builder, v goCollectionField, tag int, optional bool) {
 	w := func(f string, a ...any) { fmt.Fprintf(b, f+"\n", a...) }
 
 	if v.IsRepeated {
@@ -1253,7 +679,7 @@ func writeGoCollectionMarshal(b *strings.Builder, v schema.VarInfo, tag int, opt
 }
 
 // emitGoCollectionElemMarshal emits the single-element encode call for a list field.
-func emitGoCollectionElemMarshal(b *strings.Builder, v schema.VarInfo, tag int, indent string) {
+func emitGoCollectionElemMarshal(b *strings.Builder, v goCollectionField, tag int, indent string) {
 	if v.ElemIsCustom {
 		fmt.Fprintf(b, indent+"w.Tag(%d, 2).Bytes(_elem.Marshal())\n", tag)
 	} else {
@@ -1264,16 +690,16 @@ func emitGoCollectionElemMarshal(b *strings.Builder, v schema.VarInfo, tag int, 
 }
 
 // emitGoMapEntryMarshal emits the K/V sub-message encode call for one map entry.
-func emitGoMapEntryMarshal(b *strings.Builder, v schema.VarInfo, tag int, indent string) {
+func emitGoMapEntryMarshal(b *strings.Builder, v goCollectionField, tag int, indent string) {
 	w := func(f string, a ...any) { fmt.Fprintf(b, indent+f+"\n", a...) }
-	keyWT := protoWireType[v.MapKeyProtoType]
+	keyWT := scalarWireType(v.MapKeyProtoType)
 	keyWM := goWriterMethod[v.MapKeyProtoType]
 	w("_kv := &pb.Writer{}")
 	w("_kv.Tag(1, %d).%s(_k)", keyWT, keyWM)
 	if v.ElemIsCustom {
 		w("_kv.Tag(2, 2).Bytes(_v.Marshal())")
 	} else {
-		valWT := protoWireType[v.ElemProtoType]
+		valWT := scalarWireType(v.ElemProtoType)
 		valWM := goWriterMethod[v.ElemProtoType]
 		w("_kv.Tag(2, %d).%s(_v)", valWT, valWM)
 	}
@@ -1282,7 +708,7 @@ func emitGoMapEntryMarshal(b *strings.Builder, v schema.VarInfo, tag int, indent
 
 // writeGoCollectionUnmarshal emits the case + decode logic for a list or map field.
 // optional=true initializes nil collections on first appearance (used for delta fields).
-func writeGoCollectionUnmarshal(b *strings.Builder, v schema.VarInfo, tag int, optional bool) {
+func writeGoCollectionUnmarshal(b *strings.Builder, v goCollectionField, tag int, optional bool) {
 	w := func(f string, a ...any) { fmt.Fprintf(b, f+"\n", a...) }
 
 	w("\t\tcase %d:", tag)
@@ -1305,7 +731,7 @@ func writeGoCollectionUnmarshal(b *strings.Builder, v schema.VarInfo, tag int, o
 }
 
 // emitGoCollectionElemUnmarshal emits the decode + append for one list element.
-func emitGoCollectionElemUnmarshal(b *strings.Builder, v schema.VarInfo, indent string) {
+func emitGoCollectionElemUnmarshal(b *strings.Builder, v goCollectionField, indent string) {
 	w := func(f string, a ...any) { fmt.Fprintf(b, indent+f+"\n", a...) }
 	if v.ElemIsCustom {
 		w("var _elem %s", v.ElemProtoType)
@@ -1318,7 +744,7 @@ func emitGoCollectionElemUnmarshal(b *strings.Builder, v schema.VarInfo, indent 
 }
 
 // emitGoMapEntryUnmarshal emits the K/V sub-message decode + assignment for one map entry.
-func emitGoMapEntryUnmarshal(b *strings.Builder, v schema.VarInfo, indent string) {
+func emitGoMapEntryUnmarshal(b *strings.Builder, v goCollectionField, indent string) {
 	w := func(f string, a ...any) { fmt.Fprintf(b, indent+f+"\n", a...) }
 	w("_rd := pb.NewReader(_b)")
 	w("var _k %s", v.MapKeyGoType)
@@ -1342,7 +768,7 @@ func emitGoMapEntryUnmarshal(b *strings.Builder, v schema.VarInfo, indent string
 // writeGoFieldEncode emits a single field encode line for a required or optional field.
 func writeGoFieldEncode(b *strings.Builder, goName, protoType string, tag int, optional bool) {
 	w := func(f string, a ...any) { fmt.Fprintf(b, f+"\n", a...) }
-	wt := protoWireType[protoType]
+	wt := scalarWireType(protoType)
 	wm := goWriterMethod[protoType]
 
 	if optional {

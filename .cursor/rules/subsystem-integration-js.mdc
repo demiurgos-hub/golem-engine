@@ -6,6 +6,9 @@ globs:
   - golem-js/src/**/*.ts
   - golem-js/test/**/*.js
   - codegen/js_*.go
+  - codegen/scalar_encode.go
+  - codegen/envelope_codecs.go
+  - codegen/codec_metadata.go
   - codegen/templates/js/**/*.tmpl
 alwaysApply: false
 ---

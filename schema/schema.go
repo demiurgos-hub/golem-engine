@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -31,6 +30,8 @@ type SchemaVarDef struct {
 
 // VarInfo holds all computed metadata for a single synced variable across languages.
 type VarInfo struct {
+	Collection    *CollectionInfo
+	CSPresence    CSDeltaPresence
 	SnakeName     string
 	GoName        string
 	FieldName     string
@@ -81,6 +82,7 @@ func (v VarInfo) CSConvert(src string) string {
 
 // EntityData is the fully-resolved template data for one entity type.
 type EntityData struct {
+	Wire            *EntityWireLayout
 	Name            string
 	UpdateTag       int // optional EntityUpdate state tag; delta uses UpdateTag+1
 	LowerName       string
@@ -150,6 +152,7 @@ type WorldExtractDef struct {
 
 // WorldFieldInfo holds computed metadata for a single world data field across languages.
 type WorldFieldInfo struct {
+	Collection   *CollectionInfo
 	SnakeName    string
 	GoName       string
 	FieldName    string // camelCase
@@ -178,6 +181,7 @@ type WorldFieldInfo struct {
 
 // WorldTypeData is the fully-resolved template data for one world data type.
 type WorldTypeData struct {
+	Catalog        *CatalogInfo
 	Name           string // PascalCase, e.g. "Zone"
 	DataName       string // Name + "Data", e.g. "ZoneData"
 	SnakeName      string // snake_case of DataName, e.g. "zone_data"
@@ -204,6 +208,7 @@ type WorldUpdateField struct {
 
 // ProtoTemplateData is passed to the entities.proto template.
 type ProtoTemplateData struct {
+	Layout               *ProtocolLayout
 	Package              string
 	GoPackage            string
 	Dimensions           int
@@ -292,37 +297,22 @@ type CustomTypeData struct {
 // parsed custom types. Returns an empty slice (not an error) if the directory
 // does not exist, so custom types are optional.
 func LoadCustomTypes(typesDir string) ([]CustomTypeData, error) {
-	entries, err := os.ReadDir(typesDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("reading types dir %s: %w", typesDir, err)
-	}
-
 	seen := make(map[string]string)
 	var types []CustomTypeData
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(typesDir, e.Name()))
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", e.Name(), err)
-		}
-		var tf TypeSchemaFile
-		if err := yaml.Unmarshal(data, &tf); err != nil {
-			return nil, fmt.Errorf("parsing %s: %w", e.Name(), err)
-		}
+	_, err := visitYAMLDirectory[TypeSchemaFile](typesDir, "types", true, func(filename string, tf TypeSchemaFile) error {
 		name := strings.TrimSpace(tf.Type)
 		if name == "" {
-			return nil, fmt.Errorf("%s: type schema must set a non-empty type name", e.Name())
+			return fmt.Errorf("%s: type schema must set a non-empty type name", filename)
 		}
 		if prev, ok := seen[name]; ok {
-			return nil, fmt.Errorf("duplicate custom type %q in %s and %s", name, prev, e.Name())
+			return fmt.Errorf("duplicate custom type %q in %s and %s", name, prev, filename)
 		}
-		seen[name] = e.Name()
+		seen[name] = filename
 		types = append(types, BuildCustomTypeData(tf))
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	slices.SortFunc(types, func(a, b CustomTypeData) int {
 		return strings.Compare(a.Name, b.Name)
@@ -389,36 +379,16 @@ type CommandSchemaFile struct {
 // Supports scalar shorthand (`dx: float`) and explicit
 // (`dx: { tag: 1, type: float }`) YAML syntax. Tag is optional for legacy
 // schemas, but when one command field sets it every field in that command must.
-type CommandFieldDef struct {
-	Type string `yaml:"type"`
-	Tag  *int   `yaml:"tag"`
-}
+type CommandFieldDef payloadFieldDef
 
 // UnmarshalYAML allows scalar shorthand (`dx: float`) as well as the explicit
 // object form (`dx: { type: float }`).
 func (c *CommandFieldDef) UnmarshalYAML(value *yaml.Node) error {
-	if value.Kind == yaml.ScalarNode {
-		c.Type = value.Value
-		return nil
-	}
-	type plain CommandFieldDef
-	return value.Decode((*plain)(c))
+	return unmarshalPayloadField(value, (*payloadFieldDef)(c))
 }
 
 // CommandFieldInfo holds computed metadata for a single command field.
-type CommandFieldInfo struct {
-	SnakeName string
-	GoName    string
-	FieldName string // camelCase
-	GoType    string
-	ProtoType string
-	TSType    string
-	TSDefault string // TS default value expression; for custom types this is an object literal
-	CSType    string
-	CSDefault string // C# default value expression; for custom types this is a constructor expression
-	IsCustom  bool   // true when the field type is a custom composite type, not a proto scalar
-	ProtoTag  int
-}
+type CommandFieldInfo PayloadFieldInfo
 
 // CommandData is the fully-resolved template data for one command type.
 type CommandData struct {
@@ -440,28 +410,16 @@ type ClientMessageField struct {
 // LoadSchemas reads all .yaml files from the entity schemas directory and returns parsed entities.
 // customTypes maps type name to resolved CustomTypeData for collection field validation.
 func LoadSchemas(schemasDir string, dimensions int, customTypes map[string]CustomTypeData) ([]EntityData, error) {
-	entries, err := os.ReadDir(schemasDir)
-	if err != nil {
-		return nil, fmt.Errorf("reading schemas dir %s: %w", schemasDir, err)
-	}
-
 	var entities []EntityData
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(schemasDir, e.Name()))
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", e.Name(), err)
-		}
-		var sf SchemaFile
-		if err := yaml.Unmarshal(data, &sf); err != nil {
-			return nil, fmt.Errorf("parsing %s: %w", e.Name(), err)
-		}
+	_, err := visitYAMLDirectory[SchemaFile](schemasDir, "schemas", false, func(filename string, sf SchemaFile) error {
 		if err := validateExplicitEnvelopeTag("entity", sf.Entity, sf.Tag); err != nil {
-			return nil, fmt.Errorf("%s: %w", e.Name(), err)
+			return fmt.Errorf("%s: %w", filename, err)
 		}
 		entities = append(entities, BuildEntityData(sf, dimensions, customTypes))
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	if len(entities) == 0 {
@@ -597,81 +555,19 @@ func BuildEntityData(sf SchemaFile, dimensions int, customTypes map[string]Custo
 		}
 		vi.OwnerOnly = ownerOnly
 
-		isRepeated, isMap, mapKeyType, elemType, isCollection := ParseCollectionType(def.Type)
-		if isCollection {
-			vi.IsRepeated = isRepeated
-			vi.IsMap = isMap
-			vi.ElemProtoType = elemType
-			if isMap {
-				vi.MapKeyProtoType = mapKeyType
-				if _, ok := protoToGo[mapKeyType]; !ok {
-					log.Fatalf("entity %q: var %q: unknown map key type %q", sf.Entity, k, mapKeyType)
-				}
+		c, collectionErr := resolveCollection(def.Type, customTypes, scalarFirst)
+		if collectionErr != nil {
+			if strings.HasPrefix(collectionErr.Error(), "unknown element") {
+				log.Fatalf("entity %q: var %q: %s (not a scalar or custom type)", sf.Entity, k, collectionErr)
+			}
+			log.Fatalf("entity %q: var %q: %s", sf.Entity, k, collectionErr)
+		}
+		if c != nil {
+			c.applyVar(&vi)
+			if c.CustomType != nil {
+				usedTypes[c.ElemProtoType] = *c.CustomType
 			}
 
-			// Resolve element type: custom type or scalar
-			if _, isScalar := protoToGo[elemType]; isScalar {
-				vi.ElemIsCustom = false
-				if isRepeated {
-					goElem := protoToGo[elemType]
-					csElem := protoToCS[elemType]
-					vi.GoType = "[]" + goElem
-					vi.ElemGoType = goElem
-					vi.TSType = protoToTS[elemType] + "[]"
-					vi.ElemTSType = protoToTS[elemType]
-					vi.CSType = "List<" + csElem + ">"
-					vi.ElemCSType = csElem
-				} else {
-					goKey := protoToGo[mapKeyType]
-					goVal := protoToGo[elemType]
-					csKey := protoToCS[mapKeyType]
-					csVal := protoToCS[elemType]
-					vi.GoType = "map[" + goKey + "]" + goVal
-					vi.ElemGoType = goVal
-					vi.MapKeyGoType = goKey
-					tsKey := protoToTS[mapKeyType]
-					tsVal := protoToTS[elemType]
-					vi.TSType = "Record<" + tsKey + ", " + tsVal + ">"
-					vi.ElemTSType = tsVal
-					vi.MapKeyTSType = tsKey
-					vi.CSType = "Dictionary<" + csKey + ", " + csVal + ">"
-					vi.ElemCSType = csVal
-					vi.MapKeyCSType = csKey
-				}
-			} else {
-				ct, ok := customTypes[elemType]
-				if !ok {
-					log.Fatalf("entity %q: var %q: unknown element type %q (not a scalar or custom type)", sf.Entity, k, elemType)
-				}
-				vi.ElemIsCustom = true
-				usedTypes[elemType] = ct
-				if isRepeated {
-					vi.GoType = "[]" + elemType
-					vi.ElemGoType = elemType
-					vi.TSType = elemType + "[]"
-					vi.ElemTSType = elemType
-					vi.CSType = "List<" + elemType + ">"
-					vi.ElemCSType = elemType
-				} else {
-					goKey := protoToGo[mapKeyType]
-					tsKey := protoToTS[mapKeyType]
-					csKey := protoToCS[mapKeyType]
-					vi.GoType = "map[" + goKey + "]" + elemType
-					vi.ElemGoType = elemType
-					vi.MapKeyGoType = goKey
-					vi.TSType = "Record<" + tsKey + ", " + elemType + ">"
-					vi.ElemTSType = elemType
-					vi.MapKeyTSType = tsKey
-					vi.CSType = "Dictionary<" + csKey + ", " + elemType + ">"
-					vi.ElemCSType = elemType
-					vi.MapKeyCSType = csKey
-				}
-			}
-			vi.TSDefault = "[]"
-			vi.CSDefault = "new " + vi.CSType + "()"
-			if isMap {
-				vi.TSDefault = "{}"
-			}
 		} else {
 			goType, ok := protoToGo[def.Type]
 			if !ok {
@@ -694,6 +590,7 @@ func BuildEntityData(sf SchemaFile, dimensions int, customTypes map[string]Custo
 			customTypeNames[vi.ElemTSType] = true
 		}
 
+		vi.CSPresence = vi.DeltaPresenceCS()
 		ed.AllVars = append(ed.AllVars, vi)
 		if sync == "tick" {
 			vi.BitIndex = tickBit
@@ -712,6 +609,9 @@ func BuildEntityData(sf SchemaFile, dimensions int, customTypes map[string]Custo
 		ed.CustomTypeNames = append(ed.CustomTypeNames, name)
 	}
 
+	layout := buildEntityWireLayout(ed, dimensions)
+	ed.Wire = &layout
+
 	return ed
 }
 
@@ -724,43 +624,28 @@ func BuildEntityData(sf SchemaFile, dimensions int, customTypes map[string]Custo
 // does not exist, so commands are optional. Returns an error if a file has an
 // empty command name or if two files declare the same command name.
 func LoadCommands(commandsDir string, customTypes map[string]CustomTypeData) ([]CommandData, error) {
-	entries, err := os.ReadDir(commandsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("reading commands dir %s: %w", commandsDir, err)
-	}
-
 	var commands []CommandData
 	seen := make(map[string]string) // command name -> first YAML filename
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(commandsDir, e.Name()))
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", e.Name(), err)
-		}
-		var cf CommandSchemaFile
-		if err := yaml.Unmarshal(data, &cf); err != nil {
-			return nil, fmt.Errorf("parsing %s: %w", e.Name(), err)
-		}
+	_, err := visitYAMLDirectory[CommandSchemaFile](commandsDir, "commands", true, func(filename string, cf CommandSchemaFile) error {
 		name := strings.TrimSpace(cf.Command)
 		if name == "" {
-			return nil, fmt.Errorf("%s: command schema must set a non-empty command name", e.Name())
+			return fmt.Errorf("%s: command schema must set a non-empty command name", filename)
 		}
 		if prev, ok := seen[name]; ok {
-			return nil, fmt.Errorf("duplicate command name %q in %s and %s", name, prev, e.Name())
+			return fmt.Errorf("duplicate command name %q in %s and %s", name, prev, filename)
 		}
 		if err := validateExplicitEnvelopeTag("command", name, cf.Tag); err != nil {
-			return nil, fmt.Errorf("%s: %w", e.Name(), err)
+			return fmt.Errorf("%s: %w", filename, err)
 		}
 		if err := validateCommandFieldTags(cf); err != nil {
-			return nil, fmt.Errorf("%s: %w", e.Name(), err)
+			return fmt.Errorf("%s: %w", filename, err)
 		}
-		seen[name] = e.Name()
+		seen[name] = filename
 		commands = append(commands, BuildCommandData(cf, customTypes))
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return commands, nil
 }
@@ -783,104 +668,29 @@ func BuildCommandData(cf CommandSchemaFile, customTypes map[string]CustomTypeDat
 		cd.Target = "session"
 	}
 
-	// offset: entity-targeted commands reserve proto field 1 for entity_id.
-	tagOffset := 0
-	if cd.Target == "entity" {
-		tagOffset = 1
+	fields, err := resolvePayloadFields("command", cf.Command, cd.Target, commandFieldDefinitions(cf.Fields), customTypes)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, field := range fields {
+		cd.Fields = append(cd.Fields, CommandFieldInfo(field))
 	}
 
-	keys := SortedKeys(cf.Fields)
-	explicitTags := commandUsesExplicitFieldTags(cf.Fields)
-	if explicitTags {
-		slices.SortFunc(keys, func(a, b string) int { return *cf.Fields[a].Tag - *cf.Fields[b].Tag })
-	} else {
-		// Sort alphabetically for stable, deterministic legacy assignment.
-		slices.SortFunc(keys, func(a, b string) int { return strings.Compare(a, b) })
-	}
-
-	for i, k := range keys {
-		def := cf.Fields[k]
-
-		// Collection types are not supported on commands; reject with a clear message.
-		if _, _, _, _, isCollection := ParseCollectionType(def.Type); isCollection {
-			log.Fatalf("command %q: field %q: collection types (list/dict) are not supported on commands; use a flat custom type", cf.Command, k)
-		}
-
-		var fi CommandFieldInfo
-		fi.SnakeName = k
-		fi.GoName = SnakeToPascal(k)
-		fi.FieldName = SnakeToCamel(k)
-		if explicitTags {
-			fi.ProtoTag = *def.Tag
-		} else {
-			fi.ProtoTag = (i + 1) + tagOffset
-		}
-
-		if goType, ok := protoToGo[def.Type]; ok {
-			// Proto scalar type.
-			tsType := protoToTS[def.Type]
-			csType := protoToCS[def.Type]
-			fi.GoType = goType
-			fi.ProtoType = def.Type
-			fi.TSType = tsType
-			fi.TSDefault = tsDefaults[tsType]
-			fi.CSType = csType
-			fi.CSDefault = csDefaults[csType]
-		} else if ct, ok := customTypes[def.Type]; ok {
-			// Custom composite type. TSDefault is an inline TS object literal built
-			// from the custom type's scalar fields. This assumes custom type fields
-			// are scalars only (enforced by BuildCustomTypeData); if nested custom
-			// types are ever allowed, TSDefault construction would need to be recursive.
-			parts := make([]string, 0, len(ct.Fields))
-			for _, cf := range ct.Fields {
-				parts = append(parts, cf.FieldName+": "+tsDefaults[cf.TSType])
-			}
-			fi.GoType = def.Type
-			fi.ProtoType = def.Type
-			fi.TSType = def.Type
-			fi.TSDefault = "{ " + strings.Join(parts, ", ") + " }"
-			fi.CSType = def.Type
-			fi.CSDefault = "new " + def.Type + "()"
-			fi.IsCustom = true
-		} else {
-			log.Fatalf("unknown type %q for field %q in command %q", def.Type, k, cf.Command)
-		}
-
-		cd.Fields = append(cd.Fields, fi)
-	}
 	return cd
 }
 
-func commandUsesExplicitFieldTags(fields map[string]CommandFieldDef) bool {
-	for _, def := range fields {
-		if def.Tag != nil {
-			return true
-		}
+func commandFieldDefinitions(fields map[string]CommandFieldDef) map[string]payloadFieldDef {
+	result := make(map[string]payloadFieldDef, len(fields))
+	for name, field := range fields {
+		result[name] = payloadFieldDef(field)
 	}
-	return false
+	return result
+}
+func validateCommandFieldTags(value CommandSchemaFile) error {
+	return validatePayloadFieldTags("command", value.Command, value.Target, commandFieldDefinitions(value.Fields))
 }
 
-func validateCommandFieldTags(cf CommandSchemaFile) error {
-	if !commandUsesExplicitFieldTags(cf.Fields) {
-		return nil
-	}
-	occupied := make(map[int]string, len(cf.Fields)+1)
-	if strings.TrimSpace(cf.Target) == "entity" {
-		occupied[1] = "entity_id"
-	}
-	for _, name := range SortedKeys(cf.Fields) {
-		def := cf.Fields[name]
-		if def.Tag == nil {
-			return fmt.Errorf("command %q: field %q: tag is required when any field sets tag", cf.Command, name)
-		}
-		if err := claimEnvelopeTag(occupied, "command "+cf.Command, name, *def.Tag); err != nil {
-			return err
-		}
-
-		// ValidateCommands checks that entity-targeted commands reference a known entity type.
-	}
-	return nil
-}
+// ValidateCommands checks entity-targeted commands reference a declared entity.
 func ValidateCommands(commands []CommandData, entities []EntityData) error {
 	entityNames := make(map[string]bool, len(entities))
 	for _, e := range entities {
@@ -914,36 +724,16 @@ type EventSchemaFile struct {
 // Supports scalar shorthand (`damage: int32`) and explicit
 // (`damage: { tag: 1, type: int32 }`) YAML syntax. Tag is optional for legacy
 // schemas, but when one event field sets it every field in that event must.
-type EventFieldDef struct {
-	Type string `yaml:"type"`
-	Tag  *int   `yaml:"tag"`
-}
+type EventFieldDef payloadFieldDef
 
 // UnmarshalYAML allows scalar shorthand (`damage: int32`) as well as the explicit
 // object form (`damage: { type: int32 }`).
 func (e *EventFieldDef) UnmarshalYAML(value *yaml.Node) error {
-	if value.Kind == yaml.ScalarNode {
-		e.Type = value.Value
-		return nil
-	}
-	type plain EventFieldDef
-	return value.Decode((*plain)(e))
+	return unmarshalPayloadField(value, (*payloadFieldDef)(e))
 }
 
 // EventFieldInfo holds computed metadata for a single event field.
-type EventFieldInfo struct {
-	SnakeName string
-	GoName    string
-	FieldName string // camelCase
-	GoType    string
-	ProtoType string
-	TSType    string
-	TSDefault string
-	CSType    string
-	CSDefault string
-	IsCustom  bool // true when the field type is a custom composite type
-	ProtoTag  int
-}
+type EventFieldInfo PayloadFieldInfo
 
 // EventData is the fully-resolved template data for one server event type.
 type EventData struct {
@@ -968,43 +758,28 @@ type ServerEventField struct {
 // does not exist, so events are optional. Returns an error if a file has an
 // empty event name or if two files declare the same event name.
 func LoadEvents(eventsDir string, customTypes map[string]CustomTypeData) ([]EventData, error) {
-	entries, err := os.ReadDir(eventsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("reading events dir %s: %w", eventsDir, err)
-	}
-
 	var events []EventData
 	seen := make(map[string]string) // event name -> first YAML filename
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(eventsDir, e.Name()))
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", e.Name(), err)
-		}
-		var ef EventSchemaFile
-		if err := yaml.Unmarshal(data, &ef); err != nil {
-			return nil, fmt.Errorf("parsing %s: %w", e.Name(), err)
-		}
+	_, err := visitYAMLDirectory[EventSchemaFile](eventsDir, "events", true, func(filename string, ef EventSchemaFile) error {
 		name := strings.TrimSpace(ef.Event)
 		if name == "" {
-			return nil, fmt.Errorf("%s: event schema must set a non-empty event name", e.Name())
+			return fmt.Errorf("%s: event schema must set a non-empty event name", filename)
 		}
 		if prev, ok := seen[name]; ok {
-			return nil, fmt.Errorf("duplicate event name %q in %s and %s", name, prev, e.Name())
+			return fmt.Errorf("duplicate event name %q in %s and %s", name, prev, filename)
 		}
 		if err := validateExplicitEnvelopeTag("event", name, ef.Tag); err != nil {
-			return nil, fmt.Errorf("%s: %w", e.Name(), err)
+			return fmt.Errorf("%s: %w", filename, err)
 		}
 		if err := validateEventFieldTags(ef); err != nil {
-			return nil, fmt.Errorf("%s: %w", e.Name(), err)
+			return fmt.Errorf("%s: %w", filename, err)
 		}
-		seen[name] = e.Name()
+		seen[name] = filename
 		events = append(events, BuildEventData(ef, customTypes))
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return events, nil
 }
@@ -1028,97 +803,26 @@ func BuildEventData(ef EventSchemaFile, customTypes map[string]CustomTypeData) E
 		FOIOnly:    ef.FOIOnly,
 	}
 
-	// offset: entity-targeted events reserve proto field 1 for entity_id.
-	tagOffset := 0
-	if target == "entity" {
-		tagOffset = 1
+	fields, err := resolvePayloadFields("event", ef.Event, ed.Target, eventFieldDefinitions(ef.Fields), customTypes)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, field := range fields {
+		ed.Fields = append(ed.Fields, EventFieldInfo(field))
 	}
 
-	keys := SortedKeys(ef.Fields)
-	explicitTags := eventUsesExplicitFieldTags(ef.Fields)
-
-	if explicitTags {
-		slices.SortFunc(keys, func(a, b string) int { return *ef.Fields[a].Tag - *ef.Fields[b].Tag })
-	} else {
-		// Preserve legacy alphabetical assignment when no tags are authored.
-		slices.SortFunc(keys, func(a, b string) int { return strings.Compare(a, b) })
-	}
-
-	for i, k := range keys {
-		def := ef.Fields[k]
-
-		// Collection types are not supported on events; reject with a clear message.
-		if _, _, _, _, isCollection := ParseCollectionType(def.Type); isCollection {
-			log.Fatalf("event %q: field %q: collection types (list/dict) are not supported on events; use a flat custom type", ef.Event, k)
-		}
-
-		var fi EventFieldInfo
-		fi.SnakeName = k
-		fi.GoName = SnakeToPascal(k)
-		fi.FieldName = SnakeToCamel(k)
-		if explicitTags {
-			fi.ProtoTag = *def.Tag
-		} else {
-			fi.ProtoTag = (i + 1) + tagOffset
-		}
-
-		if goType, ok := protoToGo[def.Type]; ok {
-			tsType := protoToTS[def.Type]
-			csType := protoToCS[def.Type]
-			fi.GoType = goType
-			fi.ProtoType = def.Type
-			fi.TSType = tsType
-			fi.TSDefault = tsDefaults[tsType]
-			fi.CSType = csType
-			fi.CSDefault = csDefaults[csType]
-		} else if ct, ok := customTypes[def.Type]; ok {
-			parts := make([]string, 0, len(ct.Fields))
-			for _, cf := range ct.Fields {
-				parts = append(parts, cf.FieldName+": "+tsDefaults[cf.TSType])
-			}
-			fi.GoType = def.Type
-			fi.ProtoType = def.Type
-			fi.TSType = def.Type
-			fi.TSDefault = "{ " + strings.Join(parts, ", ") + " }"
-			fi.CSType = def.Type
-			fi.CSDefault = "new " + def.Type + "()"
-			fi.IsCustom = true
-		} else {
-			log.Fatalf("unknown type %q for field %q in event %q", def.Type, k, ef.Event)
-		}
-
-		ed.Fields = append(ed.Fields, fi)
-	}
 	return ed
 }
 
-func eventUsesExplicitFieldTags(fields map[string]EventFieldDef) bool {
-	for _, def := range fields {
-		if def.Tag != nil {
-			return true
-		}
+func eventFieldDefinitions(fields map[string]EventFieldDef) map[string]payloadFieldDef {
+	result := make(map[string]payloadFieldDef, len(fields))
+	for name, field := range fields {
+		result[name] = payloadFieldDef(field)
 	}
-	return false
+	return result
 }
-
-func validateEventFieldTags(ef EventSchemaFile) error {
-	if !eventUsesExplicitFieldTags(ef.Fields) {
-		return nil
-	}
-	occupied := make(map[int]string, len(ef.Fields)+1)
-	if strings.TrimSpace(ef.Target) == "entity" {
-		occupied[1] = "entity_id"
-	}
-	for _, name := range SortedKeys(ef.Fields) {
-		def := ef.Fields[name]
-		if def.Tag == nil {
-			return fmt.Errorf("event %q: field %q: tag is required when any field sets tag", ef.Event, name)
-		}
-		if err := claimEnvelopeTag(occupied, "event "+ef.Event, name, *def.Tag); err != nil {
-			return err
-		}
-	}
-	return nil
+func validateEventFieldTags(value EventSchemaFile) error {
+	return validatePayloadFieldTags("event", value.Event, value.Target, eventFieldDefinitions(value.Fields))
 }
 
 // ValidateEvents checks event schemas for consistency: target must be a known
@@ -1163,45 +867,33 @@ func ValidateEvents(events []EventData, entities []EntityData) error {
 // world schemas are optional. Returns an error if a file has an empty world
 // name or if two files declare the same world type.
 func LoadWorldSchemas(worldDir string, customTypes map[string]CustomTypeData) ([]WorldTypeData, error) {
-	entries, err := os.ReadDir(worldDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("reading world dir %s: %w", worldDir, err)
-	}
-
 	type loadedWorld struct {
 		file string
 		wf   WorldSchemaFile
 	}
 	var loaded []loadedWorld
 	seen := make(map[string]string) // world type name -> first YAML filename
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(worldDir, e.Name()))
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", e.Name(), err)
-		}
-		var wf WorldSchemaFile
-		if err := yaml.Unmarshal(data, &wf); err != nil {
-			return nil, fmt.Errorf("parsing %s: %w", e.Name(), err)
-		}
+	exists, err := visitYAMLDirectory[WorldSchemaFile](worldDir, "world", true, func(filename string, wf WorldSchemaFile) error {
 		name := strings.TrimSpace(wf.World)
 		if name == "" {
-			return nil, fmt.Errorf("%s: world schema must set a non-empty world type name", e.Name())
+			return fmt.Errorf("%s: world schema must set a non-empty world type name", filename)
 		}
 		if prev, ok := seen[name]; ok {
-			return nil, fmt.Errorf("duplicate world type %q in %s and %s", name, prev, e.Name())
+			return fmt.Errorf("duplicate world type %q in %s and %s", name, prev, filename)
 		}
-		if err := validateWorldSource(e.Name(), wf.Source); err != nil {
-			return nil, err
+		if err := validateWorldSource(filename, wf.Source); err != nil {
+			return err
 		}
-		seen[name] = e.Name()
+		seen[name] = filename
 		wf.World = name
-		loaded = append(loaded, loadedWorld{file: e.Name(), wf: wf})
+		loaded = append(loaded, loadedWorld{file: filename, wf: wf})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, nil
 	}
 	slices.SortFunc(loaded, func(a, b loadedWorld) int {
 		return strings.Compare(a.wf.World, b.wf.World)
@@ -1278,60 +970,15 @@ func BuildWorldTypeData(wf WorldSchemaFile, customTypes map[string]CustomTypeDat
 		wt.CatalogKeyField = wf.Source.Key
 		wt.CatalogItemType = wf.Source.Type
 
-		ct, ok := customTypes[wf.Source.Type]
-		if !ok {
-			log.Fatalf("world %q: catalog source references unknown custom type %q", wf.World, wf.Source.Type)
+		catalog, err := ResolveCatalog(wf.World, wf.Source, customTypes)
+		if err != nil {
+			log.Fatal(err)
 		}
-
-		fi := WorldFieldInfo{
-			SnakeName:     "items",
-			GoName:        "Items",
-			FieldName:     "items",
-			TSProtoField:  "items",
-			CSProtoField:  "Items",
-			ProtoTag:      1,
-			ElemProtoType: wf.Source.Type,
-			ElemIsCustom:  true,
-			ElemGoType:    wf.Source.Type,
-			ElemTSType:    wf.Source.Type,
-			ElemCSType:    wf.Source.Type,
-		}
-
-		if wf.Source.Key == "" {
-			// List mode
-			fi.IsRepeated = true
-			fi.GoType = "[]" + wf.Source.Type
-			fi.TSType = wf.Source.Type + "[]"
-			fi.TSDefault = "[]"
-			fi.CSType = "List<" + wf.Source.Type + ">"
-			fi.CSDefault = "new " + fi.CSType + "()"
-		} else {
-			// Dict mode: find the key field's type on the custom type
-			var keyProtoType, keyGoType, keyTSType, keyCSType string
-			for _, cf := range ct.Fields {
-				if cf.SnakeName == wf.Source.Key {
-					keyProtoType = cf.ProtoType
-					keyGoType = cf.GoType
-					keyTSType = cf.TSType
-					keyCSType = cf.CSType
-					break
-				}
-			}
-			if keyProtoType == "" {
-				log.Fatalf("world %q: catalog key %q not found on type %q", wf.World, wf.Source.Key, wf.Source.Type)
-			}
-			fi.IsMap = true
-			fi.MapKeyProtoType = keyProtoType
-			fi.MapKeyGoType = keyGoType
-			fi.MapKeyTSType = keyTSType
-			fi.MapKeyCSType = keyCSType
-			fi.GoType = "map[" + keyGoType + "]" + wf.Source.Type
-			fi.TSType = "Record<" + keyTSType + ", " + wf.Source.Type + ">"
-			fi.TSDefault = "{}"
-			fi.CSType = "Dictionary<" + keyCSType + ", " + wf.Source.Type + ">"
-			fi.CSDefault = "new " + fi.CSType + "()"
-			wt.CatalogKeyTSType = keyTSType
-			wt.CatalogKeyCSType = keyCSType
+		wt.Catalog = catalog
+		fi := WorldFieldInfo{SnakeName: "items", GoName: "Items", FieldName: "items", TSProtoField: "items", CSProtoField: "Items", ProtoTag: 1}
+		catalog.Collection.applyWorld(&fi)
+		if catalog.Key != nil {
+			wt.CatalogKeyTSType, wt.CatalogKeyCSType = catalog.Key.TSType, catalog.Key.CSType
 		}
 
 		wt.Fields = []WorldFieldInfo{fi}
@@ -1383,56 +1030,13 @@ func BuildWorldTypeData(wf WorldSchemaFile, customTypes map[string]CustomTypeDat
 		}
 		seen[rf.name] = rf.typ
 
-		// Check for collection types first.
-		isRepeated, isMap, mapKeyType, elemType, isCollection := ParseCollectionType(rf.typ)
-		if isCollection {
-			fi := WorldFieldInfo{
-				SnakeName:     rf.name,
-				GoName:        SnakeToPascal(rf.name),
-				FieldName:     SnakeToCamel(rf.name),
-				TSProtoField:  SnakeToCamel(rf.name),
-				CSProtoField:  SnakeToPascal(rf.name),
-				ProtoTag:      protoTag,
-				IsRepeated:    isRepeated,
-				IsMap:         isMap,
-				ElemProtoType: elemType,
-			}
-			if isMap {
-				fi.MapKeyProtoType = mapKeyType
-				goKey, ok := protoToGo[mapKeyType]
-				if !ok {
-					log.Fatalf("world %q: field %q: unknown map key type %q", wf.World, rf.name, mapKeyType)
-				}
-				fi.MapKeyGoType = goKey
-				fi.MapKeyTSType = protoToTS[mapKeyType]
-				fi.MapKeyCSType = protoToCS[mapKeyType]
-			}
-			if ct, ok := customTypes[elemType]; ok {
-				fi.ElemIsCustom = true
-				fi.ElemGoType = elemType
-				fi.ElemTSType = elemType
-				fi.ElemCSType = elemType
-				_ = ct
-			} else if goElem, ok := protoToGo[elemType]; ok {
-				fi.ElemGoType = goElem
-				fi.ElemTSType = protoToTS[elemType]
-				fi.ElemCSType = protoToCS[elemType]
-			} else {
-				log.Fatalf("world %q: field %q: unknown element type %q", wf.World, rf.name, elemType)
-			}
-			if isRepeated {
-				fi.GoType = "[]" + fi.ElemGoType
-				fi.TSType = fi.ElemTSType + "[]"
-				fi.TSDefault = "[]"
-				fi.CSType = "List<" + fi.ElemCSType + ">"
-				fi.CSDefault = "new " + fi.CSType + "()"
-			} else {
-				fi.GoType = "map[" + fi.MapKeyGoType + "]" + fi.ElemGoType
-				fi.TSType = "Record<" + fi.MapKeyTSType + ", " + fi.ElemTSType + ">"
-				fi.TSDefault = "{}"
-				fi.CSType = "Dictionary<" + fi.MapKeyCSType + ", " + fi.ElemCSType + ">"
-				fi.CSDefault = "new " + fi.CSType + "()"
-			}
+		c, err := resolveCollection(rf.typ, customTypes, customFirst)
+		if err != nil {
+			log.Fatalf("world %q: field %q: %s", wf.World, rf.name, err)
+		}
+		if c != nil {
+			fi := WorldFieldInfo{SnakeName: rf.name, GoName: SnakeToPascal(rf.name), FieldName: SnakeToCamel(rf.name), TSProtoField: SnakeToCamel(rf.name), CSProtoField: SnakeToPascal(rf.name), ProtoTag: protoTag}
+			c.applyWorld(&fi)
 			protoTag++
 			wt.Fields = append(wt.Fields, fi)
 			continue
@@ -1527,6 +1131,7 @@ func ValidateCatalogFile(path, keyField string) error {
 
 // BuildProtoData assembles the template data for entities.proto from entities,
 // commands, world types, config, custom types, and events.
+// It retains legacy unchecked construction; Bake uses ResolveProtoData instead.
 func BuildProtoData(cfg *Config, entities []EntityData, commands []CommandData, worldTypes []WorldTypeData, customTypes []CustomTypeData, events []EventData) ProtoTemplateData {
 	pd := ProtoTemplateData{
 		Package:     cfg.Proto.Package,
@@ -1538,103 +1143,24 @@ func BuildProtoData(cfg *Config, entities []EntityData, commands []CommandData, 
 		CustomTypes: customTypes,
 	}
 
-	tag := 1
-	for _, e := range entities {
-		if e.UpdateTag != 0 {
-			continue
+	layout := allocateProtocolLayout(entities, commands, events, worldTypes)
+	pd.Layout = &layout
+	for _, v := range layout.Entity.Variants {
+		if v.Role == "removal" {
+			pd.EntityRemovedTag = v.Tag
+		} else {
+			pd.EntityUpdateFields = append(pd.EntityUpdateFields, EntityUpdateField{v.MessageType, v.SnakeName, v.Tag})
 		}
-		pd.EntityUpdateFields = append(pd.EntityUpdateFields, EntityUpdateField{
-			MessageType: e.Name + "State",
-			SnakeName:   ToSnakeCase(e.Name) + "_state",
-			Tag:         tag,
-		})
-		tag++
-		pd.EntityUpdateFields = append(pd.EntityUpdateFields, EntityUpdateField{
-			MessageType: e.Name + "Delta",
-			SnakeName:   ToSnakeCase(e.Name) + "_delta",
-			Tag:         tag,
-		})
-		tag++
 	}
-	pd.EntityRemovedTag = tag
-	for _, e := range entities {
-		if e.UpdateTag == 0 {
-			continue
-		}
-		pd.EntityUpdateFields = append(pd.EntityUpdateFields,
-			EntityUpdateField{
-				MessageType: e.Name + "State",
-				SnakeName:   ToSnakeCase(e.Name) + "_state",
-				Tag:         e.UpdateTag,
-			},
-			EntityUpdateField{
-				MessageType: e.Name + "Delta",
-				SnakeName:   ToSnakeCase(e.Name) + "_delta",
-				Tag:         e.UpdateTag + 1,
-			},
-		)
+	for _, v := range layout.Command.Variants {
+		pd.ClientMessageFields = append(pd.ClientMessageFields, ClientMessageField{v.MessageType, v.SnakeName, v.Tag})
 	}
-
-	cmdTag := 1
-	for _, c := range commands {
-		if c.UpdateTag != 0 {
-			continue
-		}
-		pd.ClientMessageFields = append(pd.ClientMessageFields, ClientMessageField{
-			MessageType: c.Name + "Command",
-			SnakeName:   ToSnakeCase(c.Name),
-			Tag:         cmdTag,
-		})
-		cmdTag++
+	for _, v := range layout.Event.Variants {
+		pd.ServerEventFields = append(pd.ServerEventFields, ServerEventField{v.MessageType, v.SnakeName, v.Tag})
 	}
-	for _, c := range commands {
-		if c.UpdateTag == 0 {
-			continue
-		}
-		pd.ClientMessageFields = append(pd.ClientMessageFields, ClientMessageField{
-			MessageType: c.Name + "Command",
-			SnakeName:   ToSnakeCase(c.Name),
-			Tag:         c.UpdateTag,
-		})
+	for _, v := range layout.World.Variants {
+		pd.WorldUpdateFields = append(pd.WorldUpdateFields, WorldUpdateField{v.MessageType, v.SnakeName, v.Tag})
 	}
-
-	pd.WorldTypes = worldTypes
-	for _, wt := range worldTypes {
-		tag := wt.UpdateTag
-		if tag < 1 {
-			// Defensive fallback for hand-built test fixtures that omit UpdateTag.
-			tag = len(pd.WorldUpdateFields) + 1
-		}
-		pd.WorldUpdateFields = append(pd.WorldUpdateFields, WorldUpdateField{
-			MessageType: wt.DataName,
-			SnakeName:   wt.SnakeName,
-			Tag:         tag,
-		})
-	}
-
-	pd.Events = events
-	evtTag := 1
-	for _, ev := range events {
-		if ev.UpdateTag != 0 {
-			continue
-		}
-		pd.ServerEventFields = append(pd.ServerEventFields, ServerEventField{
-			MessageType: ev.Name + "Event",
-			SnakeName:   ToSnakeCase(ev.Name),
-			Tag:         evtTag,
-		})
-		evtTag++
-	}
-	for _, ev := range events {
-		if ev.UpdateTag == 0 {
-			continue
-		}
-		pd.ServerEventFields = append(pd.ServerEventFields, ServerEventField{
-			MessageType: ev.Name + "Event",
-			SnakeName:   ToSnakeCase(ev.Name),
-			Tag:         ev.UpdateTag,
-		})
-	}
-
+	pd.WorldTypes, pd.Events = worldTypes, events
 	return pd
 }

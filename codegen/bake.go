@@ -69,7 +69,8 @@ func Bake(projectRoot string) error {
 	if err := schema.ValidateEvents(events, entities); err != nil {
 		return err
 	}
-	if err := schema.ValidateEnvelopeTags(entities, commands, events); err != nil {
+	protoData, err := schema.ResolveProtoData(cfg, entities, commands, worldTypes, customTypesList, events)
+	if err != nil {
 		return err
 	}
 
@@ -89,34 +90,16 @@ func Bake(projectRoot string) error {
 		if wt.Source == nil || wt.Source.Format != "catalog" {
 			continue
 		}
-		// Validate that the declared key field actually exists on the custom type.
-		if wt.Source.Key != "" {
-			ct, ok := customTypesMap[wt.Source.Type]
-			if !ok {
-				return fmt.Errorf("world %q: catalog type %q not found in custom types", wt.Name, wt.Source.Type)
-			}
-			found := false
-			for _, cf := range ct.Fields {
-				if cf.SnakeName == wt.Source.Key {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return fmt.Errorf("world %q: catalog key %q not found on type %q", wt.Name, wt.Source.Key, wt.Source.Type)
-			}
-		}
 		catalogPath := filepath.Join(projectRoot, wt.Source.File)
 		if err := schema.ValidateCatalogFile(catalogPath, wt.Source.Key); err != nil {
 			return fmt.Errorf("catalog %s: %w", wt.Source.File, err)
 		}
 	}
 
-	if err := generateProto(projectRoot, cfg, entities, commands, worldTypes, customTypesList, events); err != nil {
+	if err := generateProto(projectRoot, cfg, protoData); err != nil {
 		return err
 	}
 
-	protoData := schema.BuildProtoData(cfg, entities, commands, worldTypes, customTypesList, events)
 	protoData.ProtocolConstantSets = protocolConstantSets
 
 	// Populate each entity's Events field with events that target it.
@@ -261,8 +244,7 @@ func Bake(projectRoot string) error {
 	return nil
 }
 
-func generateProto(projectRoot string, cfg *schema.Config, entities []schema.EntityData, commands []schema.CommandData, worldTypes []schema.WorldTypeData, customTypes []schema.CustomTypeData, events []schema.EventData) error {
-	data := schema.BuildProtoData(cfg, entities, commands, worldTypes, customTypes, events)
+func generateProto(projectRoot string, cfg *schema.Config, data schema.ProtoTemplateData) error {
 	t, err := loadEmbeddedTemplate("templates/proto/entities.proto.tmpl")
 	if err != nil {
 		return err
@@ -319,8 +301,9 @@ func generateIntegration(projectRoot string, integCfg schema.IntegrationConfig, 
 
 func loadEmbeddedTemplate(path string) (*template.Template, error) {
 	funcs := template.FuncMap{
-		"LowerFirst": schema.LcFirst,
-		"Quote":      func(s string) string { return fmt.Sprintf("%q", s) },
+		"FullStateProjection": goFullStateProjection,
+		"LowerFirst":          schema.LcFirst,
+		"Quote":               func(s string) string { return fmt.Sprintf("%q", s) },
 		"Add": func(values ...int) int {
 			sum := 0
 			for _, v := range values {

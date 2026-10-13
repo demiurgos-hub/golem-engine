@@ -9,21 +9,6 @@ import (
 	"github.com/demiurgos-hub/golem-engine/schema"
 )
 
-// protoWireType maps protobuf scalar type names to their wire type numbers.
-var protoWireType = map[string]int{
-	"double": 1, // 64-bit
-	"float":  5, // 32-bit
-	"int32":  0, // varint
-	"int64":  0,
-	"uint32": 0,
-	"uint64": 0,
-	"sint32": 0,
-	"sint64": 0,
-	"bool":   0,
-	"string": 2, // length-delimited
-	"bytes":  2,
-}
-
 // protoReaderMethod maps protobuf types to the PbReader method name.
 var protoReaderMethod = map[string]string{
 	"double": "double",
@@ -52,21 +37,6 @@ var protoWriterMethod = map[string]string{
 	"bool":   "bool",
 	"string": "string",
 	"bytes":  "bytes",
-}
-
-// protoTSDefault returns the TypeScript zero value for a protobuf scalar type.
-var protoTSDefault = map[string]string{
-	"double": "0",
-	"float":  "0",
-	"int32":  "0",
-	"int64":  "0",
-	"uint32": "0",
-	"uint64": "0",
-	"sint32": "0",
-	"sint64": "0",
-	"bool":   "false",
-	"string": `""`,
-	"bytes":  "new Uint8Array()",
 }
 
 // protoTSZero returns the TypeScript equality check against zero for encode skipping.
@@ -165,49 +135,18 @@ func writeJSProtocolConstants(b *strings.Builder, sets []schema.ProtocolConstant
 	}
 }
 
-type msgField struct {
-	Name            string
-	ProtoType       string
-	Tag             int
-	IsOptional      bool // true for scalar delta fields
-	IsRepeated      bool
-	IsMap           bool
-	MapKeyProtoType string
-	ElemProtoType   string
-	ElemIsCustom    bool
-	ElemTSType      string
-	MapKeyTSType    string
-}
-
 func entityStateFields(ent schema.EntityData) []msgField {
-	fields := []msgField{
-		{Name: "entityId", ProtoType: "int64", Tag: 1},
-		{Name: "posX", ProtoType: "float", Tag: 2},
-		{Name: "posY", ProtoType: "float", Tag: 3},
-	}
-	if ent.Is3D {
-		fields = append(fields, msgField{Name: "posZ", ProtoType: "float", Tag: 4})
-	}
-	fields = append(fields, msgField{Name: "revision", ProtoType: "uint64", Tag: entityRevisionProtoTag})
-	for _, v := range ent.AllVars {
-		fields = append(fields, varInfoToEntityMsgField(ent, v, false))
+	var fields []msgField
+	for _, field := range ent.WireLayout().State {
+		fields = append(fields, varInfoToMsgField(field.VarInfo, field.Optional))
 	}
 	return fields
 }
 
 func entityDeltaFields(ent schema.EntityData) []msgField {
-	fields := []msgField{
-		{Name: "entityId", ProtoType: "int64", Tag: 1},
-		{Name: "posX", ProtoType: "float", Tag: 2, IsOptional: true},
-		{Name: "posY", ProtoType: "float", Tag: 3, IsOptional: true},
-	}
-	if ent.Is3D {
-		fields = append(fields, msgField{Name: "posZ", ProtoType: "float", Tag: 4, IsOptional: true})
-	}
-	fields = append(fields, msgField{Name: "revision", ProtoType: "uint64", Tag: entityRevisionProtoTag})
-	for _, v := range ent.TickVars {
-		mf := varInfoToEntityMsgField(ent, v, true)
-		fields = append(fields, mf)
+	var fields []msgField
+	for _, field := range ent.WireLayout().Delta {
+		fields = append(fields, varInfoToMsgField(field.VarInfo, field.Optional))
 	}
 	return fields
 }
@@ -225,30 +164,21 @@ func varInfoToMsgField(v schema.VarInfo, isDelta bool) msgField {
 		MapKeyProtoType: v.MapKeyProtoType,
 		ElemProtoType:   v.ElemProtoType,
 		ElemIsCustom:    v.ElemIsCustom,
-		ElemTSType:      v.ElemTSType,
-		MapKeyTSType:    v.MapKeyTSType,
+		ElemType:        v.ElemTSType,
+		MapKeyType:      v.MapKeyTSType,
 		IsOptional:      isDelta,
 	}
-	return mf
-}
-
-func varInfoToEntityMsgField(ent schema.EntityData, v schema.VarInfo, isDelta bool) msgField {
-	mf := varInfoToMsgField(v, isDelta)
-	mf.Tag = entityProtoTag(ent, v.UserTag)
+	if c := v.Collection; c != nil {
+		mf.useCollection(c, c.ElemTSType, c.MapKeyTSType)
+	}
 	return mf
 }
 
 func tsType(protoType string) string {
-	switch protoType {
-	case "bool":
-		return "boolean"
-	case "string":
-		return "string"
-	case "bytes":
-		return "Uint8Array"
-	default:
-		return "number"
+	if info, ok := schema.LookupScalar(protoType); ok {
+		return info.TSType
 	}
+	return "number"
 }
 
 // writeMessageClass emits a TS class with static encode/decode.
@@ -262,20 +192,20 @@ func writeMessageClass(b *strings.Builder, name string, fields []msgField, _ boo
 		switch {
 		case f.IsRepeated:
 			if f.IsOptional {
-				w("  %s?: %s[];", f.Name, f.ElemTSType)
+				w("  %s?: %s[];", f.Name, f.ElemType)
 			} else {
-				w("  %s: %s[] = [];", f.Name, f.ElemTSType)
+				w("  %s: %s[] = [];", f.Name, f.ElemType)
 			}
 		case f.IsMap:
 			if f.IsOptional {
-				w("  %s?: Record<%s, %s>;", f.Name, f.MapKeyTSType, f.ElemTSType)
+				w("  %s?: Record<%s, %s>;", f.Name, f.MapKeyType, f.ElemType)
 			} else {
-				w("  %s: Record<%s, %s> = {};", f.Name, f.MapKeyTSType, f.ElemTSType)
+				w("  %s: Record<%s, %s> = {};", f.Name, f.MapKeyType, f.ElemType)
 			}
 		case f.IsOptional && !isEntityId:
 			w("  %s?: %s;", f.Name, tsType(f.ProtoType))
 		default:
-			w("  %s: %s = %s;", f.Name, tsType(f.ProtoType), protoTSDefault[f.ProtoType])
+			w("  %s: %s = %s;", f.Name, tsType(f.ProtoType), scalarTSDefault(f.ProtoType))
 		}
 	}
 	w("")
@@ -290,19 +220,8 @@ func writeMessageClass(b *strings.Builder, name string, fields []msgField, _ boo
 			writeJSCollectionEncode(b, f)
 		case f.IsMap:
 			writeJSMapEncode(b, f)
-		case f.IsOptional && !isEntityId:
-			wt := protoWireType[f.ProtoType]
-			wm := protoWriterMethod[f.ProtoType]
-			w("    if (m.%s !== undefined) w.tag(%d, %d).%s(m.%s);", f.Name, f.Tag, wt, wm, f.Name)
-		case f.ProtoType == "bytes":
-			wt := protoWireType[f.ProtoType]
-			wm := protoWriterMethod[f.ProtoType]
-			w("    if (m.%s.length > 0) w.tag(%d, %d).%s(m.%s);", f.Name, f.Tag, wt, wm, f.Name)
 		default:
-			wt := protoWireType[f.ProtoType]
-			wm := protoWriterMethod[f.ProtoType]
-			zero := protoTSZero[f.ProtoType]
-			w("    if (m.%s !== %s) w.tag(%d, %d).%s(m.%s);", f.Name, zero, f.Tag, wt, wm, f.Name)
+			writeJSScalarEncode(b, f.Name, f.ProtoType, f.Tag, f.IsOptional && !isEntityId, "    ")
 		}
 	}
 	w("    return w.finish();")
@@ -351,14 +270,7 @@ func writeJSCustomTypeInterface(b *strings.Builder, ct schema.CustomTypeData) {
 	w("function encode%s(m: %s): Uint8Array {", ct.Name, ct.Name)
 	w("  const w = new PbWriter();")
 	for _, f := range ct.Fields {
-		wt := protoWireType[f.ProtoType]
-		wm := protoWriterMethod[f.ProtoType]
-		if f.ProtoType == "bytes" {
-			w("  if (m.%s.length > 0) w.tag(%d, %d).%s(m.%s);", f.FieldName, f.ProtoTag, wt, wm, f.FieldName)
-		} else {
-			zero := protoTSZero[f.ProtoType]
-			w("  if (m.%s !== %s) w.tag(%d, %d).%s(m.%s);", f.FieldName, zero, f.ProtoTag, wt, wm, f.FieldName)
-		}
+		writeJSScalarEncode(b, f.FieldName, f.ProtoType, f.ProtoTag, false, "  ")
 	}
 	w("  return w.finish();")
 	w("}")
@@ -370,7 +282,7 @@ func writeJSCustomTypeInterface(b *strings.Builder, ct schema.CustomTypeData) {
 	// Build default object literal
 	defaults := make([]string, 0, len(ct.Fields))
 	for _, f := range ct.Fields {
-		defaults = append(defaults, fmt.Sprintf("%s: %s", f.FieldName, protoTSDefault[f.ProtoType]))
+		defaults = append(defaults, fmt.Sprintf("%s: %s", f.FieldName, scalarTSDefault(f.ProtoType)))
 	}
 	w("  const m: %s = { %s };", ct.Name, strings.Join(defaults, ", "))
 	w("  while (!r.done) {")
@@ -409,7 +321,7 @@ func writeJSCollectionElemEncode(b *strings.Builder, f msgField, indent string) 
 	if f.ElemIsCustom {
 		fmt.Fprintf(b, indent+"w.tag(%d, 2).bytes(encode%s(_e));\n", f.Tag, f.ElemProtoType)
 	} else {
-		wt := protoWireType[f.ElemProtoType]
+		wt := scalarWireType(f.ElemProtoType)
 		wm := protoWriterMethod[f.ElemProtoType]
 		if wt == 2 {
 			// string or bytes: no sub-writer needed, length-delimited natively
@@ -433,7 +345,7 @@ func writeJSCollectionDecode(b *strings.Builder, f msgField) {
 	if f.ElemIsCustom {
 		w("            m.%s.push(decode%s(_b));", f.Name, f.ElemProtoType)
 	} else {
-		wt := protoWireType[f.ElemProtoType]
+		wt := scalarWireType(f.ElemProtoType)
 		rm := protoReaderMethod[f.ElemProtoType]
 		if wt == 2 {
 			w("            const _inner = new PbReader(_b); m.%s.push(_inner.%s());", f.Name, rm)
@@ -449,7 +361,7 @@ func writeJSCollectionDecode(b *strings.Builder, f msgField) {
 // writeJSMapEncode emits the encode block for a map field in a TS class.
 func writeJSMapEncode(b *strings.Builder, f msgField) {
 	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
-	keyWT := protoWireType[f.MapKeyProtoType]
+	keyWT := scalarWireType(f.MapKeyProtoType)
 	keyWM := protoWriterMethod[f.MapKeyProtoType]
 	if f.IsOptional {
 		w("    if (m.%s !== undefined) {", f.Name)
@@ -476,7 +388,7 @@ func writeJSMapValueEncode(b *strings.Builder, f msgField, indent string) {
 	if f.ElemIsCustom {
 		fmt.Fprintf(b, indent+"_kv.tag(2, 2).bytes(encode%s(_v as any));\n", f.ElemProtoType)
 	} else {
-		valWT := protoWireType[f.ElemProtoType]
+		valWT := scalarWireType(f.ElemProtoType)
 		valWM := protoWriterMethod[f.ElemProtoType]
 		fmt.Fprintf(b, indent+"_kv.tag(2, %d).%s(_v as any);\n", valWT, valWM)
 	}
@@ -490,7 +402,7 @@ func writeJSMapDecode(b *strings.Builder, f msgField) {
 	w("          const _b = r.bytes();")
 	w("          if (_b.length > 0) {")
 	w("            const _r = new PbReader(_b);")
-	w("            let _k: %s = %s, _v: %s = %s;", f.MapKeyTSType, protoTSDefault[f.MapKeyProtoType], f.ElemTSType, jsCollectionValDefault(f))
+	w("            let _k: %s = %s, _v: %s = %s;", f.MapKeyType, scalarTSDefault(f.MapKeyProtoType), f.ElemType, jsCollectionValDefault(f))
 	w("            while (!_r.done) {")
 	w("              const _t = _r.tag();")
 	w("              switch (_t.field) {")
@@ -522,105 +434,22 @@ func jsCollectionValDefault(f msgField) string {
 	if f.ElemIsCustom {
 		return "{} as any"
 	}
-	return protoTSDefault[f.ElemProtoType]
+	return scalarTSDefault(f.ElemProtoType)
 }
 
 // writeEntityUpdateClass emits a decode-only class for the EntityUpdate oneof.
 func writeEntityUpdateClass(b *strings.Builder, proto schema.ProtoTemplateData) {
-	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
-
-	w("export class EntityUpdate {")
-	for _, uf := range proto.EntityUpdateFields {
-		fieldName := schema.SnakeToCamel(uf.SnakeName)
-		w("  %s?: %s;", fieldName, uf.MessageType)
-	}
-	w("  entityRemoved?: EntityRemoved;")
-	w("")
-
-	w("  static decode(b: Uint8Array): EntityUpdate {")
-	w("    const r = new PbReader(b);")
-	w("    const m = new EntityUpdate();")
-	w("    while (!r.done) {")
-	w("      const t = r.tag();")
-	w("      switch (t.field) {")
-	for _, uf := range proto.EntityUpdateFields {
-		fieldName := schema.SnakeToCamel(uf.SnakeName)
-		w("        case %d: m.%s = %s.decode(r.bytes()); break;", uf.Tag, fieldName, uf.MessageType)
-	}
-	w("        case %d: m.entityRemoved = EntityRemoved.decode(r.bytes()); break;", proto.EntityRemovedTag)
-	w("        default: r.skip(t.wire); break;")
-	w("      }")
-	w("    }")
-	w("    return m;")
-	w("  }")
-	w("}\n")
+	writeJSEnvelope(b, proto.EnvelopeLayouts().Entity, false)
 }
 
 // writeCommandClass emits an encode-only class for one command message.
 func writeCommandClass(b *strings.Builder, cmd schema.CommandData) {
-	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
-
-	w("export class %sCommand {", cmd.Name)
-	if cmd.Target == "entity" {
-		w("  entityId: number = 0;")
-	}
-	for _, f := range cmd.Fields {
-		if f.IsCustom {
-			w("  %s: %s = %s;", f.FieldName, f.TSType, f.TSDefault)
-		} else {
-			w("  %s: %s = %s;", f.FieldName, tsType(f.ProtoType), protoTSDefault[f.ProtoType])
-		}
-	}
-	w("")
-
-	w("  static encode(m: %sCommand): Uint8Array {", cmd.Name)
-	w("    const w = new PbWriter();")
-	if cmd.Target == "entity" {
-		w("    if (m.entityId !== 0) w.tag(1, 0).int64(m.entityId);")
-	}
-	for _, f := range cmd.Fields {
-		if f.IsCustom {
-			// Reuse the private encodeXxx helper emitted by writeJSCustomTypeInterface.
-			// Guard on byteLength > 0 for parity with scalar omit-zero behavior: a
-			// zero-value custom struct encodes to an empty Uint8Array.
-			w("    { const _b = encode%s(m.%s); if (_b.byteLength > 0) w.tag(%d, 2).bytes(_b); }", f.ProtoType, f.FieldName, f.ProtoTag)
-		} else {
-			wt := protoWireType[f.ProtoType]
-			wm := protoWriterMethod[f.ProtoType]
-			if f.ProtoType == "bytes" {
-				w("    if (m.%s.length > 0) w.tag(%d, %d).%s(m.%s);", f.FieldName, f.ProtoTag, wt, wm, f.FieldName)
-			} else {
-				zero := protoTSZero[f.ProtoType]
-				w("    if (m.%s !== %s) w.tag(%d, %d).%s(m.%s);", f.FieldName, zero, f.ProtoTag, wt, wm, f.FieldName)
-			}
-		}
-	}
-	w("    return w.finish();")
-	w("  }")
-	w("}\n")
+	writeJSPayload(b, commandPayload(cmd))
 }
 
 // writeClientMessageClass emits an encode-only ClientMessage class wrapping commands.
 func writeClientMessageClass(b *strings.Builder, proto schema.ProtoTemplateData) {
-	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
-
-	w("export class ClientMessage {")
-	for _, cmf := range proto.ClientMessageFields {
-		fieldName := schema.SnakeToCamel(cmf.SnakeName)
-		w("  %s?: %s;", fieldName, cmf.MessageType)
-	}
-	w("")
-
-	w("  static encode(m: ClientMessage): Uint8Array {")
-	w("    const w = new PbWriter();")
-	for _, cmf := range proto.ClientMessageFields {
-		fieldName := schema.SnakeToCamel(cmf.SnakeName)
-		w("    if (m.%s) w.tag(%d, 2).bytes(%s.encode(m.%s));",
-			fieldName, cmf.Tag, cmf.MessageType, fieldName)
-	}
-	w("    return w.finish();")
-	w("  }")
-	w("}\n")
+	writeJSEnvelope(b, proto.EnvelopeLayouts().Command, true)
 }
 
 // writeClientPacketClass emits an encode-only transport envelope for batches of
@@ -682,7 +511,7 @@ func worldDataFields(wt schema.WorldTypeData) []msgField {
 // worldFieldToMsgField converts a WorldFieldInfo into a msgField, including
 // collection metadata so writeMessageClass handles lists and maps correctly.
 func worldFieldToMsgField(f schema.WorldFieldInfo) msgField {
-	return msgField{
+	mf := msgField{
 		Name:            f.TSProtoField,
 		ProtoType:       f.ProtoType,
 		Tag:             f.ProtoTag,
@@ -691,38 +520,18 @@ func worldFieldToMsgField(f schema.WorldFieldInfo) msgField {
 		MapKeyProtoType: f.MapKeyProtoType,
 		ElemProtoType:   f.ElemProtoType,
 		ElemIsCustom:    f.ElemIsCustom,
-		ElemTSType:      f.ElemTSType,
-		MapKeyTSType:    f.MapKeyTSType,
+		ElemType:        f.ElemTSType,
+		MapKeyType:      f.MapKeyTSType,
 	}
+	if c := f.Collection; c != nil {
+		mf.useCollection(c, c.ElemTSType, c.MapKeyTSType)
+	}
+	return mf
 }
 
 // writeWorldUpdateClass emits a decode-only WorldUpdate class (same pattern as EntityUpdate).
 func writeWorldUpdateClass(b *strings.Builder, proto schema.ProtoTemplateData) {
-	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
-
-	w("export class WorldUpdate {")
-	for _, wuf := range proto.WorldUpdateFields {
-		fieldName := schema.SnakeToCamel(wuf.SnakeName)
-		w("  %s?: %s;", fieldName, wuf.MessageType)
-	}
-	w("")
-
-	w("  static decode(b: Uint8Array): WorldUpdate {")
-	w("    const r = new PbReader(b);")
-	w("    const m = new WorldUpdate();")
-	w("    while (!r.done) {")
-	w("      const t = r.tag();")
-	w("      switch (t.field) {")
-	for _, wuf := range proto.WorldUpdateFields {
-		fieldName := schema.SnakeToCamel(wuf.SnakeName)
-		w("        case %d: m.%s = %s.decode(r.bytes()); break;", wuf.Tag, fieldName, wuf.MessageType)
-	}
-	w("        default: r.skip(t.wire); break;")
-	w("      }")
-	w("    }")
-	w("    return m;")
-	w("  }")
-	w("}\n")
+	writeJSEnvelope(b, proto.EnvelopeLayouts().World, false)
 }
 
 // generateJSEventProto writes events_pb.ts with per-event classes and a
@@ -751,95 +560,9 @@ func generateJSEventProto(outDir, golemImport string, proto schema.ProtoTemplate
 }
 
 // writeJSEventClass emits an event class with static encode/decode helpers.
-func writeJSEventClass(b *strings.Builder, ev schema.EventData) {
-	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
-
-	w("export class %sEvent {", ev.Name)
-	if ev.EntityType != "" {
-		w("  entityId: number = 0;")
-	}
-	for _, f := range ev.Fields {
-		if f.IsCustom {
-			w("  %s: %s = %s;", f.FieldName, f.TSType, f.TSDefault)
-		} else {
-			w("  %s: %s = %s;", f.FieldName, tsType(f.ProtoType), protoTSDefault[f.ProtoType])
-		}
-	}
-	w("")
-
-	w("  static encode(m: %sEvent): Uint8Array {", ev.Name)
-	w("    const w = new PbWriter();")
-	if ev.EntityType != "" {
-		w("    if (m.entityId !== 0) w.tag(1, 0).int64(m.entityId);")
-	}
-	for _, f := range ev.Fields {
-		if f.IsCustom {
-			w("    { const _b = encode%s(m.%s); if (_b.byteLength > 0) w.tag(%d, 2).bytes(_b); }", f.ProtoType, f.FieldName, f.ProtoTag)
-		} else {
-			wt := protoWireType[f.ProtoType]
-			wm := protoWriterMethod[f.ProtoType]
-			if f.ProtoType == "bytes" {
-				w("    if (m.%s.length > 0) w.tag(%d, %d).%s(m.%s);", f.FieldName, f.ProtoTag, wt, wm, f.FieldName)
-			} else {
-				zero := protoTSZero[f.ProtoType]
-				w("    if (m.%s !== %s) w.tag(%d, %d).%s(m.%s);", f.FieldName, zero, f.ProtoTag, wt, wm, f.FieldName)
-			}
-		}
-	}
-	w("    return w.finish();")
-	w("  }")
-	w("")
-
-	w("  static decode(b: Uint8Array): %sEvent {", ev.Name)
-	w("    const r = new PbReader(b);")
-	w("    const m = new %sEvent();", ev.Name)
-	w("    while (!r.done) {")
-	w("      const t = r.tag();")
-	w("      switch (t.field) {")
-	if ev.EntityType != "" {
-		w("        case 1: m.entityId = r.int64(); break;")
-	}
-	for _, f := range ev.Fields {
-		if f.IsCustom {
-			w("        case %d: m.%s = decode%s(r.bytes()); break;", f.ProtoTag, f.FieldName, f.ProtoType)
-		} else {
-			rm := protoReaderMethod[f.ProtoType]
-			w("        case %d: m.%s = r.%s(); break;", f.ProtoTag, f.FieldName, rm)
-		}
-	}
-	w("        default: r.skip(t.wire); break;")
-	w("      }")
-	w("    }")
-	w("    return m;")
-	w("  }")
-	w("}\n")
-}
+func writeJSEventClass(b *strings.Builder, ev schema.EventData) { writeJSPayload(b, eventPayload(ev)) }
 
 // writeServerEventClass emits a decode-only oneof wrapper for server events.
 func writeServerEventClass(b *strings.Builder, proto schema.ProtoTemplateData) {
-	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
-
-	w("export class ServerEvent {")
-	for _, sef := range proto.ServerEventFields {
-		fieldName := schema.SnakeToCamel(sef.SnakeName)
-		w("  %s?: %s;", fieldName, sef.MessageType)
-	}
-	w("")
-
-	w("  static decode(b: Uint8Array): ServerEvent {")
-	w("    const r = new PbReader(b);")
-	w("    const m = new ServerEvent();")
-	w("    while (!r.done) {")
-	w("      const t = r.tag();")
-	w("      switch (t.field) {")
-	for _, sef := range proto.ServerEventFields {
-		fieldName := schema.SnakeToCamel(sef.SnakeName)
-		w("        case %d: m.%s = %s.decode(r.bytes()); break;", sef.Tag, fieldName, sef.MessageType)
-	}
-	w("        default: r.skip(t.wire); break;")
-	w("      }")
-	w("    }")
-	w("    return m;")
-	w("  }")
-	w("}\n")
+	writeJSEnvelope(b, proto.EnvelopeLayouts().Event, false)
 }

@@ -1,5 +1,5 @@
 ---
-description: codegen — templates, integrations, generated-file emitters.
+description: codegen — language-specific payload/envelope/collection emitters, resolved-schema consumers, templates, and integrations.
 globs:
   - codegen/**/*.go
   - codegen/**/*.tmpl
@@ -9,6 +9,14 @@ alwaysApply: false
 # `codegen`
 
 `Bake` orchestrates proto output plus per-integration generation from `schema` DTOs.
+
+Consume schema's resolved envelope variants, entity wire fields, scalar/collection metadata and catalog item/key metadata; do not allocate tags or repeat type/key lookup. Legacy DTO adaptation belongs at generation boundaries. `codec_metadata.go` contains backend input adapters, not YAML policy or a universal message IR. Language-specific reader/writer mappings, omit-zero guards, public shapes and operation availability stay in codegen.
+
+`go_payload.go`, `js_payload.go` and `cs_payload.go` each share ordinary command/event emission. `envelope_codecs.go` has one emitter per language over ordered variants. Go retains encode/decode for all envelopes; JS/C# command envelopes encode only, other envelopes decode only. Preserve Go's last recognized oneof versus JS/C#'s separate properties. `scalar_encode.go` shares JS/C# scalar guards between ordinary/custom messages; Go retains its own scalar helper. Go entity and world collection emission share element/map-entry algorithms with explicit ordinary/delta presence; nil/undefined/null means absent and a present empty delta collection means clear.
+
+`goFullStateProjection` plus the `fullStateLiteral` template share authoritative/public state construction at generation time. Preserve the wrappers' locks, revision capture, shallow collection references, owner-only tick/once redaction and serialization after unlocking. Keep compact serialization and dirty-mask deltas separate; add no generated runtime identifiers for this helper.
+
+Compatibility evidence lives in the resolution baseline, characterization and generated-consumer tests. Freeze supported wire bytes, public APIs and fingerprint preimages; retain known string/bytes-list framing differences, empty-custom-element behavior, Go unknown map-entry behavior, C# scalar-map default inference and Go tick-bytes limitations until separately reviewed corrections. `GOLEM_REQUIRE_CONSUMERS=1` makes missing compiler/runtime prerequisites fail rather than skip; `GOLEM_CONSUMER_RACE=1` runs generated Go consumers with the race detector.
 
 `RemoveIntegration` only supports shared-only targets without extra emitters or finalizers. It preflights known output names, regular files, the generated header and resolved project containment before removing those files. It must never recursively delete an output directory or alter consumer configuration.
 
