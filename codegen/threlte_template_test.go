@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -105,7 +106,7 @@ func TestThrelteIntegrationIsRemovableRawSharedTypeScript(t *testing.T) {
 	if got := integ.SharedTemplates[0].File; got != "GolemThrelte.ts" {
 		t.Fatalf("output = %q, want GolemThrelte.ts", got)
 	}
-	if isGeneratedJSIntermediateTS("GolemThrelte.ts") {
+	if isGeneratedJSIntermediateName("GolemThrelte.ts") {
 		t.Fatal("JS intermediate cleanup must leave the consumer-compiled bridge intact")
 	}
 }
@@ -168,5 +169,37 @@ func TestBakeRejectsThrelteConfigurationBeforeWriting(t *testing.T) {
 	}
 	if len(files) != 1 || files[0].Name() != "golem.yaml" {
 		t.Fatalf("invalid configuration wrote files: %v", files)
+	}
+}
+
+func TestThrelteContainmentRemainsLexical(t *testing.T) {
+	root := t.TempDir()
+	protocol := filepath.Join(root, "protocol")
+	if err := os.Mkdir(protocol, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(protocol, filepath.Join(root, "bridge")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	cfg := &schema.Config{Integrations: map[string]schema.IntegrationConfig{
+		"js-client": {Out: "protocol"}, "threlte": {Out: "bridge", ProtocolImport: "../protocol/"},
+	}}
+	if err := validateThrelteIntegration(root, cfg); err != nil {
+		t.Fatal("lexically separate output must remain accepted", err)
+	}
+}
+
+func TestThrelteCrossVolumeRelErrorPolicy(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows volume semantics")
+	}
+	cfg := &schema.Config{Integrations: map[string]schema.IntegrationConfig{
+		"js-client": {Out: `C:\protocol`}, "threlte": {Out: `D:\bridge`, ProtocolImport: "../protocol/"},
+	}}
+	if _, err := filepath.Rel(`C:\protocol`, `D:\bridge`); err == nil {
+		t.Fatal("fixture must produce a Rel error")
+	}
+	if err := validateThrelteIntegration("", cfg); err != nil {
+		t.Fatal("Threlte must preserve its existing Rel error policy", err)
 	}
 }

@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -111,5 +112,16 @@ func TestRemoveIntegrationContainmentAndPreflight(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRemoveMissingOutputOutsideProjectIsNoOp(t *testing.T) {
+	root := t.TempDir()
+	out := filepath.Join(t.TempDir(), "missing")
+	if err := os.WriteFile(filepath.Join(root, "golem.yaml"), []byte(fmt.Sprintf("integrations:\n  phaser:\n    out: %q\n", filepath.ToSlash(out))), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveIntegration(root, "phaser"); err != nil {
+		t.Fatal(err)
 	}
 }

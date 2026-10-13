@@ -21,13 +21,6 @@ const jsBakeTSConfig = `{
 }
 `
 
-// isGeneratedJSIntermediateTS reports whether name is a bake-emitted TypeScript
-// intermediate that may be removed after tsc leaves .js/.d.ts outputs.
-// Authored or unknown .ts files and all .d.ts files are left alone.
-func isGeneratedJSIntermediateTS(name string) bool {
-	return isGeneratedJSIntermediateName(name)
-}
-
 // removeGeneratedJSIntermediates deletes marked, regular bake intermediate .ts files and
 // the temporary bake tsconfig from outDir. Unknown/authored .ts and .d.ts survive.
 func removeGeneratedJSIntermediates(outDir string) error {
@@ -44,7 +37,7 @@ func removeGeneratedJSIntermediates(outDir string) error {
 			_ = os.Remove(filepath.Join(outDir, name))
 			continue
 		}
-		if isGeneratedJSIntermediateTS(name) {
+		if isGeneratedJSIntermediateName(name) {
 			path := filepath.Join(outDir, name)
 			info, err := os.Lstat(path)
 			if err != nil || !info.Mode().IsRegular() {
@@ -60,8 +53,8 @@ func removeGeneratedJSIntermediates(outDir string) error {
 	return nil
 }
 
-// compileJSIntegration runs tsc on generated .ts in outDir, then removes intermediate .ts
-// and the temporary tsconfig so only .js and .d.ts remain.
+// compileJSIntegration recursively compiles TypeScript in outDir, then removes
+// marked top-level intermediates and the temporary compiler config on success.
 func compileJSIntegration(projectRoot, outDir string) error {
 	cfgPath := filepath.Join(outDir, "tsconfig.golem-bake.json")
 	if err := os.WriteFile(cfgPath, []byte(jsBakeTSConfig), 0o644); err != nil {
