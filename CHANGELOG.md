@@ -19,6 +19,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- An explicit JavaScript WebTransport ACK interval of `0` now uses the same 1 ms coalescing default as omission. Positive intervals and first-pending-ACK deadlines are unchanged.
+
 - JavaScript bake cleanup requires a Golem generated header before deleting recognized intermediate TypeScript files. Authored files with generated-looking names, declarations, and symlinks are preserved; normal generation still overwrites its selected outputs.
 
 - Session avatars remove their registered 2D and 3D colliders before `OnRemove` during disconnect cleanup and failed-spawn rollback, preventing leftover collision shapes.

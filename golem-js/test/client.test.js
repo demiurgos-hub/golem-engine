@@ -1986,3 +1986,34 @@ test("GameClient applies raw unreliable state datagram batches through the compa
     FakeWebTransport.instances.length = 0;
   }
 });
+
+for (const interval of [undefined, 0, 7]) {
+  test(`WebTransport ACK interval ${interval} uses the expected first-packet deadline`, async (t) => {
+    let now = 1000;
+    let scheduler;
+    t.mock.method(Date, "now", () => now);
+    t.mock.method(globalThis, "setInterval", callback => { scheduler = callback; return 1; });
+    t.mock.method(globalThis, "clearInterval", () => {});
+    const previousWebTransport = globalThis.WebTransport;
+    globalThis.WebTransport = FakeWebTransport;
+    const channel = createChannel({transport:"webtransport",url:"https://example.test",eventualAckIntervalMs:interval});
+    try {
+      await flushMicrotasks(); await flushMicrotasks();
+      const transport = FakeWebTransport.instances.at(-1);
+      const receive = async seq => {
+        transport.datagramReadable.push(encodeDatagramPacket({packetSeq:seq,ackSeq:0,ackMask:[0,0,0,0],flags:0,lane:1,payload:new Uint8Array([5])}));
+        await flushMicrotasks();
+      };
+      await receive(0); scheduler(); await flushMicrotasks();
+      assert.equal(transport.datagramWrites.length,0,"zero must not make an immediate ACK due");
+      now = 1000 + (interval || 1) - 0.1;
+      await receive(1); scheduler(); await flushMicrotasks();
+      assert.equal(transport.datagramWrites.length,0);
+      now += 0.1; scheduler(); await flushMicrotasks();
+      assert.equal(transport.datagramWrites.length,1,"later traffic must not postpone the deadline");
+      assert.equal(decodeDatagramPacket(transport.datagramWrites[0]).ackSeq,1);
+    } finally {
+      channel.close(); globalThis.WebTransport = previousWebTransport; FakeWebTransport.instances.length=0;
+    }
+  });
+}

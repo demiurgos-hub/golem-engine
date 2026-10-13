@@ -27,7 +27,7 @@ The `js-client` integration emits generated TypeScript in consumer projects from
 
 Transport constants and framing must stay in sync with `golem/net`: reliable frame cap `256 KiB`, WebTransport datagram cap `1200`, datagram header/ACK mask sizes, lane IDs (`1` unreliable, `2` reliable-unordered, `3` reliable-ordered, `4` eventual-state), and control frames `0x00 'OGS' 0x01/0x02`.
 
-WebTransport ACK coalescing starts its deadline with the first pending packet. Later arrivals must not postpone that deadline; an idle client receiving continuous state still sends standalone ACKs. Piggybacked or standalone ACK delivery clears the pending deadline.
+At the datagram scheduling boundary, an omitted or exactly zero ACK interval uses the 1 ms default; preserve positive intervals. WebTransport ACK coalescing starts its deadline with the first pending packet. Later arrivals must not postpone that deadline; an idle client receiving continuous state still sends standalone ACKs. Piggybacked or standalone ACK delivery clears the pending deadline.
 
 Peer ACKs only prune reliable commands that are in flight. A newly queued command's placeholder packet sequence is not a sent packet; acknowledging it would discard the command and leave a permanent ordered-sequence gap.
 

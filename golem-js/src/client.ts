@@ -1755,7 +1755,7 @@ class WebTransportDatagramProtocol {
   ) {
     this._writer = writer;
     this._onClose = onClose;
-    this._ackIntervalMs = Math.max(0, ackIntervalMs);
+    this._ackIntervalMs = Math.max(0, ackIntervalMs === 0 ? datagramAckCoalesceDelayMs : ackIntervalMs);
     this._scheduler = setInterval(() => this._tick(), datagramSchedulerIntervalMs);
   }
 
