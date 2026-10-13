@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 )
 
 const jsBakeTSConfig = `{
@@ -25,21 +24,7 @@ const jsBakeTSConfig = `{
 // intermediate that must be removed after tsc leaves .js/.d.ts outputs.
 // Authored or unknown .ts files and all .d.ts files are left alone.
 func isGeneratedJSIntermediateTS(name string) bool {
-	if !strings.HasSuffix(name, ".ts") || strings.HasSuffix(name, ".d.ts") {
-		return false
-	}
-	switch name {
-	case "EntityManager.ts",
-		"EventManager.ts",
-		"WorldManager.ts",
-		"entities_pb.ts",
-		"events_pb.ts",
-		"world_pb.ts",
-		"client.ts":
-		return true
-	default:
-		return strings.HasSuffix(name, "Synced.ts")
-	}
+	return isGeneratedJSIntermediateName(name)
 }
 
 // removeGeneratedJSIntermediates deletes known bake intermediate .ts files and

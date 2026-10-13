@@ -104,22 +104,25 @@ func generateJSProto(
 		writeClientPacketClass(&b)
 	}
 
-	outPath := filepath.Join(outDir, "entities_pb.ts")
+	outPath := filepath.Join(outDir, codecOutputName("js-client", entityCodecOutput))
 	if err := os.WriteFile(outPath, []byte(b.String()), 0o644); err != nil {
 		return err
 	}
 	fmt.Printf("  wrote %s\n", outPath)
 
-	if len(worldTypes) > 0 {
-		if err := generateJSWorldProto(outDir, golemImport, proto); err != nil {
-			return err
+	for _, output := range selectIntegrationOutputs("js-client", schema.SharedData{WorldTypes: worldTypes, Events: events}) {
+		switch output.role {
+		case worldCodecOutput:
+			if err := generateJSWorldProto(outDir, golemImport, proto); err != nil {
+				return err
+			}
+		case eventCodecOutput:
+			if err := generateJSEventProto(outDir, golemImport, proto); err != nil {
+				return err
+			}
 		}
 	}
-	if len(events) > 0 {
-		if err := generateJSEventProto(outDir, golemImport, proto); err != nil {
-			return err
-		}
-	}
+
 	return nil
 }
 
@@ -487,7 +490,7 @@ func generateJSWorldProto(outDir, golemImport string, proto schema.ProtoTemplate
 
 	writeWorldUpdateClass(&b, proto)
 
-	outPath := filepath.Join(outDir, "world_pb.ts")
+	outPath := filepath.Join(outDir, codecOutputName("js-client", worldCodecOutput))
 	if err := os.WriteFile(outPath, []byte(b.String()), 0o644); err != nil {
 		return err
 	}
@@ -551,7 +554,7 @@ func generateJSEventProto(outDir, golemImport string, proto schema.ProtoTemplate
 	}
 	writeServerEventClass(&b, proto)
 
-	outPath := filepath.Join(outDir, "events_pb.ts")
+	outPath := filepath.Join(outDir, codecOutputName("js-client", eventCodecOutput))
 	if err := os.WriteFile(outPath, []byte(b.String()), 0o644); err != nil {
 		return err
 	}

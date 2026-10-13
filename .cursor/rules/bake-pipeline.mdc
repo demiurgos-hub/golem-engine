@@ -1,5 +1,5 @@
 ---
-description: bake pipeline — checked schema resolution, read-only descriptor handoff, codec compatibility, and generated-consumer checks.
+description: bake pipeline — checked schema resolution, read-only descriptor handoff, integration output selection, codec compatibility, and generated-consumer checks.
 globs:
   - schema/**/*.go
   - codegen/**/*.go
@@ -13,7 +13,7 @@ When a schema-driven feature changes, trace it through schema loading, validatio
 
 At the envelope validation stage, `Bake` calls `ResolveProtoData` once and passes that result to proto rendering and integrations. Catalog metadata is already resolved by world construction; file-content validation remains a separate pre-output step. Consumers must not repeat schema resolution or tag allocation. Keep integration output ownership, manager lifecycle, framework adapters and client runtime changes separate from schema/codec refactors.
 
-The integration handoff consists of ordered envelope variants/tags/roles, ordered entity state/delta fields with presence/visibility/dirty-bit metadata, payload fields plus targeting metadata, collection/custom-type dependencies and catalog item/key metadata. These are read-only after resolution. Legacy flat DTOs remain supported by explicit adapters, not alternate emitter policy.
+The integration handoff consists of ordered envelope variants/tags/roles, ordered entity state/delta fields with presence/visibility/dirty-bit metadata, payload fields plus targeting metadata, collection/custom-type dependencies and catalog item/key metadata. These are read-only after resolution. Integration decoration uses per-target entity copies; output selection and defaults live in `codegen/integration_outputs.go`, not schema descriptors. Legacy flat DTOs remain supported by explicit adapters, not alternate emitter policy.
 
 If a new field, target, branch, helper, import, or generated method is added in one target, check the parallel Go, JS, proto, and template paths for the same behavior.
 

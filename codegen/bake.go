@@ -109,9 +109,6 @@ func Bake(projectRoot string) error {
 			entityEventMap[ev.EntityType] = append(entityEventMap[ev.EntityType], ev)
 		}
 	}
-	for i := range entities {
-		entities[i].Events = entityEventMap[entities[i].Name]
-	}
 
 	for integName, integCfg := range cfg.Integrations {
 		integ, err := GetIntegration(integName)
@@ -119,49 +116,29 @@ func Bake(projectRoot string) error {
 			return err
 		}
 
+		spec := integrationSpecs[integName]
 		golemImport := integCfg.GolemImport
 		if golemImport == "" {
-			switch integName {
-			case "go-server":
-				golemImport = "github.com/demiurgos-hub/golem-engine/golem"
-			case "go-client":
-				golemImport = "github.com/demiurgos-hub/golem-engine/golem-go-client"
-			case "js-client":
-				golemImport = "golem-engine"
-			case "csharp-client":
-				golemImport = "GolemEngine.Unity"
-			case "phaser":
-				golemImport = "golem-phaser"
-			case "threlte":
-				golemImport = "golem-threlte"
-			case "unity":
-				golemImport = "GolemEngine.Unity"
-			case "ebiten":
-				golemImport = "github.com/demiurgos-hub/golem-engine/golem-ebiten"
-			}
+			golemImport = spec.defaultImport
 		}
-
 		goPackage := integCfg.Package
-		if (integName == "go-server" || integName == "go-client" || integName == "ebiten") && goPackage == "" {
-			goPackage = "synced"
+		if goPackage == "" {
+			goPackage = spec.defaultPackage
 		}
-		if (integName == "csharp-client" || integName == "unity") && goPackage == "" {
-			goPackage = "Golem.Generated"
-		}
+		// Template-only decorations must not leak to another target or into the
+		// resolved schema descriptors shared by codec generators.
+		entities := append([]schema.EntityData(nil), entities...)
 
 		for i := range entities {
+			entities[i].Events = entityEventMap[entities[i].Name]
 			entities[i].ProtocolImport = integCfg.ProtocolImport
 			entities[i].GolemImport = golemImport
-			if integName == "go-server" || integName == "go-client" || integName == "ebiten" || integName == "csharp-client" || integName == "unity" {
+			if spec.defaultPackage != "" {
 				entities[i].GoPackage = goPackage
 			} else {
 				entities[i].GoPackage = ""
 			}
-			if integ.Template != "" && integ.FileNamer != nil {
-				if err := generateIntegration(projectRoot, integCfg, integ, entities[i]); err != nil {
-					return err
-				}
-			}
+
 		}
 
 		sd := schema.SharedData{
@@ -180,47 +157,16 @@ func Bake(projectRoot string) error {
 			Fingerprint:             ComputeSchemaFingerprint(entities),
 		}
 
-		sharedTemplates := integ.SharedTemplates
-		if integName == "js-client" && len(worldTypes) > 0 {
-			sharedTemplates = append(sharedTemplates, SharedTemplateEntry{
-				Template: "js/world_manager.ts.tmpl",
-				File:     "WorldManager.ts",
-			})
-		}
-		if integName == "csharp-client" && len(worldTypes) > 0 {
-			sharedTemplates = append(sharedTemplates, SharedTemplateEntry{
-				Template: "csharp/world_manager.cs.tmpl",
-				File:     "WorldManager.cs",
-			})
-		}
-		if integName == "go-client" && len(worldTypes) > 0 {
-			sharedTemplates = append(sharedTemplates, SharedTemplateEntry{
-				Template: "go_client/world_manager.go.tmpl",
-				File:     "world_manager.go",
-			})
-		}
-		if integName == "js-client" && len(events) > 0 {
-			sharedTemplates = append(sharedTemplates, SharedTemplateEntry{
-				Template: "js/event_manager.ts.tmpl",
-				File:     "EventManager.ts",
-			})
-		}
-		if integName == "csharp-client" && len(events) > 0 {
-			sharedTemplates = append(sharedTemplates, SharedTemplateEntry{
-				Template: "csharp/event_manager.cs.tmpl",
-				File:     "EventManager.cs",
-			})
-		}
-		if integName == "go-client" && len(events) > 0 {
-			sharedTemplates = append(sharedTemplates, SharedTemplateEntry{
-				Template: "go_client/event_manager.go.tmpl",
-				File:     "event_manager.go",
-			})
-		}
-
-		for _, st := range sharedTemplates {
-			if err := generateShared(projectRoot, integCfg, integ, sd, st); err != nil {
-				return err
+		for _, output := range selectIntegrationOutputs(integName, sd) {
+			switch output.role {
+			case entityOutput:
+				if err := generateIntegration(projectRoot, integCfg, integ, entities[output.entityIndex]); err != nil {
+					return err
+				}
+			case sharedOutput:
+				if err := generateShared(projectRoot, integCfg, integ, sd, SharedTemplateEntry{Template: output.template, File: output.file}); err != nil {
+					return err
+				}
 			}
 		}
 

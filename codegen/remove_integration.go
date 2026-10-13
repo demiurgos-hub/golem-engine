@@ -48,7 +48,7 @@ func RemoveIntegration(projectRoot, name string) error {
 		return err
 	}
 	rel, err := filepath.Rel(root, out)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+	if err != nil || !isContainedRelativePath(rel) {
 		return fmt.Errorf("integration output must stay inside the project")
 	}
 	var files []string

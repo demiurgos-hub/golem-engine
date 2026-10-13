@@ -101,18 +101,15 @@ func emitThrelteCompileFixture(t *testing.T, root string, data schema.SharedData
 			t.Fatal(err)
 		}
 	}
-	shared := append([]SharedTemplateEntry{}, js.SharedTemplates...)
-	if len(data.WorldTypes) > 0 {
-		shared = append(shared, SharedTemplateEntry{Template: "js/world_manager.ts.tmpl", File: "WorldManager.ts"})
-	}
-	if len(data.Events) > 0 {
-		shared = append(shared, SharedTemplateEntry{Template: "js/event_manager.ts.tmpl", File: "EventManager.ts"})
-	}
-	for _, template := range shared {
-		if err := generateShared(root, config, js, data, template); err != nil {
+	for _, output := range selectIntegrationOutputs("js-client", data) {
+		if output.role != sharedOutput {
+			continue
+		}
+		if err := generateShared(root, config, js, data, SharedTemplateEntry{Template: output.template, File: output.file}); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	proto := schema.BuildProtoData(&schema.Config{Simulation: schema.SimulationConfig{Dimensions: 3}}, data.Entities, data.Commands, data.WorldTypes, data.CustomTypes, data.Events)
 	if err := generateJSProto(filepath.Join(root, config.Out), data.GolemImport, data.Entities, data.Commands, data.WorldTypes, data.Events, proto); err != nil {
 		t.Fatal(err)

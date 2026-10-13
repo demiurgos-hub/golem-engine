@@ -65,16 +65,19 @@ func generateCSharpProto(
 	if err := generateCSharpEntitiesProto(outDir, golemImport, namespace, entities, commands, proto); err != nil {
 		return err
 	}
-	if len(worldTypes) > 0 {
-		if err := generateCSharpWorldProto(outDir, golemImport, namespace, proto); err != nil {
-			return err
+	for _, output := range selectIntegrationOutputs("csharp-client", schema.SharedData{WorldTypes: worldTypes, Events: events}) {
+		switch output.role {
+		case worldCodecOutput:
+			if err := generateCSharpWorldProto(outDir, golemImport, namespace, proto); err != nil {
+				return err
+			}
+		case eventCodecOutput:
+			if err := generateCSharpEventProto(outDir, golemImport, namespace, proto); err != nil {
+				return err
+			}
 		}
 	}
-	if len(events) > 0 {
-		if err := generateCSharpEventProto(outDir, golemImport, namespace, proto); err != nil {
-			return err
-		}
-	}
+
 	return nil
 }
 
@@ -104,7 +107,7 @@ func generateCSharpEntitiesProto(outDir, golemImport, namespace string, entities
 	}
 	writeCSharpFooter(&b, namespace)
 
-	outPath := filepath.Join(outDir, "EntitiesPb.cs")
+	outPath := filepath.Join(outDir, codecOutputName("csharp-client", entityCodecOutput))
 	if err := os.WriteFile(outPath, []byte(b.String()), 0o644); err != nil {
 		return err
 	}
@@ -482,7 +485,7 @@ func generateCSharpWorldProto(outDir, golemImport, namespace string, proto schem
 	}
 	writeCSWorldUpdateClass(&b, proto)
 	writeCSharpFooter(&b, namespace)
-	outPath := filepath.Join(outDir, "WorldPb.cs")
+	outPath := filepath.Join(outDir, codecOutputName("csharp-client", worldCodecOutput))
 	if err := os.WriteFile(outPath, []byte(b.String()), 0o644); err != nil {
 		return err
 	}
@@ -529,7 +532,7 @@ func generateCSharpEventProto(outDir, golemImport, namespace string, proto schem
 	}
 	writeCSServerEventClass(&b, proto)
 	writeCSharpFooter(&b, namespace)
-	outPath := filepath.Join(outDir, "EventsPb.cs")
+	outPath := filepath.Join(outDir, codecOutputName("csharp-client", eventCodecOutput))
 	if err := os.WriteFile(outPath, []byte(b.String()), 0o644); err != nil {
 		return err
 	}

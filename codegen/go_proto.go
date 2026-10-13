@@ -90,7 +90,7 @@ func generateGoProto(
 		writeGoClientPacket(&b)
 	}
 
-	outPath := filepath.Join(outDir, "entities_pb.go")
+	outPath := filepath.Join(outDir, codecOutputName("go-client", entityCodecOutput))
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("creating dir for %s: %w", outPath, err)
 	}
@@ -103,16 +103,19 @@ func generateGoProto(
 	}
 	fmt.Printf("  wrote %s\n", outPath)
 
-	if len(worldTypes) > 0 {
-		if err := generateGoWorldProto(outDir, golemImport, goPackage, proto); err != nil {
-			return err
+	for _, output := range selectIntegrationOutputs("go-client", schema.SharedData{WorldTypes: worldTypes, Events: events}) {
+		switch output.role {
+		case worldCodecOutput:
+			if err := generateGoWorldProto(outDir, golemImport, goPackage, proto); err != nil {
+				return err
+			}
+		case eventCodecOutput:
+			if err := generateGoEventProto(outDir, golemImport, goPackage, proto); err != nil {
+				return err
+			}
 		}
 	}
-	if len(events) > 0 {
-		if err := generateGoEventProto(outDir, golemImport, goPackage, proto); err != nil {
-			return err
-		}
-	}
+
 	return nil
 }
 
@@ -254,7 +257,7 @@ func generateGoEventProto(outDir, golemImport, goPackage string, proto schema.Pr
 
 	writeGoServerEvent(&b, proto)
 
-	outPath := filepath.Join(outDir, "events_pb.go")
+	outPath := filepath.Join(outDir, codecOutputName("go-client", eventCodecOutput))
 	if err := os.WriteFile(outPath, []byte(b.String()), 0o644); err != nil {
 		return err
 	}
@@ -357,7 +360,7 @@ func generateGoWorldProto(outDir, golemImport, goPackage string, proto schema.Pr
 
 	writeGoWorldUpdate(&b, proto)
 
-	outPath := filepath.Join(outDir, "world_pb.go")
+	outPath := filepath.Join(outDir, codecOutputName("go-client", worldCodecOutput))
 	if err := os.WriteFile(outPath, []byte(b.String()), 0o644); err != nil {
 		return err
 	}

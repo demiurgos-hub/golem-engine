@@ -36,7 +36,7 @@ func validateThrelteIntegration(projectRoot string, cfg *schema.Config) error {
 		return fmt.Errorf("threlte output: %w", err)
 	}
 	rel, err := filepath.Rel(jsOut, threlteOut)
-	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+	if err == nil && isContainedRelativePath(rel) {
 		return fmt.Errorf("threlte output must be outside js-client output so its TypeScript is compiled by the application")
 	}
 	return nil
