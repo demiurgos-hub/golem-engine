@@ -37,3 +37,5 @@ export {
 } from "./bootstrap.js";
 
 export { GolemConnectionLifecycle, type GolemConnectionConfig, type GolemConnectionStatus, type GolemConnectionSnapshot } from "./connection.js";
+
+export { combineUnsubscribers, type Unsubscribe } from "./subscriptions.js";

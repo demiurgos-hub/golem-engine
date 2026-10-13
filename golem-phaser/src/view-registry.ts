@@ -3,8 +3,8 @@ import type {
   SyncedPositionEntity,
 } from "./views.js";
 
-/** Function returned by generated listener registration methods. */
-export type Unsubscribe = () => void;
+import type { Unsubscribe } from "golem-engine";
+export { combineUnsubscribers, type Unsubscribe } from "golem-engine";
 
 /** Callbacks used by a generated registry to observe entity lifecycle. */
 export interface EntityViewObserver {
@@ -47,20 +47,4 @@ export function createEntityViewRegistry<C>(
   registry: EntityViewRegistry<C>,
 ): EntityViewRegistry<C> {
   return registry;
-}
-
-/** Combine generated listener cleanup functions into one unsubscribe. */
-export function combineUnsubscribers(
-  ...unsubscribers: Unsubscribe[]
-): Unsubscribe {
-  let active = true;
-  return () => {
-    if (!active) {
-      return;
-    }
-    active = false;
-    for (const unsubscribe of unsubscribers) {
-      unsubscribe();
-    }
-  };
 }

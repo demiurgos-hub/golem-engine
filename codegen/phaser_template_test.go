@@ -51,8 +51,7 @@ func TestGeneratePhaserRegistryIncludesTypedCompleteDefinitions(t *testing.T) {
 		"entity instanceof SyncedPlayer",
 		"client.entities.getAll().values()",
 		"client.entities.onSpawn",
-		"client.events.onHit",
-		`dispatch(entity, "Hit", event)`,
+		"client.events.subscribeEntityEvents(dispatch)",
 		"golem: GolemPlugin<Client>;",
 	} {
 		if !strings.Contains(content, want) {

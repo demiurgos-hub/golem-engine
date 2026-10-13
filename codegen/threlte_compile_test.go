@@ -11,22 +11,43 @@ import (
 )
 
 // Run after building the local npm packages. Keep Go-only environments usable.
-func TestThrelteGeneratedConsumerCompiles(t *testing.T) {
+func TestThrelteGeneratedConsumerCompiles(t *testing.T) { testGeneratedFrameworkConsumer(t, "threlte") }
+func TestPhaserGeneratedConsumerCompiles(t *testing.T)  { testGeneratedFrameworkConsumer(t, "phaser") }
+
+func testGeneratedFrameworkConsumer(t *testing.T, framework string) {
 	root, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
 	}
-	tsc := filepath.Join(root, "golem-threlte", "node_modules", "typescript", "lib", "tsc.js")
-	engineTypes := filepath.Join(root, "golem-js", "dist", "index.d.ts")
-	threlteTypes := filepath.Join(root, "golem-threlte", "dist", "index.d.ts")
-	svelteTypes := filepath.Join(root, "golem-threlte", "node_modules", "svelte", "types", "index.d.ts")
-	for _, file := range []string{tsc, engineTypes, threlteTypes, svelteTypes} {
+
+	packageDir := "golem-" + framework
+	tsc := filepath.Join(root, packageDir, "node_modules", "typescript", "lib", "tsc.js")
+	paths := map[string][]string{
+		"golem-engine": {filepath.Join(root, "golem-js", "dist", "index.d.ts")},
+		packageDir:     {filepath.Join(root, packageDir, "dist", "index.d.ts")},
+	}
+	if framework == "threlte" {
+		paths["svelte"] = []string{filepath.Join(root, packageDir, "node_modules", "svelte", "types", "index.d.ts")}
+	} else {
+		paths["phaser"] = []string{filepath.Join(root, packageDir, "node_modules", "phaser", "types", "phaser.d.ts")}
+	}
+	prerequisites := []string{tsc}
+	for _, values := range paths {
+		prerequisites = append(prerequisites, values...)
+	}
+	for _, file := range prerequisites {
 		if _, err := os.Stat(file); err != nil {
-			t.Skipf("build golem-js and golem-threlte first to check the generated consumer: %s", file)
+			if os.Getenv("GOLEM_REQUIRE_CONSUMERS") == "1" {
+				t.Fatalf("build %s and golem-js first: %s", packageDir, file)
+			}
+			t.Skipf("build %s and golem-js first: %s", packageDir, file)
 		}
 	}
 	node, err := exec.LookPath("node")
 	if err != nil {
+		if os.Getenv("GOLEM_REQUIRE_CONSUMERS") == "1" {
+			t.Fatal(err)
+		}
 		t.Skip("Node.js is needed for generated consumer type checks")
 	}
 	hit := schema.BuildEventData(schema.EventSchemaFile{Event: "Hit", Target: "entity", EntityType: "Actor", Fields: map[string]schema.EventFieldDef{"amount": {Type: "int32"}}}, nil)
@@ -57,7 +78,10 @@ func TestThrelteGeneratedConsumerCompiles(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := t.TempDir()
-			emitThrelteCompileFixture(t, fixture, tc.data)
+			emitFrameworkCompileFixture(t, fixture, framework, tc.data)
+			if framework == "phaser" && tc.consumer != "" {
+				tc.consumer = phaserConsumerTypeFixture
+			}
 			if tc.consumer != "" {
 				if err := os.WriteFile(filepath.Join(fixture, "consumer.ts"), []byte(tc.consumer), 0600); err != nil {
 					t.Fatal(err)
@@ -67,7 +91,7 @@ func TestThrelteGeneratedConsumerCompiles(t *testing.T) {
 				"compilerOptions": map[string]any{
 					"target": "ES2022", "module": "ESNext", "moduleResolution": "bundler",
 					"strict": true, "skipLibCheck": true, "noEmit": true,
-					"paths": map[string][]string{"golem-engine": {engineTypes}, "golem-threlte": {threlteTypes}, "svelte": {svelteTypes}},
+					"paths": paths,
 				},
 				"include": []string{"./**/*.ts"},
 			})
@@ -86,7 +110,7 @@ func TestThrelteGeneratedConsumerCompiles(t *testing.T) {
 	}
 }
 
-func emitThrelteCompileFixture(t *testing.T, root string, data schema.SharedData) {
+func emitFrameworkCompileFixture(t *testing.T, root, framework string, data schema.SharedData) {
 	t.Helper()
 	js, err := GetIntegration("js-client")
 	if err != nil {
@@ -114,11 +138,11 @@ func emitThrelteCompileFixture(t *testing.T, root string, data schema.SharedData
 	if err := generateJSProto(filepath.Join(root, config.Out), data.GolemImport, data.Entities, data.Commands, data.WorldTypes, data.Events, proto); err != nil {
 		t.Fatal(err)
 	}
-	bridge, err := GetIntegration("threlte")
+	bridge, err := GetIntegration(framework)
 	if err != nil {
 		t.Fatal(err)
 	}
-	data.GolemImport = "golem-threlte"
+	data.GolemImport = "golem-" + framework
 	data.ProtocolImport = "../protocol/"
 	if err := generateShared(root, schema.IntegrationConfig{Out: "bridge"}, bridge, data, bridge.SharedTemplates[0]); err != nil {
 		t.Fatal(err)
@@ -153,4 +177,16 @@ function hud() {
     catalog?.items['actor'].id satisfies string | undefined;
   });
 }
+`
+
+const phaserConsumerTypeFixture = `import { defineEntityViews } from './bridge/GolemPhaser.js';
+import type { Client } from './protocol/client.js';
+declare const client: Client;
+const registry = defineEntityViews(views => ({ Actor: views.Actor.headless(), Beacon: views.Beacon.headless(), Session: views.Session.headless() }));
+const stop = registry.subscribeEvents?.(client, (entity, name, event) => {});stop?.();
+// @ts-expect-error Every generated type must be registered.
+defineEntityViews(views => ({ Actor: views.Actor.headless() }));
+client.events.onHit((actor, event) => { actor.health satisfies number; event.amount satisfies number; });
+// @ts-expect-error A Hit handler receives an entity before its payload.
+client.events.onHit((event: {amount: number}) => {});
 `

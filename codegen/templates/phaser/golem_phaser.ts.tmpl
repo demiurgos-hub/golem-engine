@@ -79,15 +79,7 @@ export function defineEntityViews(
     },
 {{- if .Events}}
     subscribeEvents(client, dispatch) {
-      return combineUnsubscribers(
-{{- range .Events}}
-{{- if eq .Target "entity"}}
-        client.events.on{{.Name}}((entity, event) =>
-          dispatch(entity, "{{.Name}}", event),
-        ),
-{{- end}}
-{{- end}}
-      );
+      return client.events.subscribeEntityEvents(dispatch);
     },
 {{- end}}
   });

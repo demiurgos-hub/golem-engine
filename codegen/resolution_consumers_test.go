@@ -128,6 +128,11 @@ func TestResolutionGeneratedJSConsumer(t *testing.T) {
 	}
 	dir := t.TempDir()
 	pd := resolutionFixture(2)
+	pd.Events = append(pd.Events,
+		schema.BuildEventData(schema.EventSchemaFile{Event: "Pulse", Target: "entity", EntityType: "Beacon"}, nil),
+		schema.BuildEventData(schema.EventSchemaFile{Event: "Private", Target: "session"}, nil))
+	pd = schema.BuildProtoData(&schema.Config{Simulation: schema.SimulationConfig{Dimensions: 2}}, pd.Entities, pd.Commands, pd.WorldTypes, pd.CustomTypes, pd.Events)
+
 	module := filepath.Join(dir, "node_modules/golem-engine")
 	if err := os.CopyFS(module, os.DirFS(filepath.Join(root, "golem-js/dist"))); err != nil {
 		t.Fatal(err)
@@ -142,11 +147,15 @@ func TestResolutionGeneratedJSConsumer(t *testing.T) {
 	}
 	writeConsumerFile(t, dir, "tsconfig.json", `{"compilerOptions":{"target":"ES2022","module":"NodeNext","moduleResolution":"NodeNext","strict":true,"skipLibCheck":true,"outDir":"out"},"include":["*.ts"]}`)
 	renderConsumerTemplate(t, dir, "js/manager.ts.tmpl", "EntityManager.ts", schema.SharedData{GolemImport: "golem-engine", Entities: pd.Entities})
+	renderConsumerTemplate(t, dir, "js/event_manager.ts.tmpl", "EventManager.ts", schema.SharedData{GolemImport: "golem-engine", Entities: pd.Entities, Events: pd.Events})
+	writeConsumerFile(t, dir, "events.mjs", jsEventManagerContract)
+
 	writeConsumerFile(t, dir, "manager.mjs", jsManagerContract)
 	writeConsumerFile(t, dir, "contract.mjs", jsCodecContract)
 	runConsumer(t, dir, "node", tsc, "-p", "tsconfig.json")
 	runConsumer(t, dir, "node", "contract.mjs")
 	runConsumer(t, dir, "node", "manager.mjs")
+	runConsumer(t, dir, "node", "events.mjs")
 }
 
 func TestResolutionGeneratedCSharpConsumer(t *testing.T) {

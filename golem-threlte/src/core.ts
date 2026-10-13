@@ -1,8 +1,8 @@
 import type { Component } from 'svelte';
 import type { Readable } from 'svelte/store';
-import type { GameClient } from 'golem-engine';
+import { combineUnsubscribers, type GameClient, type Unsubscribe } from 'golem-engine';
+export { combineUnsubscribers, type Unsubscribe } from 'golem-engine';
 
-export type Unsubscribe = () => void;
 export interface EntityIdentity { readonly entityId: number }
 export interface EntitySnapshot<E> { readonly entity: E; readonly version: number }
 export interface EntitySource<E extends EntityIdentity> {
@@ -11,16 +11,6 @@ export interface EntitySource<E extends EntityIdentity> {
   onSpawn(fn: (entity: E) => void): Unsubscribe;
   onUpdate(fn: (entity: E) => void): Unsubscribe;
   onRemove(fn: (id: number) => void): Unsubscribe;
-}
-
-/** Release a group of listeners once. */
-export function combineUnsubscribers(...unsubscribers: Unsubscribe[]): Unsubscribe {
-  let active = true;
-  return () => {
-    if (!active) return;
-    active = false;
-    for (const unsubscribe of unsubscribers) unsubscribe();
-  };
 }
 
 /** A read-only store whose notifications never depend on model identity. */

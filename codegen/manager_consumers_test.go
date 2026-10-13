@@ -93,3 +93,28 @@ static class ManagerContract {
  }
 }
 `
+
+const jsEventManagerContract = `import assert from 'node:assert/strict';
+import { EntityManager } from './out/EntityManager.js';
+import { EventManager } from './out/EventManager.js';
+import { SyncedActor } from './out/ActorSynced.js';
+import { SyncedBeacon } from './out/BeaconSynced.js';
+import { PbWriter } from 'golem-engine';
+const entities = new EntityManager(); const events = new EventManager(entities); const order=[];
+const actor=new SyncedActor(1);actor.onHit=()=>order.push('hook');const beacon=new SyncedBeacon(2);
+entities._entities.set(1,actor);entities._entities.set(2,beacon);
+const registrations=[];
+for(const name of ['Hit','Pulse']) { const original=events['on'+name].bind(events);events['on'+name]=fn=>{registrations.push(name);return original(fn);}; }
+events.onHit(()=>order.push('typed'));registrations.length=0;
+const calls=[];const stop=events.subscribeEntityEvents((entity,name,event)=>{order.push('composite');calls.push([entity,name,event]);});
+assert.deepEqual(registrations,['Hit','Pulse']);
+const other=[];const stopOther=events.subscribeEntityEvents((entity,name)=>other.push(name));
+const hit={entityId:1};events.applyUpdate({hit});assert.deepEqual(order,['hook','typed','composite']);assert.deepEqual(calls,[[actor,'Hit',hit]]);
+events.applyUpdate({pulse:{entityId:2}});assert.equal(calls[1][0],beacon);assert.equal(calls[1][1],'Pulse');
+events.applyUpdate({hit:{entityId:2}});events.applyUpdate({hit:{entityId:99}});events.applyUpdate({notice:{}});events.applyUpdate({private:{}});assert.equal(calls.length,2);
+stop();stop();events.applyUpdate({hit});assert.equal(calls.length,2);assert.deepEqual(other,['Hit','Pulse','Hit']);
+stopOther();events.applyRaw(new PbWriter().tag(1,2).bytes(new Uint8Array([8,1])).finish());assert.equal(other.length,3);
+// Global/session-only managers return a valid empty composite (covered by the
+// generated framework consumers); independent listeners survive this cleanup.
+assert.deepEqual(order.slice(-2),['hook','typed']);
+`

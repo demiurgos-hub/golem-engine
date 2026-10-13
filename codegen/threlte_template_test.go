@@ -33,7 +33,7 @@ func TestGenerateThrelteAdapterUsesGeneratedManagersAndTypedComponents(t *testin
 		"Species: worldStore(() => client.world.species, (listener) => client.world.onSpeciesUpdate(listener))",
 		"Hit: (listener: (entity: SyncedActor, event: HitEvent) => void) => client.events.onHit(listener)",
 		"Notice: (listener: (event: NoticeEvent) => void) => client.events.onNotice(listener)",
-		`client.events.onHit((entity, event) => dispatch(entity, "Hit", event))`,
+		`client.events.subscribeEntityEvents(dispatch)`,
 		"return useGolemContext(golemAdapter)",
 		"export interface ActorEvents {\n  Hit: HitEvent;",
 		"export type ActorViewProps = EntityViewProps<SyncedActor, ActorEvents>",

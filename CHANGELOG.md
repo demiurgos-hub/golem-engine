@@ -8,6 +8,9 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- `golem-engine` exports `Unsubscribe` and `combineUnsubscribers`; Phaser and Threlte keep their existing re-exports. Cleanup runs once in registration order, stops on the first exception, and remains inactive after an exception.
+- Generated JavaScript event managers expose `subscribeEntityEvents` for all entity-targeted events; generated Phaser and Threlte bridges use it. Upgrade the runtime and adapters together to 0.3.2 and regenerate related JS protocol and framework integrations together. Existing generated clients remain compatible with the new runtime.
+
 - `golem/collision/layerpolicy` provides a backend-independent named-layer table with symmetric collision masks and error-returning operations. Existing 2D and 3D `Layers` APIs retain their typed backends and panic diagnostics.
 
 - `golem-threlte` provides a persistent Svelte provider, reactive entity/world/status stores, typed entity components and events, independent filtered scene mounts, and Threlte scheduler/transform helpers. Presentation components survive ordinary updates and clean up on visibility exit, replacement, or scene teardown without closing an application-owned session. Optional interpolation uses seconds and explicit coordinate selectors; external transform control bypasses all writes.

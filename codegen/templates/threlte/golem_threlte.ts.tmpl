@@ -47,13 +47,11 @@ export const golemAdapter = createGolemAdapter({
   entities: (client: Client) => client.entities,
   createBindings,
   subscribeEvents(client, dispatch) {
-    return combineUnsubscribers(
-{{- range .Events}}
-{{- if eq .Target "entity"}}
-      client.events.on{{.Name}}((entity, event) => dispatch(entity, "{{.Name}}", event)),
+{{- if .Events}}
+    return client.events.subscribeEntityEvents(dispatch);
+{{- else}}
+    return combineUnsubscribers();
 {{- end}}
-{{- end}}
-    );
   },
 });
 

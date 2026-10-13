@@ -1,6 +1,6 @@
 {
   "name": "golem-threlte",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Typed Svelte and Threlte presentation for persistent Golem clients",
   "license": "Apache-2.0",
   "type": "module",
@@ -19,7 +19,7 @@
     "prepack": "npm run build"
   },
   "peerDependencies": {
-    "golem-engine": ">=0.3.1 <0.4.0",
+    "golem-engine": ">=0.3.2 <0.4.0",
     "svelte": "^5.57.1",
     "@threlte/core": "^8.6.1",
     "three": "^0.186.1"
