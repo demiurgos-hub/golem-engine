@@ -23,38 +23,11 @@ namespace {{.GoPackage}}
             {
                 throw new ArgumentNullException(nameof(transportFactory));
             }
-            var entities = new EntityManager();
-{{if .WorldTypes}}
-            var world = new WorldManager();
-{{- end}}
-{{if .Events}}
-            var events = new EventManager(entities);
-{{- end}}
+{{template "clientSetup" .}}
 #pragma warning disable CS0618
             return new GameClient(
 #pragma warning restore CS0618
-                entities,
-                bytes => EntityUpdate.Decode(bytes),
-{{if .Commands}}
-                command => ClientMessage.Encode((ClientMessage)command),
-                frames => ClientPacket.Encode(frames),
-{{- else}}
-                _ => System.Array.Empty<byte>(),
-                frames => System.Array.Empty<byte>(),
-{{- end}}
-                transportFactory
-{{if .WorldTypes}},
-                world,
-                bytes => WorldUpdate.Decode(bytes)
-{{- else}},
-                null,
-                null
-{{- end}}
-{{if .Events}},
-                events
-{{- else}},
-                null
-{{- end}}
+{{template "clientArguments" .}}
             );
         }
 
@@ -62,36 +35,9 @@ namespace {{.GoPackage}}
             Func<GolemConnectOptions, IGolemTransport> transportFactory,
             Func<GolemConnectOptions, bool> transportSupported = null)
         {
-            var entities = new EntityManager();
-{{if .WorldTypes}}
-            var world = new WorldManager();
-{{- end}}
-{{if .Events}}
-            var events = new EventManager(entities);
-{{- end}}
+{{template "clientSetup" .}}
             return new GameClient(
-                entities,
-                bytes => EntityUpdate.Decode(bytes),
-{{if .Commands}}
-                command => ClientMessage.Encode((ClientMessage)command),
-                frames => ClientPacket.Encode(frames),
-{{- else}}
-                _ => System.Array.Empty<byte>(),
-                frames => System.Array.Empty<byte>(),
-{{- end}}
-                transportFactory
-{{if .WorldTypes}},
-                world,
-                bytes => WorldUpdate.Decode(bytes)
-{{- else}},
-                null,
-                null
-{{- end}}
-{{if .Events}},
-                events,
-{{- else}},
-                null,
-{{- end}}
+{{template "clientArguments" .}},
                 transportSupported
             );
         }
@@ -126,3 +72,37 @@ namespace {{.GoPackage}}
 {{end}}
     }
 }
+
+{{define "clientSetup"}}
+            var entities = new EntityManager();
+{{if .WorldTypes}}
+            var world = new WorldManager();
+{{- end}}
+{{if .Events}}
+            var events = new EventManager(entities);
+{{- end}}
+{{end}}
+
+{{define "clientArguments"}}
+                entities,
+                bytes => EntityUpdate.Decode(bytes),
+{{if .Commands}}
+                command => ClientMessage.Encode((ClientMessage)command),
+                frames => ClientPacket.Encode(frames),
+{{- else}}
+                _ => System.Array.Empty<byte>(),
+                frames => System.Array.Empty<byte>(),
+{{- end}}
+                transportFactory
+{{if .WorldTypes}},
+                world,
+                bytes => WorldUpdate.Decode(bytes)
+{{- else}},
+                null,
+                null
+{{- end}}
+{{if .Events}},
+                events
+{{- else}},
+                null
+{{- end}}{{end}}
