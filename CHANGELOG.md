@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- `golem/collision/layerpolicy` provides a backend-independent named-layer table with symmetric collision masks and error-returning operations. Existing 2D and 3D `Layers` APIs retain their typed backends and panic diagnostics.
+
 - `golem-threlte` provides a persistent Svelte provider, reactive entity/world/status stores, typed entity components and events, independent filtered scene mounts, and Threlte scheduler/transform helpers. Presentation components survive ordinary updates and clean up on visibility exit, replacement, or scene teardown without closing an application-owned session. Optional interpolation uses seconds and explicit coordinate selectors; external transform control bypasses all writes.
 - The `threlte` integration generates one `GolemThrelte.ts` adapter beside existing `js-client` output. Every entity requires a typed component or explicit headless registration. Bake validates the JS dependency and separate output directories; `--remove-integration threlte` removes only the recognized generated bridge. Re-run bake and compile the bridge with the application's Svelte toolchain.
 - The JavaScript runtime's `connectionState`/`subscribeConnectionState` and lifecycle `status`/`subscribeStatus` expose current, multicast connection snapshots without replacing application callbacks. `golem-threlte` requires the matching `golem-engine` 0.3.1 runtime; existing Phaser APIs remain compatible.

@@ -14,13 +14,13 @@ func TestSimpleBackendDetectsSphereSphereContact(t *testing.T) {
 		t.Fatalf("contacts = %d, want 1", len(contacts))
 	}
 	c := contacts[0]
-	if c.A != 1 || c.B != 2 {
-		t.Fatalf("contact pair = %d,%d; want 1,2", c.A, c.B)
+	if !((c.A == 1 && c.B == 2) || (c.A == 2 && c.B == 1)) {
+		t.Fatalf("contact pair = %d,%d; want entities 1 and 2", c.A, c.B)
 	}
 	if c.Depth <= 0 {
 		t.Fatalf("Depth = %g, want positive", c.Depth)
 	}
-	if c.Normal.X >= 0 {
+	if (c.A == 1 && c.Normal.X >= 0) || (c.A == 2 && c.Normal.X <= 0) {
 		t.Fatalf("Normal.X = %g, want push direction away from B", c.Normal.X)
 	}
 }

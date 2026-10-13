@@ -49,12 +49,7 @@ func (g *Grid) Insert(id int64, x, y float64) {
 	ck := g.toCell(x, y)
 	g.positions[id] = p
 	g.cellOf[id] = ck
-	cell := g.cells[ck]
-	if cell == nil {
-		cell = make(map[int64]struct{})
-		g.cells[ck] = cell
-	}
-	cell[id] = struct{}{}
+	g.addToCell(id, ck)
 }
 
 // Remove deletes an entity from the grid.
@@ -63,12 +58,7 @@ func (g *Grid) Remove(id int64) {
 	if !ok {
 		return
 	}
-	if cell := g.cells[ck]; cell != nil {
-		delete(cell, id)
-		if len(cell) == 0 {
-			delete(g.cells, ck)
-		}
-	}
+	g.removeFromCell(id, ck)
 	delete(g.positions, id)
 	delete(g.cellOf, id)
 }
@@ -86,19 +76,27 @@ func (g *Grid) Move(id int64, x, y float64) {
 	if oldCK == newCK {
 		return
 	}
-	if cell := g.cells[oldCK]; cell != nil {
-		delete(cell, id)
-		if len(cell) == 0 {
-			delete(g.cells, oldCK)
-		}
-	}
-	cell := g.cells[newCK]
+	g.removeFromCell(id, oldCK)
+	g.addToCell(id, newCK)
+	g.cellOf[id] = newCK
+}
+
+func (g *Grid) addToCell(id int64, ck cellKey) {
+	cell := g.cells[ck]
 	if cell == nil {
 		cell = make(map[int64]struct{})
-		g.cells[newCK] = cell
+		g.cells[ck] = cell
 	}
 	cell[id] = struct{}{}
-	g.cellOf[id] = newCK
+}
+
+func (g *Grid) removeFromCell(id int64, ck cellKey) {
+	if cell := g.cells[ck]; cell != nil {
+		delete(cell, id)
+		if len(cell) == 0 {
+			delete(g.cells, ck)
+		}
+	}
 }
 
 // Has reports whether an entity is tracked by the grid.

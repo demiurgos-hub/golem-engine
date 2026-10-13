@@ -1,6 +1,6 @@
 package collision
 
-import "fmt"
+import "github.com/demiurgos-hub/golem-engine/golem/collision/layerpolicy"
 
 // Layers maps named layers to bit indices, maintains a symmetric collision
 // matrix, and — when bound to a backend via Bind — acts as a registration
@@ -24,14 +24,13 @@ import "fmt"
 //
 //	ids := srv.OverlapCircle(x, y, r, layers.MaskFor("Enemy"))
 type Layers struct {
-	indices map[string]int // name → bit index (0–31)
-	matrix  [32]uint32     // matrix[i] = bitmask of layer bits that layer i collides with
-	backend Backend        // nil until Bind is called
+	table   layerpolicy.Table
+	backend Backend // nil until Bind is called
 }
 
 // NewLayers creates an empty Layers registry ready for Bind, Define, and SetCollides calls.
 func NewLayers() *Layers {
-	return &Layers{indices: make(map[string]int)}
+	return &Layers{table: layerpolicy.New()}
 }
 
 // Bind attaches a collision backend. Required before calling Add, Set, or Remove.
@@ -46,15 +45,11 @@ func (l *Layers) Bind(b Backend) *Layers {
 // method chaining. Panics if any name is already registered or if the total
 // number of defined layers would exceed 32.
 func (l *Layers) Define(names ...string) *Layers {
-	for _, name := range names {
-		if _, exists := l.indices[name]; exists {
-			panic(fmt.Sprintf("collision.Layers: layer %q is already defined", name))
-		}
-		idx := len(l.indices)
-		if idx >= 32 {
-			panic("collision.Layers: cannot define more than 32 layers")
-		}
-		l.indices[name] = idx
+	if len(names) == 0 {
+		return l
+	}
+	if err := l.table.Define(names...); err != nil {
+		panic("collision.Layers: " + err.Error())
 	}
 	return l
 }
@@ -66,10 +61,9 @@ func (l *Layers) Define(names ...string) *Layers {
 // Returns the receiver for method chaining. Panics if either name has not been
 // registered with Define.
 func (l *Layers) SetCollides(a, b string) *Layers {
-	ai := l.mustIndex(a)
-	bi := l.mustIndex(b)
-	l.matrix[ai] |= 1 << bi
-	l.matrix[bi] |= 1 << ai
+	if err := l.table.SetCollides(a, b); err != nil {
+		panic("collision.Layers: " + err.Error())
+	}
 	return l
 }
 
@@ -101,7 +95,11 @@ func (l *Layers) Remove(entityID int64) {
 // Use this for spatial query layerMask arguments alongside MaskFor.
 // Panics if the name has not been registered with Define.
 func (l *Layers) Layer(name string) uint32 {
-	return 1 << l.mustIndex(name)
+	value, err := l.table.Layer(name)
+	if err != nil {
+		panic("collision.Layers: " + err.Error())
+	}
+	return value
 }
 
 // Mask returns the collision mask for the named layer: the OR of the bits of
@@ -109,7 +107,11 @@ func (l *Layers) Layer(name string) uint32 {
 // what Add and Set pass as the mask argument to the backend automatically.
 // Panics if the name has not been registered with Define.
 func (l *Layers) Mask(name string) uint32 {
-	return l.matrix[l.mustIndex(name)]
+	value, err := l.table.Mask(name)
+	if err != nil {
+		panic("collision.Layers: " + err.Error())
+	}
+	return value
 }
 
 // Lookup returns the layer bit and collision mask for name.
@@ -118,31 +120,21 @@ func (l *Layers) Lookup(name string) (layer, mask uint32, ok bool) {
 	if l == nil {
 		return 0, 0, false
 	}
-	idx, ok := l.indices[name]
-	if !ok {
-		return 0, 0, false
-	}
-	return 1 << idx, l.matrix[idx], true
+	return l.table.Lookup(name)
 }
 
 // MaskFor returns the OR of the Layer bits for each of the given names. Use
 // this to build layerMask arguments for spatial queries such as OverlapBox or
 // Raycast. Panics if any name has not been registered with Define.
 func (l *Layers) MaskFor(names ...string) uint32 {
-	var out uint32
-	for _, name := range names {
-		out |= 1 << l.mustIndex(name)
+	if len(names) == 0 {
+		return 0
 	}
-	return out
-}
-
-// mustIndex returns the bit index for name, panicking if it is not defined.
-func (l *Layers) mustIndex(name string) int {
-	idx, ok := l.indices[name]
-	if !ok {
-		panic(fmt.Sprintf("collision.Layers: layer %q is not defined", name))
+	value, err := l.table.MaskFor(names...)
+	if err != nil {
+		panic("collision.Layers: " + err.Error())
 	}
-	return idx
+	return value
 }
 
 // mustBackend panics if no backend has been bound.

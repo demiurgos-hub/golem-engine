@@ -1,5 +1,5 @@
 ---
-description: golem/interest — Spatial hash grid and field-of-interest manager.
+description: golem/interest — spatial hash membership indexes and field-of-interest manager.
 globs: golem/interest/**/*.go
 alwaysApply: false
 ---
@@ -11,5 +11,7 @@ alwaysApply: false
 **`Manager`** owns the `Grid` and per-session known sets. Key methods: `AssignFOI(sessionID, entityID, radius, margin)` / `RemoveFOI(sessionID)` for lifecycle; `UpdateGrid(registry)` synchronises the grid with all live entities (inserts new, removes stale, moves changed) and records deleted globals in reused `removedGlobals`; `ComputeDiffs()` returns a `map[sessionID]*Diff` by querying each session's FOI against the grid, applying hysteresis (enter at `Radius`, exit at `Radius+Margin`), and diffing against the previous known set. `ComputeDiffsFiltered(allow)` applies an optional predicate before Entered/Stayed and forces Exited when a previously known entity becomes disallowed; `ComputeDiffs()` remains equivalent to a nil (allow-all) filter. Global entities (`IsGlobal() == true`) bypass spatial checks but still pass through the allow predicate (Server supplies visibility-group membership). Deleted globals emit Exited via `removedGlobals` even when the FOI anchor is not on the grid. This package does not store group policy.
 
 **Not thread-safe.** All methods are called exclusively from the game tick goroutine (single-writer), under Server `interestMu`. The parent **`golem`** package creates and drives the Manager inside `runLoop`; consumers interact via `Server.AssignFOI` / `Server.RemoveFOI`.
+
+**Grid membership:** private addToCell/removeFromCell helpers own cell-map creation, membership changes, and empty-cell pruning. Insert/Move/Remove own the position and cellOf indexes. Same-cell Move updates the position without rehashing. UpdateGrid uses Insert's existing insert-or-move contract; global policy and stale-entity cleanup remain in Manager.
 
 Depends on **`golem/registry`** for the `Entity` interface and `Registry.All()`. Does **not** import `golem`, `golem/net`, `golem/visibility`, or `golem/world`.

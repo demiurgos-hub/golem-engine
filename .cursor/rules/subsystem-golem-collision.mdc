@@ -1,0 +1,21 @@
+---
+description: collision and collision3d — typed backends, shared named-layer policy, and backend-local spatial traversal.
+globs:
+  - golem/collision/**/*
+  - golem/collision3d/**/*
+alwaysApply: false
+---
+
+# Collision
+
+The root module owns `golem/collision3d`. `golem/collision`, `collision/cp`, and `collision/resolv` are separate Go modules, developed through the ignored local `go.work`. Test each module explicitly; root `go test ./...` does not cover nested modules.
+
+`collision/layerpolicy` owns name allocation and symmetric masks without importing collision shapes, backends, or the root runtime. The typed 2D and 3D `Layers` facades own backend binding and preserve their diagnostic prefixes and panic order. Define is incremental on failure; matrix changes do not reconfigure already registered shapes. Keep the policy package public because collision3d cannot import collision's internal packages.
+
+`collision/internal/querygeom` owns measured 2D primitive dispatch and narrowphase tests. Chipmunk and resolv own shape extraction and traversal. Chipmunk reads current circle radii/bounding boxes, retains native symmetric query filtering, and selects the nearest cast hit after sorting. Resolv queries original shape dimensions, filters only by layer, and stops at the first map-traversal hit for single-hit casts. Do not normalize these differences or degenerate query encodings during refactors.
+
+Chipmunk `registerBody` owns shape/filter/sensor creation, space insertion, and bookkeeping. Add creates a kinematic body; AddDynamic owns initial position, mass, and moment. Caller-managed static bodies through Space remain separate.
+
+3D overlap queries share only private traversal. The 2D/3D segment kernels remain distinct: exact-zero checks versus the 3D epsilon, and typed normal construction. Backend methods remain tick-goroutine-only. Contact-event lifecycle belongs to the parent runtime and is outside this subsystem.
+
+Release collision with its new helper packages before raising root/cp/resolv dependency pins. A workspace can mask an old published dependency missing those helpers; verify standalone module builds against the intended versions. Never commit local replace directives or workspace files.

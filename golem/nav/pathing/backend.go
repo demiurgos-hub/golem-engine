@@ -3,8 +3,9 @@ package navpathing
 import (
 	"fmt"
 
-	"github.com/quasilyte/pathing"
 	"github.com/demiurgos-hub/golem-engine/golem/nav"
+	"github.com/demiurgos-hub/golem-engine/golem/nav/internal/mapinput"
+	"github.com/quasilyte/pathing"
 )
 
 // Backend wraps quasilyte/pathing's AStar to implement nav.Backend.
@@ -52,13 +53,8 @@ func New(cfg GridConfig) (*Backend, error) {
 // blocked(gid) returns true for GIDs that are impassable. GID 0 (empty cell)
 // is always treated as impassable regardless of blocked.
 func NewFromTiledLayer(cols, rows, tileW, tileH int, data []int, blocked func(gid int) bool) (*Backend, error) {
-	return newBackend(cols, rows, float64(tileW), float64(tileH), 0, 0, func(col, row int) bool {
-		gid := data[row*cols+col]
-		if gid == 0 {
-			return false
-		}
-		return !blocked(gid)
-	})
+	source := mapinput.RowMajor{Cols: cols, Values: data, Blocked: blocked}
+	return newBackend(cols, rows, float64(tileW), float64(tileH), 0, 0, source.Walkable)
 }
 
 // NewFromLDtkIntGrid builds a Backend from an LDtk IntGrid layer. Pass
@@ -68,14 +64,8 @@ func NewFromTiledLayer(cols, rows, tileW, tileH int, data []int, blocked func(gi
 // blocked(val) returns true for IntGrid values that are impassable. Value 0
 // (empty cell) is always treated as impassable.
 func NewFromLDtkIntGrid(cols, rows, gridSize int, originX, originY float64, csv []int, blocked func(val int) bool) (*Backend, error) {
-	cw := float64(gridSize)
-	return newBackend(cols, rows, cw, cw, originX, originY, func(col, row int) bool {
-		val := csv[row*cols+col]
-		if val == 0 {
-			return false
-		}
-		return !blocked(val)
-	})
+	source := mapinput.RowMajor{Cols: cols, Values: csv, Blocked: blocked}
+	return newBackend(cols, rows, float64(gridSize), float64(gridSize), originX, originY, source.Walkable)
 }
 
 func newBackend(cols, rows int, cellW, cellH, originX, originY float64, walkable func(col, row int) bool) (*Backend, error) {

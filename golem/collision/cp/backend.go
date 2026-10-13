@@ -4,7 +4,7 @@ import (
 	"math"
 
 	"github.com/demiurgos-hub/golem-engine/golem/collision"
-
+	"github.com/demiurgos-hub/golem-engine/golem/collision/internal/querygeom"
 	cp "github.com/jakecoffman/cp/v2"
 )
 
@@ -53,26 +53,7 @@ func (b *CpBackend) Space() *cp.Space {
 // Unrecognised shape types are silently ignored.
 func (b *CpBackend) Add(entityID int64, shape collision.Shape, layer, mask uint32, trigger bool) {
 	body := cp.NewKinematicBody()
-	body.UserData = entityID
-
-	var cpShape *cp.Shape
-	switch s := shape.(type) {
-	case collision.Circle:
-		cpShape = cp.NewCircle(body, s.R, cp.Vector{})
-	case collision.AABB:
-		cpShape = cp.NewBox(body, s.W, s.H, 0)
-	default:
-		return
-	}
-
-	// cp uses uint for layer/mask categories; convert from uint32.
-	cpShape.SetFilter(cp.NewShapeFilter(cp.NO_GROUP, uint(layer), uint(mask)))
-	cpShape.SetSensor(trigger)
-
-	b.space.AddBody(body)
-	b.space.AddShape(cpShape)
-
-	b.entries[entityID] = bodyEntry{body: body, shape: cpShape, trigger: trigger}
+	b.registerBody(entityID, body, shape, layer, mask, trigger, false)
 }
 
 // AddDynamic registers a collision shape for the given entity as a dynamic
@@ -94,6 +75,10 @@ func (b *CpBackend) Add(entityID int64, shape collision.Shape, layer, mask uint3
 func (b *CpBackend) AddDynamic(entityID int64, shape collision.Shape, layer, mask uint32, trigger bool, mass, moment, x, y float64) {
 	body := cp.NewBody(mass, moment)
 	body.SetPosition(cp.Vector{X: x, Y: y})
+	b.registerBody(entityID, body, shape, layer, mask, trigger, true)
+}
+
+func (b *CpBackend) registerBody(entityID int64, body *cp.Body, shape collision.Shape, layer, mask uint32, trigger, dynamic bool) {
 	body.UserData = entityID
 
 	var cpShape *cp.Shape
@@ -106,13 +91,14 @@ func (b *CpBackend) AddDynamic(entityID int64, shape collision.Shape, layer, mas
 		return
 	}
 
+	// cp uses uint for layer/mask categories; convert from uint32.
 	cpShape.SetFilter(cp.NewShapeFilter(cp.NO_GROUP, uint(layer), uint(mask)))
 	cpShape.SetSensor(trigger)
 
 	b.space.AddBody(body)
 	b.space.AddShape(cpShape)
 
-	b.entries[entityID] = bodyEntry{body: body, shape: cpShape, trigger: trigger, dynamic: true}
+	b.entries[entityID] = bodyEntry{body: body, shape: cpShape, trigger: trigger, dynamic: dynamic}
 }
 
 // Remove unregisters the entity's body and shape from the space.
@@ -301,7 +287,7 @@ func (b *CpBackend) OverlapBox(cx, cy, hw, hh float64, layerMask uint32) []int64
 			return
 		}
 		pos := e.body.Position()
-		if overlapBoxCpShape(cx, cy, hw, hh, pos.X, pos.Y, found) {
+		if querygeom.OverlapBox(cx, cy, hw, hh, pos.X, pos.Y, primitiveForShape(found)) {
 			out = append(out, id)
 		}
 	}, nil)
@@ -326,7 +312,7 @@ func (b *CpBackend) OverlapCircle(cx, cy, radius float64, layerMask uint32) []in
 			return
 		}
 		pos := e.body.Position()
-		if overlapCircleCpShape(cx, cy, radius, pos.X, pos.Y, found) {
+		if querygeom.OverlapCircle(cx, cy, radius, pos.X, pos.Y, primitiveForShape(found)) {
 			out = append(out, id)
 		}
 	}, nil)
@@ -387,7 +373,7 @@ func (b *CpBackend) CircleCastAll(ox, oy, radius, dx, dy float64, layerMask uint
 //   - qhw > 0, qhh > 0    → box sweep (AABB half-extents)
 //   - qhw < 0, qhh == 0   → circle sweep (radius = -qhw)
 //
-// When collectAll is false the function returns after finding the first hit.
+// When collectAll is false the function still collects and sorts before returning the nearest hit.
 func (b *CpBackend) castSegment(px, py, qx, qy, qhw, qhh float64, layerMask uint32, collectAll bool) []collision.RaycastHit {
 	dx, dy := qx-px, qy-py
 	segLen := math.Sqrt(dx*dx + dy*dy)
@@ -425,22 +411,7 @@ func (b *CpBackend) castSegment(px, py, qx, qy, qhw, qhh float64, layerMask uint
 		pos := e.body.Position()
 		ex, ey := pos.X, pos.Y
 
-		var t float64
-		var n collision.Vec2
-		var hit bool
-
-		switch {
-		case qhw == 0 && qhh == 0:
-			// Raycast
-			hit, t, n = castRayVsCpShape(px, py, qx, qy, ex, ey, found)
-		case qhw > 0 && qhh > 0:
-			// BoxCast: Minkowski-expand the entity shape by (qhw,qhh)
-			hit, t, n = castBoxVsCpShape(px, py, qx, qy, qhw, qhh, ex, ey, found)
-		default:
-			// CircleCast: radius = -qhw
-			r := -qhw
-			hit, t, n = castCircleVsCpShape(px, py, qx, qy, r, ex, ey, found)
-		}
+		t, n, hit := querygeom.CastSegment(px, py, qx, qy, qhw, qhh, ex, ey, primitiveForShape(found))
 
 		if !hit {
 			return
@@ -464,91 +435,12 @@ func (b *CpBackend) castSegment(px, py, qx, qy, qhw, qhh float64, layerMask uint
 	return hits
 }
 
-// castRayVsCpShape dispatches a ray test to the correct shape type.
-func castRayVsCpShape(px, py, qx, qy, ex, ey float64, s *cp.Shape) (bool, float64, collision.Vec2) {
-	switch s.Class.(type) {
-	case *cp.Circle:
-		r := s.Class.(*cp.Circle).Radius()
-		t, n, ok := collision.SegmentVsCircle(px, py, qx, qy, ex, ey, r)
-		return ok, t, n
-	default:
-		hw := (s.BB().R - s.BB().L) / 2
-		hh := (s.BB().T - s.BB().B) / 2
-		t, n, ok := collision.SegmentVsAABB(px, py, qx, qy, ex, ey, hw, hh)
-		return ok, t, n
+// primitiveForShape preserves Chipmunk's current bounding-box approximation for
+// non-circles, including shapes changed directly through Space().
+func primitiveForShape(s *cp.Shape) querygeom.Primitive {
+	if circle, ok := s.Class.(*cp.Circle); ok {
+		return querygeom.Circle(circle.Radius())
 	}
-}
-
-// castBoxVsCpShape dispatches a box-sweep test (Minkowski-expanded entity shape).
-func castBoxVsCpShape(px, py, qx, qy, qhw, qhh, ex, ey float64, s *cp.Shape) (bool, float64, collision.Vec2) {
-	switch s.Class.(type) {
-	case *cp.Circle:
-		r := s.Class.(*cp.Circle).Radius()
-		// Swept box vs static circle = segment vs rounded rect.
-		t, n, ok := collision.SegmentVsRoundedRect(px, py, qx, qy, ex, ey, qhw, qhh, r)
-		return ok, t, n
-	default:
-		hw := (s.BB().R - s.BB().L) / 2
-		hh := (s.BB().T - s.BB().B) / 2
-		// Swept box vs static AABB = segment vs expanded AABB (Minkowski sum).
-		t, n, ok := collision.SegmentVsAABB(px, py, qx, qy, ex, ey, hw+qhw, hh+qhh)
-		return ok, t, n
-	}
-}
-
-// castCircleVsCpShape dispatches a circle-sweep test.
-func castCircleVsCpShape(px, py, qx, qy, r, ex, ey float64, s *cp.Shape) (bool, float64, collision.Vec2) {
-	switch s.Class.(type) {
-	case *cp.Circle:
-		er := s.Class.(*cp.Circle).Radius()
-		// Swept circle vs static circle = ray vs circle with summed radii.
-		t, n, ok := collision.SegmentVsCircle(px, py, qx, qy, ex, ey, r+er)
-		return ok, t, n
-	default:
-		hw := (s.BB().R - s.BB().L) / 2
-		hh := (s.BB().T - s.BB().B) / 2
-		// Swept circle vs static AABB = segment vs rounded rect.
-		t, n, ok := collision.SegmentVsRoundedRect(px, py, qx, qy, ex, ey, hw, hh, r)
-		return ok, t, n
-	}
-}
-
-// overlapBoxCpShape tests whether the AABB at (qx,qy) with half-extents (hw,hh)
-// overlaps the cp shape whose body centre is at (ex,ey).
-func overlapBoxCpShape(qx, qy, hw, hh, ex, ey float64, s *cp.Shape) bool {
-	switch s.Class.(type) {
-	case *cp.Circle:
-		r := s.Class.(*cp.Circle).Radius()
-		// Closest point on the AABB to the circle centre.
-		clampX := math.Max(qx-hw, math.Min(ex, qx+hw))
-		clampY := math.Max(qy-hh, math.Min(ey, qy+hh))
-		dx, dy := ex-clampX, ey-clampY
-		return dx*dx+dy*dy < r*r
-	default:
-		// For box or polygon shapes use the bounding-box test; the BBQuery
-		// broadphase already filtered by BB, so this is correct for AABB shapes.
-		shapeHW := (s.BB().R - s.BB().L) / 2
-		shapeHH := (s.BB().T - s.BB().B) / 2
-		return math.Abs(qx-ex) < hw+shapeHW && math.Abs(qy-ey) < hh+shapeHH
-	}
-}
-
-// overlapCircleCpShape tests whether the circle at (qx,qy) with radius r
-// overlaps the cp shape whose body centre is at (ex,ey).
-func overlapCircleCpShape(qx, qy, r, ex, ey float64, s *cp.Shape) bool {
-	switch s.Class.(type) {
-	case *cp.Circle:
-		er := s.Class.(*cp.Circle).Radius()
-		dx, dy := qx-ex, qy-ey
-		total := r + er
-		return dx*dx+dy*dy < total*total
-	default:
-		// For box / polygon shapes use closest-point-on-AABB test.
-		shapeHW := (s.BB().R - s.BB().L) / 2
-		shapeHH := (s.BB().T - s.BB().B) / 2
-		clampX := math.Max(ex-shapeHW, math.Min(qx, ex+shapeHW))
-		clampY := math.Max(ey-shapeHH, math.Min(qy, ey+shapeHH))
-		dx, dy := qx-clampX, qy-clampY
-		return dx*dx+dy*dy < r*r
-	}
+	bb := s.BB()
+	return querygeom.Box((bb.R-bb.L)/2, (bb.T-bb.B)/2)
 }

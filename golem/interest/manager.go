@@ -131,11 +131,7 @@ func (m *Manager) UpdateGrid(reg *registry.Registry) {
 
 		delete(m.globals, id)
 		x, y := interestPosition(e)
-		if m.grid.Has(id) {
-			m.grid.Move(id, x, y)
-		} else {
-			m.grid.Insert(id, x, y)
-		}
+		m.grid.Insert(id, x, y)
 		m.tracked[id] = struct{}{}
 	}
 

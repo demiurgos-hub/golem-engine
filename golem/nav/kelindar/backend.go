@@ -3,8 +3,9 @@ package navkelindar
 import (
 	"fmt"
 
-	"github.com/kelindar/tile"
 	"github.com/demiurgos-hub/golem-engine/golem/nav"
+	"github.com/demiurgos-hub/golem-engine/golem/nav/internal/mapinput"
+	"github.com/kelindar/tile"
 )
 
 // Backend wraps kelindar/tile's Grid to implement nav.Backend and nav.DynamicBackend.
@@ -59,12 +60,12 @@ func New(cfg GridConfig) (*Backend, error) {
 // blocked(gid) returns true for GIDs that are impassable. GID 0 (empty cell)
 // is always treated as impassable regardless of blocked.
 func NewFromTiledLayer(cols, rows, tileW, tileH int, data []int, blocked func(gid int) bool) (*Backend, error) {
+	source := mapinput.RowMajor{Cols: cols, Values: data, Blocked: blocked}
 	return newBackend(cols, rows, float64(tileW), float64(tileH), 0, 0, func(col, row int) tile.Value {
-		gid := data[row*cols+col]
-		if gid == 0 || blocked(gid) {
-			return 0
+		if source.Walkable(col, row) {
+			return 1
 		}
-		return 1
+		return 0
 	})
 }
 
@@ -75,13 +76,12 @@ func NewFromTiledLayer(cols, rows, tileW, tileH int, data []int, blocked func(gi
 // blocked(val) returns true for IntGrid values that are impassable. Value 0
 // (empty cell) is always treated as impassable.
 func NewFromLDtkIntGrid(cols, rows, gridSize int, originX, originY float64, csv []int, blocked func(val int) bool) (*Backend, error) {
-	cw := float64(gridSize)
-	return newBackend(cols, rows, cw, cw, originX, originY, func(col, row int) tile.Value {
-		val := csv[row*cols+col]
-		if val == 0 || blocked(val) {
-			return 0
+	source := mapinput.RowMajor{Cols: cols, Values: csv, Blocked: blocked}
+	return newBackend(cols, rows, float64(gridSize), float64(gridSize), originX, originY, func(col, row int) tile.Value {
+		if source.Walkable(col, row) {
+			return 1
 		}
-		return 1
+		return 0
 	})
 }
 

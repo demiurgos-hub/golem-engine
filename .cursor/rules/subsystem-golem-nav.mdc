@@ -1,0 +1,18 @@
+---
+description: nav — nested navigation modules, row-major map input, and backend-specific coordinate and path policies.
+globs:
+  - golem/nav/**/*
+alwaysApply: false
+---
+
+# Navigation
+
+`golem/nav`, `nav/pathing`, and `nav/kelindar` are separate Go modules developed through the ignored local `go.work`. The shared nav module does not depend on the root runtime, map loaders, or either pathfinding library.
+
+`nav/internal/mapinput.RowMajor` borrows raw Tiled/LDtk values during synchronous construction. It owns row-major indexing and the rule that zero is blocked without calling the blocked callback. Nonzero values call the supplied predicate. Constructors keep validation order, origins, dimensions, library allocation, and bool-versus-cost adaptation. Do not silently introduce nil-callback defaults, data-length validation, or GID decoding.
+
+Keep backend-specific coordinate rounding, numeric limits, weighted costs, and reconstruction separate. Pathing uses truncated integer cell dimensions/half-centers and chained partial paths. Kelindar uses floating dimensions, int16 coordinates, padded pages, and weighted reconstruction. Same-cell requests currently return the exact start before checking walkability. The backend tests characterize these behaviors; they are not instructions to fix them as part of refactoring.
+
+Known deferred corrections include kelindar page-rounding overflow at 32767 and raw-cost narrowing, endpoint walkability versus the interface promise, and pathing's shared AStar scratch versus its concurrent-use comment. Do not infer thread safety from that comment or merge endpoint/segment policies to hide these differences.
+
+Release nav with mapinput before raising backend dependency pins. Verify each nested module explicitly and standalone against intended dependency versions; do not commit workspace files or local replace directives.

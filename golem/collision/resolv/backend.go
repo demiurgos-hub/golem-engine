@@ -4,7 +4,7 @@ import (
 	"math"
 
 	"github.com/demiurgos-hub/golem-engine/golem/collision"
-
+	"github.com/demiurgos-hub/golem-engine/golem/collision/internal/querygeom"
 	"github.com/solarlune/resolv"
 )
 
@@ -151,7 +151,8 @@ func (b *ResolvBackend) OverlapBox(cx, cy, hw, hh float64, layerMask uint32) []i
 			continue
 		}
 		ex, ey := e.shape.Position().X, e.shape.Position().Y
-		if overlapBoxShape(cx, cy, hw, hh, ex, ey, e.origShape) {
+		primitive, _ := querygeom.FromShape(e.origShape)
+		if querygeom.OverlapBox(cx, cy, hw, hh, ex, ey, primitive) {
 			out = append(out, e.id)
 		}
 	}
@@ -168,46 +169,12 @@ func (b *ResolvBackend) OverlapCircle(cx, cy, radius float64, layerMask uint32) 
 			continue
 		}
 		ex, ey := e.shape.Position().X, e.shape.Position().Y
-		if overlapCircleShape(cx, cy, radius, ex, ey, e.origShape) {
+		primitive, _ := querygeom.FromShape(e.origShape)
+		if querygeom.OverlapCircle(cx, cy, radius, ex, ey, primitive) {
 			out = append(out, e.id)
 		}
 	}
 	return out
-}
-
-// overlapBoxShape reports whether the AABB centred at (qx, qy) with half-extents
-// (hw, hh) overlaps the entity shape centred at (ex, ey).
-func overlapBoxShape(qx, qy, hw, hh, ex, ey float64, s collision.Shape) bool {
-	switch shape := s.(type) {
-	case collision.AABB:
-		ehw, ehh := shape.W/2, shape.H/2
-		return math.Abs(qx-ex) < hw+ehw && math.Abs(qy-ey) < hh+ehh
-	case collision.Circle:
-		// Closest point on the query AABB to the circle centre.
-		cx := math.Max(qx-hw, math.Min(ex, qx+hw))
-		cy := math.Max(qy-hh, math.Min(ey, qy+hh))
-		dx, dy := ex-cx, ey-cy
-		return dx*dx+dy*dy < shape.R*shape.R
-	}
-	return false
-}
-
-// overlapCircleShape reports whether the circle centred at (qx, qy) with the
-// given radius overlaps the entity shape centred at (ex, ey).
-func overlapCircleShape(qx, qy, r, ex, ey float64, s collision.Shape) bool {
-	switch shape := s.(type) {
-	case collision.Circle:
-		dx, dy := qx-ex, qy-ey
-		total := r + shape.R
-		return dx*dx+dy*dy < total*total
-	case collision.AABB:
-		// Closest point on the entity AABB to the query circle centre.
-		cx := math.Max(ex-shape.W/2, math.Min(qx, ex+shape.W/2))
-		cy := math.Max(ey-shape.H/2, math.Min(qy, ey+shape.H/2))
-		dx, dy := qx-cx, qy-cy
-		return dx*dx+dy*dy < r*r
-	}
-	return false
 }
 
 // Raycast returns the first registered entity hit by the segment (x1,y1)→(x2,y2).
@@ -278,18 +245,8 @@ func (b *ResolvBackend) castSegment(px, py, qx, qy, qhw, qhh float64, layerMask 
 		}
 		ex, ey := e.shape.Position().X, e.shape.Position().Y
 
-		var t float64
-		var n collision.Vec2
-		var ok bool
-
-		switch {
-		case qhw == 0 && qhh == 0:
-			t, n, ok = castRayVsShape(px, py, qx, qy, ex, ey, e.origShape)
-		case qhw > 0 && qhh > 0:
-			t, n, ok = castBoxVsShape(px, py, qx, qy, qhw, qhh, ex, ey, e.origShape)
-		default:
-			t, n, ok = castCircleVsShape(px, py, qx, qy, -qhw, ex, ey, e.origShape)
-		}
+		primitive, _ := querygeom.FromShape(e.origShape)
+		t, n, ok := querygeom.CastSegment(px, py, qx, qy, qhw, qhh, ex, ey, primitive)
 
 		if !ok {
 			continue
@@ -313,34 +270,4 @@ func (b *ResolvBackend) castSegment(px, py, qx, qy, qhw, qhh float64, layerMask 
 		return hits[:1]
 	}
 	return hits
-}
-
-func castRayVsShape(px, py, qx, qy, ex, ey float64, s collision.Shape) (float64, collision.Vec2, bool) {
-	switch shape := s.(type) {
-	case collision.Circle:
-		return collision.SegmentVsCircle(px, py, qx, qy, ex, ey, shape.R)
-	case collision.AABB:
-		return collision.SegmentVsAABB(px, py, qx, qy, ex, ey, shape.W/2, shape.H/2)
-	}
-	return 0, collision.Vec2{}, false
-}
-
-func castBoxVsShape(px, py, qx, qy, qhw, qhh, ex, ey float64, s collision.Shape) (float64, collision.Vec2, bool) {
-	switch shape := s.(type) {
-	case collision.AABB:
-		return collision.SegmentVsAABB(px, py, qx, qy, ex, ey, shape.W/2+qhw, shape.H/2+qhh)
-	case collision.Circle:
-		return collision.SegmentVsRoundedRect(px, py, qx, qy, ex, ey, qhw, qhh, shape.R)
-	}
-	return 0, collision.Vec2{}, false
-}
-
-func castCircleVsShape(px, py, qx, qy, r, ex, ey float64, s collision.Shape) (float64, collision.Vec2, bool) {
-	switch shape := s.(type) {
-	case collision.Circle:
-		return collision.SegmentVsCircle(px, py, qx, qy, ex, ey, r+shape.R)
-	case collision.AABB:
-		return collision.SegmentVsRoundedRect(px, py, qx, qy, ex, ey, shape.W/2, shape.H/2, r)
-	}
-	return 0, collision.Vec2{}, false
 }

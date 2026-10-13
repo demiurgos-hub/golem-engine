@@ -2,7 +2,6 @@ package footprint
 
 import (
 	"fmt"
-	"sync/atomic"
 
 	"github.com/demiurgos-hub/golem-engine/golem/collision"
 )
@@ -21,33 +20,23 @@ type Placer2D struct {
 
 // Handle2D owns the synthetic collision IDs created by Placer2D.Place.
 type Handle2D struct {
-	backend collision.Backend
-	ids     []int64
-	removed atomic.Bool
+	state placementHandle
 }
 
 // IDs returns a copy of the synthetic collision IDs for this placement.
 func (h *Handle2D) IDs() []int64 {
-	if h == nil || len(h.ids) == 0 {
+	if h == nil {
 		return nil
 	}
-	out := make([]int64, len(h.ids))
-	copy(out, h.ids)
-	return out
+	return h.state.IDs()
 }
 
 // Remove unregisters every shape ID from the backend.
 // It is nil-safe, idempotent, and safe for concurrent callers: only the first
 // successful call performs backend removals.
 func (h *Handle2D) Remove() {
-	if h == nil || !h.removed.CompareAndSwap(false, true) {
-		return
-	}
-	if h.backend == nil {
-		return
-	}
-	for _, id := range h.ids {
-		h.backend.Remove(id)
+	if h != nil {
+		h.state.Remove()
 	}
 }
 
@@ -83,9 +72,6 @@ func (p *Placer2D) Place(fp *Footprint, t Transform2D) (*Handle2D, error) {
 	}
 
 	alloc := p.IDs
-	if alloc == nil {
-		alloc = defaultIDs
-	}
 
 	type prepared struct {
 		shape collision.Shape
@@ -124,16 +110,13 @@ func (p *Placer2D) Place(fp *Footprint, t Transform2D) (*Handle2D, error) {
 		})
 	}
 
-	h := &Handle2D{backend: p.Backend, ids: make([]int64, 0, len(prep))}
-	for _, item := range prep {
-		id := alloc.Next()
-		if id >= 0 {
-			h.Remove()
-			return nil, fmt.Errorf("footprint: allocator must return negative IDs, got %d", id)
-		}
-		p.Backend.Add(id, item.shape, item.layer, item.mask, item.trig)
-		h.ids = append(h.ids, id)
-		p.Backend.Update(id, item.x, item.y)
+	h := &Handle2D{state: placementHandle{backend: p.Backend, ids: make([]int64, 0, len(prep))}}
+	err = registerPrepared(&h.state, alloc, prep,
+		func(id int64, item prepared) { p.Backend.Add(id, item.shape, item.layer, item.mask, item.trig) },
+		func(id int64, item prepared) { p.Backend.Update(id, item.x, item.y) },
+	)
+	if err != nil {
+		return nil, err
 	}
 	return h, nil
 }

@@ -100,22 +100,17 @@ func (b *SimpleBackend) ReadBack(_ func(entityID int64, x, y, z float64)) {}
 func (b *SimpleBackend) OverlapBox(cx, cy, cz, hw, hh, hd float64, layerMask uint32) []int64 {
 	query := AABB{W: hw * 2, H: hh * 2, D: hd * 2}
 	pos := Vec3{X: cx, Y: cy, Z: cz}
-	var out []int64
-	for _, e := range b.entries {
-		if e.layer&layerMask == 0 {
-			continue
-		}
-		if _, _, ok := overlap(query, pos, e.shape, e.pos); ok {
-			out = append(out, e.id)
-		}
-	}
-	return out
+	return b.overlapShape(query, pos, layerMask)
 }
 
 // OverlapSphere returns IDs whose shapes overlap the query sphere.
 func (b *SimpleBackend) OverlapSphere(cx, cy, cz, radius float64, layerMask uint32) []int64 {
 	query := Sphere{R: radius}
 	pos := Vec3{X: cx, Y: cy, Z: cz}
+	return b.overlapShape(query, pos, layerMask)
+}
+
+func (b *SimpleBackend) overlapShape(query Shape, pos Vec3, layerMask uint32) []int64 {
 	var out []int64
 	for _, e := range b.entries {
 		if e.layer&layerMask == 0 {
