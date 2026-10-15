@@ -98,8 +98,8 @@ namespace GolemEngine.Unity.Editor
             model.SnakeName = GolemScribeNaming.ToSnakeCase(model.TypeName);
             model.KeyFieldName = catalogAttr.Key;
             model.SourceGuid = StableSourceGuid(catalogType);
-            model.TypesRelativePath = CombineRelative(typesSchemaDir, GolemScribeNaming.CatalogSchemaFileName(model.TypeName));
-            model.WorldRelativePath = CombineRelative(worldSchemaDir, GolemScribeNaming.CatalogSchemaFileName(model.TypeName));
+            model.TypesRelativePath = GolemScribePaths.CombineRelative(typesSchemaDir, GolemScribeNaming.CatalogSchemaFileName(model.TypeName));
+            model.WorldRelativePath = GolemScribePaths.CombineRelative(worldSchemaDir, GolemScribeNaming.CatalogSchemaFileName(model.TypeName));
             model.CatalogDataRelativePath =
                 GolemScribeConstants.CatalogDataDirectory + "/" + GolemScribeNaming.CatalogDataFileName(model.TypeName);
 
@@ -123,11 +123,11 @@ namespace GolemEngine.Unity.Editor
                 }
             }
 
-            var seenTags = new Dictionary<int, string>();
-            var seenNames = new Dictionary<string, string>(StringComparer.Ordinal);
+            var claims = new GolemScribeFieldClaims();
             FieldInfo keyField = null;
 
-            foreach (var field in EnumerateAttributedFields(catalogType))
+            foreach (var field in GolemScribeFieldInspection.Enumerate(
+                         catalogType, new[] { typeof(ScriptableObject), typeof(UnityEngine.Object) }, typeof(GolemFieldAttribute), typeof(GolemAssetRefAttribute)))
             {
                 var fieldAttr = field.GetCustomAttribute<GolemFieldAttribute>(inherit: false);
                 var assetAttr = field.GetCustomAttribute<GolemAssetRefAttribute>(inherit: false);
@@ -143,14 +143,15 @@ namespace GolemEngine.Unity.Editor
                     continue;
                 }
 
-                if (!field.IsPublic && field.GetCustomAttribute<SerializeField>() == null)
+                var visibility = GolemScribeFieldInspection.CheckVisibility(field);
+                if (!visibility.IsSerialized)
                 {
                     model.Errors.Add(
                         $"Catalog '{model.TypeName}' field '{field.Name}' must be public or [SerializeField].");
                     continue;
                 }
 
-                if (field.IsStatic)
+                if (visibility.IsStatic)
                 {
                     model.Errors.Add($"Catalog '{model.TypeName}' field '{field.Name}' cannot be static.");
                     continue;
@@ -186,7 +187,7 @@ namespace GolemEngine.Unity.Editor
                 }
 
                 // Direct custom-type tags: proto field number equals tag (no entity offset / revision slot).
-                if (seenTags.TryGetValue(tag, out var previousField))
+                if (claims.CheckTag(tag, out var previousField))
                 {
                     model.Errors.Add(
                         $"Catalog '{model.TypeName}': fields '{previousField}' and '{field.Name}' share tag {tag}.");
@@ -205,15 +206,14 @@ namespace GolemEngine.Unity.Editor
                     continue;
                 }
 
-                if (seenNames.TryGetValue(snake, out var previousName))
+                if (claims.CheckName(snake, out var previousName))
                 {
                     model.Errors.Add(
                         $"Catalog '{model.TypeName}': fields '{previousName}' and '{field.Name}' both map to '{snake}'.");
                     continue;
                 }
 
-                seenTags[tag] = field.Name;
-                seenNames[snake] = field.Name;
+                claims.Commit(tag, snake, field.Name);
                 var fieldModel = new GolemCatalogFieldModel
                 {
                     SnakeName = snake,
@@ -641,38 +641,6 @@ namespace GolemEngine.Unity.Editor
             }
 
             return yamlToken ?? string.Empty;
-        }
-
-        private static IEnumerable<FieldInfo> EnumerateAttributedFields(Type type)
-        {
-            for (var current = type; current != null && current != typeof(object); current = current.BaseType)
-            {
-                if (current == typeof(ScriptableObject) || current == typeof(UnityEngine.Object))
-                {
-                    break;
-                }
-
-                foreach (var field in current.GetFields(
-                             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic |
-                             BindingFlags.DeclaredOnly))
-                {
-                    if (field.GetCustomAttribute<GolemFieldAttribute>(inherit: false) != null ||
-                        field.GetCustomAttribute<GolemAssetRefAttribute>(inherit: false) != null)
-                    {
-                        yield return field;
-                    }
-                }
-            }
-        }
-
-        private static string CombineRelative(string directory, string fileName)
-        {
-            var dir = (directory ?? string.Empty).Replace('\\', '/').Trim('/');
-            if (string.IsNullOrEmpty(dir))
-            {
-                return fileName;
-            }
-            return dir + "/" + fileName;
         }
     }
 }

@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <IsTestProject>true</IsTestProject>
+    <AssemblyName>GolemEngine.Unity.Editor.Tests</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="NUnit" Version="3.14.0" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
+    <Compile Include="../../Editor/GolemBakeCommand.cs" />
+    <Compile Include="../../Editor/Scribe/GolemScribeArtifact*.cs" />
+    <Compile Include="../../Editor/Scribe/GolemScribePaths.cs" />
+    <Compile Include="../../Editor/Scribe/GolemScribeFileTransaction.cs" />
+    <Compile Include="../Editor/GolemScribeFileTransactionTests.cs" />
+    <Compile Include="../../Editor/Scribe/GolemScribeManifest.cs" />
+    <Compile Include="../../Editor/Scribe/GolemScribeConstants.cs" />
+    <Compile Include="../../Editor/Scribe/GolemYamlWriter.cs" />
+    <Compile Include="../Editor/GolemScribeManifestTests.cs" />
+    <Compile Include="../Editor/GolemYamlWriterTests.cs" />
+    <Compile Include="../Editor/GolemScribeArtifactPlanTests.cs" />
+    <Compile Include="../Editor/GolemBakeCommandTests.cs" />
+  </ItemGroup>
+</Project>

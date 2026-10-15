@@ -78,13 +78,13 @@ namespace GolemEngine.Unity.Editor
             model.EntityName = entityAttr.Name;
             model.Global = entityAttr.Global;
             model.Persistent = entityAttr.Persistent;
-            model.RelativePath = CombineRelative(entitySchemaDir, GolemScribeNaming.EntitySchemaFileName(model.EntityName));
+            model.RelativePath = GolemScribePaths.CombineRelative(entitySchemaDir, GolemScribeNaming.EntitySchemaFileName(model.EntityName));
 
             var reserved = dimensions == 3 ? Reserved3D : Reserved2D;
-            var seenTags = new Dictionary<int, string>();
-            var seenNames = new Dictionary<string, string>(StringComparer.Ordinal);
+            var claims = new GolemScribeFieldClaims();
 
-            foreach (var field in EnumerateAttributedFields(componentType))
+            foreach (var field in GolemScribeFieldInspection.Enumerate(
+                         componentType, new[] { typeof(MonoBehaviour), typeof(Behaviour), typeof(Component) }, typeof(GolemVarAttribute)))
             {
                 var varAttr = field.GetCustomAttribute<GolemVarAttribute>(inherit: false);
                 if (varAttr == null)
@@ -92,14 +92,15 @@ namespace GolemEngine.Unity.Editor
                     continue;
                 }
 
-                if (!field.IsPublic && field.GetCustomAttribute<SerializeField>() == null)
+                var visibility = GolemScribeFieldInspection.CheckVisibility(field);
+                if (!visibility.IsSerialized)
                 {
                     model.Errors.Add(
                         $"Entity '{model.EntityName}' field '{field.Name}' must be public or [SerializeField] to use [GolemVar].");
                     continue;
                 }
 
-                if (field.IsStatic)
+                if (visibility.IsStatic)
                 {
                     model.Errors.Add($"Entity '{model.EntityName}' field '{field.Name}' cannot be static.");
                     continue;
@@ -134,7 +135,7 @@ namespace GolemEngine.Unity.Editor
                     continue;
                 }
 
-                if (seenTags.TryGetValue(varAttr.Tag, out var previousField))
+                if (claims.CheckTag(varAttr.Tag, out var previousField))
                 {
                     model.Errors.Add(
                         $"Entity '{model.EntityName}': fields '{previousField}' and '{field.Name}' share tag {varAttr.Tag}.");
@@ -149,15 +150,14 @@ namespace GolemEngine.Unity.Editor
                     continue;
                 }
 
-                if (seenNames.TryGetValue(snake, out var previousName))
+                if (claims.CheckName(snake, out var previousName))
                 {
                     model.Errors.Add(
                         $"Entity '{model.EntityName}': fields '{previousName}' and '{field.Name}' both map to '{snake}'.");
                     continue;
                 }
 
-                seenTags[varAttr.Tag] = field.Name;
-                seenNames[snake] = field.Name;
+                claims.Commit(varAttr.Tag, snake, field.Name);
                 model.Vars.Add(new GolemEntityVarModel
                 {
                     SnakeName = snake,
@@ -212,35 +212,6 @@ namespace GolemEngine.Unity.Editor
             }
 
             return GolemYamlWriter.BuildDocument(lines);
-        }
-
-        private static IEnumerable<FieldInfo> EnumerateAttributedFields(Type type)
-        {
-            for (var current = type; current != null && current != typeof(object); current = current.BaseType)
-            {
-                if (current == typeof(MonoBehaviour) || current == typeof(Behaviour) || current == typeof(Component))
-                {
-                    break;
-                }
-
-                foreach (var field in current.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
-                {
-                    if (field.GetCustomAttribute<GolemVarAttribute>(inherit: false) != null)
-                    {
-                        yield return field;
-                    }
-                }
-            }
-        }
-
-        private static string CombineRelative(string directory, string fileName)
-        {
-            var dir = (directory ?? string.Empty).Replace('\\', '/').Trim('/');
-            if (string.IsNullOrEmpty(dir))
-            {
-                return fileName;
-            }
-            return dir + "/" + fileName;
         }
     }
 }

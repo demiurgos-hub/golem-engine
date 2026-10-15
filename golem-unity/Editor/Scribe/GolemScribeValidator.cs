@@ -68,28 +68,14 @@ namespace GolemEngine.Unity.Editor
         public static ValidationResult Validate(string projectRoot)
         {
             var result = new ValidationResult();
-            if (string.IsNullOrWhiteSpace(projectRoot) || !Directory.Exists(projectRoot))
+            if (!GolemScribeContext.TryLoad(projectRoot, out var context, out var contextError))
             {
-                result.Errors.Add($"Golem project root does not exist: {projectRoot}");
+                result.Errors.Add(contextError);
                 return result;
             }
-
-            if (!GolemYamlConfig.TryGetProjectSchema(projectRoot, out var schema, out var schemaError))
-            {
-                result.Errors.Add(schemaError);
-                return result;
-            }
-
-            List<GolemScribeArtifactRecord> previous;
-            try
-            {
-                previous = GolemScribeManifest.Load(projectRoot);
-            }
-            catch (Exception ex)
-            {
-                result.Errors.Add(ex.Message);
-                return result;
-            }
+            projectRoot = context.ProjectRoot;
+            var schema = context.Schema;
+            var previous = context.Previous;
 
             ValidateManifestRecords(projectRoot, previous, result);
 
@@ -140,105 +126,33 @@ namespace GolemEngine.Unity.Editor
                 throw new ArgumentNullException(nameof(result));
             }
 
-            previous = previous ?? Array.Empty<GolemScribeArtifactRecord>();
-            desired = desired ?? Array.Empty<GolemScribeArtifactRecord>();
-            var kindSet = new HashSet<string>(
-                (kinds ?? Array.Empty<string>()).Where(k => !string.IsNullOrEmpty(k)),
-                StringComparer.Ordinal);
-
             if (string.IsNullOrWhiteSpace(projectRoot) || !Directory.Exists(projectRoot))
             {
                 result.Errors.Add($"Golem project root does not exist: {projectRoot}");
                 return;
             }
 
-            var previousByPath = new Dictionary<string, GolemScribeArtifactRecord>(StringComparer.Ordinal);
-            foreach (var prior in previous)
+            var prepared = GolemScribeArtifactPlan.Prepare(Path.GetFullPath(projectRoot), kinds, previous, desired);
+            result.Errors.AddRange(prepared.Issues.Select(i => i.ValidationError).Where(e => e != null));
+            var plan = GolemScribeArtifactPlan.Build(prepared, GolemScribeArtifactReader.Capture(prepared));
+            foreach (var entry in plan.Entries)
             {
-                if (prior == null || string.IsNullOrEmpty(prior.Path) ||
-                    string.IsNullOrEmpty(prior.Kind) || !kindSet.Contains(prior.Kind))
+                if (entry.HasReadError)
                 {
+                    result.Errors.Add(entry.Disk.Error);
                     continue;
                 }
-
-                if (!GolemScribeArtifacts.TryResolveContainedPath(
-                        projectRoot, prior.Path, out _, out var normalized, out var pathError))
+                if (entry.Missing) result.Missing.Add(entry.Path);
+                if (entry.ManuallyModified) result.ManuallyModified.Add(entry.Path);
+                if (entry.Stale) result.Stale.Add(entry.Path + (entry.MissingManifest ? " (missing from manifest)" : string.Empty));
+                if (entry.Orphaned) result.Orphaned.Add(entry.Path);
+                if (entry.Disk.Status == ScribeArtifactStatus.Handwritten)
                 {
-                    result.Errors.Add("Manifest ownership path rejected: " + pathError);
-                    continue;
+                    if (entry.Desired != null)
+                        result.Errors.Add($"Path '{entry.Path}' is occupied by a handwritten file; Scribe will not overwrite it.");
+                    else
+                        result.Warnings.Add($"Left handwritten file '{entry.Path}' in place; not reported as an orphan.");
                 }
-
-                previousByPath[normalized] = prior;
-            }
-
-            var desiredByPath = new Dictionary<string, GolemScribeArtifactRecord>(StringComparer.Ordinal);
-            foreach (var record in desired)
-            {
-                if (record == null || string.IsNullOrEmpty(record.Path))
-                {
-                    result.Errors.Add("Desired Scribe artifact is missing a relative path.");
-                    continue;
-                }
-
-                if (string.IsNullOrEmpty(record.Kind) || !kindSet.Contains(record.Kind))
-                {
-                    result.Errors.Add(
-                        $"Desired Scribe artifact '{record.Path}' has unexpected kind '{record.Kind}'.");
-                    continue;
-                }
-
-                if (record.PendingContent == null)
-                {
-                    result.Errors.Add($"Desired Scribe artifact '{record.Path}' is missing generated content.");
-                    continue;
-                }
-
-                if (!GolemScribeArtifacts.TryResolveContainedPath(
-                        projectRoot, record.Path, out var absolute, out var normalized, out var pathError))
-                {
-                    result.Errors.Add(pathError);
-                    continue;
-                }
-
-                if (desiredByPath.ContainsKey(normalized))
-                {
-                    result.Errors.Add($"Duplicate desired Scribe output path '{normalized}'.");
-                    continue;
-                }
-
-                desiredByPath[normalized] = record;
-                ClassifyDesiredPath(normalized, absolute, record, previousByPath, result);
-            }
-
-            foreach (var prior in previousByPath.Values.OrderBy(r => r.Path, StringComparer.Ordinal))
-            {
-                if (!GolemScribeArtifacts.TryResolveContainedPath(
-                        projectRoot, prior.Path, out var absolute, out var normalized, out _))
-                {
-                    continue;
-                }
-
-                if (desiredByPath.ContainsKey(normalized))
-                {
-                    continue;
-                }
-
-                // Manifest still owns this path but it is not in the current desired set.
-                if (!File.Exists(absolute))
-                {
-                    result.Missing.Add(normalized);
-                    continue;
-                }
-
-                var existing = File.ReadAllText(absolute);
-                if (!GolemYamlWriter.IsScribeOwned(existing))
-                {
-                    result.Warnings.Add(
-                        $"Left handwritten file '{normalized}' in place; not reported as an orphan.");
-                    continue;
-                }
-
-                result.Orphaned.Add(normalized);
             }
         }
 
@@ -293,56 +207,6 @@ namespace GolemEngine.Unity.Editor
             }
         }
 
-        private static void ClassifyDesiredPath(
-            string normalized,
-            string absolute,
-            GolemScribeArtifactRecord desired,
-            IReadOnlyDictionary<string, GolemScribeArtifactRecord> previousByPath,
-            ValidationResult result)
-        {
-            if (!File.Exists(absolute))
-            {
-                result.Missing.Add(normalized);
-                return;
-            }
-
-            var existing = File.ReadAllText(absolute);
-            if (!GolemYamlWriter.IsScribeOwned(existing))
-            {
-                result.ManuallyModified.Add(normalized);
-                result.Errors.Add(
-                    $"Path '{normalized}' is occupied by a handwritten file; Scribe will not overwrite it.");
-                return;
-            }
-
-            var diskHash = GolemScribeManifest.ComputeContentHash(existing);
-            previousByPath.TryGetValue(normalized, out var prior);
-
-            if (prior != null &&
-                !string.IsNullOrEmpty(prior.Hash) &&
-                !string.Equals(prior.Hash, diskHash, StringComparison.Ordinal))
-            {
-                // Marker present but bytes no longer match the committed manifest hash.
-                result.ManuallyModified.Add(normalized);
-            }
-
-            if (!string.Equals(existing, desired.PendingContent, StringComparison.Ordinal))
-            {
-                // Desired exporter output differs from disk — stale unless already a manual edit.
-                if (!result.ManuallyModified.Contains(normalized))
-                {
-                    result.Stale.Add(normalized);
-                }
-            }
-            else if (prior == null)
-            {
-                // Disk already matches desired but the path is absent from the manifest.
-                result.Stale.Add(normalized + " (missing from manifest)");
-            }
-            // When disk matches desired, diskHash == desiredHash, so a prior.Hash mismatch
-            // is already classified as ManuallyModified above — no separate manifest-hash stale case.
-        }
-
         /// <summary>Validates manifest structure, known kinds, and path containment. Exposed for tests.</summary>
         internal static void ValidateManifestRecords(
             string projectRoot,
@@ -350,15 +214,16 @@ namespace GolemEngine.Unity.Editor
             ValidationResult result)
         {
             var manifestPath = GolemScribeManifest.ManifestPath(projectRoot);
-            if (File.Exists(manifestPath))
+            var manifest = GolemScribeArtifactReader.ReadAbsolute(manifestPath, GolemScribeConstants.ManifestFileName);
+            if (manifest.Status == ScribeArtifactStatus.ReadFailure)
             {
-                var text = File.ReadAllText(manifestPath);
-                if (!GolemYamlWriter.IsScribeOwned(text))
-                {
-                    result.Errors.Add(
-                        $"Refusing to trust {GolemScribeConstants.ManifestFileName}: file exists but is not Scribe-owned.");
-                    return;
-                }
+                result.Errors.Add(manifest.Error);
+                return;
+            }
+            if (manifest.Status == ScribeArtifactStatus.Handwritten)
+            {
+                result.Errors.Add($"Refusing to trust {GolemScribeConstants.ManifestFileName}: file exists but is not Scribe-owned.");
+                return;
             }
 
             var seenPaths = new HashSet<string>(StringComparer.Ordinal);
@@ -428,16 +293,14 @@ namespace GolemEngine.Unity.Editor
                 return;
             }
 
-            if (!File.Exists(absolute))
+            var snapshot = GolemScribeArtifactReader.ReadAbsolute(absolute, normalized);
+            if (snapshot.Status == ScribeArtifactStatus.ReadFailure)
             {
+                result.Errors.Add(snapshot.Error);
                 return;
             }
-
-            var text = File.ReadAllText(absolute);
-            if (!GolemYamlWriter.IsScribeOwned(text))
-            {
-                return;
-            }
+            if (snapshot.Status != ScribeArtifactStatus.Owned) return;
+            var text = snapshot.Content;
 
             if (!TryReadFootprintHeader(text, out var version, out var dimensions))
             {

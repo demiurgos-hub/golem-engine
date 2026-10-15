@@ -3,7 +3,8 @@
   "rootNamespace": "GolemEngine.Unity.Editor.Tests",
   "references": [
     "GolemEngine.Unity",
-    "GolemEngine.Unity.Editor"
+    "GolemEngine.Unity.Editor",
+    "GolemEngine.Unity.ScribeFixtures"
   ],
   "includePlatforms": [
     "Editor"

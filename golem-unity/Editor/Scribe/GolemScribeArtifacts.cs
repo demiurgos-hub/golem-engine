@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Text;
 
 namespace GolemEngine.Unity.Editor
 {
@@ -29,18 +28,11 @@ namespace GolemEngine.Unity.Editor
             public bool CatalogSchemaBytesChanged => TypeSchemaBytesChanged || WorldSchemaBytesChanged;
         }
 
-        private sealed class PathMutation
-        {
-            public string AbsolutePath;
-            public string PreviousContent;
-            public bool Existed;
-            public bool Deleted;
-        }
-
         /// <summary>
         /// Reconciles one artifact kind: writes/updates desired managed files, deletes orphaned
         /// Scribe-owned files of that kind, and rebuilds the manifest while preserving other kinds.
-        /// Mutations are applied transactionally with rollback on failure.
+        /// Files are replaced atomically with rollback on failure. Rollback failures are included in Errors;
+        /// a failed result does not guarantee that the original filesystem state was fully restored.
         /// Never deletes or overwrites handwritten (non-Scribe-marked) files.
         /// </summary>
         public static ReconcileResult ReconcileKind(
@@ -80,235 +72,57 @@ namespace GolemEngine.Unity.Editor
                 return result;
             }
 
-            var desiredByPath = new Dictionary<string, GolemScribeArtifactRecord>(StringComparer.Ordinal);
-            foreach (var record in desiredForKinds)
+            var prepared = GolemScribeArtifactPlan.Prepare(rootFull, kinds, previous, desiredForKinds);
+            result.Errors.AddRange(prepared.Issues.Select(i => i.WriterError).Where(e => e != null));
+            if (result.Errors.Count > 0) return result;
+            var plan = GolemScribeArtifactPlan.Build(prepared, GolemScribeArtifactReader.Capture(prepared));
+            foreach (var entry in plan.Entries)
             {
-                if (record == null || string.IsNullOrEmpty(record.Path))
+                if (entry.HasReadError)
                 {
-                    result.Errors.Add("Scribe artifact is missing a relative path.");
-                    continue;
+                    result.Errors.Add(entry.Disk.Error);
                 }
-
-                if (string.IsNullOrEmpty(record.Kind) || !kindSet.Contains(record.Kind))
+                else if (entry.Disk.Status == ScribeArtifactStatus.Handwritten)
                 {
-                    result.Errors.Add(
-                        $"Scribe artifact '{record.Path}' has kind '{record.Kind}', expected one of: {string.Join(", ", kindSet.OrderBy(k => k, StringComparer.Ordinal))}.");
-                    continue;
-                }
-
-                if (record.PendingContent == null)
-                {
-                    result.Errors.Add($"Scribe artifact '{record.Path}' is missing generated content.");
-                    continue;
-                }
-
-                if (!TryResolveContainedPath(rootFull, record.Path, out _, out var normalized, out var pathError))
-                {
-                    result.Errors.Add(pathError);
-                    continue;
-                }
-
-                if (desiredByPath.ContainsKey(normalized))
-                {
-                    result.Errors.Add($"Duplicate Scribe output path '{normalized}'.");
-                    continue;
-                }
-
-                desiredByPath[normalized] = new GolemScribeArtifactRecord
-                {
-                    Kind = record.Kind,
-                    SourceGuid = record.SourceGuid,
-                    Entity = record.Entity,
-                    Path = normalized,
-                    PendingContent = record.PendingContent,
-                    Hash = GolemScribeManifest.ComputeContentHash(record.PendingContent)
-                };
-            }
-
-            if (result.Errors.Count > 0)
-            {
-                return result;
-            }
-
-            foreach (var record in desiredByPath.Values)
-            {
-                if (!TryResolveContainedPath(rootFull, record.Path, out var absolute, out _, out var pathError))
-                {
-                    result.Errors.Add(pathError);
-                    continue;
-                }
-
-                if (!CanWriteManagedPath(absolute, out _))
-                {
-                    result.Errors.Add(
-                        $"Refusing to overwrite handwritten file '{record.Path}'. Move it or remove the conflicting Scribe source.");
+                    if (entry.Desired != null)
+                        result.Errors.Add($"Refusing to overwrite handwritten file '{entry.Path}'. Move it or remove the conflicting Scribe source.");
+                    else
+                        result.Warnings.Add($"Left handwritten file '{entry.Path}' in place during Scribe orphan cleanup.");
                 }
             }
-
-            var previousOfKinds = previous
-                .Where(r => r != null && !string.IsNullOrEmpty(r.Kind) && kindSet.Contains(r.Kind))
-                .ToList();
-            var desiredPaths = new HashSet<string>(desiredByPath.Keys, StringComparer.Ordinal);
-            var orphans = new List<(string relative, string absolute, string kind)>();
-            foreach (var prior in previousOfKinds)
-            {
-                if (string.IsNullOrEmpty(prior.Path))
-                {
-                    result.Errors.Add("Prior Scribe manifest record is missing a path.");
-                    continue;
-                }
-
-                if (!TryResolveContainedPath(rootFull, prior.Path, out var absolute, out var relative, out var pathError))
-                {
-                    result.Errors.Add("Hostile or corrupt manifest path rejected: " + pathError);
-                    continue;
-                }
-
-                if (desiredPaths.Contains(relative))
-                {
-                    continue;
-                }
-
-                if (!File.Exists(absolute))
-                {
-                    continue;
-                }
-
-                var existing = File.ReadAllText(absolute);
-                if (!GolemYamlWriter.IsScribeOwned(existing))
-                {
-                    result.Warnings.Add(
-                        $"Left handwritten file '{relative}' in place during Scribe orphan cleanup.");
-                    continue;
-                }
-
-                orphans.Add((relative, absolute, prior.Kind));
-            }
-
-            if (result.Errors.Count > 0)
-            {
-                return result;
-            }
-
-            var preserved = new List<GolemScribeArtifactRecord>();
-            foreach (var prior in previous)
-            {
-                if (prior == null || (!string.IsNullOrEmpty(prior.Kind) && kindSet.Contains(prior.Kind)))
-                {
-                    continue;
-                }
-
-                if (string.IsNullOrEmpty(prior.Path))
-                {
-                    result.Errors.Add("Preserved manifest record has hostile or corrupt path: missing path");
-                    continue;
-                }
-
-                if (!TryResolveContainedPath(rootFull, prior.Path, out _, out var normalized, out var pathError))
-                {
-                    result.Errors.Add("Preserved manifest record has hostile or corrupt path: " + pathError);
-                    continue;
-                }
-
-                preserved.Add(new GolemScribeArtifactRecord
-                {
-                    Kind = prior.Kind,
-                    SourceGuid = prior.SourceGuid,
-                    Entity = prior.Entity,
-                    Path = normalized,
-                    Hash = prior.Hash
-                });
-            }
-
-            if (result.Errors.Count > 0)
-            {
-                return result;
-            }
-
-            var mutations = new List<PathMutation>();
-            string previousManifestText = null;
             var manifestPath = GolemScribeManifest.ManifestPath(rootFull);
-            if (File.Exists(manifestPath))
-            {
-                previousManifestText = File.ReadAllText(manifestPath);
-            }
+            if (!CanWriteManagedPath(manifestPath, out var manifestError)) result.Errors.Add(manifestError);
+            if (result.Errors.Count > 0) return result;
 
+            var transaction = new GolemScribeFileTransaction();
             try
             {
-                foreach (var record in desiredByPath.Values.OrderBy(r => r.Path, StringComparer.Ordinal))
+                foreach (var entry in plan.Writes)
                 {
-                    TryResolveContainedPath(rootFull, record.Path, out var absolute, out _, out _);
-                    var content = record.PendingContent;
-                    if (File.Exists(absolute))
+                    // Recheck even planned no-ops: the snapshot is an observation, not authorization.
+                    if (transaction.WriteManaged(entry.Disk.AbsolutePath, entry.Desired.Content))
                     {
-                        var existing = File.ReadAllText(absolute);
-                        if (string.Equals(existing, content, StringComparison.Ordinal))
-                        {
-                            result.ManifestRecords.Add(StripPending(record));
-                            continue;
-                        }
-
-                        mutations.Add(new PathMutation
-                        {
-                            AbsolutePath = absolute,
-                            PreviousContent = existing,
-                            Existed = true
-                        });
+                        AfterWriteHookForTests?.Invoke(entry.Disk.AbsolutePath);
+                        result.AnyBytesChanged = true;
+                        MarkSchemaBytesChanged(result, entry.Kind);
                     }
-                    else
-                    {
-                        mutations.Add(new PathMutation
-                        {
-                            AbsolutePath = absolute,
-                            PreviousContent = null,
-                            Existed = false
-                        });
-                    }
-
-                    if (!TryWriteFile(absolute, content, out var writeError))
-                    {
-                        throw new IOException(writeError);
-                    }
-
-                    AfterWriteHookForTests?.Invoke(absolute);
-
-                    result.AnyBytesChanged = true;
-                    MarkSchemaBytesChanged(result, record.Kind);
-                    result.ManifestRecords.Add(StripPending(record));
                 }
-
-                foreach (var orphan in orphans.OrderBy(o => o.relative, StringComparer.Ordinal))
+                foreach (var entry in plan.Deletions)
                 {
-                    var existing = File.ReadAllText(orphan.absolute);
-                    mutations.Add(new PathMutation
-                    {
-                        AbsolutePath = orphan.absolute,
-                        PreviousContent = existing,
-                        Existed = true,
-                        Deleted = true
-                    });
-                    File.Delete(orphan.absolute);
+                    transaction.DeleteManaged(entry.Disk.AbsolutePath);
                     result.AnyBytesChanged = true;
-                    MarkSchemaBytesChanged(result, orphan.kind);
+                    MarkSchemaBytesChanged(result, entry.Kind);
                 }
-
-                var manifestRecords = preserved.Concat(result.ManifestRecords)
-                    .OrderBy(r => r.Path ?? string.Empty, StringComparer.Ordinal)
-                    .ToList();
-
-                if (GolemScribeManifest.Write(rootFull, manifestRecords))
-                {
+                var manifestRecords = plan.ManifestRecords.Select(r => r.ToManifestRecord()).ToList();
+                if (transaction.WriteManaged(manifestPath, GolemScribeManifest.BuildDocument(manifestRecords)))
                     result.AnyBytesChanged = true;
-                }
-
-                result.ManifestRecords.Clear();
                 result.ManifestRecords.AddRange(manifestRecords);
                 return result;
             }
             catch (Exception ex)
             {
-                Rollback(mutations, manifestPath, previousManifestText);
                 result.Errors.Add(ex.Message);
+                result.Errors.AddRange(transaction.Rollback());
                 result.ManifestRecords.Clear();
                 result.EntitySchemaBytesChanged = false;
                 result.TypeSchemaBytesChanged = false;
@@ -344,49 +158,29 @@ namespace GolemEngine.Unity.Editor
             }
         }
 
-        /// <summary>Writes a managed file when content differs. Returns true when bytes changed.</summary>
+        /// <summary>Atomically replaces a managed file when text differs; throws with rollback diagnostics on failure.</summary>
         public static bool WriteManagedFile(string absolutePath, string content)
         {
-            if (File.Exists(absolutePath))
+            var transaction = new GolemScribeFileTransaction();
+            try
             {
-                var existing = File.ReadAllText(absolutePath);
-                if (!GolemYamlWriter.IsScribeOwned(existing))
-                {
-                    throw new InvalidOperationException(
-                        $"Refusing to overwrite handwritten file '{absolutePath}'.");
-                }
-
-                if (string.Equals(existing, content, StringComparison.Ordinal))
-                {
-                    return false;
-                }
+                return transaction.WriteManaged(absolutePath, content);
             }
-
-            if (!TryWriteFile(absolutePath, content, out var error))
+            catch (Exception ex)
             {
-                throw new InvalidOperationException(error);
+                var errors = new List<string> { ex.Message };
+                errors.AddRange(transaction.Rollback());
+                throw new InvalidOperationException(string.Join("\n", errors), ex);
             }
-
-            return true;
         }
 
         /// <summary>Returns true when an existing file is Scribe-owned or the path is free.</summary>
         public static bool CanWriteManagedPath(string absolutePath, out string error)
         {
-            error = null;
-            if (!File.Exists(absolutePath))
-            {
-                return true;
-            }
-
-            var existing = File.ReadAllText(absolutePath);
-            if (GolemYamlWriter.IsScribeOwned(existing))
-            {
-                return true;
-            }
-
-            error = $"Path is occupied by a handwritten file: {absolutePath}";
-            return false;
+            var snapshot = GolemScribeArtifactReader.ReadAbsolute(absolutePath, absolutePath);
+            error = snapshot.Status == ScribeArtifactStatus.Handwritten
+                ? $"Path is occupied by a handwritten file: {absolutePath}" : snapshot.Error;
+            return snapshot.Status == ScribeArtifactStatus.Missing || snapshot.Status == ScribeArtifactStatus.Owned;
         }
 
         /// <summary>
@@ -409,77 +203,7 @@ namespace GolemEngine.Unity.Editor
                 return false;
             }
 
-            if (string.IsNullOrWhiteSpace(relativePath))
-            {
-                error = "Artifact path is empty.";
-                return false;
-            }
-
-            var raw = relativePath.Replace('\\', '/').Trim();
-            if (raw.Length == 0)
-            {
-                error = "Artifact path is empty.";
-                return false;
-            }
-
-            if (raw.StartsWith("/", StringComparison.Ordinal) ||
-                raw.StartsWith("\\", StringComparison.Ordinal) ||
-                Path.IsPathRooted(relativePath) ||
-                (raw.Length >= 2 && char.IsLetter(raw[0]) && raw[1] == ':'))
-            {
-                error = $"Artifact path must be project-relative, not absolute: '{relativePath}'.";
-                return false;
-            }
-
-            var rawParts = raw.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
-            var parts = new List<string>(rawParts.Length);
-            foreach (var part in rawParts)
-            {
-                if (part == ".")
-                {
-                    continue;
-                }
-
-                if (part == "..")
-                {
-                    error = $"Artifact path escapes the project root: '{relativePath}'.";
-                    return false;
-                }
-
-                parts.Add(part);
-            }
-
-            if (parts.Count == 0)
-            {
-                error = $"Artifact path is empty: '{relativePath}'.";
-                return false;
-            }
-
-            normalizedRelative = string.Join("/", parts);
-            var combined = rootFull;
-            foreach (var part in parts)
-            {
-                combined = Path.Combine(combined, part);
-            }
-
-            absolutePath = Path.GetFullPath(combined);
-            var rootPrefix = rootFull.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal)
-                ? rootFull
-                : rootFull + Path.DirectorySeparatorChar;
-            var absoluteWithSep = absolutePath.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal)
-                ? absolutePath
-                : absolutePath + Path.DirectorySeparatorChar;
-
-            if (!absolutePath.Equals(rootFull, StringComparison.OrdinalIgnoreCase) &&
-                !absoluteWithSep.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
-            {
-                error = $"Artifact path escapes the project root: '{relativePath}'.";
-                absolutePath = null;
-                normalizedRelative = null;
-                return false;
-            }
-
-            return true;
+            return GolemScribePaths.TryResolveRelative(rootFull, relativePath, out absolutePath, out normalizedRelative, out error);
         }
 
         /// <summary>Converts a project-relative path to an absolute filesystem path under the project root.</summary>
@@ -525,93 +249,6 @@ namespace GolemEngine.Unity.Editor
             }
 
             return true;
-        }
-
-        private static void Rollback(List<PathMutation> mutations, string manifestPath, string previousManifestText)
-        {
-            for (var i = mutations.Count - 1; i >= 0; i--)
-            {
-                var mutation = mutations[i];
-                try
-                {
-                    if (mutation.Deleted || mutation.Existed)
-                    {
-                        var directory = Path.GetDirectoryName(mutation.AbsolutePath);
-                        if (!string.IsNullOrEmpty(directory))
-                        {
-                            Directory.CreateDirectory(directory);
-                        }
-                        File.WriteAllText(mutation.AbsolutePath, mutation.PreviousContent ?? string.Empty, Utf8NoBom);
-                    }
-                    else if (File.Exists(mutation.AbsolutePath))
-                    {
-                        File.Delete(mutation.AbsolutePath);
-                    }
-                }
-                catch
-                {
-                    // Best-effort rollback; original error is reported to the caller.
-                }
-            }
-
-            try
-            {
-                if (previousManifestText != null)
-                {
-                    File.WriteAllText(manifestPath, previousManifestText, Utf8NoBom);
-                }
-                else if (File.Exists(manifestPath))
-                {
-                    File.Delete(manifestPath);
-                }
-            }
-            catch
-            {
-                // Best-effort rollback.
-            }
-        }
-
-        private static GolemScribeArtifactRecord StripPending(GolemScribeArtifactRecord source)
-        {
-            return new GolemScribeArtifactRecord
-            {
-                Kind = source.Kind,
-                SourceGuid = source.SourceGuid,
-                Entity = source.Entity,
-                Path = source.Path,
-                Hash = source.Hash ?? (source.PendingContent != null
-                    ? GolemScribeManifest.ComputeContentHash(source.PendingContent)
-                    : null)
-            };
-        }
-
-        private static readonly UTF8Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
-
-        private static bool TryWriteFile(string absolutePath, string content, out string error)
-        {
-            error = null;
-            try
-            {
-                var directory = Path.GetDirectoryName(absolutePath);
-                if (!string.IsNullOrEmpty(directory))
-                {
-                    Directory.CreateDirectory(directory);
-                }
-
-                var tempPath = absolutePath + ".tmp";
-                File.WriteAllText(tempPath, content ?? string.Empty, Utf8NoBom);
-                if (File.Exists(absolutePath))
-                {
-                    File.Delete(absolutePath);
-                }
-                File.Move(tempPath, absolutePath);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                error = $"Failed to write '{absolutePath}': {ex.Message}";
-                return false;
-            }
         }
     }
 }

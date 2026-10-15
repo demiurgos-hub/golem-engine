@@ -140,37 +140,16 @@ namespace GolemEngine.Unity.Editor
         /// <summary>Records imported/moved asset paths and schedules a coalesced reconcile.</summary>
         public static void NotifyImportedOrMoved(IEnumerable<string> paths)
         {
-            if (IsSuppressed || !GolemUnityEditorSettings.instance.AutoExportOnAssetChange)
-            {
-                return;
-            }
-
-            var relevant = false;
-            foreach (var path in paths)
-            {
-                if (!IsRelevantAssetPath(path))
-                {
-                    continue;
-                }
-
-                DirtyPaths.Add(path);
-                relevant = true;
-            }
-
-            if (!relevant)
-            {
-                return;
-            }
-
-            SessionState.SetBool(PendingKey, true);
-            if (!_running)
-            {
-                Schedule();
-            }
+            NotifyPaths(paths, DirtyPaths);
         }
 
         /// <summary>Records deleted asset paths and schedules a coalesced reconcile.</summary>
         public static void NotifyDeleted(IEnumerable<string> paths)
+        {
+            NotifyPaths(paths, DeletedPaths);
+        }
+
+        private static void NotifyPaths(IEnumerable<string> paths, HashSet<string> destination)
         {
             if (IsSuppressed || !GolemUnityEditorSettings.instance.AutoExportOnAssetChange)
             {
@@ -185,7 +164,7 @@ namespace GolemEngine.Unity.Editor
                     continue;
                 }
 
-                DeletedPaths.Add(path);
+                destination.Add(path);
                 relevant = true;
             }
 
@@ -241,6 +220,7 @@ namespace GolemEngine.Unity.Editor
         /// <summary>Exposed for editor tests: clears in-memory coalesce state.</summary>
         internal static void ResetForTests()
         {
+            EditorApplication.delayCall -= RunDeferred;
             _scheduled = false;
             _running = false;
             DirtyPaths.Clear();
@@ -265,6 +245,14 @@ namespace GolemEngine.Unity.Editor
 
         /// <summary>Exposed for editor tests: pending dirty path count.</summary>
         internal static int DirtyPathCountForTests => DirtyPaths.Count + DeletedPaths.Count;
+        internal static bool IsDirtyForTests(string path) => DirtyPaths.Contains(path);
+        internal static bool IsDeletedForTests(string path) => DeletedPaths.Contains(path);
+
+        internal static void RunDeferredForTests()
+        {
+            EditorApplication.delayCall -= RunDeferred;
+            RunDeferred();
+        }
 
         /// <summary>
         /// Decoupled auto-bake gate: bake when a successful exporter changed schema bytes.

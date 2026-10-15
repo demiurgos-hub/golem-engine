@@ -279,23 +279,27 @@ namespace GolemEngine.Unity.Editor.Tests
         }
 
         [Test]
-        public void ApplyFootprintCandidate_DuplicateAlias_DropsBoth()
+        public void ProductionCollectorDuplicateAliasDropsBothAndLaterClaimants()
         {
-            var models = new List<GolemFootprintModel>();
-            var aliases = new Dictionary<string, string>();
-            var conflicts = new HashSet<string>();
-            var errors = new List<string>();
-
-            GolemFootprintExporter.ApplyFootprintCandidate(
-                new GolemFootprintModel { Guid = "a", Alias = "wall" },
-                aliases, conflicts, models, errors);
-            GolemFootprintExporter.ApplyFootprintCandidate(
-                new GolemFootprintModel { Guid = "b", Alias = "wall" },
-                aliases, conflicts, models, errors);
-
-            Assert.That(models, Is.Empty);
-            Assert.That(conflicts, Does.Contain("wall"));
-            Assert.That(errors, Has.Some.Contain("multiple prefabs"));
+            var root = CreateTempRoot();
+            try
+            {
+                var sources = new List<ScribePrefabSource>();
+                for (var i = 0; i < 3; i++)
+                {
+                    var prefab = CreateRoot("Wall" + i);
+                    prefab.AddComponent<GolemFootprint>().Alias = "wall";
+                    prefab.AddComponent<BoxCollider2D>();
+                    sources.Add(new ScribePrefabSource(i.ToString(), "Assets/Wall" + i + ".prefab", prefab));
+                }
+                GolemFootprintExporter.CollectFootprints(2, "footprints.golem.yaml", null, root, sources,
+                    out var desired, out var count, out var errors);
+                Assert.That(desired, Is.Empty);
+                Assert.That(count, Is.Zero);
+                Assert.That(errors, Has.Some.Contain("multiple prefabs"));
+                Assert.That(errors, Has.Some.Contain("skipping"));
+            }
+            finally { DeleteTempRoot(root); }
         }
 
         [Test]

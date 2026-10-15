@@ -75,7 +75,7 @@ namespace GolemEngine.Unity.Editor
 
         private static void CheckBakeCommand(GolemUnityEditorSettings settings, ref int warnings)
         {
-            if (!TryGetExecutable(settings.BakeCommand, out var executable))
+            if (!GolemBakeCommand.TryParse(settings.BakeCommand, out var executable, out _))
             {
                 warnings++;
                 Debug.LogWarning("Golem bake command is empty. Configure it in Project Settings > Golem.");
@@ -189,31 +189,6 @@ namespace GolemEngine.Unity.Editor
                 $"world_schema={schema.WorldSchema}, dimensions={schema.Dimensions}, " +
                 $"footprints={footprints}, auto_export={settings.AutoExportOnAssetChange}, " +
                 $"auto_bake={settings.AutoBakeOnExport}");
-        }
-
-        private static bool TryGetExecutable(string command, out string executable)
-        {
-            executable = string.Empty;
-            command = command?.Trim();
-            if (string.IsNullOrEmpty(command))
-            {
-                return false;
-            }
-
-            if (command[0] == '"')
-            {
-                var closingQuote = command.IndexOf('"', 1);
-                if (closingQuote < 0)
-                {
-                    return false;
-                }
-                executable = command.Substring(1, closingQuote - 1);
-                return !string.IsNullOrEmpty(executable);
-            }
-
-            var firstSpace = command.IndexOfAny(new[] { ' ', '\t' });
-            executable = firstSpace < 0 ? command : command.Substring(0, firstSpace);
-            return !string.IsNullOrEmpty(executable);
         }
 
         private static bool ExecutableExistsOnPath(string executable)

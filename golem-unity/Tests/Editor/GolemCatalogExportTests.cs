@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using GolemEngine.Unity.Editor;
 using NUnit.Framework;
+using UnityEngine;
 
 namespace GolemEngine.Unity.Editor.Tests
 {
@@ -194,31 +195,34 @@ namespace GolemEngine.Unity.Editor.Tests
             }
         }
 
-        [Test]
-        public void ApplyCatalogCandidate_DropsBothSidesOfDuplicateTypeNames()
+        private static class FirstSource
         {
-            var desired = new List<GolemScribeArtifactRecord>();
-            var sources = new Dictionary<string, string>();
-            var conflicts = new HashSet<string>();
-            var errors = new List<string>();
+            [GolemCatalog("Id")]
+            internal sealed class Item : ScriptableObject { [GolemField(1)] public string Id; }
+        }
+        private static class SecondSource
+        {
+            [GolemCatalog("Id")]
+            internal sealed class Item : ScriptableObject { [GolemField(1)] public string Id; }
+        }
 
-            var first = new[]
+        [Test]
+        public void ProductionCollectorDropsDuplicateTypeNamesAndPreservesPriorArtifacts()
+        {
+            var root = CreateTempRoot();
+            try
             {
-                Desired(GolemScribeConstants.ArtifactKindTypeSchema, "schemas/types/item.yaml", "type: Item\n")
-            };
-            var second = new[]
-            {
-                Desired(GolemScribeConstants.ArtifactKindTypeSchema, "schemas/types/item.yaml", "type: Item\n")
-            };
-
-            GolemCatalogExporter.ApplyCatalogCandidate(
-                "Item", "Ns.A.Item", first, sources, conflicts, desired, errors);
-            GolemCatalogExporter.ApplyCatalogCandidate(
-                "Item", "Ns.B.Item", second, sources, conflicts, desired, errors);
-
-            Assert.That(desired, Is.Empty);
-            Assert.That(conflicts, Does.Contain("Item"));
-            Assert.That(errors, Has.Some.Contain("multiple classes"));
+                var yaml = GolemYamlWriter.BuildDocument(new[] { "type: Item", "fields: {}" });
+                WriteOwned(root, "schemas/types/item.yaml", yaml);
+                var previous = new[] { Record(GolemScribeConstants.ArtifactKindTypeSchema, "schemas/types/item.yaml", yaml) };
+                GolemCatalogExporter.CollectCatalogs(new GolemYamlConfig.ProjectSchemaConfig(), previous, root,
+                    new[] { typeof(FirstSource.Item), typeof(SecondSource.Item) },
+                    _ => System.Array.Empty<ScriptableObject>(), out var desired, out _, out var errors);
+                Assert.That(desired, Has.Count.EqualTo(1));
+                Assert.That(desired[0].PendingContent, Is.EqualTo(yaml));
+                Assert.That(errors, Has.Some.Contain("multiple classes"));
+            }
+            finally { DeleteTempRoot(root); }
         }
 
         [Test]

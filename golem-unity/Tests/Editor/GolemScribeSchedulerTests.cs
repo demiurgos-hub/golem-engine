@@ -162,5 +162,82 @@ namespace GolemEngine.Unity.Editor.Tests
                     catalogSchemaBytesChanged: true),
                 Is.True);
         }
+
+        [Test]
+        public void MovedNotificationsKeepDirtyAndDeletedSetsDistinct()
+        {
+            var callback = typeof(GolemScribePostprocessor).GetMethod("OnPostprocessAllAssets",
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+            callback.Invoke(null, new object[]
+            {
+                new[] { "Assets/A.prefab", "assets/a.PREFAB", "Assets/ignored.png", "Assets/Source.cs" },
+                new[] { "Assets/A.prefab" }, new[] { "Assets/New.asset" }, new[] { "Assets/Old.asset" }
+            });
+            Assert.That(GolemScribeScheduler.IsDirtyForTests("Assets/A.prefab"), Is.True);
+            Assert.That(GolemScribeScheduler.IsDeletedForTests("Assets/A.prefab"), Is.True);
+            Assert.That(GolemScribeScheduler.IsDirtyForTests("Assets/New.asset"), Is.True);
+            Assert.That(GolemScribeScheduler.IsDeletedForTests("Assets/Old.asset"), Is.True);
+            Assert.That(GolemScribeScheduler.IsDirtyForTests("Assets/Old.asset"), Is.False);
+            Assert.That(GolemScribeScheduler.DirtyPathCountForTests, Is.EqualTo(5));
+        }
+
+        [Test]
+        public void DeferredExportRetainsExternalNotificationsAndRunsFollowUpWithoutReentrancy()
+        {
+            var settings = GolemUnityEditorSettings.instance;
+            var previousRoot = settings.ProjectRoot;
+            var root = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "scribe-scheduler-" + System.Guid.NewGuid().ToString("N"));
+            System.IO.Directory.CreateDirectory(root);
+            System.IO.File.WriteAllText(System.IO.Path.Combine(root, "golem.yaml"), "simulation:\n  dimensions: 2\n");
+            var notified = false;
+            try
+            {
+                settings.ProjectRoot = root;
+                settings.AutoBakeOnExport = false;
+                GolemScribeArtifacts.AfterWriteHookForTests = _ =>
+                {
+                    if (notified) return;
+                    notified = true;
+                    Assert.That(GolemScribeScheduler.IsRunningForTests, Is.True);
+                    Assert.That(GolemScribeScheduler.ExportAllImmediate(false).Errors, Has.Some.Contain("already running"));
+                    GolemScribeScheduler.NotifyImportedOrMoved(new[] { "Assets/External.prefab" });
+                    GolemScribeScheduler.NotifyDeleted(new[] { "Assets/Old.prefab" });
+                };
+                GolemScribeScheduler.RequestExportAll();
+                GolemScribeScheduler.RunDeferredForTests();
+                Assert.That(notified, Is.True);
+                Assert.That(GolemScribeScheduler.IsScheduledForTests, Is.True);
+                Assert.That(GolemScribeScheduler.IsDirtyForTests("Assets/External.prefab"), Is.True);
+                Assert.That(GolemScribeScheduler.IsDeletedForTests("Assets/Old.prefab"), Is.True);
+                GolemScribeScheduler.RunDeferredForTests();
+                Assert.That(GolemScribeScheduler.IsScheduledForTests, Is.False);
+                Assert.That(GolemScribeScheduler.IsRunningForTests, Is.False);
+                Assert.That(GolemScribeScheduler.DirtyPathCountForTests, Is.Zero);
+            }
+            finally
+            {
+                GolemScribeArtifacts.AfterWriteHookForTests = null;
+                settings.ProjectRoot = previousRoot;
+                GolemScribeScheduler.ResetForTests();
+                System.IO.Directory.Delete(root, true);
+            }
+        }
+
+        [Test]
+        public void NestedSuppressionRestoresStateAfterExceptionAndReloadRetainsPendingWork()
+        {
+            GolemScribeScheduler.RunSuppressed(() =>
+            {
+                Assert.Throws<System.InvalidOperationException>(() => GolemScribeScheduler.RunSuppressed(
+                    () => throw new System.InvalidOperationException("test")));
+                Assert.That(GolemScribeScheduler.IsSuppressed, Is.True);
+                GolemScribeScheduler.NotifyDeleted(new[] { "Assets/Ignore.cs" });
+            });
+            Assert.That(GolemScribeScheduler.IsSuppressed, Is.False);
+            Assert.That(GolemScribeScheduler.DirtyPathCountForTests, Is.Zero);
+            SessionState.SetBool("GolemScribe.PendingReconcile", true);
+            GolemScribeScheduler.HandleScriptsReloaded();
+            Assert.That(GolemScribeScheduler.IsScheduledForTests, Is.True);
+        }
     }
 }

@@ -34,7 +34,7 @@ namespace GolemEngine.Unity.Editor
                 return;
             }
 
-            if (!TrySplitCommand(settings.BakeCommand, out var fileName, out var arguments))
+            if (!GolemBakeCommand.TryParse(settings.BakeCommand, out var fileName, out var arguments))
             {
                 Debug.LogError("Golem bake command is empty. Configure it in Project Settings > Golem.");
                 return;
@@ -135,40 +135,6 @@ namespace GolemEngine.Unity.Editor
             {
                 Debug.LogError(stderr.TrimEnd());
             }
-        }
-
-        private static bool TrySplitCommand(string command, out string fileName, out string arguments)
-        {
-            fileName = string.Empty;
-            arguments = string.Empty;
-            command = command?.Trim();
-            if (string.IsNullOrEmpty(command))
-            {
-                return false;
-            }
-
-            if (command[0] == '"')
-            {
-                var closingQuote = command.IndexOf('"', 1);
-                if (closingQuote < 0)
-                {
-                    return false;
-                }
-                fileName = command.Substring(1, closingQuote - 1);
-                arguments = command.Substring(closingQuote + 1).TrimStart();
-                return !string.IsNullOrEmpty(fileName);
-            }
-
-            var firstSpace = command.IndexOfAny(new[] { ' ', '\t' });
-            if (firstSpace < 0)
-            {
-                fileName = command;
-                return true;
-            }
-
-            fileName = command.Substring(0, firstSpace);
-            arguments = command.Substring(firstSpace + 1).TrimStart();
-            return !string.IsNullOrEmpty(fileName);
         }
     }
 }

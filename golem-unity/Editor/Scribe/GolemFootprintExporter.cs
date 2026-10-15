@@ -32,28 +32,14 @@ namespace GolemEngine.Unity.Editor
             var result = new ExportResult();
             var settings = GolemUnityEditorSettings.instance;
             var projectRoot = settings.ProjectRoot;
-            if (string.IsNullOrWhiteSpace(projectRoot) || !Directory.Exists(projectRoot))
+            if (!GolemScribeContext.TryLoad(projectRoot, out var context, out var contextError))
             {
-                result.Errors.Add($"Golem project root does not exist: {projectRoot}");
+                result.Errors.Add(contextError);
                 return result;
             }
-
-            if (!GolemYamlConfig.TryGetProjectSchema(projectRoot, out var schema, out var schemaError))
-            {
-                result.Errors.Add(schemaError);
-                return result;
-            }
-
-            List<GolemScribeArtifactRecord> previous;
-            try
-            {
-                previous = GolemScribeManifest.Load(projectRoot);
-            }
-            catch (Exception ex)
-            {
-                result.Errors.Add(ex.Message);
-                return result;
-            }
+            projectRoot = context.ProjectRoot;
+            var schema = context.Schema;
+            var previous = context.Previous;
 
             var relativePath = settings.FootprintsPath;
             CollectFootprints(
@@ -96,6 +82,20 @@ namespace GolemEngine.Unity.Editor
             out int footprintCount,
             out List<string> errors)
         {
+            CollectFootprints(dimensions, relativePath, previous, projectRoot, DiscoverFootprints(),
+                out desiredRecords, out footprintCount, out errors);
+        }
+
+        internal static void CollectFootprints(
+            int dimensions,
+            string relativePath,
+            IReadOnlyList<GolemScribeArtifactRecord> previous,
+            string projectRoot,
+            IEnumerable<ScribePrefabSource> sources,
+            out List<GolemScribeArtifactRecord> desiredRecords,
+            out int footprintCount,
+            out List<string> errors)
+        {
             desiredRecords = new List<GolemScribeArtifactRecord>();
             footprintCount = 0;
             errors = new List<string>();
@@ -120,18 +120,12 @@ namespace GolemEngine.Unity.Editor
             var invalidGuids = new HashSet<string>(StringComparer.Ordinal);
             var seenGuids = new HashSet<string>(StringComparer.Ordinal);
 
-            var prefabGuids = AssetDatabase.FindAssets("t:Prefab");
-            foreach (var prefabGuid in prefabGuids.OrderBy(g => g, StringComparer.Ordinal))
+            foreach (var source in sources.OrderBy(source => source.SourceGuid, StringComparer.Ordinal))
             {
-                var assetPath = AssetDatabase.GUIDToAssetPath(prefabGuid);
-                if (string.IsNullOrEmpty(assetPath) ||
-                    !assetPath.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
-                if (prefab == null)
+                var prefabGuid = source.SourceGuid;
+                var assetPath = source.AssetPath;
+                var prefab = source.Prefab;
+                if (string.IsNullOrEmpty(assetPath) || !assetPath.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase) || prefab == null)
                 {
                     continue;
                 }
@@ -269,46 +263,15 @@ namespace GolemEngine.Unity.Editor
             });
         }
 
-        /// <summary>Applies alias conflict rules for unit tests without AssetDatabase scanning.</summary>
-        internal static void ApplyFootprintCandidate(
-            GolemFootprintModel model,
-            Dictionary<string, string> aliasToGuid,
-            HashSet<string> conflictedAliases,
-            List<GolemFootprintModel> models,
-            List<string> errors)
+        private static IEnumerable<ScribePrefabSource> DiscoverFootprints()
         {
-            if (model == null || string.IsNullOrEmpty(model.Guid))
+            var guids = AssetDatabase.FindAssets("t:Prefab");
+            foreach (var guid in guids.OrderBy(g => g, StringComparer.Ordinal))
             {
-                return;
+                var path = AssetDatabase.GUIDToAssetPath(guid);
+                if (string.IsNullOrEmpty(path) || !path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase)) continue;
+                yield return new ScribePrefabSource(guid, path, AssetDatabase.LoadAssetAtPath<GameObject>(path));
             }
-
-            var alias = (model.Alias ?? string.Empty).Trim();
-            model.Alias = alias;
-            if (alias.Length == 0)
-            {
-                models.Add(model);
-                return;
-            }
-
-            if (conflictedAliases.Contains(alias))
-            {
-                errors.Add($"alias '{alias}' conflicts with another footprint; skipping GUID {model.Guid}.");
-                return;
-            }
-
-            if (aliasToGuid.TryGetValue(alias, out var previousGuid))
-            {
-                errors.Add($"Footprint alias '{alias}' is used by multiple prefabs.");
-                conflictedAliases.Add(alias);
-                aliasToGuid.Remove(alias);
-                models.RemoveAll(m =>
-                    string.Equals(m.Alias, alias, StringComparison.Ordinal) ||
-                    string.Equals(m.Guid, previousGuid, StringComparison.Ordinal));
-                return;
-            }
-
-            aliasToGuid[alias] = model.Guid;
-            models.Add(model);
         }
 
         private static void AppendPreviousFootprints(
@@ -389,23 +352,13 @@ namespace GolemEngine.Unity.Editor
                 return;
             }
 
-            if (!GolemScribeArtifacts.TryResolveContainedPath(
-                    projectRoot, priorRecord.Path, out var absolute, out _, out var pathError))
+            var snapshot = GolemScribeArtifactReader.Read(projectRoot, priorRecord.Path);
+            if (snapshot.Status == ScribeArtifactStatus.InvalidPath || snapshot.Status == ScribeArtifactStatus.ReadFailure)
             {
-                errors.Add("Preserved footprint artifact path rejected: " + pathError);
+                errors.Add("Preserved footprint artifact path rejected: " + snapshot.Error);
                 return;
             }
-
-            if (!File.Exists(absolute))
-            {
-                return;
-            }
-
-            var content = File.ReadAllText(absolute);
-            if (!GolemYamlWriter.IsScribeOwned(content))
-            {
-                return;
-            }
+            if (snapshot.Status != ScribeArtifactStatus.Owned) return;
 
             desiredRecords.Add(new GolemScribeArtifactRecord
             {
@@ -413,8 +366,8 @@ namespace GolemEngine.Unity.Editor
                 SourceGuid = priorRecord.SourceGuid,
                 Entity = priorRecord.Entity,
                 Path = normalized,
-                PendingContent = content,
-                Hash = GolemScribeManifest.ComputeContentHash(content)
+                PendingContent = snapshot.Content,
+                Hash = snapshot.Hash
             });
         }
 
@@ -436,20 +389,15 @@ namespace GolemEngine.Unity.Editor
                 return false;
             }
 
-            if (!GolemScribeArtifacts.TryResolveContainedPath(
-                    projectRoot, priorRecord.Path, out var absolute, out _, out var pathError))
+            var snapshot = GolemScribeArtifactReader.Read(projectRoot, priorRecord.Path);
+            if (snapshot.Status == ScribeArtifactStatus.InvalidPath || snapshot.Status == ScribeArtifactStatus.ReadFailure)
             {
-                error = "Prior footprint artifact path rejected: " + pathError;
+                error = "Prior footprint artifact path rejected: " + snapshot.Error;
                 return false;
             }
-
-            if (!File.Exists(absolute))
-            {
-                return false;
-            }
-
-            var content = File.ReadAllText(absolute);
-            if (!GolemFootprintYamlBuilder.TryParse(content, out dimensions, out footprints))
+            if (snapshot.Status == ScribeArtifactStatus.Missing) return false;
+            if (snapshot.Status != ScribeArtifactStatus.Owned ||
+                !GolemFootprintYamlBuilder.TryParse(snapshot.Content, out dimensions, out footprints))
             {
                 error = "Prior footprints.golem.yaml could not be parsed for preservation.";
                 return false;

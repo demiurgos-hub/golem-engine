@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)../../../artifacts/scribe-portable/bin/</BaseOutputPath>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)../../../artifacts/scribe-portable/obj/</BaseIntermediateOutputPath>
+  </PropertyGroup>
+</Project>

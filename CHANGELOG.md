@@ -22,6 +22,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Unity Scribe replaces generated files atomically and restores original file bytes after handled export failures. If restoration fails, errors identify every affected path and explicitly report incomplete rollback. Configuration, manifest, and artifact read failures include their input path instead of being mistaken for missing output or escaping without context. Handwritten files introduced during an export are rechecked before replacement or deletion.
+
 - Unity spawns initialize each transform binding once for its current entity, preserving view callback counts and serialized child targets. **Behavior change:** repeated same-entity binds during spawn callbacks no longer force another snap. Set the transform explicitly in a callback or rebind after spawn dispatch returns if another snap is intentional. Explicit binds outside spawning still snap, including same-entity binds; existing generated views do not need regeneration.
 
 - An explicit JavaScript WebTransport ACK interval of `0` now uses the same 1 ms coalescing default as omission. Positive intervals and first-pending-ACK deadlines are unchanged.

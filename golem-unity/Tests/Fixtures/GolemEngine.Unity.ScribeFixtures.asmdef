@@ -1,0 +1,8 @@
+{
+  "name": "GolemEngine.Unity.ScribeFixtures",
+  "rootNamespace": "GolemEngine.Unity.ScribeFixtures",
+  "references": ["GolemEngine.Unity"],
+  "includePlatforms": [],
+  "autoReferenced": false,
+  "defineConstraints": ["UNITY_INCLUDE_TESTS"]
+}

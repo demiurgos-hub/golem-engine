@@ -54,28 +54,14 @@ namespace GolemEngine.Unity.Editor
             var result = new ExportResult();
             var settings = GolemUnityEditorSettings.instance;
             var projectRoot = settings.ProjectRoot;
-            if (string.IsNullOrWhiteSpace(projectRoot) || !Directory.Exists(projectRoot))
+            if (!GolemScribeContext.TryLoad(projectRoot, out var context, out var contextError))
             {
-                result.Errors.Add($"Golem project root does not exist: {projectRoot}");
+                result.Errors.Add(contextError);
                 return result;
             }
-
-            if (!GolemYamlConfig.TryGetProjectSchema(projectRoot, out var schema, out var schemaError))
-            {
-                result.Errors.Add(schemaError);
-                return result;
-            }
-
-            List<GolemScribeArtifactRecord> previous;
-            try
-            {
-                previous = GolemScribeManifest.Load(projectRoot);
-            }
-            catch (Exception ex)
-            {
-                result.Errors.Add(ex.Message);
-                return result;
-            }
+            projectRoot = context.ProjectRoot;
+            var schema = context.Schema;
+            var previous = context.Previous;
 
             CollectCatalogs(schema, previous, projectRoot, out var desiredRecords, out var catalogCount, out var collectErrors);
             result.Errors.AddRange(collectErrors);
@@ -118,6 +104,20 @@ namespace GolemEngine.Unity.Editor
             out int catalogCount,
             out List<string> errors)
         {
+            CollectCatalogs(schema, previous, projectRoot, FindCatalogTypes(), FindCatalogAssets,
+                out desiredRecords, out catalogCount, out errors);
+        }
+
+        internal static void CollectCatalogs(
+            GolemYamlConfig.ProjectSchemaConfig schema,
+            IReadOnlyList<GolemScribeArtifactRecord> previous,
+            string projectRoot,
+            IEnumerable<Type> catalogTypes,
+            Func<Type, IReadOnlyList<ScriptableObject>> loadAssets,
+            out List<GolemScribeArtifactRecord> desiredRecords,
+            out int catalogCount,
+            out List<string> errors)
+        {
             desiredRecords = new List<GolemScribeArtifactRecord>();
             catalogCount = 0;
             errors = new List<string>();
@@ -126,7 +126,6 @@ namespace GolemEngine.Unity.Editor
             var typeNameToFullName = new Dictionary<string, string>(StringComparer.Ordinal);
             var conflictedTypes = new HashSet<string>(StringComparer.Ordinal);
             var pathToTypeName = new Dictionary<string, string>(StringComparer.Ordinal);
-            var catalogTypes = FindCatalogTypes();
             foreach (var catalogType in catalogTypes.OrderBy(t => t.FullName, StringComparer.Ordinal))
             {
                 var model = GolemCatalogSchemaBuilder.Build(
@@ -174,7 +173,7 @@ namespace GolemEngine.Unity.Editor
                     continue;
                 }
 
-                var assets = FindCatalogAssets(catalogType);
+                var assets = loadAssets(catalogType);
                 GolemCatalogSchemaBuilder.BuildRows(model, assets, out var rows, out var rowErrors);
                 if (rowErrors.Count > 0)
                 {
@@ -351,65 +350,29 @@ namespace GolemEngine.Unity.Editor
                     continue;
                 }
 
-                if (!GolemScribeArtifacts.TryResolveContainedPath(
-                        projectRoot, prior.Path, out var absolute, out var normalized, out var pathError))
+                var snapshot = GolemScribeArtifactReader.Read(projectRoot, prior.Path);
+                if (snapshot.Status == ScribeArtifactStatus.InvalidPath)
                 {
-                    errors?.Add($"Preserved catalog '{typeName}' artifact path rejected: {pathError}");
+                    errors?.Add($"Preserved catalog '{typeName}' artifact path rejected: {snapshot.Error}");
                     continue;
                 }
-
-                if (!File.Exists(absolute))
+                if (snapshot.Status == ScribeArtifactStatus.ReadFailure)
                 {
+                    errors?.Add(snapshot.Error);
                     continue;
                 }
-
-                var content = File.ReadAllText(absolute);
-                if (!GolemYamlWriter.IsScribeOwned(content))
-                {
-                    // Handwritten occupant: do not claim it; orphan cleanup will leave it in place.
-                    continue;
-                }
+                if (snapshot.Status != ScribeArtifactStatus.Owned) continue;
 
                 desiredRecords.Add(new GolemScribeArtifactRecord
                 {
                     Kind = prior.Kind,
                     SourceGuid = prior.SourceGuid,
                     Entity = prior.Entity,
-                    Path = normalized,
-                    PendingContent = content,
-                    Hash = GolemScribeManifest.ComputeContentHash(content)
+                    Path = snapshot.Path,
+                    PendingContent = snapshot.Content,
+                    Hash = snapshot.Hash
                 });
             }
-        }
-
-        /// <summary>Applies duplicate catalog-type conflict rules for unit tests without AssetDatabase scanning.</summary>
-        internal static void ApplyCatalogCandidate(
-            string typeName,
-            string sourceFullName,
-            IReadOnlyList<GolemScribeArtifactRecord> records,
-            Dictionary<string, string> typeNameToFullName,
-            HashSet<string> conflictedTypes,
-            List<GolemScribeArtifactRecord> desiredRecords,
-            List<string> errors)
-        {
-            if (conflictedTypes.Contains(typeName))
-            {
-                errors.Add($"Catalog type '{typeName}' is defined by multiple classes; skipping '{sourceFullName}'.");
-                return;
-            }
-
-            if (typeNameToFullName.TryGetValue(typeName, out var previousFullName))
-            {
-                errors.Add(
-                    $"Catalog type '{typeName}' is defined by multiple classes: '{previousFullName}' and '{sourceFullName}'.");
-                conflictedTypes.Add(typeName);
-                typeNameToFullName.Remove(typeName);
-                desiredRecords.RemoveAll(r => string.Equals(r.Entity, typeName, StringComparison.Ordinal));
-                return;
-            }
-
-            typeNameToFullName[typeName] = sourceFullName;
-            desiredRecords.AddRange(records);
         }
 
         private static List<Type> FindCatalogTypes()

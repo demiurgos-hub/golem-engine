@@ -54,18 +54,15 @@ namespace GolemEngine.Unity.Editor
         public static List<GolemScribeArtifactRecord> Load(string projectRoot)
         {
             var path = ManifestPath(projectRoot);
-            if (!File.Exists(path))
-            {
-                return new List<GolemScribeArtifactRecord>();
-            }
-
-            var text = File.ReadAllText(path);
-            if (!GolemYamlWriter.IsScribeOwned(text))
+            var snapshot = GolemScribeArtifactReader.ReadAbsolute(path, GolemScribeConstants.ManifestFileName);
+            if (snapshot.Status == ScribeArtifactStatus.Missing) return new List<GolemScribeArtifactRecord>();
+            if (snapshot.Status == ScribeArtifactStatus.ReadFailure) throw new IOException(snapshot.Error);
+            if (snapshot.Status != ScribeArtifactStatus.Owned)
             {
                 throw new InvalidOperationException(
                     $"Refusing to read {GolemScribeConstants.ManifestFileName}: file exists but is not Scribe-owned. Move or rename the handwritten file.");
             }
-
+            var text = snapshot.Content;
             return Parse(text);
         }
 

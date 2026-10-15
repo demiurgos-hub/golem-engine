@@ -26,28 +26,14 @@ namespace GolemEngine.Unity.Editor
             var result = new ExportResult();
             var settings = GolemUnityEditorSettings.instance;
             var projectRoot = settings.ProjectRoot;
-            if (string.IsNullOrWhiteSpace(projectRoot) || !System.IO.Directory.Exists(projectRoot))
+            if (!GolemScribeContext.TryLoad(projectRoot, out var context, out var contextError))
             {
-                result.Errors.Add($"Golem project root does not exist: {projectRoot}");
+                result.Errors.Add(contextError);
                 return result;
             }
-
-            if (!GolemYamlConfig.TryGetProjectSchema(projectRoot, out var schema, out var schemaError))
-            {
-                result.Errors.Add(schemaError);
-                return result;
-            }
-
-            List<GolemScribeArtifactRecord> previous;
-            try
-            {
-                previous = GolemScribeManifest.Load(projectRoot);
-            }
-            catch (Exception ex)
-            {
-                result.Errors.Add(ex.Message);
-                return result;
-            }
+            projectRoot = context.ProjectRoot;
+            var schema = context.Schema;
+            var previous = context.Previous;
 
             CollectEntities(schema, out var desiredRecords, out var registryMap, out var collectErrors);
             result.Errors.AddRange(collectErrors);
@@ -109,23 +95,28 @@ namespace GolemEngine.Unity.Editor
             out Dictionary<string, GameObject> registryMap,
             out List<string> errors)
         {
+            CollectEntities(schema, DiscoverEntities(), out desiredRecords, out registryMap, out errors);
+        }
+
+        internal static void CollectEntities(
+            GolemYamlConfig.ProjectSchemaConfig schema,
+            IEnumerable<ScribePrefabSource> sources,
+            out List<GolemScribeArtifactRecord> desiredRecords,
+            out Dictionary<string, GameObject> registryMap,
+            out List<string> errors)
+        {
             desiredRecords = new List<GolemScribeArtifactRecord>();
             registryMap = new Dictionary<string, GameObject>(StringComparer.Ordinal);
             errors = new List<string>();
 
             var entityNameToSource = new Dictionary<string, string>(StringComparer.Ordinal);
             var conflictedEntities = new HashSet<string>(StringComparer.Ordinal);
-            var prefabGuids = AssetDatabase.FindAssets("t:Prefab");
-            foreach (var prefabGuid in prefabGuids)
+            foreach (var source in sources)
             {
-                var assetPath = AssetDatabase.GUIDToAssetPath(prefabGuid);
-                if (string.IsNullOrEmpty(assetPath) || !assetPath.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
-                if (prefab == null)
+                var prefabGuid = source.SourceGuid;
+                var assetPath = source.AssetPath;
+                var prefab = source.Prefab;
+                if (string.IsNullOrEmpty(assetPath) || !assetPath.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase) || prefab == null)
                 {
                     continue;
                 }
@@ -184,38 +175,15 @@ namespace GolemEngine.Unity.Editor
             }
         }
 
-        /// <summary>Applies duplicate-entity conflict rules for unit tests without AssetDatabase scanning.</summary>
-        internal static void ApplyEntityCandidate(
-            string entityName,
-            string sourcePath,
-            GolemScribeArtifactRecord record,
-            GameObject prefab,
-            Dictionary<string, string> entityNameToSource,
-            HashSet<string> conflictedEntities,
-            List<GolemScribeArtifactRecord> desiredRecords,
-            Dictionary<string, GameObject> registryMap,
-            List<string> errors)
+        private static IEnumerable<ScribePrefabSource> DiscoverEntities()
         {
-            if (conflictedEntities.Contains(entityName))
+            var guids = AssetDatabase.FindAssets("t:Prefab");
+            foreach (var guid in guids)
             {
-                errors.Add($"Entity '{entityName}' is defined by multiple prefabs; skipping '{sourcePath}'.");
-                return;
+                var path = AssetDatabase.GUIDToAssetPath(guid);
+                if (string.IsNullOrEmpty(path) || !path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase)) continue;
+                yield return new ScribePrefabSource(guid, path, AssetDatabase.LoadAssetAtPath<GameObject>(path));
             }
-
-            if (entityNameToSource.TryGetValue(entityName, out var previousPath))
-            {
-                errors.Add(
-                    $"Entity '{entityName}' is defined by multiple prefabs: '{previousPath}' and '{sourcePath}'.");
-                conflictedEntities.Add(entityName);
-                entityNameToSource.Remove(entityName);
-                desiredRecords.RemoveAll(r => string.Equals(r.Entity, entityName, StringComparison.Ordinal));
-                registryMap.Remove(entityName);
-                return;
-            }
-
-            entityNameToSource[entityName] = sourcePath;
-            desiredRecords.Add(record);
-            registryMap[entityName] = prefab;
         }
 
         internal static void ClearPendingRegistryRemovalsForTests()

@@ -1,5 +1,5 @@
-using System.Collections.Generic;
-using GolemEngine.Unity.Editor;
+using System;
+using GolemEngine.Unity;
 using NUnit.Framework;
 using UnityEngine;
 
@@ -7,49 +7,37 @@ namespace GolemEngine.Unity.Editor.Tests
 {
     public sealed class GolemEntityExportPlannerTests
     {
+        [GolemEntity("Player")]
+        private sealed class PlayerSource : MonoBehaviour { [GolemVar(1)] public int Health; }
+        [GolemEntity("Peer")]
+        private sealed class PeerSource : MonoBehaviour { [GolemVar(1)] public int Health; }
+        [GolemEntity("Invalid")]
+        private sealed class InvalidSource : MonoBehaviour { [GolemVar(1)] public int[] Unsupported; }
+
         [Test]
-        public void ApplyEntityCandidate_DropsBothSidesOfDuplicateEntityNames()
+        public void ProductionCollectorDropsAllDuplicateNamesButKeepsValidPeer()
         {
-            var desired = new List<GolemScribeArtifactRecord>();
-            var registry = new Dictionary<string, GameObject>();
-            var sources = new Dictionary<string, string>();
-            var conflicts = new HashSet<string>();
-            var errors = new List<string>();
-            var a = new GameObject("a");
-            var b = new GameObject("b");
+            var objects = new[] { new GameObject("A"), new GameObject("B"), new GameObject("C"), new GameObject("Peer"), new GameObject("Invalid") };
             try
             {
-                var first = new GolemScribeArtifactRecord
-                {
-                    Kind = GolemScribeConstants.ArtifactKindEntitySchema,
-                    Entity = "Player",
-                    Path = "schemas/entities/player.yaml",
-                    SourceGuid = "11111111111111111111111111111111",
-                    PendingContent = "x"
-                };
-                var second = new GolemScribeArtifactRecord
-                {
-                    Kind = GolemScribeConstants.ArtifactKindEntitySchema,
-                    Entity = "Player",
-                    Path = "schemas/entities/player.yaml",
-                    SourceGuid = "22222222222222222222222222222222",
-                    PendingContent = "y"
-                };
-
-                GolemEntityExporter.ApplyEntityCandidate(
-                    "Player", "Assets/A.prefab", first, a, sources, conflicts, desired, registry, errors);
-                GolemEntityExporter.ApplyEntityCandidate(
-                    "Player", "Assets/B.prefab", second, b, sources, conflicts, desired, registry, errors);
-
-                Assert.That(desired, Is.Empty);
-                Assert.That(registry, Is.Empty);
-                Assert.That(conflicts, Does.Contain("Player"));
+                for (var i = 0; i < 3; i++) objects[i].AddComponent<PlayerSource>();
+                objects[3].AddComponent<PeerSource>();
+                objects[4].AddComponent<InvalidSource>();
+                var sources = new ScribePrefabSource[objects.Length];
+                for (var i = 0; i < objects.Length; i++)
+                    sources[i] = new ScribePrefabSource(i.ToString(), "Assets/" + i + ".prefab", objects[i]);
+                GolemEntityExporter.CollectEntities(new GolemYamlConfig.ProjectSchemaConfig(), sources,
+                    out var desired, out var registry, out var errors);
+                Assert.That(desired, Has.Count.EqualTo(1));
+                Assert.That(desired[0].Entity, Is.EqualTo("Peer"));
+                Assert.That(registry.Keys, Is.EquivalentTo(new[] { "Peer" }));
                 Assert.That(errors, Has.Some.Contain("multiple prefabs"));
+                Assert.That(errors, Has.Some.Contain("skipping"));
+                Assert.That(errors, Has.Some.Contain("unsupported type"));
             }
             finally
             {
-                Object.DestroyImmediate(a);
-                Object.DestroyImmediate(b);
+                foreach (var obj in objects) UnityEngine.Object.DestroyImmediate(obj);
             }
         }
     }
