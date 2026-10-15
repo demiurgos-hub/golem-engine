@@ -29,12 +29,20 @@ namespace GolemEngine.Unity
 
             var instance = Instantiate(prefab, transform);
             _instances[id] = instance;
-            var binding = instance.GetComponent<GolemTransformBinding>();
-            binding?.Bind(entity);
-            foreach (var view in instance.GetComponents<MonoBehaviour>())
+            using (GolemTransformBinding.BeginSpawnBindingScope(entity))
             {
-                var bind = FindCompatibleMethod(view.GetType(), "Bind", entity.GetType());
-                bind?.Invoke(view, new[] { entity });
+                var binding = instance.GetComponent<GolemTransformBinding>();
+                binding?.Bind(entity);
+                foreach (var view in instance.GetComponents<MonoBehaviour>())
+                {
+                    if (view is GolemTransformBinding transformBinding)
+                    {
+                        transformBinding.Bind(entity);
+                        continue;
+                    }
+                    var bind = FindCompatibleMethod(view.GetType(), "Bind", entity.GetType());
+                    bind?.Invoke(view, new[] { entity });
+                }
             }
         }
 

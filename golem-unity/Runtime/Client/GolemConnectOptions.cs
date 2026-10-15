@@ -69,7 +69,7 @@ namespace GolemEngine.Unity
         {
             Url = url ?? throw new ArgumentNullException(nameof(url));
             Transport = transport ?? string.Empty;
-            ServerCertificateHashes = CloneHashes(serverCertificateHashes);
+            ServerCertificateHashes = GolemCertificateHashes.Copy(serverCertificateHashes);
             EventualAckIntervalMs = eventualAckIntervalMs;
         }
 
@@ -93,8 +93,40 @@ namespace GolemEngine.Unity
         {
             return eventualAckIntervalMs > 0 ? eventualAckIntervalMs : 1;
         }
+    }
 
-        private static IReadOnlyList<GolemCertificateHash> CloneHashes(IReadOnlyList<GolemCertificateHash> hashes)
+    internal enum GolemEndpointUrlError
+    {
+        None,
+        InvalidAbsoluteUrl,
+        UserInfoNotAllowed,
+        InvalidScheme,
+    }
+
+    internal static class GolemEndpointUrl
+    {
+        // Callers validate the transport kind and retain their contextual diagnostics.
+        internal static GolemEndpointUrlError Validate(string transport, string url)
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var parsed))
+            {
+                return GolemEndpointUrlError.InvalidAbsoluteUrl;
+            }
+            if (!string.IsNullOrEmpty(parsed.UserInfo))
+            {
+                return GolemEndpointUrlError.UserInfoNotAllowed;
+            }
+            var validScheme = transport == GolemConnectOptions.TransportWebTransport
+                ? string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+                : string.Equals(parsed.Scheme, "ws", StringComparison.OrdinalIgnoreCase) ||
+                  string.Equals(parsed.Scheme, "wss", StringComparison.OrdinalIgnoreCase);
+            return validScheme ? GolemEndpointUrlError.None : GolemEndpointUrlError.InvalidScheme;
+        }
+    }
+
+    internal static class GolemCertificateHashes
+    {
+        internal static GolemCertificateHash[] Copy(IReadOnlyList<GolemCertificateHash> hashes)
         {
             if (hashes == null || hashes.Count == 0)
             {

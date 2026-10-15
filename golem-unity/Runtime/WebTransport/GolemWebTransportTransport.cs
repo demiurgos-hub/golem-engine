@@ -130,7 +130,7 @@ namespace GolemEngine.Unity
             catch (Exception ex)
             {
                 _connected = false;
-                var info = DisconnectInfo(false, phase, ex);
+                var info = GolemUnityLog.CreateDisconnectInfo(false, phase, ex, TransportName, _url);
                 GolemUnityLog.Error(
                     $"connect failed transport={TransportName} url={redactedUrl} phase={GolemUnityLog.PhaseName(phase)} category={GolemUnityLog.CategoryName(info.Category)} {GolemUnityLog.FormatError(ex)}");
                 DisconnectedEvent?.Invoke(info);
@@ -162,7 +162,7 @@ namespace GolemEngine.Unity
             catch (Exception ex)
             {
                 _connected = false;
-                var info = DisconnectInfo(false, GolemDisconnectPhase.Send, ex);
+                var info = GolemUnityLog.CreateDisconnectInfo(false, GolemDisconnectPhase.Send, ex, TransportName, _url);
                 GolemUnityLog.Error(
                     $"send failed transport={TransportName} url={GolemUnityLog.RedactUrl(_url)} category={GolemUnityLog.CategoryName(info.Category)} {GolemUnityLog.FormatError(ex)}");
                 DisconnectedEvent?.Invoke(info);
@@ -242,7 +242,7 @@ namespace GolemEngine.Unity
             }
             catch (Exception ex)
             {
-                var info = DisconnectInfo(false, GolemDisconnectPhase.Receive, ex);
+                var info = GolemUnityLog.CreateDisconnectInfo(false, GolemDisconnectPhase.Receive, ex, TransportName, _url);
                 GolemUnityLog.LogDisconnect(TransportName, info);
                 DisconnectedEvent?.Invoke(info);
             }
@@ -268,7 +268,7 @@ namespace GolemEngine.Unity
             catch (Exception ex)
             {
                 _connected = false;
-                var info = DisconnectInfo(false, GolemDisconnectPhase.Receive, ex);
+                var info = GolemUnityLog.CreateDisconnectInfo(false, GolemDisconnectPhase.Receive, ex, TransportName, _url);
                 GolemUnityLog.Error(
                     $"datagram receive failed transport={TransportName} url={GolemUnityLog.RedactUrl(_url)} category={GolemUnityLog.CategoryName(info.Category)} {GolemUnityLog.FormatError(ex)}");
                 DisconnectedEvent?.Invoke(info);
@@ -293,7 +293,7 @@ namespace GolemEngine.Unity
             catch (Exception ex)
             {
                 _connected = false;
-                var info = DisconnectInfo(false, GolemDisconnectPhase.Receive, ex);
+                var info = GolemUnityLog.CreateDisconnectInfo(false, GolemDisconnectPhase.Receive, ex, TransportName, _url);
                 GolemUnityLog.Error(
                     $"datagram scheduler failed transport={TransportName} url={GolemUnityLog.RedactUrl(_url)} category={GolemUnityLog.CategoryName(info.Category)} {GolemUnityLog.FormatError(ex)}");
                 DisconnectedEvent?.Invoke(info);
@@ -413,17 +413,6 @@ namespace GolemEngine.Unity
                 _cts?.Dispose();
                 _cts = null;
             }
-        }
-
-        private GolemDisconnectInfo DisconnectInfo(bool wasClean, GolemDisconnectPhase phase, Exception ex)
-        {
-            return new GolemDisconnectInfo(
-                wasClean,
-                error: ex,
-                transport: TransportName,
-                url: _url,
-                phase: phase,
-                category: wasClean ? GolemDisconnectCategory.UserClosed : GolemUnityLog.ClassifyError(ex));
         }
     }
 }

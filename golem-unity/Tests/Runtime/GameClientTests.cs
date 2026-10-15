@@ -4,7 +4,7 @@ using System;
 
 namespace GolemEngine.Unity.Tests
 {
-    public sealed class GameClientTests
+    public sealed partial class GameClientTests
     {
         [Test]
         public void DispatchesServerMessageToEntityManager()
@@ -274,16 +274,14 @@ namespace GolemEngine.Unity.Tests
 
         private sealed class RecordingTransport : IGolemTransport
         {
-            private readonly int _maxDatagramBytes;
-
             public RecordingTransport(int maxDatagramBytes = 0)
             {
-                _maxDatagramBytes = maxDatagramBytes;
+                MaxDatagramBytes = maxDatagramBytes;
             }
 
             public bool Connected => true;
             public int MaxMessageBytes => GameClient.MaxReliableMessageBytes;
-            public int MaxDatagramBytes => _maxDatagramBytes;
+            public int MaxDatagramBytes { get; set; }
             public List<byte[]> Sent { get; } = new List<byte[]>();
             public List<byte[]> UnreliableSent { get; } = new List<byte[]>();
             public List<byte[]> ReliableUnorderedSent { get; } = new List<byte[]>();

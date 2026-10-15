@@ -8,7 +8,7 @@ using NUnit.Framework;
 
 namespace GolemEngine.Unity.Tests
 {
-    public sealed class GolemRealtimeBootstrapTests
+    public sealed partial class GolemRealtimeBootstrapTests
     {
         [Test]
         public void ParseRealtimeConfigReadsOptionalFields()
@@ -510,7 +510,7 @@ namespace GolemEngine.Unity.Tests
                     new GolemDisconnectInfo(
                         false,
                         code: status,
-                        reason: status == 426 ? "Upgrade Required" : "ticket rejected",
+                        reason: "handshake failed",
                         transport: options.Transport,
                         phase: GolemDisconnectPhase.Connect,
                         category: GolemDisconnectCategory.Protocol));
@@ -887,6 +887,7 @@ namespace GolemEngine.Unity.Tests
 
         private sealed class ManualTransport : IGolemTransport
         {
+            public Exception ConnectError;
             private readonly bool _autoOpen;
             private bool _connected;
 
@@ -910,6 +911,7 @@ namespace GolemEngine.Unity.Tests
             public void Connect(string url)
             {
                 ConnectCalls++;
+                if (ConnectError != null) throw ConnectError;
                 if (_autoOpen)
                 {
                     Open();

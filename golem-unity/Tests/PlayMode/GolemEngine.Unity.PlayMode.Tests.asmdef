@@ -1,0 +1,10 @@
+{
+  "name": "GolemEngine.Unity.PlayMode.Tests",
+  "rootNamespace": "GolemEngine.Unity.Tests",
+  "references": ["GolemEngine.Unity"],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "autoReferenced": false,
+  "optionalUnityReferences": ["TestAssemblies"]
+}

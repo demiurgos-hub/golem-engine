@@ -4,7 +4,7 @@ using NUnit.Framework;
 
 namespace GolemEngine.Unity.Tests
 {
-    public sealed class GolemDatagramProtocolTests
+    public sealed partial class GolemDatagramProtocolTests
     {
         [Test]
         public void SendUnreliableEncodesLaneAndPayload()

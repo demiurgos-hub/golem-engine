@@ -101,13 +101,10 @@ namespace GolemEngine.Unity
                 packet = new DatagramPacket
                 {
                     PacketSeq = _nextPacketSeq++,
-                    AckSeq = _recvPackets.Latest,
-                    AckMask = CopyAckMask(_recvPackets.Mask),
                     Lane = lane,
                     Payload = CopyPayload(payload),
                 };
-                _ackDirty = false;
-                _ackDueAt = default;
+                TakeAckSnapshotLocked(out packet.AckSeq, out packet.AckMask);
             }
             _write(EncodePacket(packet));
         }
@@ -172,12 +169,9 @@ namespace GolemEngine.Unity
                 packet = new DatagramPacket
                 {
                     PacketSeq = _nextPacketSeq++,
-                    AckSeq = _recvPackets.Latest,
-                    AckMask = CopyAckMask(_recvPackets.Mask),
                     Flags = AckOnlyFlag,
                 };
-                _ackDirty = false;
-                _ackDueAt = default;
+                TakeAckSnapshotLocked(out packet.AckSeq, out packet.AckMask);
             }
             _write(EncodePacket(packet));
         }
@@ -207,20 +201,13 @@ namespace GolemEngine.Unity
                     _pendingReliable.Remove(key);
                     var packet = pending.Packet;
                     packet.PacketSeq = _nextPacketSeq++;
-                    packet.AckSeq = _recvPackets.Latest;
-                    packet.AckMask = CopyAckMask(_recvPackets.Mask);
+                    TakeAckSnapshotLocked(out packet.AckSeq, out packet.AckMask);
                     pending.Packet = packet;
                     pending.Attempts++;
                     pending.LastSentAt = now;
                     pending.NextSendAt = now + RetryDelay(pending.Attempts);
                     _pendingReliable[packet.PacketSeq] = pending;
                     packets.Add(packet);
-                }
-
-                if (packets.Count > 0)
-                {
-                    _ackDirty = false;
-                    _ackDueAt = default;
                 }
             }
 
@@ -241,10 +228,7 @@ namespace GolemEngine.Unity
                 {
                     return payload;
                 }
-                ackSeq = _recvPackets.Latest;
-                ackMask = CopyAckMask(_recvPackets.Mask);
-                _ackDirty = false;
-                _ackDueAt = default;
+                TakeAckSnapshotLocked(out ackSeq, out ackMask);
             }
 
             var outBytes = new byte[ClientReliableAckControlFrame.Length + 2 + AckMaskBytes + payload.Length];
@@ -270,8 +254,6 @@ namespace GolemEngine.Unity
                 packet = new DatagramPacket
                 {
                     PacketSeq = _nextPacketSeq++,
-                    AckSeq = _recvPackets.Latest,
-                    AckMask = CopyAckMask(_recvPackets.Mask),
                     Lane = lane,
                     MessageId = _nextMessageId++,
                     Payload = CopyPayload(payload),
@@ -280,8 +262,7 @@ namespace GolemEngine.Unity
                 {
                     packet.OrderedSeq = _nextOrderedSeq++;
                 }
-                _ackDirty = false;
-                _ackDueAt = default;
+                TakeAckSnapshotLocked(out packet.AckSeq, out packet.AckMask);
                 _pendingReliable[packet.PacketSeq] = new PendingReliableDatagram
                 {
                     Packet = packet,
@@ -339,6 +320,15 @@ namespace GolemEngine.Unity
             }
         }
 
+        // Caller holds _lock. Consumption precedes encoding/IO, even if that later fails.
+        private void TakeAckSnapshotLocked(out ushort ackSeq, out uint[] ackMask)
+        {
+            ackSeq = _recvPackets.Latest;
+            ackMask = CopyAckMask(_recvPackets.Mask);
+            _ackDirty = false;
+            _ackDueAt = default;
+        }
+
         private void ScheduleAckLocked(DateTime now)
         {
             _ackDirty = true;
@@ -374,28 +364,9 @@ namespace GolemEngine.Unity
 
         private static byte[] EncodePacket(DatagramPacket packet)
         {
-            if ((packet.Flags & AckOnlyFlag) == 0 && !IsKnownLane(packet.Lane))
-            {
-                throw new InvalidOperationException($"golem-unity: unknown datagram lane {(byte)packet.Lane}");
-            }
-
-            var length = PacketHeaderBytes;
-            if ((packet.Flags & AckOnlyFlag) == 0)
-            {
-                length += LaneHeaderBytes + packet.Payload.Length;
-                if (packet.Lane == GolemDatagramLane.ReliableUnordered)
-                {
-                    length += ReliableMessageIdBytes;
-                }
-                else if (packet.Lane == GolemDatagramLane.ReliableOrdered)
-                {
-                    length += ReliableMessageIdBytes + ReliableOrderedSequenceBytes;
-                }
-                else if (packet.Lane == GolemDatagramLane.EventualState)
-                {
-                    length += EventualStateTokenBytes;
-                }
-            }
+            var length = (packet.Flags & AckOnlyFlag) != 0
+                ? PacketHeaderBytes
+                : GetPacketHeaderBytes(packet.Lane) + packet.Payload.Length;
             if (length > MaxWebTransportDatagramBytes)
             {
                 throw new InvalidOperationException($"golem-unity: datagram size {length} exceeds max {MaxWebTransportDatagramBytes}");
@@ -505,12 +476,27 @@ namespace GolemEngine.Unity
             return packet;
         }
 
-        private static bool IsKnownLane(GolemDatagramLane lane)
+        internal static int GetPayloadBudget(int maxPacketBytes, GolemDatagramLane lane)
         {
-            return lane == GolemDatagramLane.Unreliable ||
-                lane == GolemDatagramLane.ReliableUnordered ||
-                lane == GolemDatagramLane.ReliableOrdered ||
-                lane == GolemDatagramLane.EventualState;
+            return maxPacketBytes - GetPacketHeaderBytes(lane);
+        }
+
+        private static int GetPacketHeaderBytes(GolemDatagramLane lane)
+        {
+            var header = PacketHeaderBytes + LaneHeaderBytes;
+            switch (lane)
+            {
+                case GolemDatagramLane.Unreliable:
+                    return header;
+                case GolemDatagramLane.ReliableUnordered:
+                    return header + ReliableMessageIdBytes;
+                case GolemDatagramLane.ReliableOrdered:
+                    return header + ReliableMessageIdBytes + ReliableOrderedSequenceBytes;
+                case GolemDatagramLane.EventualState:
+                    return header + EventualStateTokenBytes;
+                default:
+                    throw new InvalidOperationException($"golem-unity: unknown datagram lane {(byte)lane}");
+            }
         }
 
         private static bool SequenceNewer(ushort a, ushort b)

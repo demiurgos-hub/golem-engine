@@ -48,6 +48,22 @@ namespace GolemEngine.Unity
             return details;
         }
 
+        internal static GolemDisconnectInfo CreateDisconnectInfo(
+            bool wasClean,
+            GolemDisconnectPhase phase,
+            Exception error,
+            string transport,
+            string url)
+        {
+            return new GolemDisconnectInfo(
+                wasClean,
+                error: error,
+                transport: transport,
+                url: url,
+                phase: phase,
+                category: wasClean ? GolemDisconnectCategory.UserClosed : ClassifyError(error));
+        }
+
         public static GolemDisconnectCategory ClassifyError(Exception ex)
         {
             if (ex == null)

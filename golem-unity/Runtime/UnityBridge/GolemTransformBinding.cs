@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
 
@@ -16,15 +18,74 @@ namespace GolemEngine.Unity
         private PropertyInfo _posX;
         private PropertyInfo _posY;
         private PropertyInfo _posZ;
+        private bool _boundSuccessfully;
 
+        [ThreadStatic] private static SpawnBindingScope _spawnScope;
+
+        /// <summary>
+        /// Binds and immediately snaps to an entity. Repeated binding to the current entity
+        /// during one spawner dispatch initializes once; explicit binds outside it always snap.
+        /// </summary>
         public void Bind(object entity)
         {
+            var scope = _spawnScope;
+            if (scope != null && ReferenceEquals(scope.Entity, entity) &&
+                _boundSuccessfully && ReferenceEquals(_entity, entity) && scope.Contains(this))
+            {
+                return;
+            }
+            _boundSuccessfully = false;
             _entity = entity;
             var type = entity.GetType();
             _posX = type.GetProperty("PosX");
             _posY = type.GetProperty("PosY");
             _posZ = type.GetProperty("PosZ");
             ApplyPosition(true);
+            _boundSuccessfully = true;
+            if (scope != null && ReferenceEquals(scope.Entity, entity))
+            {
+                scope.Record(this);
+            }
+        }
+
+        // Only synchronous spawn dispatch owns this scope; never carry it across a yield.
+        internal static IDisposable BeginSpawnBindingScope(object entity)
+        {
+            return new SpawnBindingScope(entity);
+        }
+
+        private sealed class SpawnBindingScope : IDisposable
+        {
+            internal readonly object Entity;
+            private readonly SpawnBindingScope _parent;
+            private readonly List<GolemTransformBinding> _initialized = new List<GolemTransformBinding>();
+
+            internal SpawnBindingScope(object entity)
+            {
+                Entity = entity;
+                _parent = _spawnScope;
+                _spawnScope = this;
+            }
+
+            internal bool Contains(GolemTransformBinding binding)
+            {
+                // Unity Object equality is not managed reference identity.
+                foreach (var initialized in _initialized)
+                {
+                    if (ReferenceEquals(initialized, binding)) return true;
+                }
+                return false;
+            }
+
+            internal void Record(GolemTransformBinding binding)
+            {
+                if (!Contains(binding)) _initialized.Add(binding);
+            }
+
+            public void Dispose()
+            {
+                _spawnScope = _parent;
+            }
         }
 
         private void Update()

@@ -22,6 +22,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Unity spawns initialize each transform binding once for its current entity, preserving view callback counts and serialized child targets. **Behavior change:** repeated same-entity binds during spawn callbacks no longer force another snap. Set the transform explicitly in a callback or rebind after spawn dispatch returns if another snap is intentional. Explicit binds outside spawning still snap, including same-entity binds; existing generated views do not need regeneration.
+
 - An explicit JavaScript WebTransport ACK interval of `0` now uses the same 1 ms coalescing default as omission. Positive intervals and first-pending-ACK deadlines are unchanged.
 
 - JavaScript bake cleanup requires a Golem generated header before deleting recognized intermediate TypeScript files. Authored files with generated-looking names, declarations, and symlinks are preserved; normal generation still overwrites its selected outputs.

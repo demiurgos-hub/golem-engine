@@ -1,5 +1,5 @@
 ---
-description: integration/unity - Unity/C# client runtime and csharp-client codegen.
+description: integration/unity - Unity/C# client runtime, shared endpoint and diagnostic policy, datagram ACK ownership, scoped transform initialization, and csharp-client codegen.
 globs:
   - golem-unity/**/*
   - codegen/templates/csharp/**/*.tmpl
@@ -33,3 +33,11 @@ C# codecs consume resolved schema layouts and `VarInfo.DeltaPresenceCS`; delta a
 Keep framing aligned with `golem/net` / `golem-js`: reliable frame cap `256 KiB`, WebTransport datagram cap `1200`, datagram lanes, and control frames. When changing C# generated shapes or connect APIs, update `codegen` template tests and `golem-unity/Tests`.
 
 The generated C# factory shares manager setup and codec arguments through named `clientSetup`/`clientArguments` template fragments. Preserve the legacy parameterless transport-factory constructor, its null check and obsolete marker separately from the options-aware constructor. Only the no-argument generated factory supplies built-in capability detection; custom options-aware factories retain the runtime default. Portable generated-consumer tests cover these contracts without changing Unity runtime lifecycle.
+
+**Shared runtime policy:** `GolemEndpointUrl` owns absolute URL/user-info/scheme checks; caller wrappers retain exception types, contextual messages and validation ordering. `GolemCertificateHashes.Copy` copies nonempty arrays/lists without changing the public array-backed representation. `GolemUnityLog.CreateDisconnectInfo` reuses `ClassifyError`; Runtime grants internal access to `GolemEngine.Unity.WebTransport` and `GolemEngine.Unity.Tests` without referencing either assembly. Keep transport-specific lifecycle, raw metadata, sanitization and logging boundaries separate. Terminal handshake text matching remains private to `GameClient`, with numeric disconnect-code checks outside it.
+
+**Datagrams:** `GetPayloadBudget` and encoder allocation share lane header sizes, retaining supplied transport limits and the built-in 1200-byte encoder ceiling. `TakeAckSnapshotLocked` copies and consumes ACK state under `_lock` before encoding/IO; it does not assign sequences or roll back on send failure. Keep retry eligibility, message IDs, ACK-only flags and stream piggyback conditions with their callers; writes and deliveries stay outside locks.
+
+**Transform binding:** the spawner owns a synchronous `BeginSpawnBindingScope` after instantiation. The first root binding precedes view callbacks; other components retain traversal order. Transform components dispatch directly, other views retain compatible-method reflection. The binding coordinator suppresses successful same-current-entity initialization only within the active scope, restores nested scopes on disposal, and retries failed initialization. Generated/custom view callbacks still execute on every view bind, serialized targets still work, and explicit binding outside spawning always snaps. Never carry a scope across a yield or await. Do not remove generated `OnBound` binding calls or conflate manager removal with view `Unbind`.
+
+`TestUnityRuntimePolicyConsumer` compiles actual runtime sources and NUnit policy tests in separate C# 9 assemblies; its Unity boundary stubs do not validate frame/lifecycle behavior. `Tests/PlayMode` requires real Unity and its generated bridge fixture is checked against the template. Verify Runtime independently of optional WebTransport and compile that assembly separately with its existing dependency.

@@ -38,7 +38,7 @@ namespace GolemEngine.Unity
             }
             catch (Exception ex)
             {
-                var info = DisconnectInfo(false, GolemDisconnectPhase.Connect, ex);
+                var info = GolemUnityLog.CreateDisconnectInfo(false, GolemDisconnectPhase.Connect, ex, TransportName, _url);
                 GolemUnityLog.Error(
                     $"connect failed transport={TransportName} url={GolemUnityLog.RedactUrl(url)} category={GolemUnityLog.CategoryName(info.Category)} {GolemUnityLog.FormatError(ex)}");
                 DisconnectedEvent?.Invoke(info);
@@ -65,7 +65,7 @@ namespace GolemEngine.Unity
             }
             catch (Exception ex)
             {
-                var info = DisconnectInfo(false, GolemDisconnectPhase.Send, ex);
+                var info = GolemUnityLog.CreateDisconnectInfo(false, GolemDisconnectPhase.Send, ex, TransportName, _url);
                 GolemUnityLog.Error(
                     $"send failed transport={TransportName} url={GolemUnityLog.RedactUrl(_url)} state={_socket?.State} category={GolemUnityLog.CategoryName(info.Category)} {GolemUnityLog.FormatError(ex)}");
                 DisconnectedEvent?.Invoke(info);
@@ -177,21 +177,10 @@ namespace GolemEngine.Unity
             }
             catch (Exception ex)
             {
-                var info = DisconnectInfo(false, GolemDisconnectPhase.Receive, ex);
+                var info = GolemUnityLog.CreateDisconnectInfo(false, GolemDisconnectPhase.Receive, ex, TransportName, _url);
                 GolemUnityLog.LogDisconnect(TransportName, info);
                 DisconnectedEvent?.Invoke(info);
             }
-        }
-
-        private GolemDisconnectInfo DisconnectInfo(bool wasClean, GolemDisconnectPhase phase, Exception ex)
-        {
-            return new GolemDisconnectInfo(
-                wasClean,
-                error: ex,
-                transport: TransportName,
-                url: _url,
-                phase: phase,
-                category: wasClean ? GolemDisconnectCategory.UserClosed : GolemUnityLog.ClassifyError(ex));
         }
     }
 }

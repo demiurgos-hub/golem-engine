@@ -32,7 +32,7 @@ namespace GolemEngine.Unity
         {
             Transport = transport ?? throw new ArgumentNullException(nameof(transport));
             Url = url ?? throw new ArgumentNullException(nameof(url));
-            ServerCertificateHashes = CloneHashes(serverCertificateHashes);
+            ServerCertificateHashes = GolemCertificateHashes.Copy(serverCertificateHashes);
             EventualAckIntervalMs = eventualAckIntervalMs;
             Fallback = fallback;
         }
@@ -42,21 +42,6 @@ namespace GolemEngine.Unity
         public IReadOnlyList<GolemCertificateHash> ServerCertificateHashes { get; }
         public int? EventualAckIntervalMs { get; }
         public GolemRealtimeEndpoint Fallback { get; }
-
-        private static IReadOnlyList<GolemCertificateHash> CloneHashes(
-            IReadOnlyList<GolemCertificateHash> hashes)
-        {
-            if (hashes == null || hashes.Count == 0)
-            {
-                return Array.Empty<GolemCertificateHash>();
-            }
-            var copy = new GolemCertificateHash[hashes.Count];
-            for (var i = 0; i < hashes.Count; i++)
-            {
-                copy[i] = hashes[i];
-            }
-            return copy;
-        }
     }
 
     /// <summary>HTTP response returned by an injectable realtime-config fetch function.</summary>
@@ -590,17 +575,14 @@ namespace GolemEngine.Unity
 
         private static void ValidateEndpointUrl(string transport, string url, string label)
         {
-            if (!Uri.TryCreate(url, UriKind.Absolute, out var parsed) ||
-                !string.IsNullOrEmpty(parsed.UserInfo))
+            var error = GolemEndpointUrl.Validate(transport, url);
+            if (error == GolemEndpointUrlError.InvalidAbsoluteUrl ||
+                error == GolemEndpointUrlError.UserInfoNotAllowed)
             {
                 throw new InvalidOperationException(
                     $"golem-unity: realtime {label} URL must be absolute");
             }
-            var validScheme = transport == GolemConnectOptions.TransportWebTransport
-                ? string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
-                : string.Equals(parsed.Scheme, "ws", StringComparison.OrdinalIgnoreCase) ||
-                  string.Equals(parsed.Scheme, "wss", StringComparison.OrdinalIgnoreCase);
-            if (!validScheme)
+            if (error == GolemEndpointUrlError.InvalidScheme)
             {
                 throw new InvalidOperationException(
                     $"golem-unity: realtime {label} URL has an invalid scheme for {transport}");

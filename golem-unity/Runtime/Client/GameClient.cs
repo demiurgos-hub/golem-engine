@@ -848,16 +848,13 @@ namespace GolemEngine.Unity
 
         private static void ValidateEndpointUrl(string transport, string url, string parameterName)
         {
-            if (!Uri.TryCreate(url, UriKind.Absolute, out var parsed) ||
-                !string.IsNullOrEmpty(parsed.UserInfo))
+            var error = GolemEndpointUrl.Validate(transport, url);
+            if (error == GolemEndpointUrlError.InvalidAbsoluteUrl ||
+                error == GolemEndpointUrlError.UserInfoNotAllowed)
             {
                 throw new ArgumentException("golem-unity: realtime endpoint must be an absolute URL", parameterName);
             }
-            var validScheme = transport == GolemConnectOptions.TransportWebTransport
-                ? string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
-                : string.Equals(parsed.Scheme, "ws", StringComparison.OrdinalIgnoreCase) ||
-                  string.Equals(parsed.Scheme, "wss", StringComparison.OrdinalIgnoreCase);
-            if (!validScheme)
+            if (error == GolemEndpointUrlError.InvalidScheme)
             {
                 throw new ArgumentException(
                     $"golem-unity: invalid URL scheme for {transport} endpoint",
@@ -994,17 +991,16 @@ namespace GolemEngine.Unity
             {
                 return true;
             }
-            var text = (info.Reason ?? string.Empty) + " " + ExceptionText(info.Error);
-            return MentionsHttpStatus(text, 401) ||
-                   MentionsHttpStatus(text, 403) ||
-                   MentionsHttpStatus(text, 426) ||
-                   MentionsTicketFailure(text) ||
-                   text.IndexOf("upgrade required", StringComparison.OrdinalIgnoreCase) >= 0;
+            return IsTerminalHandshakeText((info.Reason ?? string.Empty) + " " + ExceptionText(info.Error));
         }
 
         private static bool IsTerminalHandshakeException(Exception error)
         {
-            var text = ExceptionText(error);
+            return IsTerminalHandshakeText(ExceptionText(error));
+        }
+
+        private static bool IsTerminalHandshakeText(string text)
+        {
             return MentionsHttpStatus(text, 401) ||
                    MentionsHttpStatus(text, 403) ||
                    MentionsHttpStatus(text, 426) ||
@@ -1157,18 +1153,12 @@ namespace GolemEngine.Unity
             }
 
             var frame = _encodeCommand(command);
-            if (transport.MaxDatagramBytes > 0)
+            var maxDatagramBytes = transport.MaxDatagramBytes;
+            if (maxDatagramBytes > 0)
             {
-                var maxPayloadBytes = transport.MaxDatagramBytes -
-                    GolemDatagramProtocol.PacketHeaderBytes -
-                    GolemDatagramProtocol.LaneHeaderBytes -
-                    GolemDatagramProtocol.ReliableMessageIdBytes;
-                var laneName = "reliable unordered";
-                if (ordered)
-                {
-                    maxPayloadBytes -= GolemDatagramProtocol.ReliableOrderedSequenceBytes;
-                    laneName = "reliable ordered";
-                }
+                var lane = ordered ? GolemDatagramLane.ReliableOrdered : GolemDatagramLane.ReliableUnordered;
+                var maxPayloadBytes = GolemDatagramProtocol.GetPayloadBudget(maxDatagramBytes, lane);
+                var laneName = ordered ? "reliable ordered" : "reliable unordered";
                 if (frame.Length > maxPayloadBytes)
                 {
                     throw new InvalidOperationException($"golem-unity: encoded {laneName} command size {frame.Length} exceeds max payload {maxPayloadBytes}");

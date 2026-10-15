@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 
@@ -127,5 +128,23 @@ func TestGenerateUnityBridgeTemplateBindsTransform(t *testing.T) {
 		if !strings.Contains(content, want) {
 			t.Fatalf("generated PlayerView.cs missing %q\n%s", want, content)
 		}
+	}
+}
+
+func TestUnityPlayModeBridgeFixtureMatchesTemplate(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/unity/entity_bridge.cs.tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, schema.EntityData{Name: "LifecycleProbe", GoPackage: "GolemEngine.Unity.Tests"}); err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := os.ReadFile("../golem-unity/Tests/PlayMode/LifecycleProbeView.cs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.ReplaceAll(string(fixture), "\r\n", "\n") != strings.ReplaceAll(out.String(), "\r\n", "\n") {
+		t.Fatal("Unity Play Mode bridge fixture differs from the emitted template; regenerate it before running lifecycle tests")
 	}
 }
