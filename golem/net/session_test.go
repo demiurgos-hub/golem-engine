@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coder/websocket"
@@ -1011,97 +1012,148 @@ func TestSessionWriteSchedulingPrefersAckThenUnreliableThenReliableThenStream(t 
 }
 
 func TestSessionDrainOutboundClearsOrderedBacklogBeyondLegacyBurst(t *testing.T) {
-	const legacyBurst = 64
+	synctest.Test(t, func(t *testing.T) {
+		const legacyBurst = 64
 
-	reliable := &captureReliableChannel{}
-	datagrams := &captureDatagramChannel{}
-	sess := newSession(1, reliable, datagrams, nil)
+		reliable := &captureReliableChannel{}
+		datagrams := &captureDatagramChannel{}
+		sess := newSession(1, reliable, datagrams, nil)
 
-	want := legacyBurst + 32
-	for i := 0; i < want; i++ {
-		if err := sess.SendReliableOrdered([]byte{byte(i)}); err != nil {
-			t.Fatalf("SendReliableOrdered %d: %v", i, err)
+		want := legacyBurst + 32
+		for i := 0; i < want; i++ {
+			if err := sess.SendReliableOrdered([]byte{byte(i)}); err != nil {
+				t.Fatalf("SendReliableOrdered %d: %v", i, err)
+			}
 		}
-	}
 
-	if err := sess.drainOutbound(context.Background()); err != nil {
-		t.Fatalf("drainOutbound: %v", err)
-	}
+		if err := sess.drainOutbound(context.Background()); err != nil {
+			t.Fatalf("drainOutbound: %v", err)
+		}
 
-	if got := len(datagrams.writes); got != want {
-		t.Fatalf("ordered datagram writes = %d, want %d", got, want)
-	}
-	if got := len(reliable.writes); got != 0 {
-		t.Fatalf("stream writes = %d, want 0", got)
-	}
+		if got := len(datagrams.writes); got != want {
+			t.Fatalf("ordered datagram writes = %d, want %d", got, want)
+		}
+		if got := len(reliable.writes); got != 0 {
+			t.Fatalf("stream writes = %d, want 0", got)
+		}
+	})
 }
 
 func TestSessionDrainOutboundDelaysStreamUntilNextGuardedPass(t *testing.T) {
-	reliable := &captureReliableChannel{}
-	datagrams := &captureDatagramChannel{}
-	sess := newSession(1, reliable, datagrams, nil)
+	// Freeze elapsed time so this test isolates the send-count guard.
+	synctest.Test(t, func(t *testing.T) {
+		reliable := &captureReliableChannel{}
+		datagrams := &captureDatagramChannel{}
+		sess := newSession(1, reliable, datagrams, nil)
 
-	for i := 0; i < maxDatagramDrainSendsPerWake; i++ {
-		if err := sess.SendReliableOrdered([]byte{byte(i)}); err != nil {
-			t.Fatalf("SendReliableOrdered %d: %v", i, err)
+		for i := 0; i < maxDatagramDrainSendsPerWake; i++ {
+			if err := sess.SendReliableOrdered([]byte{byte(i)}); err != nil {
+				t.Fatalf("SendReliableOrdered %d: %v", i, err)
+			}
 		}
-	}
-	sess.SendBatch([][]byte{[]byte("stream")})
+		sess.SendBatch([][]byte{[]byte("stream")})
 
-	if err := sess.drainOutbound(context.Background()); err != nil {
-		t.Fatalf("first drainOutbound: %v", err)
-	}
-	if got := len(datagrams.writes); got != maxDatagramDrainSendsPerWake {
-		t.Fatalf("first drain ordered writes = %d, want %d", got, maxDatagramDrainSendsPerWake)
-	}
-	if got := len(reliable.writes); got != 0 {
-		t.Fatalf("stream writes after first drain = %d, want 0", got)
-	}
+		if err := sess.drainOutbound(context.Background()); err != nil {
+			t.Fatalf("first drainOutbound: %v", err)
+		}
+		if got := len(datagrams.writes); got != maxDatagramDrainSendsPerWake {
+			t.Fatalf("first drain ordered writes = %d, want %d", got, maxDatagramDrainSendsPerWake)
+		}
+		if got := len(reliable.writes); got != 0 {
+			t.Fatalf("stream writes after first drain = %d, want 0", got)
+		}
 
-	if err := sess.drainOutbound(context.Background()); err != nil {
-		t.Fatalf("second drainOutbound: %v", err)
-	}
-	if got := len(reliable.writes); got != 1 {
-		t.Fatalf("stream writes after second drain = %d, want 1", got)
-	}
-	if !bytes.Equal(reliable.writes[0][0], []byte("stream")) {
-		t.Fatalf("stream payload = %q, want %q", reliable.writes[0][0], []byte("stream"))
-	}
+		if err := sess.drainOutbound(context.Background()); err != nil {
+			t.Fatalf("second drainOutbound: %v", err)
+		}
+		if got := len(reliable.writes); got != 1 {
+			t.Fatalf("stream writes after second drain = %d, want 1", got)
+		}
+		if !bytes.Equal(reliable.writes[0][0], []byte("stream")) {
+			t.Fatalf("stream payload = %q, want %q", reliable.writes[0][0], []byte("stream"))
+		}
+	})
+}
+
+func TestSessionDrainOutboundStopsAfterTimeBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		reliable := &captureReliableChannel{}
+		datagrams := &delayedDatagramChannel{delay: maxDatagramDrainDuration/2 + time.Nanosecond}
+		sess := newSession(1, reliable, datagrams, nil)
+		for i := 0; i < 3; i++ {
+			if err := sess.SendReliableOrdered([]byte{byte(i)}); err != nil {
+				t.Fatalf("SendReliableOrdered %d: %v", i, err)
+			}
+		}
+		sess.SendBatch([][]byte{[]byte("stream")})
+
+		start := time.Now()
+		if err := sess.drainOutbound(context.Background()); err != nil {
+			t.Fatalf("first drainOutbound: %v", err)
+		}
+		if got := len(datagrams.writes); got != 2 {
+			t.Fatalf("first drain ordered writes = %d, want 2", got)
+		}
+		if elapsed := time.Since(start); elapsed != 2*datagrams.delay {
+			t.Fatalf("first drain elapsed = %v, want %v", elapsed, 2*datagrams.delay)
+		}
+		if got := len(reliable.writes); got != 0 {
+			t.Fatalf("stream writes after time guard = %d, want 0", got)
+		}
+
+		if err := sess.drainOutbound(context.Background()); err != nil {
+			t.Fatalf("second drainOutbound: %v", err)
+		}
+		if got := len(datagrams.writes); got != 3 {
+			t.Fatalf("total ordered writes = %d, want 3", got)
+		}
+		for i, data := range datagrams.writes {
+			packet, err := decodeDatagramPacket(data)
+			if err != nil || packet.Lane != datagramLaneReliableOrdered || !bytes.Equal(packet.Payload, []byte{byte(i)}) {
+				t.Fatalf("ordered write %d = %+v err=%v", i, packet, err)
+			}
+		}
+		if len(reliable.writes) != 1 || !bytes.Equal(reliable.writes[0][0], []byte("stream")) {
+			t.Fatalf("stream writes after second drain = %+v", reliable.writes)
+		}
+	})
 }
 
 func TestSessionWritePumpResumesGuardedDrainPromptly(t *testing.T) {
-	reliable := &notifyReliableChannel{writes: make(chan time.Time, 1)}
-	datagrams := &notifyDatagramChannel{writes: make(chan time.Time, maxDatagramDrainSendsPerWake)}
-	sess := newSession(1, reliable, datagrams, nil)
+	synctest.Test(t, func(t *testing.T) {
+		reliable := &notifyReliableChannel{writes: make(chan time.Time, 1)}
+		datagrams := &notifyDatagramChannel{writes: make(chan time.Time, maxDatagramDrainSendsPerWake)}
+		sess := newSession(1, reliable, datagrams, nil)
 
-	for i := 0; i < maxDatagramDrainSendsPerWake; i++ {
-		if err := sess.SendReliableOrdered([]byte{byte(i)}); err != nil {
-			t.Fatalf("SendReliableOrdered %d: %v", i, err)
+		for i := 0; i < maxDatagramDrainSendsPerWake; i++ {
+			if err := sess.SendReliableOrdered([]byte{byte(i)}); err != nil {
+				t.Fatalf("SendReliableOrdered %d: %v", i, err)
+			}
 		}
-	}
-	sess.SendBatch([][]byte{[]byte("stream")})
+		sess.SendBatch([][]byte{[]byte("stream")})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go sess.writePump(ctx)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go sess.writePump(ctx)
 
-	var lastDatagramAt time.Time
-	for i := 0; i < maxDatagramDrainSendsPerWake; i++ {
+		var lastDatagramAt time.Time
+		for i := 0; i < maxDatagramDrainSendsPerWake; i++ {
+			select {
+			case lastDatagramAt = <-datagrams.writes:
+			case <-time.After(200 * time.Millisecond):
+				t.Fatalf("timed out waiting for ordered datagram write %d", i+1)
+			}
+		}
+
 		select {
-		case lastDatagramAt = <-datagrams.writes:
+		case streamAt := <-reliable.writes:
+			if gap := streamAt.Sub(lastDatagramAt); gap > 50*time.Millisecond {
+				t.Fatalf("stream resumed after %v, want <= 50ms", gap)
+			}
 		case <-time.After(200 * time.Millisecond):
-			t.Fatalf("timed out waiting for ordered datagram write %d", i+1)
+			t.Fatal("timed out waiting for stream write after guarded drain")
 		}
-	}
-
-	select {
-	case streamAt := <-reliable.writes:
-		if gap := streamAt.Sub(lastDatagramAt); gap > 50*time.Millisecond {
-			t.Fatalf("stream resumed after %v, want <= 50ms", gap)
-		}
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("timed out waiting for stream write after guarded drain")
-	}
+	})
 }
 
 func TestSessionWriteOnePrefersFreshReliableDatagramsOverRetries(t *testing.T) {
@@ -1235,6 +1287,17 @@ func (c *captureDatagramChannel) WriteDatagram(_ context.Context, data []byte) e
 }
 
 func (c *captureDatagramChannel) ReadDatagrams(context.Context, func([]byte)) error { return nil }
+
+type delayedDatagramChannel struct {
+	captureDatagramChannel
+	delay time.Duration
+}
+
+func (c *delayedDatagramChannel) WriteDatagram(ctx context.Context, data []byte) error {
+	// Within synctest, this advances fake time rather than waiting on wall time.
+	time.Sleep(c.delay)
+	return c.captureDatagramChannel.WriteDatagram(ctx, data)
+}
 
 type notifyReliableChannel struct {
 	writes chan time.Time
