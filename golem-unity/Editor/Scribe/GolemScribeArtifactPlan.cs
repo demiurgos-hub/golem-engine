@@ -114,7 +114,8 @@ namespace GolemEngine.Unity.Editor
         }
 
         internal static Inputs Prepare(string rootFull, IReadOnlyCollection<string> kinds,
-            IReadOnlyList<GolemScribeArtifactRecord> previous, IReadOnlyList<GolemScribeArtifactRecord> desired)
+            IReadOnlyList<GolemScribeArtifactRecord> previous, IReadOnlyList<GolemScribeArtifactRecord> desired,
+            string sourceGuid = null)
         {
             var kindSet = new HashSet<string>((kinds ?? Array.Empty<string>()).Where(k => !string.IsNullOrEmpty(k)), StringComparer.Ordinal);
             var desiredRecords = new List<Artifact>();
@@ -122,6 +123,7 @@ namespace GolemEngine.Unity.Editor
             var preserved = new List<Artifact>();
             var issues = new List<Issue>();
             var desiredPaths = new HashSet<string>(StringComparer.Ordinal);
+            var desiredDiskPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var record in desired ?? Array.Empty<GolemScribeArtifactRecord>())
             {
                 if (record == null || string.IsNullOrEmpty(record.Path))
@@ -133,6 +135,10 @@ namespace GolemEngine.Unity.Editor
                     issues.Add(new Issue(
                         $"Scribe artifact '{record.Path}' has kind '{record.Kind}', expected one of: {string.Join(", ", kindSet.OrderBy(k => k, StringComparer.Ordinal))}.",
                         $"Desired Scribe artifact '{record.Path}' has unexpected kind '{record.Kind}'."));
+                }
+                else if (sourceGuid != null && !string.Equals(record.SourceGuid, sourceGuid, StringComparison.Ordinal))
+                {
+                    issues.Add(new Issue("Desired artifact is outside the selected Scribe source.", "Desired artifact is outside the selected Scribe source."));
                 }
                 else if (record.PendingContent == null)
                 {
@@ -147,6 +153,11 @@ namespace GolemEngine.Unity.Editor
                 {
                     issues.Add(new Issue($"Duplicate Scribe output path '{normalized}'.", $"Duplicate desired Scribe output path '{normalized}'."));
                 }
+                else if (!desiredDiskPaths.Add(normalized))
+                {
+                    issues.Add(new Issue("Scribe output paths differ only by casing: " + normalized,
+                        "Scribe output paths differ only by casing: " + normalized));
+                }
                 else
                 {
                     desiredRecords.Add(new Artifact(record, normalized, desired: true));
@@ -156,7 +167,8 @@ namespace GolemEngine.Unity.Editor
             foreach (var prior in previous ?? Array.Empty<GolemScribeArtifactRecord>())
             {
                 if (prior == null) continue;
-                var selected = !string.IsNullOrEmpty(prior.Kind) && kindSet.Contains(prior.Kind);
+                var selected = !string.IsNullOrEmpty(prior.Kind) && kindSet.Contains(prior.Kind) &&
+                    (sourceGuid == null || string.Equals(prior.SourceGuid, sourceGuid, StringComparison.Ordinal));
                 if (string.IsNullOrEmpty(prior.Path))
                 {
                     issues.Add(new Issue(selected ? "Prior Scribe manifest record is missing a path."
@@ -173,6 +185,16 @@ namespace GolemEngine.Unity.Editor
                     (selected ? priorRecords : preserved).Add(new Artifact(prior, normalized, desired: false));
                 }
             }
+            foreach (var record in preserved)
+                if (desiredDiskPaths.Contains(record.Path))
+                    issues.Add(new Issue("Desired path is already owned by a preserved Scribe source: " + record.Path,
+                        "Desired path is already owned by a preserved Scribe source: " + record.Path));
+            // Keep ordinal manifest identities, but do not write then delete a case-only alias of
+            // the same physical Windows file. Require an intermediate distinct path for renaming.
+            foreach (var record in priorRecords)
+                if (!desiredPaths.Contains(record.Path) && desiredDiskPaths.Contains(record.Path))
+                    issues.Add(new Issue("Case-only Scribe output rename is unsafe; use a distinct intermediate path: " + record.Path,
+                        "Case-only Scribe output rename is unsafe: " + record.Path));
             return new Inputs(rootFull, desiredRecords, priorRecords, preserved, issues);
         }
 

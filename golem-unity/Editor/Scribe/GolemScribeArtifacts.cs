@@ -44,6 +44,15 @@ namespace GolemEngine.Unity.Editor
             return ReconcileKinds(projectRoot, new[] { kind }, previous, desiredForKind);
         }
 
+        /// <summary>Reconciles one saved source without pruning unloaded scenes or other sources of the same kind.</summary>
+        public static ReconcileResult ReconcileSource(string projectRoot, string kind, string sourceGuid,
+            IReadOnlyList<GolemScribeArtifactRecord> previous, IReadOnlyList<GolemScribeArtifactRecord> desired)
+        {
+            if (string.IsNullOrWhiteSpace(sourceGuid))
+                return new ReconcileResult { Errors = { "Scribe source identity is required." } };
+            return ReconcileKinds(projectRoot, new[] { kind }, previous, desired, sourceGuid);
+        }
+
         /// <summary>
         /// Reconciles one or more artifact kinds in a single transactional pass, preserving
         /// manifest records whose kind is outside <paramref name="kinds"/>.
@@ -52,7 +61,8 @@ namespace GolemEngine.Unity.Editor
             string projectRoot,
             IReadOnlyCollection<string> kinds,
             IReadOnlyList<GolemScribeArtifactRecord> previous,
-            IReadOnlyList<GolemScribeArtifactRecord> desiredForKinds)
+            IReadOnlyList<GolemScribeArtifactRecord> desiredForKinds,
+            string sourceGuid = null)
         {
             var result = new ReconcileResult();
             previous = previous ?? Array.Empty<GolemScribeArtifactRecord>();
@@ -72,7 +82,7 @@ namespace GolemEngine.Unity.Editor
                 return result;
             }
 
-            var prepared = GolemScribeArtifactPlan.Prepare(rootFull, kinds, previous, desiredForKinds);
+            var prepared = GolemScribeArtifactPlan.Prepare(rootFull, kinds, previous, desiredForKinds, sourceGuid);
             result.Errors.AddRange(prepared.Issues.Select(i => i.WriterError).Where(e => e != null));
             if (result.Errors.Count > 0) return result;
             var plan = GolemScribeArtifactPlan.Build(prepared, GolemScribeArtifactReader.Capture(prepared));

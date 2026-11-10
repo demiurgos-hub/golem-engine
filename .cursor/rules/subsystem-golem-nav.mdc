@@ -1,5 +1,5 @@
 ---
-description: nav — nested navigation modules, row-major map input, and backend-specific coordinate and path policies.
+description: nav — 2D grid backends, independent 3D surface contracts, navmesh-go adapter and explicit geometry baking tools.
 globs:
   - golem/nav/**/*
 alwaysApply: false
@@ -9,6 +9,18 @@ alwaysApply: false
 
 `golem/nav`, `nav/pathing`, and `nav/kelindar` are separate Go modules developed through the ignored local `go.work`. The shared nav module does not depend on the root runtime, map loaders, or either pathfinding library.
 
+`nav/surface` belongs to the shared nav module and defines Y-up, float64 world-space contracts with opaque snapshot-qualified locations and immutable route views. Query scratch is exclusively owned. `View.Release` is idempotent; handles cannot outlive their view. `CorridorQuery` is optional repair support; `PendingBackend` exposes desired geometry that is not committed so the host can quarantine old routes.
+
+`nav/navmesh` is a separate module depending on navmesh-go and shared nav. Static snapshots and dynamic managed leases implement the same surface contract. It owns no root runtime/entity imports, worker scheduling or gameplay actions. Released/foreign handles return Stale. Preserve semantic result codes and partial-result reasons rather than flattening them to booleans. Dynamic pending state conservatively quarantines an entire profile until publication; do not claim per-tile quarantine yet.
+
+`nav/navmesh/navbuild` and its `cmd/golem-nav-bake` consume explicit `{Generator?, Scene, Config}` JSON matching navmesh-go's generic source contract. Input is bounded and unknown fields rejected. Geometry generation lives in navmesh-go; collision footprints remain collision-only. `golem-bake` retains schema/code-generation responsibilities. Scribe may export explicit server navigation source but does not bake with Unity navigation.
+
+Root `golem/navigation*.go` owns queues, lifecycle, movement, motor/traversal callbacks, readiness and stable intent checkpoints. The adapter module must not import it. `examples/navigation-server` is an independent nested module proving bake/artifact/load/update/restart through the server.
+
+Queue limits include retained build-key status (`BuildHistoryCapacity`), with explicit forgetting only after cancellation/completion and globally unique generations across key reuse. Delayed, queued and active build keys share a bounded capacity; debounce defaults to 50 ms and caps eligibility delay at 250 ms. Only explicitly retryable transient errors get bounded backoff; the adapter marks `dynamic.ErrBusy`, never cancellation or stale candidates. Keep tick-owned delayed requests separate from worker-owned scratch, and expose their wait through status timestamps and delayed counts. Callbacks can change intent or detach/re-attach entities; fence by attachment/generation before applying their results. Checkpoint validation bounds the entire base64 JSON envelope, not only desired-world payload bytes.
+
+Managed agents reject partial paths unless `AllowPartial` is enabled, retaining copied diagnostic corners for rejected prefixes. Active path work has a deadline; late success cannot override cancellation. Traversal timeout uses processed movement time, and stalled replanning has a finite attempt limit. Preserve these policy limits when changing movement/corridor code.
+
 `nav/internal/mapinput.RowMajor` borrows raw Tiled/LDtk values during synchronous construction. It owns row-major indexing and the rule that zero is blocked without calling the blocked callback. Nonzero values call the supplied predicate. Constructors keep validation order, origins, dimensions, library allocation, and bool-versus-cost adaptation. Do not silently introduce nil-callback defaults, data-length validation, or GID decoding.
 
 Keep backend-specific coordinate rounding, numeric limits, weighted costs, and reconstruction separate. Pathing uses truncated integer cell dimensions/half-centers and chained partial paths. Kelindar uses floating dimensions, int16 coordinates, padded pages, and weighted reconstruction. Same-cell requests currently return the exact start before checking walkability. The backend tests characterize these behaviors; they are not instructions to fix them as part of refactoring.
@@ -16,3 +28,9 @@ Keep backend-specific coordinate rounding, numeric limits, weighted costs, and r
 Known deferred corrections include kelindar page-rounding overflow at 32767 and raw-cost narrowing, endpoint walkability versus the interface promise, and pathing's shared AStar scratch versus its concurrent-use comment. Do not infer thread safety from that comment or merge endpoint/segment policies to hide these differences.
 
 Release nav with mapinput before raising backend dependency pins. Verify each nested module explicitly and standalone against intended dependency versions; do not commit workspace files or local replace directives.
+
+Navigation release order is shared nav v0.4.0 and navmesh-go v0.1.0, adapter nav/navmesh v0.1.0, then root consumer release. These intended versions must exist before standalone release qualification. Temporary external modfiles can test unreleased source; never claim those checks validate published resolution, and never publish without the user's publication authorization.
+
+After each dependency is actually published, run `GOWORK=off go mod tidy` in its consumer modules, record real proxy checksums, and repeat ordinary test/vet checks. Candidate file-proxy archive checksums belong only in temporary test copies and must not be committed as release sums. The navigation CI lane intentionally depends on this release preparation.
+
+The pure-Go and server CI matrices include native Linux ARM64 (`ubuntu-24.04-arm`) execution. An ARM64 cross-build alone is not execution qualification; keep the hosted runner gate explicit until that lane has actually passed.

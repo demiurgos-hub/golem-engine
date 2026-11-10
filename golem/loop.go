@@ -161,6 +161,7 @@ type Server struct {
 	layers               *collision.Layers
 	layers3D             *collision3d.Layers
 	navBackend           nav.Backend
+	navigation           *navigationService
 	contactEventsEnabled bool
 	triggerPairs         map[[2]int64]struct{}
 	solidPairs           map[[2]int64]struct{}
@@ -447,7 +448,15 @@ func (s *Server) CreateEntity(e Entity, owner ...int64) error {
 // before OnRemove). Safe to call repeatedly; does not hold the avatar mutex
 // while invoking registry hooks (OnRemove) or interest operations.
 func (s *Server) DeleteEntity(id int64) {
+	if n := s.navigation; n != nil {
+		if n.deleting[id] {
+			return
+		}
+		n.deleting[id] = true
+		defer delete(n.deleting, id)
+	}
 	s.clearAvatarByEntity(id)
+	s.DetachNavigation(id)
 	if e, ok := s.reg.Get(id); ok {
 		s.unregisterCollider(e)
 	}
@@ -1128,6 +1137,9 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	s.life = lifecycleRunning
+	if s.navigation != nil {
+		s.navigation.start(runCtx)
+	}
 	s.lifeMu.Unlock()
 
 	// Stop accepting before cancelling workers when the caller context ends.
@@ -1197,11 +1209,17 @@ func (s *Server) runLoop(ctx context.Context) error {
 
 			s.drainAsyncCallbacks()
 			s.drainMessages()
+			if s.navigation != nil {
+				s.navigation.prepare()
+			}
 
 			s.reg.TickAll(dt)
 
 			if s.onTick != nil {
 				s.onTick(dt, s)
+			}
+			if s.navigation != nil {
+				s.navigation.advance(dt)
 			}
 
 			if s.collision != nil {
@@ -1251,6 +1269,9 @@ func (s *Server) runLoop(ctx context.Context) error {
 				}
 			}
 
+			if s.navigation != nil {
+				s.navigation.reconcile()
+			}
 			if s.interest != nil {
 				if err := s.runInterestTick(); err != nil {
 					return err

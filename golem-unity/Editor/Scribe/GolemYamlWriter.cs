@@ -85,13 +85,15 @@ namespace GolemEngine.Unity.Editor
             return builder.ToString();
         }
 
-        /// <summary>Returns true when existing file text is owned by Scribe.</summary>
+        /// <summary>Returns true for a Scribe YAML marker or the exact generated navigation JSON signature.</summary>
         public static bool IsScribeOwned(string fileText)
         {
             if (string.IsNullOrEmpty(fileText))
             {
                 return false;
             }
+
+            if (GolemNavigationDocument.IsOwned(fileText)) return true;
 
             using (var reader = new System.IO.StringReader(fileText))
             {

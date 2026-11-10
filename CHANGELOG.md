@@ -8,6 +8,11 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Experimental server surface navigation with independently bounded path/rebuild queues, explicit 3D agent attachment, immutable snapshot ownership, corridor repair, body-motor and traversal boundaries, readiness barriers, and stable navigation-intent checkpoints. Existing 2D backends remain separate. The `golem/nav/navmesh` module adapts pure-Go navmesh-go and includes explicit geometry baking tools; `examples/navigation-server` demonstrates geometry changes and restart recovery.
+- Navigation rebuild scheduling coalesces bursts with bounded debounce and retries explicitly transient capacity failures with bounded backoff. Delayed work shares queue limits, and cancellation or newer desired geometry prevents obsolete retries from publishing.
+- Surface movement preserves motor-owned body height while steering on the projected corridor. Configurable support tolerance bounds reconciliation, replanning and traversal landing; it must be chosen against bake-height error and distinct-floor separation.
+- Unity Scribe exports explicitly marked server navigation geometry from a saved scene, including transformed mesh instances, terrain holes, area/exclusion volumes and authored traversal links. Export is a managed JSON source artifact for the Go baker; it does not bake through or configure Unity's navigation runtime.
+
 - `golem-engine` exports `Unsubscribe` and `combineUnsubscribers`; Phaser and Threlte keep their existing re-exports. Cleanup runs once in registration order, stops on the first exception, and remains inactive after an exception.
 - Generated JavaScript event managers expose `subscribeEntityEvents` for all entity-targeted events; generated Phaser and Threlte bridges use it. Upgrade the runtime and adapters together to 0.3.2 and regenerate related JS protocol and framework integrations together. Existing generated clients remain compatible with the new runtime.
 
@@ -21,6 +26,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 - The JavaScript runtime exports `GolemConnectionLifecycle` and its configuration/status types for persistent connections in any renderer. Phaser retains its existing connection helper as a compatibility re-export.
 
 ### Fixed
+
+- `NavAgent.SetDestination` clears the old path and velocity when a replacement cannot be found, including a missing backend or nil server. A failed destination no longer leaves an NPC moving toward its previous goal.
 
 - Go engine and collision/navigation backend modules now pin the committed shared-helper revisions, so standalone builds resolve those helpers without a local workspace.
 

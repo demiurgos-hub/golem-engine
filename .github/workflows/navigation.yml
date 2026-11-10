@@ -1,0 +1,92 @@
+name: Navigation
+
+on:
+  push:
+    paths: ['golem/**', 'examples/navigation-server/**', 'go.mod', 'go.sum', '.github/workflows/navigation.yml']
+  pull_request:
+    paths: ['golem/**', 'examples/navigation-server/**', 'go.mod', 'go.sum', '.github/workflows/navigation.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# These gates intentionally require published nav v0.4.0, navmesh-go v0.1.0,
+# and nav/navmesh v0.1.0. Local workspace/replacement checks cannot satisfy
+# release dependency qualification.
+jobs:
+  pure-go:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, ubuntu-24.04-arm]
+        module: [golem/nav, golem/nav/pathing, golem/nav/kelindar, golem/nav/navmesh, examples/navigation-server]
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache: false
+      - run: go test ./...
+        working-directory: ${{ matrix.module }}
+      - run: go vet ./...
+        working-directory: ${{ matrix.module }}
+
+  engine:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache: false
+      - if: runner.os == 'Windows'
+        run: go test ./...
+      - if: runner.os == 'Linux'
+        run: go test ./golem/... ./schema ./codegen ./cmd/... ./internal/...
+      - run: go vet ./golem/...
+
+  race:
+    runs-on: ubuntu-latest
+    env:
+      # The Go race detector requires cgo and a host C compiler. This is an
+      # instrumentation lane; ordinary navigation remains CGO_ENABLED=0.
+      CGO_ENABLED: '1'
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache: false
+      - run: go test -race ./golem
+      - run: go test -race ./...
+        working-directory: golem/nav/navmesh
+      - run: go test -race ./...
+        working-directory: examples/navigation-server
+
+  linux-arm64-build:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+      GOOS: linux
+      GOARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache: false
+      - run: go build ./...
+        working-directory: examples/navigation-server

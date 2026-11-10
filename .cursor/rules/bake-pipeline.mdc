@@ -1,13 +1,17 @@
 ---
-description: bake pipeline — checked schema resolution, read-only descriptor handoff, integration output selection, codec compatibility, and generated-consumer checks.
+description: bake pipeline — schema/code generation, explicit navigation geometry tool separation, integration output selection, codec compatibility and consumer checks.
 globs:
   - schema/**/*.go
   - codegen/**/*.go
   - codegen/**/*.tmpl
+  - golem/nav/navmesh/navbuild/**/*.go
+  - golem/nav/navmesh/cmd/golem-nav-bake/**/*.go
 alwaysApply: false
 ---
 
 # `bake` pipeline
+
+`golem-bake` remains the schema/code-generation CLI. Explicit server navigation geometry is processed by the separate navmesh adapter module's `navbuild` package and `golem-nav-bake` command, which delegate pure-Go baking to navmesh-go. Its bounded `{Generator?, Scene, Config}` JSON is not entity/world schema YAML and is not inferred from collision footprints. Do not add a native navigation build subprocess to codegen. Optional Scribe export is authoring-only; preserve its managed artifact planning and transaction ownership.
 
 When a schema-driven feature changes, trace it through schema loading, validation, template DTOs, proto generation, Go generation, JS generation, and any affected templates.
 

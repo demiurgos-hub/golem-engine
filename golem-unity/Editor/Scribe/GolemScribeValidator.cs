@@ -20,10 +20,13 @@ namespace GolemEngine.Unity.Editor
             GolemScribeConstants.ArtifactKindTypeSchema,
             GolemScribeConstants.ArtifactKindWorldSchema,
             GolemScribeConstants.ArtifactKindCatalogData,
-            GolemScribeConstants.ArtifactKindFootprint
+            GolemScribeConstants.ArtifactKindFootprint,
+            GolemScribeConstants.ArtifactKindNavigationSource
         };
 
-        private static readonly string[] AllKinds = KnownKinds.ToArray();
+        // Scene navigation is explicitly exported/validated from a saved selected world; this prefab scan
+        // must not classify sources from unloaded scenes as orphaned.
+        private static readonly string[] AllKinds = KnownKinds.Where(k => k != GolemScribeConstants.ArtifactKindNavigationSource).ToArray();
 
         /// <summary>Outcome of a dry-run Scribe validation.</summary>
         public sealed class ValidationResult
@@ -119,7 +122,8 @@ namespace GolemEngine.Unity.Editor
             IReadOnlyList<GolemScribeArtifactRecord> previous,
             IReadOnlyList<GolemScribeArtifactRecord> desired,
             IReadOnlyCollection<string> kinds,
-            ValidationResult result)
+            ValidationResult result,
+            string sourceGuid = null)
         {
             if (result == null)
             {
@@ -132,7 +136,7 @@ namespace GolemEngine.Unity.Editor
                 return;
             }
 
-            var prepared = GolemScribeArtifactPlan.Prepare(Path.GetFullPath(projectRoot), kinds, previous, desired);
+            var prepared = GolemScribeArtifactPlan.Prepare(Path.GetFullPath(projectRoot), kinds, previous, desired, sourceGuid);
             result.Errors.AddRange(prepared.Issues.Select(i => i.ValidationError).Where(e => e != null));
             var plan = GolemScribeArtifactPlan.Build(prepared, GolemScribeArtifactReader.Capture(prepared));
             foreach (var entry in plan.Entries)
@@ -270,6 +274,15 @@ namespace GolemEngine.Unity.Editor
                 if (!seenPaths.Add(normalized))
                 {
                     result.Errors.Add($"Manifest lists duplicate path '{normalized}'.");
+                }
+                if (record.Kind == GolemScribeConstants.ArtifactKindNavigationSource)
+                {
+                    var snapshot = GolemScribeArtifactReader.Read(projectRoot, normalized);
+                    if (snapshot.Status == ScribeArtifactStatus.Missing) result.Missing.Add(normalized);
+                    else if (snapshot.Status == ScribeArtifactStatus.ReadFailure || snapshot.Status == ScribeArtifactStatus.InvalidPath)
+                        result.Errors.Add(snapshot.Error);
+                    else if (!GolemNavigationDocument.IsOwned(snapshot.Content) || !string.Equals(snapshot.Hash, record.Hash, StringComparison.Ordinal))
+                        result.ManuallyModified.Add(normalized);
                 }
             }
         }

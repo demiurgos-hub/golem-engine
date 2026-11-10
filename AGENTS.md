@@ -16,6 +16,9 @@ Golem Engine is a Go module for building multiplayer game backends. It includes 
 | `golem/world/` | Thread-safe store for static world data. |
 | `golem/visibility/` | Named visibility group policy manager (non-thread-safe; `Server` provides concurrency). |
 | `golem/footprint/` | Collision-only footprint YAML loader and 2D/3D placers (`collision.Backend` / `collision3d.Backend`). |
+| `golem/nav/surface/` | Backend-independent 3D surface, route, snapshot, and query contracts in the shared nav module. |
+| `golem/nav/navmesh/` | Separate module adapting navmesh-go; explicit geometry source parser and `golem-nav-bake` CLI. |
+| `golem/navigation*.go` | Server-owned navigation scheduling, movement/motor/traversal policy, lifecycle and checkpoint intents. |
 | `golem/auth/` | Token-in-query-param `OnUpgrade` handshake helper (not an account/JWT framework). |
 | `golem-go-client/` | Native Go client runtime. |
 | `golem-ebiten/` | Ebiten client lifecycle and generated bridge helpers. |
@@ -51,6 +54,7 @@ The instructions in this subsection are for Codex only. Cursor already loads `.c
 
 - Go root module: run `go test ./...` from the repo root for changes in the main module.
 - Nested Go modules under `golem/collision/` and `golem/nav/` are developed with a local `go.work`. Do not commit `go.work` or `go.work.sum`.
+- Test `golem/nav/navmesh` and `examples/navigation-server` explicitly; root `./...` excludes them. Standalone release checks use `GOWORK=off` and published dependency versions. External temporary modfiles may qualify unpublished local source, but are not evidence that release dependencies resolve.
 - JS runtime: run `npm test` in `golem-js/`.
 - Phaser package: run `npm test` in `golem-phaser/`.
 - Threlte package: build `golem-js/` first, then run `npm test` in `golem-threlte/`; browser tests use Playwright Chromium. Run the example's `npm run check` and `npm run build` from `examples/threlte/`.
