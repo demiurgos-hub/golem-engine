@@ -150,3 +150,32 @@ func TestMotionStepMovingMeshRequiresKinematicContinuousMode(t *testing.T) {
 		_ = w.Close()
 	}
 }
+
+func TestMotionStepSpinningBodyOnLargeCoordinateTriangleFloor(t *testing.T) {
+	w := world(t)
+	mesh := p.ShapeDesc{Kind: p.TriangleMesh}
+	const cells = 50
+	for z := 0; z <= cells; z++ {
+		for x := 0; x <= cells; x++ {
+			mesh.Vertices = append(mesh.Vertices, p.Vec3{X: -384 + 768*float32(x)/cells, Z: -384 + 768*float32(z)/cells})
+		}
+	}
+	for z := 0; z < cells; z++ {
+		for x := 0; x < cells; x++ {
+			a := uint32(z*(cells+1) + x)
+			mesh.Indices = append(mesh.Indices, a, a+cells+1, a+1, a+1, a+cells+1, a+cells+2)
+		}
+	}
+	add(t, w, p.Static, p.Vec3{}, mesh)
+	body, _ := add(t, w, p.FreeDynamic, p.Vec3{X: -192, Y: 2, Z: 192}, p.ShapeDesc{Kind: p.Box, HalfExtents: p.Vec3{X: .4, Y: .5, Z: .4}})
+	if err := w.SetVelocity(body, p.Vec3{}, p.Vec3{X: .3, Y: .2, Z: .1}); err != nil {
+		t.Fatal(err)
+	}
+	for frame := uint64(1); frame <= 30; frame++ {
+		step(t, w, frame)
+	}
+	state, _ := w.Body(body)
+	if state.Pose.Position.Y < .35 {
+		t.Fatalf("body crossed floor: %+v", state)
+	}
+}

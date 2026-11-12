@@ -4,14 +4,21 @@ import (
 	"path/filepath"
 
 	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
+	box "github.com/demiurgos-hub/golem-engine/golem/physics3d/box3d"
 )
 
 // This wrapper records failed proposals unchanged, at the public physics seam.
 // It does not alter motion policy or make an unsupported frame look accepted.
 type observedWorld struct {
-	p.World
+	*box.World
 	out string
 }
+
+var (
+	_ p.PlacementValidator = observedWorld{}
+	_ p.OwnerBinder        = observedWorld{}
+	_ p.CheckpointWorld    = observedWorld{}
+)
 
 // Simulate delegates unchanged and records failed frame proposals for diagnosis.
 func (w observedWorld) Simulate(frame p.Frame) (p.FrameResult, error) {
