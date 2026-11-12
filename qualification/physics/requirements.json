@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "referenceRoot": "C:/Fractured/fractured-game/workers/unity/Assets",
+  "referenceAccess": "read-only",
+  "positionPrecision": "float32",
+  "coordinateLimitMetres": 4096,
+  "sourceEnvelopesMetres": [768, 2304],
+  "backend": {
+    "repository": "https://github.com/gataengine/box3d-go",
+    "commit": "2a00e926a8d92ae1d57a2e425aadebc4610b0ed5",
+    "localFork": "C:/Demiurgos/box3d-go",
+    "toolchain": "go1.27.1",
+    "productionCGO": false
+  },
+  "requirements": [
+    {"id":"player-admission","references":["Scripts/Player/Server/PlayerMovementManagerServer.cs:61"],"requires":["external-pose admission","spawn and teleport placement"],"policy":"Keep sequence, seat, status, sea and faction/map authority in game code; physics does not automatically change client position authority."},
+    {"id":"monster-navigation","references":["Scripts/Monster/Server/AIMovementManagerServer.cs:58"],"requires":["staged route proposals","collision-clipped capsules","actual support reconciliation","regional quarantine"],"policy":"Physical dimensions remain independent from navmesh agent clearance."},
+    {"id":"mobility-blockers","references":["Scripts/Utils/MobilityBlockerQueries.cs:44","Scripts/Being/Server/MovementManagerServer.cs:260"],"requires":["sphere and capsule sweep","initial-overlap escape versus deeper penetration","0.0001m separation threshold","bounded scripted actions"],"policy":"Exact collider metadata decides blocking and AllowJumps; trigger alone does not."},
+    {"id":"projectiles","references":["Scripts/Being/Projectile.cs:89","Scripts/Being/Projectile.cs:424","Scripts/Being/ProjectileSweep.cs:19","Scripts/Cart/BallistaFlight.cs:10","Scripts/Cart/BallistaProjectile.cs:57","AssetsByType/Prefabs/Projectiles/Weapons/prefab_Projectile_Staff.prefab:45"],"requires":["ordered sweeps and initial overlaps","relative moving-target queries","dynamic spheres","continuous sensors","ballistic trajectory policy"],"policy":"Keep projectile lifetime, damage ownership and game trajectory selection in game code."},
+    {"id":"melee-aoe","references":["Scripts/Being/Server/CombatManagerServer.cs:158","Scripts/Abilities/00. Base Classes/SpellInfo.Damage.cs:31","Scripts/Being/AttackRangeCollider.cs:22"],"requires":["oriented-box and sphere overlap","closest eligible collider point","explicit owner aggregation","child-pair reference counts","overflow retry or failure"]},
+    {"id":"line-of-sight","references":["Scripts/Being/SpellManager.cs:865","Scripts/Being/ProjectileGeometry.cs:42"],"requires":["ray filters","exact collider hierarchy identity","per-collider typed metadata"],"policy":"Preserve configured layer and BlockProjectiles decisions; turrets that intentionally ignore walls keep doing so."},
+    {"id":"placement-reach","references":["Scripts/Placement/PlacementPreview.cs:462","Scripts/Placement/BlueprintPlacementValidator.cs:56","Scripts/Player/Server/PlayerBuildingManagerServer.cs:434","Scripts/Placement/PlacementValidator.cs:13"],"requires":["explicit same-tick synchronization","pair penetration","0.001m placement threshold","closest points","ground ray policy","slope tests"],"policy":"Retain server grid/yaw/height/reach validation and root-distance versus closest-point distinctions."},
+    {"id":"sensors","references":["Scripts/Building/BarbedWireContacts.cs:89","Scripts/Building/BarbedWireContacts.cs:142","Scripts/Building/BarbedWireVolume.cs:43"],"requires":["oriented scaled volumes","swept entry and exit within one tick","generational pairs","owner child counts","accepted-state events","deferred callback commands"]},
+    {"id":"construction-doors","references":["Scripts/Building/BlueprintBuilderStage.cs:60","Scripts/WorldObjects/ObjectStateSwap/ObjectStateSwap.cs:75"],"requires":["prepared physical replacement","shared change identity","navigation quarantine before physical activation","activation and deletion cleanup"],"policy":"Discrete authored door swaps stay discrete; do not silently turn them into hinge-driven game objects."},
+    {"id":"cart-support","references":["Scripts/Cart/CartManagerServer.cs:78","Scripts/Cart/CartSeatPose.cs:30","Scripts/Player/Server/PlayerCartManagerServer.cs:301"],"requires":["body-anchor separation","moving and rotating support","swept passenger transport","support disappearance"],"policy":"Keep scripted towing, seating and visual tilt policies; wheel joints do not convert existing carts into vehicles."},
+    {"id":"resolved-content","references":["Scripts/World/WorldStreamer.cs:267","Scripts/World/WorldStreamer.cs:859","AssetsByObject/Terrains/Prefabs/Server/Terrain 0,0 Server.prefab:77","AssetsByObject/Fortress/Fortress Parts/Wall_LordRoom_Stair_R.prefab:233"],"requires":["resolved server variants and overrides","full hierarchy transforms","reflected winding once","static concave meshes","terrain holes","portable source versus cooked geometry","stable component identity"],"policy":"World-definition and world-assembly ownership stays outside physics."},
+    {"id":"general-dynamics","authority":"explicit user requirement","requires":["finite-mass driven characters","free dynamic bodies","forces and torque","angular inertia","sleep and wake","CCD","fixed/distance/hinge/slider/spherical/motor/upright/wheel constraints","constraint limits and drives","coherent checkpoint and restart"]}
+  ],
+  "qualification": {
+    "workspace": "D:/Demiurgos/tests/physics-validation",
+    "platforms": ["windows/amd64", "linux/amd64", "linux/arm64-native"],
+    "tickRate": 20,
+    "substeps": 4,
+    "movingCharacters": 1000,
+    "awakeDynamicBodies": 1000,
+    "concurrentSweptProjectiles": 500,
+    "staticColliderInstances": 100000,
+    "staticTriangles": 5000000,
+    "additionalGameplayQueriesPerTick": 10000,
+    "fullTickP99MillisecondsExclusive": 50,
+    "soakSeconds": 7200,
+    "hitPointErrorMetres": 0.001,
+    "distanceAndPenetrationErrorMetres": 0.0001,
+    "missingOrUnsupportedGate": "fail",
+    "qualificationStatus": "not-yet-qualified"
+  }
+}
+

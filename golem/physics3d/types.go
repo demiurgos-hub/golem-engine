@@ -51,9 +51,20 @@ type ShapeChild struct {
 	Shape ShapeDesc
 }
 type Material struct {
+	FrictionCombine, RestitutionCombine      CombineMode
 	Friction, Restitution, RollingResistance float32
 	ID                                       uint64
 }
+type CombineMode uint8
+
+const (
+	DefaultCombine CombineMode = iota
+	Average
+	Minimum
+	Multiply
+	Maximum
+)
+
 type Roles struct{ Solid, Sensor, Query bool }
 type CollisionFilter struct {
 	Category, Mask uint64
@@ -70,6 +81,11 @@ type BodyDesc struct {
 	Mass, GravityScale, LinearDamping, AngularDamping float32
 	Enabled, Awake, AllowSleep, Continuous            bool
 	Locks                                             MotionLocks
+	// Manual mass properties are body-local. InertiaTensor contains principal
+	// moments about CenterOfMass, rotated into the body frame by InertiaRotation.
+	ManualCenterOfMass, ManualInertia bool
+	CenterOfMass, InertiaTensor       Vec3
+	InertiaRotation                   Quat
 }
 type ColliderDesc struct {
 	ID        ContentID
@@ -187,9 +203,19 @@ type Motion struct {
 	Velocity      Vec3
 	SurfaceNormal Vec3
 	MaxDriveForce float32
+	Segments      []MotionSegment
+	Frozen        bool // captured quarantine: immovable constraint; momentum is discarded
 	// Validate is a captured, immutable safety predicate for every swept segment.
 	// It must not mutate the world or call gameplay callbacks.
 	Validate func(from, to Vec3) bool
+}
+
+// MotionSegment is retained intent, not an independent physics time step.
+// Projection requests a zero-time, clearance-validated initial alignment.
+type MotionSegment struct {
+	From, Target, SurfaceNormal Vec3
+	Delta                       float32
+	Projection                  bool
 }
 type Frame struct {
 	ID      uint64
@@ -204,12 +230,24 @@ type FrameResult struct {
 	Elapsed      float32
 	Paths        []BodyPath
 }
+
 // BodyPath records every simulated anchor pose, including the frame's start.
-type BodyPath struct { Body BodyHandle; Positions []Vec3 }
+type BodyPath struct {
+	Body      BodyHandle
+	Positions []Vec3
+}
 type Metrics struct {
 	Revision, AcceptedFrames, RejectedFrames           uint64
 	Bodies, Colliders, Shapes, Joints, Awake, Substeps int
 	SimulatedSeconds                                   float64
 	Queries, Overflows                                 uint64
 	Fault                                              error
+}
+
+// OwnerBinder optionally assigns an entity owner to a body before server
+// attachment. Zero-owner colliders inherit the body owner in queries and events;
+// colliders with their own nonzero owner keep it. The operation is atomic and
+// obeys the same tick ownership and pending-frame mutation rules as World.
+type OwnerBinder interface {
+	SetOwner(BodyHandle, int64) error
 }

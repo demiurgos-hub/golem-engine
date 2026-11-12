@@ -44,6 +44,8 @@ const (
 type QueryFilter struct {
 	Mask             uint64
 	Sensors          SensorPolicy
+	RequireSolid     bool
+	IncludeNonQuery  bool // reserved for physical movement/support policy
 	ExcludeBodies    []BodyHandle
 	ExcludeColliders []ColliderHandle
 	ExcludeOwners    []int64
