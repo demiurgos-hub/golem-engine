@@ -63,6 +63,7 @@ type World struct {
 	stats           p.Metrics
 	tracker         p.ContactTracker
 	pendingTracker  *p.ContactTracker
+	policyContacts  map[p.ContactPair]struct{}
 	cleanup         []p.ContactEvent
 	restoring       bool
 	materials       map[uint64]p.Material

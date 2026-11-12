@@ -1,5 +1,5 @@
 ---
-description: physics3d — independent float32 contracts, pure-Go Box3D adapter, retained controller/support trajectories, relative-motion admission, source ownership, staged frames, checkpoints and actual-server qualification.
+description: physics3d — independent float32 contracts, pure-Go Box3D adapter, atomic live motion policy, retained controller/support trajectories, relative-motion admission, source ownership, staged frames, checkpoints and actual-server qualification.
 globs:
   - golem/physics3d/**/*
   - golem/physics*.go
@@ -11,6 +11,8 @@ alwaysApply: false
 ---
 
 # Physics 3D
+
+Optional `MotionPolicyWorld.SetMotionPolicy` changes mode and complete controller policy atomically, with mandatory `VelocityRetain`/`VelocityClear`. Validate current pose, geometry and retained momentum before mutation; preserve body/collider/joint handles, authored mass/locks, ownership, forces and activation. Reject dynamic concave geometry, incompatible upright controllers and nonzero retained velocity for Static/ExternalPose. Root `SetPhysicsMotionPolicy` synchronizes bindings and invalidates previous trajectory generations only on success; queued policies fence attachment identity and intervening policy changes. Checkpoints capture the resulting policy/intent, not transition tokens. Accepted contacts affected by native type changes are geometrically revalidated with zero invented force; continuous replay retains fractional separation/reentry, and rejection cannot publish its tracker. Exact tangent rotational intervals currently retain an explicit nonconvergence regression pending correction; never treat unresolved intervals as clear.
 
 Portable source preparation v2 requires an explicit `Settings.CharacterPolicy` before authored Unity CharacterController metadata becomes server movement. `GolemKinematicCharacters` maps step/slope/skin onto caller-supplied controller support/work budgets, with default gravity disabled; dimensions remain collider-owned. Nonzero movement deadband, disabled collision/recovery and incompatible compound/tilted geometry produce preflight diagnostics. Preserve the raw authoring metadata, hash the full conversion policy, and never silently load a character as an ordinary kinematic body.
 

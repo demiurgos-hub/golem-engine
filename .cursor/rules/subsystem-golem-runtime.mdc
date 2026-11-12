@@ -1,10 +1,12 @@
 ---
-description: golem runtime — tick loop, physics attachments and timed trajectory ownership, staged navigation, paired recovery and geometry publication, replication, lifecycle, networking and generated-code re-exports.
+description: golem runtime — tick loop, physics attachments, atomic motion-policy changes and timed trajectory ownership, staged navigation, paired recovery and geometry publication, replication, lifecycle, networking and generated-code re-exports.
 globs: golem/*.go
 alwaysApply: false
 ---
 
 # `golem` (runtime)
+
+`SetPhysicsMotionPolicy` uses optional backend atomic policy mutation without detaching entities or replacing handles. Require explicit retain/clear velocity, complete compatible controller config and navigation mode compatibility; pending frames/callbacks/restoration cannot mutate. Success synchronizes bound state and invalidates old trajectory tokens without rewinding the world. `QueuePhysicsMotionPolicy` defers contact-callback requests to the next tick and rejects stale attachment/policy generations as no-ops. Rejected backend admission leaves the old intent and bindings intact. Policy/controller intent lives in physical checkpoints; transient queue/token generations do not.
 
 `ActivatePhysicsGeometry` is the activation-first path: after complete tick-side quarantine, activate already prepared physics source, then schedule asynchronous navigation preparation. The new physical state remains defined and quarantined after navigation failure or queue rejection; stable pending metadata survives for retry. Repeating the exact identity retries navigation without recreating physical bodies. Superseded identities cannot publish, including when a newer queue admission fails. The fully private `QueuePhysicsGeometry` path remains available separately.
 

@@ -70,16 +70,17 @@ type queuedPhysicsCommand struct {
 }
 
 type physicsAttachment struct {
-	id          int64
-	body        p.BodyHandle
-	entity      Entity
-	position    registry.Spatial3DEntity
-	writer      registry.Position3DWriter
-	rotation    PhysicsRotationWriter
-	velocity    PhysicsVelocityWriter
-	activation  PhysicsActivationWriter
-	config      PhysicsAttachmentConfig
-	localAnchor p.Pose
+	policyGeneration uint64
+	id               int64
+	body             p.BodyHandle
+	entity           Entity
+	position         registry.Spatial3DEntity
+	writer           registry.Position3DWriter
+	rotation         PhysicsRotationWriter
+	velocity         PhysicsVelocityWriter
+	activation       PhysicsActivationWriter
+	config           PhysicsAttachmentConfig
+	localAnchor      p.Pose
 }
 
 type physicsService struct {

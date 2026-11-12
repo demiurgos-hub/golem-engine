@@ -232,6 +232,7 @@ func (w *World) Accept(id uint64) error {
 	w.lastFrame = id
 	w.stats.SimulatedSeconds += float64(r.Elapsed)
 	w.tracker = *w.pendingTracker
+	w.prunePolicyContacts()
 	w.pendingTracker = nil
 	w.pending = nil
 	w.cleanup = nil

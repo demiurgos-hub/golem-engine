@@ -42,6 +42,10 @@ func (w *World) controllerGeometry(h p.BodyHandle) (controllerGeometry, error) {
 }
 
 func (w *World) controllerGeometryAt(h p.BodyHandle, bodyPose p.Pose) (controllerGeometry, error) {
+	return w.controllerGeometryFor(h, bodyPose, w.bodies[h].desc.Controller)
+}
+
+func (w *World) controllerGeometryFor(h p.BodyHandle, bodyPose p.Pose, cfg p.CharacterControllerConfig) (controllerGeometry, error) {
 	v := w.bodies[h]
 	var result controllerGeometry
 	count := 0
@@ -60,7 +64,6 @@ func (w *World) controllerGeometryAt(h p.BodyHandle, bodyPose p.Pose) (controlle
 		center := s.PointA.Add(s.PointB).Mul(.5)
 		result.center = c.desc.LocalPose.Transform(center)
 		pose.Position = pose.Transform(center)
-		cfg := v.desc.Controller
 		result.cfg = character.Config{Radius: s.Radius, Height: s.PointB.Sub(s.PointA).Length() + 2*s.Radius, StepHeight: cfg.StepHeight, GroundDistance: cfg.GroundDistance, MaxSlopeDegrees: cfg.MaxSlopeDegrees, Skin: cfg.Skin, MaxDepenetration: cfg.MaxDepenetration, Iterations: cfg.Iterations, MaxHits: cfg.MaxHits}
 		result.collider, result.pose = ch, pose
 		result.filter = p.QueryFilter{Mask: ^uint64(0), PhysicalFilter: &c.desc.Filter, ExcludeBodies: []p.BodyHandle{h}, RequireSolid: true, IncludeNonQuery: true, Sensors: p.IncludeSensors}
@@ -629,7 +632,7 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 							}
 						}
 					}
-					if w.config.Continuous && len(w.sensorColliders) > 0 {
+					if w.config.Continuous && len(w.sensorColliders) > 0 || len(w.policyContacts) > 0 {
 						contactRecords = append(contactRecords, motionContactRecord{sample: sample, values: contactState.capture(w, sample, fraction), start: (at + phase + sample.StartFraction*interval) / f.Delta, end: fraction})
 					} else {
 						result.Events = append(result.Events, contactState.observe(w, sample, f.ID, result.Revision, fraction)...)

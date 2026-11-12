@@ -21,8 +21,12 @@ type motionSensorBoundary struct {
 }
 
 func (s *motionContactState) replay(w *World, record motionContactRecord, frame, revision uint64) ([]p.ContactEvent, error) {
-	if !w.config.Continuous || len(w.sensorColliders) == 0 {
-		return motionTrackEndpoint(w, record.values, frame, revision, record.end), nil
+	if !w.config.Continuous || len(w.sensorColliders) == 0 && len(w.policyContacts) == 0 {
+		values, err := w.policyEndpoint(record.values)
+		if err != nil {
+			return nil, err
+		}
+		return motionTrackEndpoint(w, values, frame, revision, record.end), nil
 	}
 	poses := make(map[b.BodyID]b.MotionBodySample, len(record.sample.Bodies))
 	for _, sample := range record.sample.Bodies {
@@ -51,6 +55,13 @@ func (s *motionContactState) replay(w *World, record motionContactRecord, frame,
 		current[event.Pair] = event
 	}
 	var boundaries []motionSensorBoundary
+	if len(w.policyContacts) > 0 {
+		var err error
+		boundaries, err = w.policyBoundaries(motion, current)
+		if err != nil {
+			return nil, err
+		}
+	}
 	seen := map[p.ContactPair]bool{}
 	hits := make([]p.Hit, 64)
 	intervals := make([]ContactInterval, 16)
@@ -142,18 +153,30 @@ func (s *motionContactState) replay(w *World, record motionContactRecord, frame,
 		}
 		for _, event := range motionTrackEndpoint(w, values, frame, revision, fraction) {
 			if event.Pair == boundary.event.Pair && event.Phase != p.Stay {
+				event.Force = p.Vec3{}
 				events = append(events, event)
 			}
 		}
 	}
-	values := record.values[:0]
+	values := make([]p.ContactEvent, 0, len(record.values)+len(w.policyContacts))
 	for _, event := range record.values {
-		if event.Pair.Kind != p.SensorContact {
+		_, policy := w.policyContacts[event.Pair]
+		if event.Pair.Kind != p.SensorContact && !policy {
 			values = append(values, event)
 		}
 	}
 	for pair, event := range current {
-		if pair.Kind == p.SensorContact {
+		_, policy := w.policyContacts[pair]
+		if pair.Kind == p.SensorContact || policy {
+			event.Force = p.Vec3{}
+			if policy {
+				for _, native := range record.values {
+					if native.Pair == pair {
+						event = native
+						break
+					}
+				}
+			}
 			values = append(values, event)
 		}
 	}

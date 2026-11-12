@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Live physics bodies can atomically switch movement mode and controller configuration with explicit velocity retention or clearing, preserving body/collider/joint handles and entity attachment. Server policy changes invalidate old trajectory tokens; callback requests can be queued for the next tick. Accepted contact continuity uses actual geometry and swept intervals without synthetic forces.
+
 - Precise sphere sweeps solve terrain triangle features directly, preventing numerical stalls on long casts. Exact captured float32 geometry is checked against an independent analytic reference; production normals remain geometric when Unity's rounded world witnesses differ.
 
 - Physics export refuses missing prefab sources before capturing a potentially incomplete collider hierarchy.
