@@ -115,11 +115,14 @@ type Config struct {
 	TickRate               int
 	AllowSleep, Continuous bool
 	Workers                uint32
+	// CCDContactTolerance bounds internal solver motion admission, independently
+	// of geometric queries and placement policy.
+	CCDContactTolerance float32
 }
 
 // DefaultConfig returns the 20 Hz / four-substep release configuration.
 func DefaultConfig() Config {
-	return Config{Gravity: Vec3{Y: -9.81}, Substeps: 4, TickRate: 20, AllowSleep: true, Continuous: true, Workers: 1}
+	return Config{Gravity: Vec3{Y: -9.81}, Substeps: 4, TickRate: 20, AllowSleep: true, Continuous: true, Workers: 1, CCDContactTolerance: .001}
 }
 
 // DefaultBody returns a live body description with explicit identity transforms.

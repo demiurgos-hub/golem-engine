@@ -208,7 +208,9 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 			return nil
 		}
 		if w.config.Continuous {
-			work, stepErr := w.backend.StepMotion(h, b.DefaultMotionStepOptions(), observe)
+			options := b.DefaultMotionStepOptions()
+			options.Tolerance = w.config.CCDContactTolerance
+			work, stepErr := w.backend.StepMotion(h, options, observe)
 			result.Microsteps += work.Microsteps
 			result.MotionPairTests += work.PairTests
 			result.Elapsed += work.Elapsed
