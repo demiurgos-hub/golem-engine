@@ -60,7 +60,7 @@ def main():
     parser.add_argument("--source-run", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--go", type=Path, required=True)
-    parser.add_argument("--phase", choices=("tests", "workload", "both"), default="tests")
+    parser.add_argument("--phase", choices=("tests", "workload", "both", "smoke"), default="tests")
     parser.add_argument("--mode", choices=("correctness", "rehearsal", "full"), default="correctness")
     parser.add_argument("--duration", default="2s")
     parser.add_argument("--warmup", default="2s")
@@ -78,6 +78,8 @@ def main():
             parser.error("run IDs must be a single safe path component")
     if not 1 <= args.physics_workers <= 64 or not 1 <= args.query_workers <= 64:
         parser.error("worker counts must be within 1..64")
+    if args.phase == "smoke" and args.mode != "correctness":
+        parser.error("Linux smoke uses correctness counts, not a second full performance run")
     root = args.root.resolve(strict=True)
     source_manifest = root / "runs" / args.source_run / "source-manifest.json"
     source = json.loads(source_manifest.read_text(encoding="utf-8-sig"))
@@ -150,7 +152,7 @@ def main():
                 passed = command(f"test-{index:02d}-{path.name}", [go, "test", *tags, "-count=1", "-json", "./..."], path, settings, required=False) and passed
             if not passed:
                 raise RuntimeError("One or more native module checks failed; see individual logs")
-        if args.phase in ("workload", "both"):
+        if args.phase in ("workload", "both", "smoke"):
             binary = run / "physics-stress"
             command("build", [go, "build", *tags, "-trimpath", "-o", binary, "."], engine / "examples/physics-stress")
             evidence["binarySHA256"] = sha(binary)
@@ -159,7 +161,25 @@ def main():
                 flags.append("-profiles")
             if args.debug_capture:
                 flags.append("-debug-capture")
+            if args.phase == "smoke":
+                flags.append("-checkpoint")
             command("workload", [binary, *flags], run)
+            if args.phase == "smoke":
+                from physics_soak import inspect_epoch
+
+                first, first_samples = inspect_epoch(run / "workload", None, sha(source_manifest))
+                restart_flags = list(flags)
+                restart_flags[restart_flags.index("-out") + 1] = str(run / "restart-smoke")
+                restart_flags += ["-resume", str(run / "workload" / "checkpoint")]
+                command("restart-smoke", [binary, *restart_flags], run)
+                second, second_samples = inspect_epoch(run / "restart-smoke", first["CheckpointID"], sha(source_manifest))
+                gates = ("all-moving-every-complete-tick", "awake-dynamic-count", "query-projectile-counts", "accepted-frames", "checkpoint-written")
+                for label, result in (("initial", first), ("restart", second)):
+                    if any(not result["Gates"].get(gate) for gate in gates):
+                        raise RuntimeError(f"{label} Linux smoke omitted required work or failed checkpoint/simulation")
+                evidence["smoke"] = {"passed": True, "initialCheckpointID": first["CheckpointID"], "restoredCheckpointID": first["CheckpointID"], "nextCheckpointID": second["CheckpointID"],
+                                     "initialMeasuredFrames": len(first_samples), "restartMeasuredFrames": len(second_samples),
+                                     "scope": "Native Linux x64 build, simulation, save and fresh-process restore; no full-size latency or long-duration claim."}
         evidence["checksPassed"] = True
     except Exception as error:
         evidence["error"] = str(error)
