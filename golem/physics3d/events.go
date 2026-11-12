@@ -74,11 +74,12 @@ func (t *ContactTracker) Current() []ContactEvent {
 	return out
 }
 
-// Drain ends every retained pair once and clears its history.
+// Drain ends every retained pair once with zero force and clears its history.
 func (t *ContactTracker) Drain(reason CleanupReason, frame, revision uint64) []ContactEvent {
 	out := make([]ContactEvent, 0, len(t.pairs))
 	for _, event := range t.pairs {
 		event.Phase, event.Reason = Exit, reason
+		event.Force = Vec3{}
 		event.Frame, event.Revision, event.Fraction = frame, revision, 1
 		out = append(out, event)
 	}
@@ -97,6 +98,7 @@ type ShutdownWorld interface {
 
 // Update emits enter/stay/exit transitions for a complete accepted frame.
 // Restoring classifies existing contacts as Restored instead of ordinary entry.
+// Exit events retain the last geometry but never repeat its solver force.
 func (t *ContactTracker) Update(current []ContactEvent, frame, revision uint64, restoring bool) []ContactEvent {
 	next := t.spare
 	if next == nil {
@@ -127,6 +129,8 @@ func (t *ContactTracker) Update(current []ContactEvent, frame, revision uint64, 
 	for pair, v := range t.pairs {
 		if _, ok := next[pair]; !ok {
 			v.Phase = Exit
+			v.Reason = Separated
+			v.Force = Vec3{}
 			v.Frame = frame
 			v.Revision = revision
 			out = append(out, v)
@@ -137,12 +141,13 @@ func (t *ContactTracker) Update(current []ContactEvent, frame, revision uint64, 
 	return out
 }
 
-// Remove emits terminal events for a destroyed or disabled collider.
+// Remove emits zero-force terminal events for a destroyed or disabled collider.
 func (t *ContactTracker) Remove(h ColliderHandle, reason CleanupReason, revision uint64) []ContactEvent {
 	var out []ContactEvent
 	for p, v := range t.pairs {
 		if p.A == h || p.B == h {
 			v.Phase = Exit
+			v.Force = Vec3{}
 			v.Reason = reason
 			v.Revision = revision
 			out = append(out, v)

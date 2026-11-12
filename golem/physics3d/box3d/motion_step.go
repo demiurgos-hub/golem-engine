@@ -8,6 +8,36 @@ import (
 type motionContactState struct {
 	sensors map[[2]b.ShapeID]bool
 	current map[p.ContactPair]int
+	bodies  map[b.BodyID]b.MotionBodySample
+}
+
+func (s *motionContactState) prepareBodies(sample b.MotionStepSample) {
+	if s.bodies == nil {
+		s.bodies = make(map[b.BodyID]b.MotionBodySample, len(sample.Bodies))
+	}
+	clear(s.bodies)
+	for _, body := range sample.Bodies {
+		s.bodies[body.Body] = body
+	}
+}
+
+func (s *motionContactState) bodyState(w *World, key p.BodyHandle, body *body) p.BodyState {
+	state := w.bodyState(key, body)
+	if sample, ok := s.bodies[body.id]; ok {
+		state.Pose = p.Pose{Position: pp(sample.End.P), Rotation: pq(sample.End.Q)}
+		state.Anchor = state.Pose.Compose(body.desc.Anchor)
+		state.CenterOfMass = state.Pose.Transform(pv(body.id.GetLocalCenter()))
+		state.LinearVelocity, state.AngularVelocity = pv(sample.LinearVelocity), pv(sample.AngularVelocity)
+	}
+	return state
+}
+
+func (s *motionContactState) worldCenter(body b.BodyID) p.Vec3 {
+	if sample, ok := s.bodies[body]; ok {
+		pose := p.Pose{Position: pp(sample.End.P), Rotation: pq(sample.End.Q)}
+		return pose.Transform(pv(body.GetLocalCenter()))
+	}
+	return pp(body.GetWorldCenter())
 }
 
 func motionSensorKey(a, z b.ShapeID) [2]b.ShapeID {
@@ -43,6 +73,15 @@ func motionCanonicalEvent(v p.ContactEvent) p.ContactEvent {
 }
 
 func (s *motionContactState) capture(w *World, sample b.MotionStepSample, fraction float32) []p.ContactEvent {
+	s.prepareBodies(sample)
+	return s.capturePrepared(w, sample, fraction)
+}
+
+func (s *motionContactState) capturePrepared(w *World, sample b.MotionStepSample, fraction float32) []p.ContactEvent {
+	impulseDuration := sample.ImpulseDuration
+	if impulseDuration == 0 {
+		impulseDuration = sample.Delta
+	}
 	if s.current == nil {
 		s.current = make(map[p.ContactPair]int)
 	}
@@ -67,30 +106,41 @@ func (s *motionContactState) capture(w *World, sample b.MotionStepSample, fracti
 			values = append(values, v)
 		}
 	}
-	for _, c := range sample.Contacts {
+	captureContact := func(c b.ContactData, impulseOnly bool) {
 		a, aok := w.shapeOwners[c.ShapeIdA]
 		z, zok := w.shapeOwners[c.ShapeIdB]
 		if !aok || !zok {
-			continue
+			return
 		}
 		ca, cz := w.colliders[a], w.colliders[z]
 		for _, m := range c.Manifolds {
 			for i := int32(0); i < m.PointCount; i++ {
 				point := m.Points[i]
+				if impulseOnly && point.TotalNormalImpulse == 0 {
+					continue
+				}
 				if point.Separation > 0 && point.TotalNormalImpulse == 0 {
 					continue
 				}
 				v := p.ContactEvent{Pair: p.ContactPair{A: a, B: z, Kind: p.SolidContact}, OwnerA: ca.desc.Owner, OwnerB: cz.desc.Owner,
-					Point: pp(c.ShapeIdA.GetBody().GetWorldCenter()).Add(pv(point.AnchorA)), Normal: pv(m.Normal),
-					Force: pv(m.Normal).Mul(point.TotalNormalImpulse / sample.Delta), Depth: max(0, -point.Separation)}
+					Point: s.worldCenter(c.ShapeIdA.GetBody()).Add(pv(point.AnchorA)), Normal: pv(m.Normal),
+					Force: pv(m.Normal).Mul(point.TotalNormalImpulse / impulseDuration), Depth: max(0, -point.Separation)}
 				add(v)
-				if ca.desc.Roles.Sensor || cz.desc.Roles.Sensor {
+				if !impulseOnly && point.Separation <= 0 && (ca.desc.Roles.Sensor || cz.desc.Roles.Sensor) {
 					v.Pair.Kind = p.SensorContact
 					v.Force = p.Vec3{}
 					add(v)
 				}
 			}
 		}
+	}
+	for _, c := range sample.Contacts {
+		captureContact(c, false)
+	}
+	// A speculative constraint can transfer force before geometric touching.
+	// Its owned witness contributes a solid response, never a sensor overlap.
+	for _, c := range sample.ImpulseContacts {
+		captureContact(c, true)
 	}
 	for _, event := range sample.SensorEvents.EndEvents {
 		delete(s.sensors, motionSensorKey(event.SensorShapeId, event.VisitorShapeId))
@@ -113,8 +163,8 @@ func (s *motionContactState) capture(w *World, sample b.MotionStepSample, fracti
 	return values
 }
 
-func (s *motionContactState) observe(w *World, sample b.MotionStepSample, frame, revision uint64, fraction float32) []p.ContactEvent {
-	events := w.pendingTracker.Update(s.capture(w, sample, fraction), frame, revision, w.restoring)
+func (s *motionContactState) observePrepared(w *World, sample b.MotionStepSample, frame, revision uint64, fraction float32) []p.ContactEvent {
+	events := w.pendingTracker.Update(s.capturePrepared(w, sample, fraction), frame, revision, w.restoring)
 	for i := range events {
 		events[i].Fraction = fraction
 	}

@@ -27,7 +27,7 @@ func TestContactTrackerScratchKeepsAcceptedAndReturnedStateIndependent(t *testin
 	if !reflect.DeepEqual(first, retained) || !reflect.DeepEqual(accepted.Current(), retained) {
 		t.Fatal("private updates or returned slice mutation changed accepted history")
 	}
-	if out := private.Remove(a, Replaced, 6); len(out) != 1 || out[0].Reason != Replaced || out[0].Depth != 5 {
+	if out := private.Remove(a, Replaced, 6); len(out) != 1 || out[0].Reason != Replaced || out[0].Depth != 5 || out[0].Force != (Vec3{}) {
 		t.Fatal(out)
 	}
 	if out := private.Update(nil, 7, 7, false); len(out) != 0 {
@@ -38,11 +38,18 @@ func TestContactTrackerScratchKeepsAcceptedAndReturnedStateIndependent(t *testin
 	if out := private.Update([]ContactEvent{contact}, 8, 8, true); len(out) != 1 || out[0].Phase != RestoredContact {
 		t.Fatal(out)
 	}
-	if out := private.Drain(Shutdown, 9, 9); len(out) != 1 || out[0].Reason != Shutdown {
+	if out := private.Drain(Shutdown, 9, 9); len(out) != 1 || out[0].Reason != Shutdown || out[0].Force != (Vec3{}) {
 		t.Fatal(out)
 	}
 	if out := private.Update(nil, 10, 10, false); len(out) != 0 {
 		t.Fatalf("scratch revived drained pair: %+v", out)
+	}
+	if out := accepted.Update(nil, 11, 11, false); len(out) != 1 || out[0].Phase != Exit || out[0].Force != (Vec3{}) {
+		t.Fatalf("separation repeated the previous solver force: %+v", out)
+	}
+	accepted.Update([]ContactEvent{contact}, 12, 12, true)
+	if out := accepted.Update(nil, 13, 13, false); len(out) != 1 || out[0].Reason != Separated || out[0].Force != (Vec3{}) {
+		t.Fatalf("natural separation retained restore classification or force: %+v", out)
 	}
 }
 

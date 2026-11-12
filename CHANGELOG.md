@@ -8,6 +8,18 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Continuous physics resolves coupled fast impacts through bounded native contact and joint continuation, including thin objects pushed against walls and motor-driven collisions. It retains the original force/gravity duration and drive budgets, reports owned intermediate poses, and faults the interacting frame if required work cannot complete.
+
+- Physics workload reports identify the retained per-run delivery gates and explicitly excluded soak and extended checks. Full-size Windows counts and the 50 ms p99 threshold remain required; component results do not imply aggregate or published-release qualification.
+
+- Physics frame metrics, stress results and debug captures expose separate local TOI continuation work counts, including failed attempts. Participant and contact-row totals describe work performed; native solver call counts remain independent of the number of observed path samples.
+
+- Physics qualification includes actual Unity 6 simulation comparisons for forces, impulses, torque, falling, bouncing, stacks, physical pushing and hinge constraints. Captures retain the initial exported source and commands; simulation tolerances remain separate from query accuracy and full workload gates.
+
+- Resolved-content qualification captures copied server prefab catalogs, activation recipes and database pose variants in bounded Unity batches, preserving source identities, variant removals and complete physical signatures. Loader checks retain inactive geometry and compare native queries by collider identity; missing content and unsupported geometry remain explicit failures.
+
+- Physics cooking preserves small nonzero triangles and unreduced convex geometry with up to 256 hull vertices, 512 faces and 768 edges. Version-2 cooked artifacts and the widened native hull format require recooking; old native snapshots are rejected. Unity source normalization removes only exactly zero-area faces, retaining original triangle ordinals and a hash of the original geometry in metadata. Full geometry/workload qualification remains separate.
+
 - Physics qualification can exercise repeated coordinated geometry activation/replacement/unloading and save complete paired checkpoints for fresh-process recovery, including projectile and route-direction state. Latency results retain the complete final frame when it exceeds the requested measurement duration; elapsed time alone does not qualify a churn/restart soak.
 
 - Live physics bodies can atomically switch movement mode and controller configuration with explicit velocity retention or clearing, preserving body/collider/joint handles and entity attachment. Server policy changes invalidate old trajectory tokens; callback requests can be queued for the next tick. Accepted contact continuity uses actual geometry and swept intervals without synthetic forces.
@@ -98,6 +110,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 - Navigation qualification's `Suite` and `Full` launchers now run the three mixed scene families at 1,000 agents only; `Full` retains the two-hour 1,000-agent soak. Existing diagnostic agent-count controls remain available.
 
 ### Fixed
+
+- Physics contact exit and cleanup events report zero force instead of repeating the previous impact. Owned native observations retain the correct body pose and contact witness through rebounds, with solver-response impulses counted once and kept separate from sensor overlap.
 
 - Unity physics export reads imported mesh geometry even when runtime Read/Write is disabled, without changing importer settings. Submesh indices, source identity and geometry validation remain preserved.
 

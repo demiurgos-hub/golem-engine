@@ -606,12 +606,27 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 				stepped := false
 				observe := func(sample b.MotionStepSample) error {
 					stepped = true
+					contactState.prepareBodies(sample)
 					result.CCDCandidatePairs += sample.SpeculativeCCD.Candidates
 					result.CCDPairTests += sample.SpeculativeCCD.PairTests
 					result.CCDPredictiveContacts += sample.SpeculativeCCD.Contacts
+					result.TOIContinuationCandidates += sample.TOIContinuation.Candidates
+					result.TOIContinuationPairTests += sample.TOIContinuation.PairTests
+					result.TOIContinuationEvents += sample.TOIContinuation.Events
+					result.TOIContinuationIslandBodies += sample.TOIContinuation.IslandBodies
+					result.TOIContinuationContactRows += sample.TOIContinuation.ContactRows
+					if !p.Finite(sample.ImpulseDuration) || sample.ImpulseDuration <= 0 || !p.Finite(sample.Delta) || sample.Delta < 0 {
+						return fmt.Errorf("physics3d: invalid native observation duration")
+					}
 					fraction := (at + phase + sample.EndFraction*interval) / f.Delta
 					for i, key := range keys {
-						state := w.bodyState(key, w.bodies[key])
+						body := w.bodies[key]
+						if body.desc.Enabled && body.desc.Mode != p.Static {
+							if _, ok := contactState.bodies[body.id]; !ok {
+								return fmt.Errorf("physics3d: native observation omitted body %v", key)
+							}
+						}
+						state := contactState.bodyState(w, key, w.bodies[key])
 						if !w.bodyInBounds(w.bodies[key], state.Pose) || !state.Anchor.Position.InBounds() || !state.LinearVelocity.Valid() || !state.AngularVelocity.Valid() {
 							return fmt.Errorf("physics3d: body %v left supported state", key)
 						}
@@ -638,9 +653,9 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 						}
 					}
 					if w.config.Continuous && len(w.sensorColliders) > 0 || len(w.policyContacts) > 0 {
-						contactRecords = append(contactRecords, motionContactRecord{sample: sample, values: contactState.capture(w, sample, fraction), start: (at + phase + sample.StartFraction*interval) / f.Delta, end: fraction})
+						contactRecords = append(contactRecords, motionContactRecord{sample: sample, values: contactState.capturePrepared(w, sample, fraction), start: (at + phase + sample.StartFraction*interval) / f.Delta, end: fraction})
 					} else {
-						result.Events = append(result.Events, contactState.observe(w, sample, f.ID, result.Revision, fraction)...)
+						result.Events = append(result.Events, contactState.observePrepared(w, sample, f.ID, result.Revision, fraction)...)
 					}
 					return nil
 				}

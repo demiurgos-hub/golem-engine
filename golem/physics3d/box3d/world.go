@@ -86,6 +86,10 @@ func New(config p.Config) (*World, error) {
 		w.backend.Destroy()
 		return nil, err
 	}
+	if err := w.backend.SetTOIContinuation(config.Continuous); err != nil {
+		w.backend.Destroy()
+		return nil, err
+	}
 	w.backend.SetConsistentParallelWarmStart(true)
 	w.initMaterials()
 	w.activeBodies = map[p.BodyHandle]struct{}{}
