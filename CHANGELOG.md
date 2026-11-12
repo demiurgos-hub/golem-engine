@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Opt-in upright capsule controllers retain stair phases and timed navigation corners through shared physics intervals, with moving/rotating support identities, swept passenger transport and relative kinematic obstruction checks. Driven characters retain finite-mass contact response; controller intent and falling state survive checkpoints. Actual-server fixtures cover stairs, platforms, ceilings, support replacement and separate body/anchor/COM transforms; full workload qualification remains pending.
+
 - Physics worlds can explicitly capture bounded diagnostic geometry and identities, accepted state, separately labeled fault poses, and supplied queries, contacts, support and movement annotations. Unity's Physics Preview loads these captures with omission warnings. A runnable Go sample and the stress runner's optional failure capture exercise the versioned format; captures are not checkpoints.
 
 - Physics handles now recycle with advancing generations, rejecting stale pooled-body commands and rebuilding replacement contacts. Query scratch is reused per worker, all-hit retention is bounded by the caller's buffer, and the coordinate envelope includes the query's full oriented geometry.
@@ -68,6 +70,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 - Navigation qualification's `Suite` and `Full` launchers now run the three mixed scene families at 1,000 agents only; `Full` retains the two-hour 1,000-agent soak. Existing diagnostic agent-count controls remain available.
 
 ### Fixed
+
+- Physics contact transitions remain private until the whole frame is accepted. Shutdown emits terminal cleanup for accepted pairs only and rejects callback commands. Constraint-force reads reject pending or faulted frames. Upright joints use the authored Y-up axis and consistent warm starting through repeated yaw rotations.
 
 - Physics stress scene manifests record the selected solver configuration, including worker count, instead of displaying defaults alongside a tuned run.
 

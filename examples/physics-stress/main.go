@@ -64,6 +64,8 @@ type sample struct {
 	Accepted                                                              bool
 	Simulated                                                             float32
 	Substeps                                                              int
+	Intervals, Microsteps                                                 int
+	MotionPairTests, MotionPathRefinements                                int
 	Bodies, Colliders, Shapes                                             int
 	Error                                                                 string `json:",omitempty"`
 }
@@ -247,6 +249,8 @@ func run(o options) (runErr error) {
 		full := now.Sub(tickStart)
 		complete := tickMeasured && now.Sub(measureStart) <= o.Duration
 		v := sample{Tick: tick, Measured: tickMeasured, FullTickNS: int64(full), ServerWallNS: int64(wall), CadenceNS: int64(cadence), PhysicsNS: int64(physics.Duration), SolveNS: int64(physics.Solve), NavigationNS: int64(nav.Prepare + nav.Movement + nav.Reconcile), Scheduled: nav.AgentsScheduled, Projectiles: projectileCount, Queries: queryCount, Accepted: physics.Accepted, Simulated: physics.Elapsed, Substeps: physics.Substeps, Bodies: physics.World.Bodies, Colliders: physics.World.Colliders, Shapes: physics.World.Shapes}
+		v.Intervals, v.Microsteps, v.MotionPairTests = physics.Intervals, physics.Microsteps, physics.MotionPairTests
+		v.MotionPathRefinements = physics.MotionPathRefinements
 		v.Measured = complete
 		for _, a := range s.actors {
 			state, _ := s.server.NavigationAgentState(a.ID)

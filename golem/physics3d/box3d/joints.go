@@ -129,6 +129,10 @@ func (w *World) CreateJoint(d p.JointDesc) (p.JointHandle, error) {
 	case p.Upright:
 		x := b.DefaultParallelJointDef()
 		x.Base = base
+		// Box3D constrains frame Z; Golem's upright frame uses its Y-up axis.
+		toUp := p.Pose{Rotation: p.Quat{X: -float32(math.Sqrt(.5)), W: float32(math.Sqrt(.5))}}
+		x.Base.LocalFrameA = bt(d.FrameA.Compose(toUp))
+		x.Base.LocalFrameB = bt(d.FrameB.Compose(toUp))
 		x.Hertz = d.Hertz
 		x.DampingRatio = d.Damping
 		x.MaxTorque = d.MaxTorque
@@ -174,8 +178,12 @@ func (w *World) DestroyJoint(h p.JointHandle) error {
 	return nil
 }
 
-// Joint returns current constraint force and torque in world space.
+// Joint returns accepted constraint force and torque in world space. Pending or
+// faulted worlds reject this read so private solver forces cannot escape a frame.
 func (w *World) Joint(h p.JointHandle) (p.JointState, error) {
+	if err := w.guard(); err != nil {
+		return p.JointState{}, err
+	}
 	v, ok := w.joints[h]
 	if !ok {
 		return p.JointState{}, p.ErrStale

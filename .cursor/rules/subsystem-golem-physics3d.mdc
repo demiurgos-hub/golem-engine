@@ -1,5 +1,5 @@
 ---
-description: physics3d — independent float32 contracts, pure-Go Box3D adapter, relative-motion admission, source cooking/ownership, staged frames, stable-ID checkpoints and actual-server qualification.
+description: physics3d — independent float32 contracts, pure-Go Box3D adapter, retained controller/support trajectories, relative-motion admission, source ownership, staged frames, checkpoints and actual-server qualification.
 globs:
   - golem/physics3d/**/*
   - golem/physics*.go
@@ -10,6 +10,11 @@ alwaysApply: false
 ---
 
 # Physics 3D
+
+Contact history is transactional with frame acceptance. Simulate updates a private
+tracker; rejection/fault discards it. `ShutdownWorld.CloseWithEvents` returns only
+terminal accepted pairs and queued lifecycle cleanup, closes mutation first, and
+is idempotent. Server shutdown dispatches copied events without accepting new commands.
 
 `DebugWorld.CaptureDebug` is an explicit owner-goroutine diagnostic seam outside active simulation. It copies accepted state and exact native body-local collider leaves with bounded geometry/annotation budgets and omission counts. Fault/pending native poses are separately flagged and never imply acceptance. Caller-supplied frame events, paths, queries and navigation targets are bounded copies; no always-on logging is added to the production loop. `box3d/cmd/physics-debug` emits a real sample capture and verifies the shared Unity fixture. `physics-stress -debug-capture` writes bounded failed-frame captures only when selected. Debug JSON is visualization data, not portable source or recovery state.
 
@@ -30,6 +35,8 @@ Queries distinguish initial overlap, touching, penetration, solid and sensor rol
 `physics3d/content` owns strict bounded Scribe source decoding, immutable `Prepared` captures, explicit solver-margin/CCD policy hashes, owner resolution and rollback of only newly constructed handles. It has no runtime/server or backend imports. Unsupported authored joint/material controls remain inspectable diagnostics and prevent loading; never silently drop them. `physics3d/box3d` cooks private hull/BVH leaves before registering reusable shapes. Native image artifacts include format/settings/source/fork identities and are separate from portable source; an empty source snapshot hash is not release evidence. Nonidentity local mesh poses must transform and recook the instance geometry. Source identity lookup survives neither removal nor an incomplete rollback.
 
 Simulation is tick-owned and staged: validate proposals before solving, freeze mutations through the frame, integrate fixed substeps once, then accept all body/entity state or fault the whole world. Never restore one pushed character after impulses have affected other bodies. Driven characters apply bounded tangential forces once per substep; the solver owns contact transfer. No extra push impulses, proxy bodies or unsupported vertical hovering.
+
+Optional `BodyDesc.Controller` owns a single upright solid capsule. Dimensions come from geometry; nonzero angular velocity and tilted capsules fail admission. Kinematic/scripted movement retains every swept step/slide phase and timed navigation corner. Driven mode keeps finite mass and requires zero synthetic step height; physical stair ascent depends on actual contact response. `SetCharacterVelocity`/server `SetPhysicsControllerVelocity` retain intent, overridden by explicit frame navigation. Exact support collider/body generations and features are re-probed; local support points belong to body origins, not COM. Support transport spans locomotion phases, bounds angular travel, and sweeps passengers under ceilings. Relative kinematic obstruction clips the participants before integration; dynamic contact transfer remains solver-owned. Checkpoints preserve controller intent/fall speed but rebuild support identities. Additional shared intervals and solver microsteps never recompute bounded drive force or multiply elapsed time; report interval/microstep/candidate/refinement counts separately. Actual-server correctness fixtures do not establish full-load capacity.
 
 With continuous simulation enabled, the Box3D adapter admits relative translations and rotations through bounded internal microsteps, then validates actual solver paths. Preserve force/torque duration and every microstep's body-origin pose, anchor, fraction and contact transition. Sum manifold-point impulses into collider-pair forces before owner aggregation. Report actual microstep/candidate counts; limits, unresolved casts and unsafe joint-generated paths fault the whole frame. Query tolerances remain independent of solver penetration bounds. Kinematic triangle meshes require this path; dynamic concave geometry remains unsupported. Triangle winding still controls solver response, and unresolved passenger crushing needs host transport policy rather than individual-body rewinds.
 

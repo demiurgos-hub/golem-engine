@@ -31,9 +31,10 @@ type CheckpointForce struct{ Force, Point Vec3 }
 // CheckpointBody stores current pose, activation, velocities and pending forces.
 // Description.Anchor remains the body-local gameplay-anchor transform.
 type CheckpointBody struct {
-	Description BodyDesc
-	Forces      []CheckpointForce
-	Torque      Vec3
+	Description         BodyDesc
+	Forces              []CheckpointForce
+	Torque              Vec3
+	ControllerFallSpeed float32
 }
 
 // CheckpointCollider replaces body/shape handles with stable content references.
@@ -163,7 +164,7 @@ func (c Checkpoint) Validate() error {
 	}
 	forces := 0
 	for _, body := range c.Bodies {
-		if !claim(bodies, body.Description.ID) || body.Description.Validate() != nil || !body.Torque.Valid() {
+		if !claim(bodies, body.Description.ID) || body.Description.Validate() != nil || !body.Torque.Valid() || !Finite(body.ControllerFallSpeed) {
 			return fmt.Errorf("%w: checkpoint body", ErrInvalid)
 		}
 		forces += len(body.Forces)

@@ -28,6 +28,8 @@ type body struct {
 	forces    []forceCommand
 	torque    p.Vec3
 	frozen    bool
+	support   p.CharacterSupport
+	fallSpeed float32
 }
 type forceCommand struct{ force, point p.Vec3 }
 type collider struct {
@@ -60,6 +62,7 @@ type World struct {
 	pending         *p.FrameResult
 	stats           p.Metrics
 	tracker         p.ContactTracker
+	pendingTracker  *p.ContactTracker
 	cleanup         []p.ContactEvent
 	restoring       bool
 	materials       map[uint64]p.Material
@@ -78,6 +81,7 @@ func New(config p.Config) (*World, error) {
 	d.EnableContinuous = config.Continuous
 	d.WorkerCount = config.Workers
 	w := &World{id: nextWorld.Add(1), backend: b.CreateWorld(&d), config: config, shapes: map[p.ShapeHandle]*shape{}, bodies: map[p.BodyHandle]*body{}, colliders: map[p.ColliderHandle]*collider{}, shapeOwners: map[b.ShapeID]p.ColliderHandle{}, joints: map[p.JointHandle]*joint{}, revision: 1}
+	w.backend.SetConsistentParallelWarmStart(true)
 	w.initMaterials()
 	w.activeBodies = map[p.BodyHandle]struct{}{}
 	return w, nil
@@ -203,7 +207,7 @@ func (w *World) CreateBody(d p.BodyDesc) (p.BodyHandle, error) {
 }
 func (w *World) bodyState(h p.BodyHandle, v *body) p.BodyState {
 	pose := p.Pose{Position: pp(v.id.GetPosition()), Rotation: pq(v.id.GetRotation())}
-	return p.BodyState{Handle: h, ID: v.desc.ID, Owner: v.desc.Owner, Mode: v.desc.Mode, Pose: pose, Anchor: pose.Compose(v.desc.Anchor), LinearVelocity: pv(v.id.GetLinearVelocity()), AngularVelocity: pv(v.id.GetAngularVelocity()), CenterOfMass: pp(v.id.GetWorldCenter()), Mass: v.id.GetMass(), Enabled: v.id.IsEnabled(), Awake: v.id.IsAwake()}
+	return p.BodyState{Handle: h, ID: v.desc.ID, Owner: v.desc.Owner, Mode: v.desc.Mode, Pose: pose, Anchor: pose.Compose(v.desc.Anchor), LinearVelocity: pv(v.id.GetLinearVelocity()), AngularVelocity: pv(v.id.GetAngularVelocity()), CenterOfMass: pp(v.id.GetWorldCenter()), Mass: v.id.GetMass(), Enabled: v.id.IsEnabled(), Awake: v.id.IsAwake(), Support: v.support}
 }
 
 // Body returns the last committed state while a frame awaits acceptance.
@@ -259,6 +263,11 @@ func (w *World) SetPose(h p.BodyHandle, pose p.Pose) error {
 	if !w.bodyInBounds(v, pose) {
 		return p.ErrInvalid
 	}
+	if v.desc.Controller.Enabled {
+		if _, err := w.controllerGeometryAt(h, pose); err != nil {
+			return err
+		}
+	}
 	v.id.SetTransform(bp(pose.Position), bq(pose.Rotation))
 	w.changed()
 	return nil
@@ -275,6 +284,9 @@ func (w *World) SetVelocity(h p.BodyHandle, linear, angular p.Vec3) error {
 	v, err := w.findBody(h)
 	if err != nil {
 		return err
+	}
+	if v.desc.Controller.Enabled && angular != (p.Vec3{}) {
+		return fmt.Errorf("%w: capsule controller rotation is pose-owned", p.ErrUnsupported)
 	}
 	v.id.SetLinearVelocity(bv(linear))
 	v.id.SetAngularVelocity(bv(angular))
@@ -387,9 +399,18 @@ func (w *World) Metrics() p.Metrics {
 
 // Close destroys the world and invalidates all of its handles; it is idempotent.
 func (w *World) Close() error {
+	_, err := w.CloseWithEvents()
+	return err
+}
+
+// CloseWithEvents closes the world and returns terminal accepted contact events.
+// It may close a faulted or pending world; neither can publish private contacts.
+func (w *World) CloseWithEvents() ([]p.ContactEvent, error) {
 	if w.closed {
-		return nil
+		return nil, nil
 	}
+	events := append([]p.ContactEvent(nil), w.cleanup...)
+	events = append(events, w.tracker.Drain(p.Shutdown, w.lastFrame, w.revision)...)
 	w.backend.Destroy()
 	w.mutation++
 	w.closed = true
@@ -403,9 +424,10 @@ func (w *World) Close() error {
 	w.queryContexts = nil
 	w.generations, w.freeHandles = nil, nil
 	w.pending, w.cleanup = nil, nil
+	w.pendingTracker = nil
 	w.tracker = p.ContactTracker{}
 	w.materials, w.materialKeys = nil, nil
-	return nil
+	return events, nil
 }
 func (w *World) orderedBodies() []p.BodyHandle {
 	keys := make([]p.BodyHandle, 0, len(w.bodies))

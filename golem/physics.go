@@ -40,6 +40,7 @@ type PhysicsPlacementPolicy struct{ MaxPenetration float32 }
 // PhysicsContactFunc observes copied contact events after all physics bodies,
 // navigation support and entity bindings have committed. QueuePhysicsCommand
 // schedules mutations for the next tick; never mutate the World in this callback.
+// Shutdown also dispatches terminal accepted pairs; commands then return an error.
 type PhysicsContactFunc func([]p.ContactEvent)
 
 // PhysicsFrameMetrics describes one attempted server physics frame. Elapsed is
@@ -47,14 +48,15 @@ type PhysicsContactFunc func([]p.ContactEvent)
 // Duration includes navigation preparation, readback and callbacks. Solve measures
 // only World.Simulate. The observer itself is excluded from both durations.
 type PhysicsFrameMetrics struct {
-	Frame           uint64
-	RequestedDelta  float64
-	Elapsed         float32
-	Substeps        int
-	Duration, Solve time.Duration
-	Accepted        bool
-	World           p.Metrics
-	Err             error
+	Frame                                                         uint64
+	RequestedDelta                                                float64
+	Elapsed                                                       float32
+	Substeps                                                      int
+	Intervals, Microsteps, MotionPairTests, MotionPathRefinements int
+	Duration, Solve                                               time.Duration
+	Accepted                                                      bool
+	World                                                         p.Metrics
+	Err                                                           error
 }
 
 // PhysicsCommand is executed on the tick goroutine before gameplay and simulation.
@@ -262,6 +264,25 @@ func (s *Server) PhysicsBody(id int64) (p.BodyState, error) {
 	return s.physics.world.Body(s.physics.agents[id].body)
 }
 
+// SetPhysicsControllerVelocity changes retained physical character intent. An
+// active staged-navigation Motion takes precedence for its frame. Call on the
+// tick outside accepted-frame callbacks; use Post there for a later tick.
+func (s *Server) SetPhysicsControllerVelocity(id int64, velocity p.Vec3) error {
+	ps := s.physics
+	if err := ps.mutable(); err != nil {
+		return err
+	}
+	a := ps.agents[id]
+	if a == nil {
+		return p.ErrStale
+	}
+	writer, ok := ps.world.(p.CharacterVelocityWriter)
+	if !ok {
+		return p.ErrUnsupported
+	}
+	return writer.SetCharacterVelocity(a.body, velocity)
+}
+
 // TeleportPhysics sets the gameplay anchor, preserving the body-local anchor
 // transform. It synchronizes query visibility and entity bindings together.
 // The complete solid volume must pass zero-penetration placement admission.
@@ -327,7 +348,8 @@ func (ps *physicsService) validatePlacement(body p.BodyHandle, pose p.Pose, poli
 	return nil
 }
 
-// OnPhysicsContact registers the accepted-frame event callback. Call at startup.
+// OnPhysicsContact registers the accepted-frame and terminal shutdown callback.
+// Call at startup. Shutdown callbacks cannot queue further commands.
 func (s *Server) OnPhysicsContact(fn PhysicsContactFunc) error {
 	if err := s.physics.mutable(); err != nil {
 		return err
@@ -437,6 +459,7 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 	}
 	ids := ps.ordered()
 	frame := p.Frame{ID: s.tick, Delta: float32(dt)}
+	submitted := make(map[p.BodyHandle]bool)
 	proposals := make(map[int64]NavigationMotionProposal)
 	for _, proposal := range f.Proposals() {
 		proposals[proposal.EntityID] = proposal
@@ -470,6 +493,7 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 			}
 		}
 		frame.Motions = append(frame.Motions, motion)
+		submitted[a.body] = true
 	}
 	if err := s.ValidateNavigationFrame(f); err != nil {
 		return err
@@ -479,6 +503,8 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 	solveStarted := NavigationNow()
 	result, err := ps.world.Simulate(frame)
 	metrics.Solve = navigationSince(solveStarted)
+	metrics.Intervals, metrics.Microsteps, metrics.MotionPairTests = result.Intervals, result.Microsteps, result.MotionPairTests
+	metrics.MotionPathRefinements = result.MotionPathRefinements
 	if err != nil {
 		ps.fault = err
 		return err
@@ -511,8 +537,8 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 	}
 	rejectedMotions := make(map[p.BodyHandle]string, len(result.RejectedMotions))
 	for _, motion := range result.RejectedMotions {
-		id, exists := ps.bodies[motion.Body]
-		if _, duplicate := rejectedMotions[motion.Body]; duplicate || !exists || proposals[id].EntityID != id || motion.Reason == "" || len(motion.Reason) > 4096 {
+		_, exists := ps.bodies[motion.Body]
+		if _, duplicate := rejectedMotions[motion.Body]; duplicate || !exists || !submitted[motion.Body] || motion.Reason == "" || len(motion.Reason) > 4096 {
 			return reject(errors.New("golem: invalid rejected physics motion"))
 		}
 		rejectedMotions[motion.Body] = motion.Reason
@@ -525,7 +551,11 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 			return reject(fmt.Errorf("golem: missing or foreign body result for entity %d", id))
 		}
 		if f.Contains(id) {
-			navResults = append(navResults, NavigationMotionResult{EntityID: id, Position: physicsNavPoint(state.Anchor.Position), Path: paths[a.body], RejectionReason: rejectedMotions[a.body]})
+			reason := ""
+			if _, hasPlan := proposals[id]; hasPlan {
+				reason = rejectedMotions[a.body]
+			}
+			navResults = append(navResults, NavigationMotionResult{EntityID: id, Position: physicsNavPoint(state.Anchor.Position), Path: paths[a.body], RejectionReason: reason})
 		}
 	}
 	accepted, err := s.validateNavigationResults(f, navResults)
@@ -583,8 +613,18 @@ func (ps *physicsService) stop() {
 	}
 	ps.closed = true
 	ps.commands = nil
-	_ = ps.world.Close()
 	ps.geometry, ps.geometryIdentities, ps.geometryPending = nil, nil, nil
+	if world, ok := ps.world.(p.ShutdownWorld); ok {
+		events, err := world.CloseWithEvents()
+		if err != nil {
+			ps.fault = err
+		}
+		if ps.onContact != nil && len(events) != 0 {
+			ps.onContact(append([]p.ContactEvent(nil), events...))
+		}
+	} else if err := ps.world.Close(); err != nil {
+		ps.fault = err
+	}
 }
 
 func validPhysicsState(state p.BodyState) bool {

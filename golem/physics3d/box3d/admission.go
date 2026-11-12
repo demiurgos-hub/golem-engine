@@ -110,6 +110,11 @@ func (w *World) ValidatePlacement(handle p.BodyHandle, pose p.Pose, maxPenetrati
 	if !w.bodyInBounds(v, pose) {
 		return false, nil
 	}
+	if v.desc.Controller.Enabled {
+		if _, err := w.controllerGeometryAt(handle, pose); err != nil {
+			return false, err
+		}
+	}
 	for _, h := range v.colliders {
 		c := w.colliders[h]
 		if !c.desc.Enabled || !c.desc.Roles.Solid {

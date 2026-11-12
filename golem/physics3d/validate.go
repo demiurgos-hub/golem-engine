@@ -96,6 +96,12 @@ func (q Query) Validate() error {
 
 // Validate checks body parameters; body and navigation anchor are distinct poses.
 func (d BodyDesc) Validate() error {
+	if err := d.Controller.Validate(d.Mode); err != nil {
+		return err
+	}
+	if d.Controller.Enabled && d.AngularVelocity != (Vec3{}) {
+		return fmt.Errorf("%w: capsule controller rotation is pose-owned", ErrUnsupported)
+	}
 	if d.Mode > ExternalPose || !d.Pose.Valid() || !d.Anchor.Valid() || !d.LinearVelocity.Valid() || !d.AngularVelocity.Valid() || !Finite(d.Mass) || d.Mass < 0 || ((d.Mode == FreeDynamic || d.Mode == DrivenCharacter) && d.Mass <= 0) || !Finite(d.GravityScale) || !Finite(d.LinearDamping) || d.LinearDamping < 0 || !Finite(d.AngularDamping) || d.AngularDamping < 0 {
 		return ErrInvalid
 	}
@@ -110,6 +116,12 @@ func (d BodyDesc) Validate() error {
 
 // Validate checks finite world settings and bounded scheduling configuration.
 func (c Config) Validate() error {
+	if !Finite(c.CCDMaxDelta) || c.CCDMaxDelta <= 0 || c.CCDMaxDelta > .05 || c.CCDMaxPathRefinements < 1 || c.CCDMaxPathRefinements > 131072 {
+		return ErrInvalid
+	}
+	if c.CCDVelocityIterations < 1 || c.CCDVelocityIterations > 16 || c.CCDRelaxIterations < 1 || c.CCDRelaxIterations > 16 {
+		return ErrInvalid
+	}
 	if !c.Gravity.Valid() || c.Substeps < 1 || c.Substeps > 128 || c.TickRate < 1 || c.TickRate > 1000 || c.Workers < 1 || c.Workers > 64 || !Finite(c.CCDContactTolerance) || c.CCDContactTolerance <= 0 || c.CCDContactTolerance >= .005 {
 		return ErrInvalid
 	}

@@ -165,7 +165,7 @@ func TestGravityContactsAndPrivateFrame(t *testing.T) {
 	if before.Pose != old.Pose {
 		t.Fatal("unaccepted body leaked")
 	}
-	if r.Substeps != 4 || r.Elapsed != .05 || len(r.Paths[0].Positions) != 5 {
+	if r.Substeps != 4 || r.Elapsed != .05 || len(r.Paths[0].Positions) != r.Microsteps+1 {
 		t.Fatal(r)
 	}
 	if e = w.SetPose(h, p.Identity()); !errors.Is(e, p.ErrBusy) {

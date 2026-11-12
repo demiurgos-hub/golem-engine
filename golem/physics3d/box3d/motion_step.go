@@ -100,7 +100,7 @@ func (s *motionContactState) observe(w *World, sample b.MotionStepSample, frame,
 	for _, v := range current {
 		values = append(values, v)
 	}
-	events := w.tracker.Update(values, frame, revision, w.restoring)
+	events := w.pendingTracker.Update(values, frame, revision, w.restoring)
 	for i := range events {
 		events[i].Fraction = fraction
 	}

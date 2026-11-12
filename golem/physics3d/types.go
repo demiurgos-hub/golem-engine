@@ -72,6 +72,7 @@ type CollisionFilter struct {
 }
 type MotionLocks struct{ LinearX, LinearY, LinearZ, AngularX, AngularY, AngularZ bool }
 type BodyDesc struct {
+	Controller                                        CharacterControllerConfig
 	ID                                                ContentID
 	Owner                                             int64
 	Mode                                              MotionMode
@@ -100,6 +101,7 @@ type ColliderDesc struct {
 	Density   float32
 }
 type BodyState struct {
+	Support                                       CharacterSupport
 	Handle                                        BodyHandle
 	ID                                            ContentID
 	Owner                                         int64
@@ -118,11 +120,18 @@ type Config struct {
 	// CCDContactTolerance bounds internal solver motion admission, independently
 	// of geometric queries and placement policy.
 	CCDContactTolerance float32
+	// Solver iterations refine constraints without advancing physical time.
+	CCDVelocityIterations, CCDRelaxIterations int
+	// CCDMaxDelta bounds the internal solver interval. Refinement limits fail
+	// the complete frame; they never omit unresolved motion from acceptance.
+	CCDMaxDelta           float32
+	CCDMaxPathRefinements int
 }
 
-// DefaultConfig returns the 20 Hz / four-substep release configuration.
+// DefaultConfig returns the 20 Hz / four configured substep defaults, with
+// additional bounded internal intervals for continuous collision response.
 func DefaultConfig() Config {
-	return Config{Gravity: Vec3{Y: -9.81}, Substeps: 4, TickRate: 20, AllowSleep: true, Continuous: true, Workers: 1, CCDContactTolerance: .001}
+	return Config{Gravity: Vec3{Y: -9.81}, Substeps: 4, TickRate: 20, AllowSleep: true, Continuous: true, Workers: 1, CCDContactTolerance: .001, CCDVelocityIterations: 4, CCDRelaxIterations: 2, CCDMaxDelta: 1.0 / 240, CCDMaxPathRefinements: 8192}
 }
 
 // DefaultBody returns a live body description with explicit identity transforms.
@@ -231,10 +240,11 @@ type FrameResult struct {
 	Events       []ContactEvent
 	Substeps     int
 	// Microsteps and MotionPairTests report actual internal collision work.
-	Microsteps, MotionPairTests int
-	Elapsed                     float32
-	Paths                       []BodyPath
-	RejectedMotions             []MotionRejection
+	Microsteps, MotionPairTests, MotionPathRefinements int
+	Intervals                                          int // shared subdivisions; their durations still sum to Elapsed
+	Elapsed                                            float32
+	Paths                                              []BodyPath
+	RejectedMotions                                    []MotionRejection
 }
 
 // MotionRejection records an intent denied before the interacting frame solved.

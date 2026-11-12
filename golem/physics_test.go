@@ -433,6 +433,24 @@ func TestPhysicsRejectedMotionCommitsActualDisplacementWithoutProposedProgress(t
 	}
 }
 
+func TestPhysicsIdleControllerRejectionRetainsAcceptedSupport(t *testing.T) {
+	s, entity, w := physicsNavigationTestServer(t)
+	h := physicsTestAttach(t, s, w, 1, p.Kinematic, PhysicsAttachmentConfig{})
+	w.simulate = func(f p.Frame, r *p.FrameResult) {
+		if len(f.Motions) != 1 || len(f.Motions[0].Segments) != 0 {
+			t.Fatal("fixture was not an idle safety capture")
+		}
+		r.RejectedMotions = []p.MotionRejection{{Body: h, Reason: "controller path rejected by captured safety"}}
+	}
+	s.tick++
+	if err := s.physics.step(.05); err != nil {
+		t.Fatal(err)
+	}
+	if w.accepted != 1 || w.rejected != 0 || entity.position != (surface.Vec3{}) {
+		t.Fatal("safe idle admission was treated as a world fault")
+	}
+}
+
 func TestPhysicsRunLoopStepsOncePerTickAndClosesWorld(t *testing.T) {
 	s := NewServer(ServerConfig{TickRate: 100})
 	e := &navigationTestEntity{id: 1}

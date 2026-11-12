@@ -23,7 +23,10 @@ type Support struct {
 	Revision      uint64
 }
 type Result struct {
-	Pose                       p.Pose
+	Pose p.Pose
+	// Path retains every swept waypoint, including start, depenetration, slide
+	// and up/forward/down step phases. Hosts must integrate this path, not its chord.
+	Path                       []p.Pose
 	Grounded, Blocked, Stepped bool
 	Support                    Support
 	Depenetration              p.Vec3
@@ -103,10 +106,22 @@ func (c Config) ground(world Queries, pose p.Pose, filter p.QueryFilter) (Suppor
 	return Support{}, false, nil
 }
 
+// Probe returns the nearest walkable support within GroundDistance. It never
+// changes pose or snaps down to a more distant floor.
+func (c Config) Probe(world Queries, pose p.Pose, filter p.QueryFilter) (Support, bool, error) {
+	if err := c.Validate(); err != nil {
+		return Support{}, false, err
+	}
+	if world == nil || !pose.Valid() {
+		return Support{}, false, p.ErrInvalid
+	}
+	return c.ground(world, pose, filter)
+}
+
 // Move sweeps, slides and bounds depenetration. Stepping is an up/forward/down
 // action with a validated walkable landing; it never snaps to another floor.
 func (c Config) Move(world Queries, start p.Pose, translation p.Vec3, filter p.QueryFilter) (Result, error) {
-	r := Result{Pose: start}
+	r := Result{Pose: start, Path: []p.Pose{start}}
 	if err := c.Validate(); err != nil {
 		return r, err
 	}
@@ -133,6 +148,7 @@ func (c Config) Move(world Queries, start p.Pose, translation p.Vec3, filter p.Q
 			return r, fmt.Errorf("%w: depenetration bound", p.ErrInvalid)
 		}
 		r.Pose.Position = r.Pose.Position.Add(correction)
+		r.Path = append(r.Path, r.Pose)
 		r.Depenetration = r.Depenetration.Add(correction)
 		if !r.Pose.Valid() {
 			return r, p.ErrInvalid
@@ -156,16 +172,18 @@ func (c Config) Move(world Queries, start p.Pose, translation p.Vec3, filter p.Q
 		hit, blocked := firstBlocking(hits, remaining, c.Skin)
 		if !blocked {
 			r.Pose.Position = r.Pose.Position.Add(remaining)
+			r.Path = append(r.Path, r.Pose)
 			remaining = p.Vec3{}
 			break
 		}
 		r.Hits = append(r.Hits, hit)
 		r.Blocked = true
 		if i == 0 && startedGrounded && c.StepHeight > 0 && hit.Normal.Y < float32(math.Cos(float64(c.MaxSlopeDegrees)*math.Pi/180)) {
-			if pose, ok, e := c.step(world, r.Pose, remaining, filter); e != nil {
+			if pose, path, ok, e := c.step(world, r.Pose, remaining, filter); e != nil {
 				return r, e
 			} else if ok {
 				r.Pose = pose
+				r.Path = append(r.Path, path...)
 				r.Stepped = true
 				remaining = p.Vec3{}
 				break
@@ -175,6 +193,9 @@ func (c Config) Move(world Queries, start p.Pose, translation p.Vec3, filter p.Q
 		distance := max(0, hit.Distance-c.Skin)
 		fraction := min(1, distance/length)
 		r.Pose.Position = r.Pose.Position.Add(remaining.Mul(fraction))
+		if r.Pose != r.Path[len(r.Path)-1] {
+			r.Path = append(r.Path, r.Pose)
+		}
 		remaining = remaining.Mul(1 - fraction)
 		normal := hit.Normal
 		if normal.Y > 0 && normal.Y < cosSlope {
@@ -215,35 +236,38 @@ func (c Config) Move(world Queries, start p.Pose, translation p.Vec3, filter p.Q
 	r.Support, r.Grounded, e = c.ground(world, r.Pose, filter)
 	return r, e
 }
-func (c Config) step(world Queries, pose p.Pose, delta p.Vec3, filter p.QueryFilter) (p.Pose, bool, error) {
+func (c Config) step(world Queries, pose p.Pose, delta p.Vec3, filter p.QueryFilter) (p.Pose, []p.Pose, bool, error) {
 	up := p.Vec3{Y: c.StepHeight}
 	hits, e := c.query(world, pose, up, filter)
 	if e != nil {
-		return pose, false, e
+		return pose, nil, false, e
 	}
 	if _, blocked := firstBlocking(hits, up, c.Skin); blocked {
-		return pose, false, nil
+		return pose, nil, false, nil
 	}
 	raised := pose
 	raised.Position = raised.Position.Add(up)
+	path := []p.Pose{raised}
 	horizontal := p.Vec3{X: delta.X, Z: delta.Z}
 	hits, e = c.query(world, raised, horizontal, filter)
 	if e != nil {
-		return pose, false, e
+		return pose, nil, false, e
 	}
 	if _, blocked := firstBlocking(hits, horizontal, c.Skin); blocked {
-		return pose, false, nil
+		return pose, nil, false, nil
 	}
 	raised.Position = raised.Position.Add(horizontal)
+	path = append(path, raised)
 	down := p.Vec3{Y: -c.StepHeight - c.GroundDistance}
 	hits, e = c.query(world, raised, down, filter)
 	if e != nil {
-		return pose, false, e
+		return pose, nil, false, e
 	}
 	h, blocked := firstBlocking(hits, down, c.Skin)
 	if !blocked || h.Normal.Y < float32(math.Cos(float64(c.MaxSlopeDegrees)*math.Pi/180)) {
-		return pose, false, nil
+		return pose, nil, false, nil
 	}
 	raised.Position.Y -= max(0, h.Distance-c.Skin)
-	return raised, true, nil
+	path = append(path, raised)
+	return raised, path, true, nil
 }

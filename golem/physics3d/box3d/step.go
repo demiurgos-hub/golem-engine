@@ -3,7 +3,6 @@ package box3d
 import (
 	"fmt"
 	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
-	"github.com/demiurgos-hub/golem-engine/golem/physics3d/character"
 	b "github.com/gataengine/box3d-go"
 	"sort"
 )
@@ -60,6 +59,13 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 	}
 	if err = w.Synchronize(); err != nil {
 		return
+	}
+	for key := range w.activeBodies {
+		if w.bodies[key].desc.Controller.Enabled {
+			if _, err = w.controllerGeometry(key); err != nil {
+				return
+			}
+		}
 	}
 	projections := map[p.BodyHandle]p.Pose{}
 	var rejected []p.MotionRejection
@@ -118,13 +124,13 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 		}
 	}
 	keys := w.orderedActiveBodies()
-	pathIndex := make(map[p.BodyHandle]int, len(keys))
 	paths := make([]p.BodyPath, len(keys))
 	for i, h := range keys {
-		pathIndex[h] = i
 		paths[i] = p.BodyPath{Body: h, Positions: []p.Vec3{w.bodies[h].committed.Anchor.Position}, Poses: []p.Pose{w.bodies[h].committed.Pose}, Fractions: []float32{0}}
 	}
 	started := false
+	tracker := w.tracker.Clone()
+	w.pendingTracker = &tracker
 	w.mutation++
 	defer func() {
 		if v := recover(); v != nil {
@@ -133,6 +139,9 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 		if err != nil && started {
 			w.stats.Fault = err
 			w.stats.RejectedFrames++
+		}
+		if err != nil {
+			w.pendingTracker = nil
 		}
 	}()
 	for i, key := range keys {
@@ -145,88 +154,9 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 		}
 	}
 	result = p.FrameResult{ID: f.ID, Revision: w.revision + 1, Substeps: w.config.Substeps, Paths: paths, RejectedMotions: rejected, Events: append([]p.ContactEvent(nil), w.cleanup...)}
-	contactState := w.newMotionContactState()
-	h := f.Delta / float32(w.config.Substeps)
-	for sub := 0; sub < w.config.Substeps; sub++ {
-		for _, key := range keys {
-			v := w.bodies[key]
-			for _, f := range v.forces {
-				v.id.ApplyForce(bv(f.force), bp(f.point), true)
-			}
-			if v.torque != (p.Vec3{}) {
-				v.id.ApplyTorque(bv(v.torque), true)
-			}
-		}
-		for _, m := range motions {
-			v := w.bodies[m.Body]
-			if m.Frozen {
-				continue
-			}
-			velocity, normal := motionVelocity(m, float32(sub)*h, h)
-			switch v.desc.Mode {
-			case p.DrivenCharacter:
-				n := normal.Unit()
-				if n.Length() == 0 {
-					n = p.Vec3{Y: 1}
-				}
-				delta := velocity.Sub(pv(v.id.GetLinearVelocity()))
-				delta = delta.Sub(n.Mul(delta.Dot(n)))
-				force := delta.Mul(v.id.GetMass() / h)
-				if length := force.Length(); length > m.MaxDriveForce {
-					force = force.Mul(m.MaxDriveForce / length)
-				}
-				v.id.ApplyForceToCenter(bv(force), true)
-			case p.Kinematic, p.ScriptedAction, p.ExternalPose:
-				velocity, err = w.clipKinematic(m.Body, velocity, h)
-				if err != nil {
-					return
-				}
-				v.id.SetLinearVelocity(bv(velocity))
-			}
-		}
-		started = true
-		observe := func(sample b.MotionStepSample) error {
-			fraction := (float32(sub) + sample.EndFraction) / float32(w.config.Substeps)
-			for i, key := range keys {
-				state := w.bodyState(key, w.bodies[key])
-				if !w.bodyInBounds(w.bodies[key], state.Pose) || !state.Anchor.Position.InBounds() || !state.LinearVelocity.Valid() || !state.AngularVelocity.Valid() {
-					return fmt.Errorf("physics3d: body %v left supported state", key)
-				}
-				paths[i].Positions = append(paths[i].Positions, state.Anchor.Position)
-				paths[i].Poses = append(paths[i].Poses, state.Pose)
-				paths[i].Fractions = append(paths[i].Fractions, fraction)
-			}
-			for _, m := range motions {
-				if m.Validate != nil {
-					path := paths[pathIndex[m.Body]].Positions
-					if !m.Validate(path[len(path)-2], path[len(path)-1]) {
-						return fmt.Errorf("physics3d: captured safety failed after microstep")
-					}
-				}
-			}
-			result.Events = append(result.Events, contactState.observe(w, sample, f.ID, result.Revision, fraction)...)
-			return nil
-		}
-		if w.config.Continuous {
-			options := b.DefaultMotionStepOptions()
-			options.Tolerance = w.config.CCDContactTolerance
-			work, stepErr := w.backend.StepMotion(h, options, observe)
-			result.Microsteps += work.Microsteps
-			result.MotionPairTests += work.PairTests
-			result.Elapsed += work.Elapsed
-			if stepErr != nil {
-				err = fmt.Errorf("physics3d: relative motion: %w", stepErr)
-				return
-			}
-		} else {
-			w.backend.Step(h, 1)
-			result.Microsteps++
-			result.Elapsed += h
-			err = observe(w.captureMotionSample(h))
-			if err != nil {
-				return
-			}
-		}
+	started = true
+	if err = w.integrateIntervals(f, motions, keys, paths, &result); err != nil {
+		return
 	}
 	result.Elapsed = f.Delta
 	for _, key := range keys {
@@ -262,6 +192,8 @@ func (w *World) Accept(id uint64) error {
 	w.mutation++
 	w.lastFrame = id
 	w.stats.SimulatedSeconds += float64(r.Elapsed)
+	w.tracker = *w.pendingTracker
+	w.pendingTracker = nil
 	w.pending = nil
 	w.cleanup = nil
 	w.restoring = false
@@ -272,21 +204,17 @@ func motionVelocity(m p.Motion, start, dt float32) (p.Vec3, p.Vec3) {
 	if len(m.Segments) == 0 {
 		return m.Velocity, m.SurfaceNormal
 	}
-	var displacement p.Vec3
 	elapsed := float32(0)
-	normal := p.Vec3{Y: 1}
 	for _, s := range m.Segments {
 		if s.Projection {
 			continue
 		}
-		overlap := min(start+dt, elapsed+s.Delta) - max(start, elapsed)
-		if overlap > 0 {
-			displacement = displacement.Add(s.Target.Sub(s.From).Mul(overlap / s.Delta))
-			normal = s.SurfaceNormal
+		if start < elapsed+s.Delta {
+			return s.Target.Sub(s.From).Mul(1 / s.Delta), s.SurfaceNormal
 		}
 		elapsed += s.Delta
 	}
-	return displacement.Mul(1 / dt), normal
+	return p.Vec3{}, p.Vec3{Y: 1}
 }
 
 func (w *World) clipKinematic(h p.BodyHandle, velocity p.Vec3, dt float32) (p.Vec3, error) {
@@ -305,41 +233,27 @@ func (w *World) clipKinematic(h p.BodyHandle, velocity p.Vec3, dt float32) (p.Ve
 		}
 		pose := w.bodyState(h, v).Pose.Compose(c.desc.LocalPose)
 		filter := p.QueryFilter{Mask: ^uint64(0), PhysicalFilter: &c.desc.Filter, ExcludeBodies: []p.BodyHandle{h}, RequireSolid: true, IncludeNonQuery: true, Sensors: p.IncludeSensors}
-		if s.Kind == p.Capsule && s.PointA.X == s.PointB.X && s.PointA.Z == s.PointB.Z && pose.Rotation == (p.Quat{W: 1}) {
-			cfg := character.DefaultConfig()
-			cfg.Radius = s.Radius
-			cfg.Height = s.PointB.Sub(s.PointA).Length() + 2*s.Radius
-			cfg.StepHeight = 0
-			center := s.PointA.Add(s.PointB).Mul(.5)
-			pose.Position = pose.Transform(center)
-			m, e := cfg.Move(w, pose, delta, filter)
-			if e != nil {
-				return p.Vec3{}, e
+		q := p.Query{Kind: p.Sweep, Mode: p.All, Shape: s, Pose: pose, Translation: delta, Filter: filter, Initial: p.ReportInitial}
+		hits := make([]p.Hit, 32)
+		r, e := w.Query(q, hits)
+		if e != nil {
+			return p.Vec3{}, e
+		}
+		if r.Incomplete {
+			hits = make([]p.Hit, r.Total)
+			r, e = w.Query(q, hits)
+			if e != nil || r.Incomplete {
+				return p.Vec3{}, fmt.Errorf("physics3d: movement query incomplete")
 			}
-			delta = m.Pose.Position.Sub(pose.Position)
-		} else {
-			q := p.Query{Kind: p.Sweep, Mode: p.All, Shape: s, Pose: pose, Translation: delta, Filter: filter, Initial: p.ReportInitial}
-			hits := make([]p.Hit, 32)
-			r, e := w.Query(q, hits)
-			if e != nil {
-				return p.Vec3{}, e
+		}
+		for _, hit := range hits[:r.Count] {
+			if !hit.Blocking || hit.Initial && hit.Normal.Dot(delta) >= 0 {
+				continue
 			}
-			if r.Incomplete {
-				hits = make([]p.Hit, r.Total)
-				r, e = w.Query(q, hits)
-				if e != nil || r.Incomplete {
-					return p.Vec3{}, fmt.Errorf("physics3d: movement query incomplete")
-				}
+			if length := delta.Length(); length > 0 {
+				delta = delta.Mul(max(0, hit.Distance-.001) / length)
 			}
-			for _, hit := range hits[:r.Count] {
-				if !hit.Blocking || hit.Initial && hit.Normal.Dot(delta) >= 0 {
-					continue
-				}
-				if length := delta.Length(); length > 0 {
-					delta = delta.Mul(max(0, hit.Distance-.001) / length)
-				}
-				break
-			}
+			break
 		}
 	}
 	return delta.Mul(1 / dt), nil
@@ -357,5 +271,6 @@ func (w *World) Reject(id uint64, cause error) error {
 	w.mutation++
 	w.stats.RejectedFrames++
 	w.pending = nil
+	w.pendingTracker = nil
 	return nil
 }

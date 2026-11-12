@@ -52,6 +52,35 @@ type ContactEvent struct {
 // callback mutation cannot change the stored contacts or another event.
 type ContactTracker struct{ pairs map[ContactPair]ContactEvent }
 
+// Clone returns independent contact history for a private simulation transaction.
+func (t *ContactTracker) Clone() ContactTracker {
+	next := ContactTracker{pairs: make(map[ContactPair]ContactEvent, len(t.pairs))}
+	for pair, event := range t.pairs {
+		next.pairs[pair] = event
+	}
+	return next
+}
+
+// Drain ends every retained pair once and clears its history.
+func (t *ContactTracker) Drain(reason CleanupReason, frame, revision uint64) []ContactEvent {
+	out := make([]ContactEvent, 0, len(t.pairs))
+	for _, event := range t.pairs {
+		event.Phase, event.Reason = Exit, reason
+		event.Frame, event.Revision, event.Fraction = frame, revision, 1
+		out = append(out, event)
+	}
+	t.pairs = nil
+	sortEvents(out)
+	return out
+}
+
+// ShutdownWorld optionally returns terminal contact events when closing a world.
+// Only accepted pair history is eligible; pending or rejected frames cannot add
+// pairs. Repeated calls return no events. Mutations are closed before returning.
+type ShutdownWorld interface {
+	CloseWithEvents() ([]ContactEvent, error)
+}
+
 // Update emits enter/stay/exit transitions for a complete accepted frame.
 // Restoring classifies existing contacts as Restored instead of ordinary entry.
 func (t *ContactTracker) Update(current []ContactEvent, frame, revision uint64, restoring bool) []ContactEvent {

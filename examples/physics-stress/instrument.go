@@ -31,8 +31,9 @@ func (w observedWorld) Simulate(frame p.Frame) (p.FrameResult, error) {
 			Frame   uint64
 			Delta   float32
 			Motions []observedMotion
+			Paths   []p.BodyPath
 			Error   string
-		}{frame.ID, frame.Delta, recordMotions(frame.Motions), err.Error()})
+		}{frame.ID, frame.Delta, recordMotions(frame.Motions), result.Paths, err.Error()})
 		if w.debugCapture {
 			o := p.DefaultDebugOptions()
 			o.IncludeUncommitted = true

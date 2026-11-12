@@ -25,7 +25,7 @@ func (w *World) CaptureCheckpoint(id, fingerprint string) (p.Checkpoint, error) 
 		d := body.desc
 		s := body.committed
 		d.Pose, d.LinearVelocity, d.AngularVelocity, d.Enabled, d.Awake = s.Pose, s.LinearVelocity, s.AngularVelocity, s.Enabled, s.Awake
-		record := p.CheckpointBody{Description: d, Torque: body.torque}
+		record := p.CheckpointBody{Description: d, Torque: body.torque, ControllerFallSpeed: body.fallSpeed}
 		for _, force := range body.forces {
 			record.Forces = append(record.Forces, p.CheckpointForce{Force: force.force, Point: force.point})
 		}
@@ -123,6 +123,7 @@ func (w *World) PrepareRestore(c p.Checkpoint) (result p.PreparedRestore, err er
 	}
 	for _, record := range c.Bodies {
 		h := prepared.bodies[record.Description.ID]
+		next.bodies[h].fallSpeed = record.ControllerFallSpeed
 		if e := next.SetVelocity(h, record.Description.LinearVelocity, record.Description.AngularVelocity); e != nil {
 			return nil, e
 		}

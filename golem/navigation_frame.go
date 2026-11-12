@@ -359,7 +359,7 @@ func (s *Server) validateNavigationResults(f *NavigationFrame, results []Navigat
 		if len(result.RejectionReason) > 4096 || result.RejectionReason != "" && f.plans[result.EntityID] == nil {
 			return nil, fmt.Errorf("%w: invalid rejected proposal for entity %d", ErrNavigationFrameFault, result.EntityID)
 		}
-		if !fitsNavigationEntity(result.Position) || len(result.Path) > 1024 {
+		if !fitsNavigationEntity(result.Position) || len(result.Path) > 16384 {
 			return nil, fmt.Errorf("%w: invalid physical result for entity %d", ErrNavigationFrameFault, result.EntityID)
 		}
 		position := navigationFramePosition(result.Position)
