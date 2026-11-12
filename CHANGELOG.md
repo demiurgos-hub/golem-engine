@@ -10,7 +10,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 - Continuous physics resolves coupled fast impacts through bounded native contact and joint continuation, including thin objects pushed against walls and motor-driven collisions. It retains the original force/gravity duration and drive budgets, reports owned intermediate poses, and faults the interacting frame if required work cannot complete.
 
-- Physics workload reports identify the retained per-run delivery gates and explicitly excluded soak and extended checks. Full-size Windows counts and the 50 ms p99 threshold remain required; component results do not imply aggregate or published-release qualification.
+- Physics qualification provides source-matched focused, engine integration, Windows capacity and Linux save/restore evidence, with a combined report that preserves failed and missing gates. The runner can select upstream's native release build while retaining explicit Golem validation. Extended matrices and the soak are excluded from the selected delivery; full-size Windows counts and the 50 ms p99 threshold remain required.
 
 - Physics frame metrics, stress results and debug captures expose separate local TOI continuation work counts, including failed attempts. Participant and contact-row totals describe work performed; native solver call counts remain independent of the number of observed path samples.
 
@@ -110,6 +110,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 - Navigation qualification's `Suite` and `Full` launchers now run the three mixed scene families at 1,000 agents only; `Full` retains the two-hour 1,000-agent soak. Existing diagnostic agent-count controls remain available.
 
 ### Fixed
+
+- Precise sweeps clip subsequent searches after a nearer hit while preserving equal-distance identities and unchanged geometric accuracy. Rounded mesh contacts use bounded scratch sized to their actual maximum output without dropping triangles or contact points.
 
 - Small physics edits synchronize active and changed static bodies without refreshing every untouched static collider. Portable handle lookups retain world, generation and type validation while avoiding repeated hash-table searches during simulation.
 
