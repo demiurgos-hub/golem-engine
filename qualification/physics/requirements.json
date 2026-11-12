@@ -27,6 +27,11 @@
     {"id":"general-dynamics","authority":"explicit user requirement","requires":["finite-mass driven characters","free dynamic bodies","forces and torque","angular inertia","sleep and wake","CCD","fixed/distance/hinge/slider/spherical/motor/upright/wheel constraints","constraint limits and drives","coherent checkpoint and restart"]}
   ],
   "contentEvidence": {
+    "authored-settings-inventory": {
+      "materials": "D:/Demiurgos/tests/physics-validation/content-audit-materials-v2.json",
+      "configurableJoints": "D:/Demiurgos/tests/physics-validation/content-audit-configurable-joints.json",
+      "scope": "All 15 PhysicMaterial assets parsed. Two unequal-friction imported materials have no serialized prefab/scene/asset references. Four ConfigurableJoint definitions are confined to two imported horse-wagon prefabs referenced only by their imported demo scene. Runtime string-based loading is not inferred; actual server cart variants were captured independently."
+    },
     "projectiles": {
       "reference": "AssetsByType/Prefabs/Projectiles/Weapons/prefab_Projectile_Staff.prefab",
       "inputHashes": "D:/Demiurgos/tests/physics-validation/unity/runs/prefab-reference-20261112-01/inputs.json",
