@@ -74,8 +74,10 @@ func (a *actor) IsGlobal() bool { return false }
 // FlushUpdate emits no network payload in this server workload.
 func (a *actor) FlushUpdate() ([]byte, error) { return nil, nil }
 
-// FullUpdate emits no network payload in this server workload.
-func (a *actor) FullUpdate() ([]byte, error) { return nil, nil }
+// FullUpdate captures authoritative actor and route-direction state for restart.
+func (a *actor) FullUpdate() ([]byte, error) {
+	return json.Marshal(savedPhysicsActor{Position: a.position, Ends: a.ends, Target: a.target})
+}
 
 type scene struct {
 	world                            *box3d.World
@@ -90,6 +92,10 @@ type scene struct {
 	queryHits                        []p.Hit
 	queryWorkers                     int
 	admissionLatency, renewalLatency histogram
+	navWorlds                        []*dynamic.World
+	navBackend                       *replaceableNavigation
+	restoredBodies                   map[p.ContentID]p.BodyState
+	churn                            churnEvidence
 }
 
 func makeScene(o options, c workload, observeNav func(golem.NavigationTickMetrics)) (*scene, error) {
@@ -108,7 +114,7 @@ func makeScene(o options, c workload, observeNav func(golem.NavigationTickMetric
 		}
 	}()
 	s.server = golem.NewServer(golem.ServerConfig{TickRate: 20})
-	if err = s.server.SetPhysicsWorld(observedWorld{World: w, out: o.Out, debugCapture: o.DebugCapture, sourceSnapshot: o.SourceManifest}); err != nil {
+	if err = s.server.SetPhysicsWorld(observedWorld{World: w, out: o.Out, debugCapture: o.DebugCapture, sourceSnapshot: o.SourceManifest, restoredBodies: &s.restoredBodies}); err != nil {
 		return nil, err
 	}
 	half := float32(o.Extent / 2)
@@ -120,6 +126,7 @@ func makeScene(o options, c workload, observeNav func(golem.NavigationTickMetric
 	for tz := 0; tz < c.TilesZ; tz++ {
 		for tx := 0; tx < c.TilesX; tx++ {
 			d := floorTile(tx, tz, c, half)
+			d.ID = p.ContentID(fmt.Sprintf("floor-shape/%d/%d", tx, tz))
 			createdTriangles += len(d.Indices) / 3
 			if e := geometryEncoder.Encode(d); e != nil {
 				return nil, e
@@ -133,7 +140,7 @@ func makeScene(o options, c workload, observeNav func(golem.NavigationTickMetric
 			}
 		}
 	}
-	box, e := w.CreateShape(p.ShapeDesc{Kind: p.Box, HalfExtents: p.Vec3{X: .4, Y: .5, Z: .4}})
+	box, e := w.CreateShape(p.ShapeDesc{ID: "box-shape", Kind: p.Box, HalfExtents: p.Vec3{X: .4, Y: .5, Z: .4}})
 	if e != nil {
 		return nil, e
 	}
@@ -188,7 +195,8 @@ func makeScene(o options, c workload, observeNav func(golem.NavigationTickMetric
 	if e != nil {
 		return nil, e
 	}
-	if e = s.server.SetSurfaceNavigation(backend, golem.NavigationConfig{PathWorkers: o.Workers, BuildWorkers: 1, PathQueueCapacity: c.Characters * 2, CompletionCapacity: c.Characters * 2, PathResultsPerTick: c.Characters, PathDrainBudget: timeBudget, MovementAgentsPerTick: c.Characters, MovementBudget: timeBudget, RequiredProfiles: []surface.ProfileID{"human", "large"}, ObserveTick: observeNav, ObservePathAdmission: func(m golem.NavigationPathAdmissionMetrics) {
+	s.navWorlds, s.navBackend = worlds, &replaceableNavigation{Backend: backend}
+	if e = s.server.SetSurfaceNavigation(s.navBackend, golem.NavigationConfig{PathWorkers: o.Workers, BuildWorkers: 1, PathQueueCapacity: c.Characters * 2, CompletionCapacity: c.Characters * 2, PathResultsPerTick: c.Characters, PathDrainBudget: timeBudget, MovementAgentsPerTick: c.Characters, MovementBudget: timeBudget, RequiredProfiles: []surface.ProfileID{"human", "large"}, ObserveTick: observeNav, ObservePathAdmission: func(m golem.NavigationPathAdmissionMetrics) {
 		if m.EntityID > 0 && m.EntityID <= int64(len(s.actors)) {
 			a := s.actors[m.EntityID-1]
 			if a.admitted {
@@ -204,7 +212,7 @@ func makeScene(o options, c workload, observeNav func(golem.NavigationTickMetric
 	columns := int(math.Ceil(math.Sqrt(float64(c.Characters))))
 	for i := 0; i < c.Characters; i++ {
 		profile := profiles[i%2]
-		shape, e := w.CreateShape(p.ShapeDesc{Kind: p.Capsule, Radius: float32(profile.Radius), PointA: p.Vec3{Y: float32(profile.Radius)}, PointB: p.Vec3{Y: float32(profile.Height - profile.Radius)}})
+		shape, e := w.CreateShape(p.ShapeDesc{ID: p.ContentID(fmt.Sprintf("character-shape/%d", i)), Kind: p.Capsule, Radius: float32(profile.Radius), PointA: p.Vec3{Y: float32(profile.Radius)}, PointB: p.Vec3{Y: float32(profile.Height - profile.Radius)}})
 		if e != nil {
 			return nil, e
 		}

@@ -27,6 +27,9 @@ const timeBudget = time.Second
 
 type options struct {
 	Mode, Out, SourceManifest        string
+	Resume                           string
+	Checkpoint                       bool
+	ChurnTicks                       uint64
 	Extent                           int
 	Workers                          int
 	PhysicsWorkers, QueryWorkers     int
@@ -40,6 +43,9 @@ func main() {
 	flag.StringVar(&o.Mode, "mode", "correctness", "correctness, rehearsal, or full (fixed workload counts)")
 	flag.StringVar(&o.Out, "out", "", "new output directory in the validation workspace")
 	flag.StringVar(&o.SourceManifest, "source-manifest", "", "exact staged source manifest; required for full mode")
+	flag.StringVar(&o.Resume, "resume", "", "verified paired checkpoint directory to restore before starting workers")
+	flag.BoolVar(&o.Checkpoint, "checkpoint", false, "capture complete paired physics/navigation/projectile state at shutdown")
+	flag.Uint64Var(&o.ChurnTicks, "churn-ticks", 0, "attempt a door create/replace/unload every N ticks, after the preceding publication completes; zero disables")
 	flag.IntVar(&o.Extent, "extent", 0, "world side length: full mode requires 768 or 2304 metres")
 	flag.IntVar(&o.Workers, "workers", 4, "navigation path workers")
 	flag.IntVar(&o.PhysicsWorkers, "physics-workers", 6, "rigid-body solver workers")
@@ -82,6 +88,10 @@ type results struct {
 	MovementDeficitTicks, CadenceMisses, RejectedFrames, QueryOverflows                uint64
 	ProjectileSweeps, ProjectileHits, GameplayQueries                                  uint64
 	StartupNS, MeasurementWallNS                                                       int64
+	CheckpointCaptureNS, CheckpointWriteNS                                             int64
+	CheckpointID                                                                       string
+	WorstObservedTickNS, MeasurementOverrunNS                                          int64
+	Churn                                                                              churnEvidence
 	TotalAllocBytes, Mallocs                                                           uint64
 	PeakHeapBytes, PeakRSSBytes                                                        uint64
 	StartMemory, EndMemory, AfterCloseGC                                               runtime.MemStats
@@ -128,7 +138,7 @@ func run(o options) (runErr error) {
 			runErr = e
 		}
 	}()
-	manifest := map[string]any{"version": 1, "startedUTC": time.Now().UTC(), "options": o, "workload": c, "goVersion": runtime.Version(), "goos": runtime.GOOS, "goarch": runtime.GOARCH, "cpus": runtime.NumCPU(), "gomaxprocs": runtime.GOMAXPROCS(0), "precision": "float32 physics/actor state; navigation existing double API only at boundary", "clock": "golem.NavigationNow; same-domain Sub", "tickRate": 20, "substeps": 4, "qualified": false, "scope": "synthetic combined load; existing navigation and representative-content gates remain required", "measurement": "full tick from first OnTickStart to first OnTickEnd; sample output excluded, start-to-start cadence includes observer cost", "geometry": "unique physical triangles; coarser analytically identical navigation plane; static field excluded from navigation", "queryMix": "25% ray, 25% sphere overlap, 25% box sweep, 25% capsule sweep, plus separate projectile sweeps", "sleep": "all requested dynamic and driven bodies explicitly disable sleep", "nativeExecution": "GOOS/GOARCH identify executable target; runner must attest native host, not emulation"}
+	manifest := map[string]any{"version": 1, "startedUTC": time.Now().UTC(), "options": o, "workload": c, "goVersion": runtime.Version(), "goos": runtime.GOOS, "goarch": runtime.GOARCH, "cpus": runtime.NumCPU(), "gomaxprocs": runtime.GOMAXPROCS(0), "precision": "float32 physics/actor state; navigation existing double API only at boundary", "clock": "golem.NavigationNow; same-domain Sub", "tickRate": 20, "substeps": 4, "qualified": false, "scope": "synthetic combined load; existing navigation and representative-content gates remain required", "measurement": "full tick from first OnTickStart to first OnTickEnd; retain every frame starting in the requested measurement window, including its complete overrun; sample output excluded, start-to-start cadence includes observer cost", "geometry": "unique physical triangles; coarser analytically identical navigation plane; static field excluded from navigation", "queryMix": "25% ray, 25% sphere overlap, 25% box sweep, 25% capsule sweep, plus separate projectile sweeps", "sleep": "all requested dynamic and driven bodies explicitly disable sleep", "nativeExecution": "GOOS/GOARCH identify executable target; runner must attest native host, not emulation"}
 	if info, ok := debug.ReadBuildInfo(); ok {
 		manifest["buildInfo"] = info
 	}
@@ -150,6 +160,12 @@ func run(o options) (runErr error) {
 	s, err := makeScene(o, c, func(m golem.NavigationTickMetrics) { nav = m })
 	if err != nil {
 		return err
+	}
+	if o.Resume != "" {
+		if err = s.resumeCheckpoint(o); err != nil {
+			_ = s.world.Close()
+			return fmt.Errorf("restart: %w", err)
+		}
 	}
 	if o.Profiles {
 		file, e := os.Create(filepath.Join(o.Out, "cpu.pprof"))
@@ -181,6 +197,8 @@ func run(o options) (runErr error) {
 	var cadence time.Duration
 	serverStart := golem.NavigationNow()
 	var loopErr error
+	var captured *golem.PhysicsCheckpoint
+	finished := false
 	measuring := false
 	tickMeasured := false
 	var queryCount, projectileCount, projectileHits int
@@ -214,6 +232,18 @@ func run(o options) (runErr error) {
 		if loopErr != nil {
 			return
 		}
+		if err := s.pollChurn(o.Out); err != nil {
+			loopErr = err
+			cancel()
+			return
+		}
+		if o.ChurnTicks > 0 && tickMeasured && s.server.Tick()%o.ChurnTicks == 0 && s.churn.PendingGeneration == 0 {
+			if err := s.beginChurn(o); err != nil {
+				loopErr = err
+				cancel()
+				return
+			}
+		}
 		for _, a := range s.actors {
 			state, ok := s.server.NavigationAgentState(a.ID)
 			if !ok {
@@ -245,9 +275,16 @@ func run(o options) (runErr error) {
 		}
 	})
 	s.server.OnTickEnd(func(tick uint64, wall time.Duration) {
+		if finished {
+			return
+		}
 		now := golem.NavigationNow()
 		full := now.Sub(tickStart)
-		complete := tickMeasured && now.Sub(measureStart) <= o.Duration
+		// Admit by start time, then retain the entire final frame even if it is
+		// slow enough to cross the requested duration. Censoring that frame would
+		// hide precisely the tail latency this workload is intended to expose.
+		complete := tickMeasured
+		r.WorstObservedTickNS = max(r.WorstObservedTickNS, int64(full))
 		v := sample{Tick: tick, Measured: tickMeasured, FullTickNS: int64(full), ServerWallNS: int64(wall), CadenceNS: int64(cadence), PhysicsNS: int64(physics.Duration), SolveNS: int64(physics.Solve), NavigationNS: int64(nav.Prepare + nav.Movement + nav.Reconcile), Scheduled: nav.AgentsScheduled, Projectiles: projectileCount, Queries: queryCount, Accepted: physics.Accepted, Simulated: physics.Elapsed, Substeps: physics.Substeps, Bodies: physics.World.Bodies, Colliders: physics.World.Colliders, Shapes: physics.World.Shapes}
 		v.Intervals, v.Microsteps, v.MotionPairTests = physics.Intervals, physics.Microsteps, physics.MotionPairTests
 		v.MotionPathRefinements = physics.MotionPathRefinements
@@ -281,7 +318,6 @@ func run(o options) (runErr error) {
 			v.Error = physics.Err.Error()
 		}
 		r.Samples++
-		// Exclude the crossing tick; duration/cadence gates must share a complete window.
 		if complete {
 			r.GameplayQueries += uint64(queryCount)
 			r.ProjectileSweeps += uint64(projectileCount)
@@ -321,18 +357,51 @@ func run(o options) (runErr error) {
 			cancel()
 		}
 		if measuring && now.Sub(measureStart) >= o.Duration {
-			r.MeasurementWallNS = int64(now.Sub(measureStart))
-			runtime.ReadMemStats(&r.EndMemory)
+			if r.MeasurementWallNS == 0 {
+				r.MeasurementWallNS = int64(now.Sub(measureStart))
+				r.MeasurementOverrunNS = max(0, r.MeasurementWallNS-int64(o.Duration))
+				runtime.ReadMemStats(&r.EndMemory)
+			}
+			if s.churn.PendingGeneration != 0 {
+				if now.Sub(measureStart)-time.Duration(r.MeasurementWallNS) < time.Minute {
+					return
+				}
+				loopErr = errors.New("geometry did not drain within one minute")
+				finished = true
+				cancel()
+				return
+			}
+			if o.Checkpoint {
+				captureStart := golem.NavigationNow()
+				checkpoint, captureErr := s.captureCheckpoint(o)
+				if captureErr != nil {
+					loopErr = fmt.Errorf("checkpoint: %w", captureErr)
+				} else {
+					captured = &checkpoint
+				}
+				r.CheckpointCaptureNS = int64(golem.NavigationNow().Sub(captureStart))
+			}
+			finished = true
 			cancel()
 		}
 	})
 	r.StartupNS = int64(golem.NavigationNow().Sub(started))
 	err = s.server.Run(ctx)
+	r.Churn = s.churn
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
 	if loopErr != nil {
 		return loopErr
+	}
+	if captured != nil {
+		writeStart := golem.NavigationNow()
+		if err = golem.SavePhysicsCheckpoint(filepath.Join(o.Out, "checkpoint"), *captured); err != nil {
+			return err
+		}
+		r.CheckpointWriteNS = int64(golem.NavigationNow().Sub(writeStart))
+		r.CheckpointID = captured.CheckpointID
+		captured = nil
 	}
 	runtime.GC()
 	r.StartupRouteAdmission = s.admissionLatency
@@ -360,7 +429,11 @@ func run(o options) (runErr error) {
 	r.Gates["awake-dynamic-count"] = r.MeasuredSamples > 0 && r.MinAwakeDynamic == c.DynamicBodies
 	r.Gates["query-projectile-counts"] = r.MeasuredSamples > 0 && r.MinQueries == c.Queries && r.MinProjectiles == c.Projectiles
 	r.Gates["full-tick-p99-below-50ms"] = r.MeasuredSamples > 0 && r.FullTick.percentile(.99) < 50*time.Millisecond
-	r.Gates["two-hour-soak"] = o.Duration >= 2*time.Hour && time.Duration(r.MeasurementWallNS) >= 2*time.Hour
+	r.Gates["two-hour-duration"] = o.Duration >= 2*time.Hour && time.Duration(r.MeasurementWallNS) >= 2*time.Hour
+	// Wall time alone does not establish churn, process restart or continuity.
+	r.Gates["two-hour-churn-restart-soak"] = false
+	r.Gates["checkpoint-written"] = r.CheckpointID != ""
+	r.Gates["checkpoint-restored"] = o.Resume != ""
 	r.Gates["accepted-frames"] = r.MeasuredSamples > 0 && r.RejectedFrames == 0
 	if r.MeasuredSamples == 0 {
 		return errors.New("no complete measured tick")

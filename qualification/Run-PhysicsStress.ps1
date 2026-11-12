@@ -13,6 +13,9 @@ param(
     [switch]$SIMD,
     [switch]$Profiles,
     [switch]$DebugCapture,
+    [switch]$Checkpoint,
+    [string]$Resume = '',
+    [uint64]$ChurnTicks = 0,
     [switch]$CommittedSources,
     [switch]$BuildOnly
 )
@@ -104,6 +107,9 @@ try {
         $arguments = @('-mode',$Mode,'-extent',"$Extent",'-duration',$Duration,'-warmup',$Warmup,'-physics-workers',"$PhysicsWorkers",'-query-workers',"$QueryWorkers",'-source-manifest',$sourceManifest,'-out',(Join-Path $runPath 'workload'))
         if ($Profiles) { $arguments += '-profiles' }
         if ($DebugCapture) { $arguments += '-debug-capture' }
+        if ($Checkpoint) { $arguments += '-checkpoint' }
+        if ($Resume) { $arguments += @('-resume', [IO.Path]::GetFullPath($Resume)) }
+        if ($ChurnTicks) { $arguments += @('-churn-ticks', "$ChurnTicks") }
         $record.arguments = $arguments
         & $executable @arguments 2>&1 | Out-File -LiteralPath (Join-Path $runPath 'workload.log') -Encoding utf8
         $record.exitCode = $LASTEXITCODE

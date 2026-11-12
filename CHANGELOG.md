@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Physics qualification can exercise repeated coordinated geometry activation/replacement/unloading and save complete paired checkpoints for fresh-process recovery, including projectile and route-direction state. Latency results retain the complete final frame when it exceeds the requested measurement duration; elapsed time alone does not qualify a churn/restart soak.
+
 - Live physics bodies can atomically switch movement mode and controller configuration with explicit velocity retention or clearing, preserving body/collider/joint handles and entity attachment. Server policy changes invalidate old trajectory tokens; callback requests can be queued for the next tick. Accepted contact continuity uses actual geometry and swept intervals without synthetic forces.
 
 - Precise sphere sweeps solve terrain triangle features directly, preventing numerical stalls on long casts. Exact captured float32 geometry is checked against an independent analytic reference; production normals remain geometric when Unity's rounded world witnesses differ.
@@ -92,6 +94,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 - Navigation qualification's `Suite` and `Full` launchers now run the three mixed scene families at 1,000 agents only; `Full` retains the two-hour 1,000-agent soak. Existing diagnostic agent-count controls remain available.
 
 ### Fixed
+
+- Continuous contact recovery no longer shrinks solver time toward zero near its penetration bound. An exact falling-body grid regression covers the previous multi-second tick; predicted motion remains bounded and actual path/penetration checks remain unchanged.
 
 - Geometric sphere/capsule queries preserve exact touching on flat triangle faces, avoiding spurious rejection by zero-penetration spawn admission. Touching pair results retain their feature identity and witnesses. The correction keeps float32 geometry and does not relax penetration thresholds.
 

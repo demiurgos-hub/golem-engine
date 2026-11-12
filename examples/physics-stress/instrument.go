@@ -15,6 +15,25 @@ type observedWorld struct {
 	out            string
 	debugCapture   bool
 	sourceSnapshot string
+	restoredBodies *map[p.ContentID]p.BodyState
+}
+
+// PrepareRestore records private stable-ID bindings for the host's restart probe.
+// The host consumes them only after the complete paired restore succeeds.
+func (w observedWorld) PrepareRestore(checkpoint p.Checkpoint) (p.PreparedRestore, error) {
+	prepared, err := w.World.PrepareRestore(checkpoint)
+	if err != nil || w.restoredBodies == nil {
+		return prepared, err
+	}
+	bodies := make(map[p.ContentID]p.BodyState, len(checkpoint.Bodies))
+	for _, record := range checkpoint.Bodies {
+		id := record.Description.ID
+		if state, ok := prepared.Body(id); ok {
+			bodies[id] = state
+		}
+	}
+	*w.restoredBodies = bodies
+	return prepared, nil
 }
 
 var (

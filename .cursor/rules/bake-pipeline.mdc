@@ -17,6 +17,10 @@ alwaysApply: false
 
 # `bake` pipeline
 
+The physics stress consumer owns its synthetic door-change recipe and host checkpoint payload (route direction and projectile generations). It uses public coordinated geometry and paired recovery APIs; these qualification fixtures do not become game-world assembly policy. Preserve complete terminal measurement frames, even those crossing the requested duration. Checkpoint manifests remain the runtime's existing manifest-last format and are saved only after a coherent tick-side capture.
+
+`qualification/physics/filter_prefab.py` is a copied-fixture boundary, never a production exporter fallback. An authorized server-content exclusion must pin the original asset hash, source GUID and exact nested instance/transform IDs, preserve unrelated bytes and variant removals, and reject remaining references to excluded objects. Emit original/filtered hashes and scope evidence under the validation workspace. The production missing-prefab guard stays unchanged; visual-sounding names do not authorize omission.
+
 Physics debug captures are a separate bounded visualization format, not authoring exports or backend cooking images. The optional `physics-debug` sample CLI and Unity Scene-view reader do not run `golem-bake`, alter Scribe manifests, or publish scene state.
 
 Offline sphere-witness analysis consumes frozen geometry/query fixtures and optional captured observations. Its independent analytic roots use higher precision solely as a qualification reference for authored float32 inputs. Preserve raw Unity comparisons and numerical conventions separately; generated reports belong in the physics validation workspace and are not portable source or cooked artifacts.
