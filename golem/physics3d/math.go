@@ -101,6 +101,25 @@ func (p Pose) Inverse() Pose {
 	q := p.Rotation.Conjugate()
 	return Pose{q.Rotate(p.Position.Mul(-1)), q}
 }
+
+// AnchorMotionBounds conservatively bounds a body-local anchor through linear
+// origin movement and shortest-arc rotation, including the curved path between
+// endpoints. The rotational sagitta keeps small admitted intervals tight.
+func AnchorMotionBounds(from, to Pose, local Vec3) (Vec3, Vec3) {
+	a, z := from.Transform(local), to.Transform(local)
+	dot := abs(from.Rotation.X*to.Rotation.X + from.Rotation.Y*to.Rotation.Y + from.Rotation.Z*to.Rotation.Z + from.Rotation.W*to.Rotation.W)
+	if from.Rotation == to.Rotation {
+		dot = 1
+	} else {
+		a, z := from.Rotation, to.Rotation
+		n := float32(math.Sqrt(float64((a.X*a.X + a.Y*a.Y + a.Z*a.Z + a.W*a.W) * (z.X*z.X + z.Y*z.Y + z.Z*z.Z + z.W*z.W))))
+		if n > 0 {
+			dot /= n
+		}
+	}
+	pad := local.Length() * (1 - min(float32(1), dot))
+	return Vec3{X: min(a.X, z.X) - pad, Y: min(a.Y, z.Y) - pad, Z: min(a.Z, z.Z) - pad}, Vec3{X: max(a.X, z.X) + pad, Y: max(a.Y, z.Y) + pad, Z: max(a.Z, z.Z) + pad}
+}
 func abs(v float32) float32 {
 	if v < 0 {
 		return -v

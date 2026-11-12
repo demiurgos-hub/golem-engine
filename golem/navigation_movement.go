@@ -13,7 +13,7 @@ func (n *navigationService) advanceAgent(a *navigationAgent, dt float64) {
 		n.failAgent(a, surface.InvalidInput, errors.New("golem: invalid navigation entity position"))
 		return
 	}
-	if !a.state.HasDestination {
+	if !a.state.HasDestination && !a.config.StagedPhysics {
 		return
 	}
 	safety := n.agentSafety(a)
@@ -74,6 +74,9 @@ func (n *navigationService) advanceAgent(a *navigationAgent, dt float64) {
 				a.needsPath = a.state.HasDestination
 			}
 		}
+	}
+	if !a.state.HasDestination {
+		return
 	}
 	if a.admissionPending && !a.quarantined {
 		if navDistance(position, a.lastPosition) > .01 {

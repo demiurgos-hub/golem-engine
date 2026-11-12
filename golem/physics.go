@@ -83,21 +83,23 @@ type physicsAttachment struct {
 }
 
 type physicsService struct {
-	server             *Server
-	world              p.World
-	agents             map[int64]*physicsAttachment
-	bodies             map[p.BodyHandle]int64
-	commands           []queuedPhysicsCommand
-	dispatching        bool
-	stepping           bool
-	closed             bool
-	restoring          bool
-	fault              error
-	onContact          PhysicsContactFunc
-	observe            func(PhysicsFrameMetrics)
-	geometry           map[string]*content.Instance
-	geometryIdentities map[string]PhysicsGeometryIdentity
-	geometryPending    map[string]PhysicsGeometryPending
+	server               *Server
+	world                p.World
+	agents               map[int64]*physicsAttachment
+	bodies               map[p.BodyHandle]int64
+	commands             []queuedPhysicsCommand
+	dispatching          bool
+	stepping             bool
+	closed               bool
+	restoring            bool
+	fault                error
+	onContact            PhysicsContactFunc
+	observe              func(PhysicsFrameMetrics)
+	geometry             map[string]*content.Instance
+	geometryIdentities   map[string]PhysicsGeometryIdentity
+	geometryPending      map[string]PhysicsGeometryPending
+	trajectories         map[int64]*physicsTrajectory
+	trajectoryGeneration uint64
 }
 
 // SetPhysicsWorld installs a tick-owned physics world before Run. The server
@@ -252,6 +254,7 @@ func (ps *physicsService) detach(id int64, reason p.CleanupReason) error {
 	}
 	delete(ps.agents, id)
 	delete(ps.bodies, a.body)
+	delete(ps.trajectories, id)
 	ps.server.DetachNavigation(id)
 	return nil
 }
@@ -280,7 +283,14 @@ func (s *Server) SetPhysicsControllerVelocity(id int64, velocity p.Vec3) error {
 	if !ok {
 		return p.ErrUnsupported
 	}
-	return writer.SetCharacterVelocity(a.body, velocity)
+	if ps.trajectories[id].active() {
+		return fmt.Errorf("%w: timed trajectory owns controller movement", p.ErrBusy)
+	}
+	if err := writer.SetCharacterVelocity(a.body, velocity); err != nil {
+		return err
+	}
+	delete(ps.trajectories, id)
+	return nil
 }
 
 // TeleportPhysics sets the gameplay anchor, preserving the body-local anchor
@@ -293,8 +303,9 @@ func (s *Server) TeleportPhysics(id int64, anchor p.Pose) error {
 }
 
 // TeleportPhysicsWithPolicy is TeleportPhysics with explicit geometric penetration
-// tolerance. It also admits externally controlled poses for ExternalPose bodies;
-// rejected placement changes neither body/entity poses nor navigation metadata.
+// tolerance. This explicit teleport checks final placement, cancels active timed
+// intent, and does not sweep intervening space. ExternalPose movement should use
+// StartPhysicsTrajectory. Rejection changes neither body/entity poses nor intent.
 func (s *Server) TeleportPhysicsWithPolicy(id int64, anchor p.Pose, policy PhysicsPlacementPolicy) error {
 	ps := s.physics
 	if err := ps.mutable(); err != nil {
@@ -327,6 +338,9 @@ func (s *Server) TeleportPhysicsWithPolicy(id int64, anchor p.Pose, policy Physi
 		return ps.fault
 	}
 	ps.write(a, state, true)
+	if action := ps.trajectories[id]; action.active() {
+		action.state.Status, action.state.Reason = PhysicsTrajectoryCancelled, "teleported"
+	}
 	return nil
 }
 
@@ -461,6 +475,7 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 	frame := p.Frame{ID: s.tick, Delta: float32(dt)}
 	submitted := make(map[p.BodyHandle]bool)
 	proposals := make(map[int64]NavigationMotionProposal)
+	trajectoryPlans := make(map[int64]*physicsTrajectoryFrame)
 	for _, proposal := range f.Proposals() {
 		proposals[proposal.EntityID] = proposal
 	}
@@ -475,14 +490,13 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 		if !exists || entity != a.entity || !validPhysicsState(state) || state.Anchor.Position != (p.Vec3{X: x, Y: y, Z: z}) {
 			return fmt.Errorf("golem: physics entity %d was changed outside its pose authority", id)
 		}
-		if !f.Contains(id) {
-			continue
-		}
-		if !physicsNavigationMode(state.Mode) {
+		if f.Contains(id) && !physicsNavigationMode(state.Mode) {
 			return fmt.Errorf("golem: body mode cannot participate in staged navigation for entity %d", id)
 		}
-		motion := p.Motion{Body: a.body, MaxDriveForce: a.config.MaxDriveForce, Frozen: f.Frozen(id)}
-		motion.Validate = func(from, to p.Vec3) bool { return f.SafeSegment(id, physicsNavPoint(from), physicsNavPoint(to)) }
+		motion := p.Motion{Body: a.body, MaxDriveForce: a.config.MaxDriveForce, Frozen: f.Contains(id) && f.Frozen(id)}
+		if f.Contains(id) {
+			motion.Validate = func(from, to p.Vec3) bool { return f.SafeSegment(id, physicsNavPoint(from), physicsNavPoint(to)) }
+		}
 		if proposal, ok := proposals[id]; ok {
 			if state.Mode == p.FreeDynamic {
 				return fmt.Errorf("golem: free dynamic body %d cannot consume navigation drive intent", id)
@@ -491,6 +505,16 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 				motion.Segments = append(motion.Segments, p.MotionSegment{From: physicsPoint(segment.From), Target: physicsPoint(segment.Target),
 					SurfaceNormal: physicsPoint(segment.SurfaceNormal), Delta: float32(segment.Delta), Projection: segment.Projection})
 			}
+		}
+		trajectoryMotion, plan, err := ps.prepareTrajectory(id, state, f, frame.Delta)
+		if err != nil {
+			return err
+		}
+		if plan != nil {
+			motion = trajectoryMotion
+			trajectoryPlans[id] = plan
+		} else if !f.Contains(id) && state.Mode != p.ExternalPose && (state.Mode != p.ScriptedAction || ps.trajectories[id] == nil) {
+			continue
 		}
 		frame.Motions = append(frame.Motions, motion)
 		submitted[a.body] = true
@@ -525,6 +549,7 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 		states[state.Handle] = state
 	}
 	paths := make(map[p.BodyHandle][]surface.Vec3, len(result.Paths))
+	physicalPaths := make(map[p.BodyHandle]p.BodyPath, len(result.Paths))
 	for _, path := range result.Paths {
 		if _, duplicate := paths[path.Body]; duplicate {
 			return reject(errors.New("golem: duplicate physics body path"))
@@ -534,6 +559,7 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 			points[i] = physicsNavPoint(point)
 		}
 		paths[path.Body] = points
+		physicalPaths[path.Body] = path
 	}
 	rejectedMotions := make(map[p.BodyHandle]string, len(result.RejectedMotions))
 	for _, motion := range result.RejectedMotions {
@@ -562,10 +588,14 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 	if err != nil {
 		return reject(err)
 	}
+	if err := ps.validateTrajectoryResults(trajectoryPlans, states, paths, physicalPaths); err != nil {
+		return reject(err)
+	}
 	if err := ps.world.Accept(result.ID); err != nil {
 		return reject(err)
 	}
 	metrics.Accepted, metrics.Elapsed, metrics.Substeps = true, result.Elapsed, result.Substeps
+	ps.acceptTrajectoryResults(trajectoryPlans, states, rejectedMotions)
 	// There are no gameplay callbacks between result validation, world acceptance
 	// and data-only binding writes. All entities are visible before reconciliation.
 	for _, id := range ids {
@@ -613,6 +643,7 @@ func (ps *physicsService) stop() {
 	}
 	ps.closed = true
 	ps.commands = nil
+	ps.trajectories = nil
 	ps.geometry, ps.geometryIdentities, ps.geometryPending = nil, nil, nil
 	if world, ok := ps.world.(p.ShutdownWorld); ok {
 		events, err := world.CloseWithEvents()
@@ -638,6 +669,9 @@ func physicsNavigationMode(mode p.MotionMode) bool {
 func (s *Server) validatePhysicsNavigation(id int64, drive bool) error {
 	if s.physics == nil || s.physics.agents[id] == nil {
 		return nil
+	}
+	if drive && s.physics.trajectories[id].active() {
+		return fmt.Errorf("%w: scripted trajectory owns body movement", p.ErrBusy)
 	}
 	state, err := s.PhysicsBody(id)
 	if err != nil {

@@ -216,10 +216,14 @@ type Motion struct {
 	SurfaceNormal Vec3
 	MaxDriveForce float32
 	Segments      []MotionSegment
+	PoseSegments  []PoseMotionSegment
 	Frozen        bool // captured quarantine: immovable constraint; momentum is discarded
 	// Validate is a captured, immutable safety predicate for every swept segment.
 	// It must not mutate the world or call gameplay callbacks.
 	Validate func(from, to Vec3) bool
+	// ValidateBounds additionally protects curved anchor paths between retained
+	// rotation samples. It has the same immutable, callback-free requirements.
+	ValidateBounds func(min, max Vec3) bool
 }
 
 // MotionSegment is retained intent, not an independent physics time step.
@@ -228,6 +232,20 @@ type MotionSegment struct {
 	From, Target, SurfaceNormal Vec3
 	Delta                       float32
 	Projection                  bool
+}
+
+// PoseMotionSegment is a timed body-origin trajectory, including shortest-arc
+// rotation. It cannot be mixed with navigation MotionSegments in one Motion.
+type PoseMotionSegment struct {
+	From, Target Pose
+	Delta        float32
+}
+
+// PoseMotionWorld identifies backends that admit complete rotating trajectories.
+// A backend without this capability must not silently consume positions alone.
+type PoseMotionWorld interface {
+	SupportsPoseMotion() bool
+	ValidatePoseMotion(BodyHandle, []PoseMotionSegment) error
 }
 type Frame struct {
 	ID      uint64

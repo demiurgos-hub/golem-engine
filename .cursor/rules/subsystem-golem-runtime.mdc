@@ -1,5 +1,5 @@
 ---
-description: golem runtime — tick loop, physics attachments, staged navigation, paired recovery and geometry publication, replication, lifecycle, networking and generated-code re-exports.
+description: golem runtime — tick loop, physics attachments and timed trajectory ownership, staged navigation, paired recovery and geometry publication, replication, lifecycle, networking and generated-code re-exports.
 globs: golem/*.go
 alwaysApply: false
 ---

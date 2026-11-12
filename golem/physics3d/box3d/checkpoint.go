@@ -25,7 +25,13 @@ func (w *World) CaptureCheckpoint(id, fingerprint string) (p.Checkpoint, error) 
 		d := body.desc
 		s := body.committed
 		d.Pose, d.LinearVelocity, d.AngularVelocity, d.Enabled, d.Awake = s.Pose, s.LinearVelocity, s.AngularVelocity, s.Enabled, s.Awake
+		if d.Mode == p.ExternalPose {
+			d.LinearVelocity, d.AngularVelocity = p.Vec3{}, p.Vec3{}
+		}
 		record := p.CheckpointBody{Description: d, Torque: body.torque, ControllerFallSpeed: body.fallSpeed}
+		if d.Mode == p.ExternalPose {
+			record.ExternalVelocity, record.ExternalAngularVelocity = s.LinearVelocity, s.AngularVelocity
+		}
 		for _, force := range body.forces {
 			record.Forces = append(record.Forces, p.CheckpointForce{Force: force.force, Point: force.point})
 		}
@@ -140,6 +146,19 @@ func (w *World) PrepareRestore(c p.Checkpoint) (result p.PreparedRestore, err er
 	if err = next.Synchronize(); err != nil {
 		return nil, err
 	}
+	for h, body := range next.bodies {
+		if body.desc.Controller.Enabled {
+			if _, err = next.controllerGeometry(h); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, record := range c.Bodies {
+		if record.Description.Mode == p.ExternalPose {
+			body := next.bodies[prepared.bodies[record.Description.ID]]
+			body.committed.LinearVelocity, body.committed.AngularVelocity = record.ExternalVelocity, record.ExternalAngularVelocity
+		}
+	}
 	next.revision, next.lastFrame, next.restoring = c.Revision, c.LastFrame, true
 	return prepared, nil
 }
@@ -155,6 +174,19 @@ func (r *preparedRestore) Body(id p.ContentID) (p.BodyState, bool) {
 	}
 	state, err := r.candidate.Body(h)
 	return state, err == nil
+}
+
+// SupportsPoseMotion reports the private replacement's trajectory capability.
+func (r *preparedRestore) SupportsPoseMotion() bool {
+	return !r.closed && r.candidate.SupportsPoseMotion()
+}
+
+// ValidatePoseMotion validates intent against unpublished replacement geometry.
+func (r *preparedRestore) ValidatePoseMotion(h p.BodyHandle, segments []p.PoseMotionSegment) error {
+	if r.closed {
+		return p.ErrStale
+	}
+	return r.candidate.ValidatePoseMotion(h, segments)
 }
 
 // FindBody resolves a body in the private replacement.

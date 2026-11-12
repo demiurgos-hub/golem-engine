@@ -30,6 +30,34 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 			return
 		}
 		from := w.bodyState(m.Body, v).Anchor.Position
+		if len(m.PoseSegments) > 0 {
+			if !w.config.Continuous || len(m.Segments) > 0 || len(m.PoseSegments) > 4096 || (v.desc.Mode != p.ScriptedAction && v.desc.Mode != p.ExternalPose) {
+				err = p.ErrUnsupported
+				return
+			}
+			pose := w.bodyState(m.Body, v).Pose
+			var duration float32
+			for _, segment := range m.PoseSegments {
+				if !segment.From.Valid() || !segment.Target.Valid() || !p.Finite(segment.Delta) || segment.Delta <= 0 || segment.From.Position.Sub(pose.Position).Length() > 1e-5 || segment.From.Rotation != pose.Rotation || !w.bodyInBounds(v, segment.Target) {
+					err = p.ErrInvalid
+					return
+				}
+				if v.desc.Controller.Enabled && segment.Target.Rotation != segment.From.Rotation {
+					err = p.ErrUnsupported
+					return
+				}
+				if m.Validate != nil && !m.Validate(segment.From.Compose(v.desc.Anchor).Position, segment.Target.Compose(v.desc.Anchor).Position) {
+					err = p.ErrInvalid
+					return
+				}
+				duration += segment.Delta
+				pose = segment.Target
+			}
+			if duration > f.Delta+1e-6 {
+				err = p.ErrInvalid
+				return
+			}
+		}
 		elapsed := float32(0)
 		for index, segment := range m.Segments {
 			if !segment.From.InBounds() || !segment.Target.InBounds() || !segment.SurfaceNormal.Valid() || !p.Finite(segment.Delta) || segment.Delta < 0 || segment.Projection && segment.Delta != 0 || !segment.Projection && segment.Delta == 0 || segment.From.Sub(from).Length() > 0.00001 {
@@ -59,6 +87,13 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 	}
 	if err = w.Synchronize(); err != nil {
 		return
+	}
+	for _, motion := range motions {
+		if len(motion.PoseSegments) > 0 {
+			if err = w.ValidatePoseMotion(motion.Body, motion.PoseSegments); err != nil {
+				return
+			}
+		}
 	}
 	for key := range w.activeBodies {
 		if w.bodies[key].desc.Controller.Enabled {
@@ -99,6 +134,10 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 	}
 	for key := range w.activeBodies {
 		v := w.bodies[key]
+		if v.desc.Mode == p.ExternalPose {
+			v.id.SetLinearVelocity(b.Vec3{})
+			v.id.SetAngularVelocity(b.Vec3{})
+		}
 		if frozen[key] {
 			if !v.frozen {
 				v.id.SetType(b.KinematicBody)

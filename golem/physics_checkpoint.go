@@ -44,6 +44,7 @@ type PhysicsCheckpoint struct {
 	Navigation                      *NavigationCheckpoint
 	NavigationAgents                []PhysicsNavigationCheckpoint
 	Geometry                        []PhysicsGeometryCheckpoint
+	Trajectories                    []PhysicsTrajectoryCheckpoint
 }
 
 // PhysicsGeometryCheckpoint records one source lease's ownership after recovery.
@@ -148,6 +149,7 @@ func (s *Server) CapturePhysicsCheckpoint(options PhysicsCheckpointOptions) (Phy
 		}
 		c.Attachments = append(c.Attachments, PhysicsAttachmentCheckpoint{EntityID: id, BodyID: state.ID, Config: a.config})
 	}
+	c.Trajectories = ps.captureTrajectories()
 	if n := s.navigation; n != nil {
 		navigation, e := s.CaptureNavigationCheckpoint(options.ID, options.NavigationFingerprint, options.DesiredNavigationRevision, options.DesiredNavigationWorld)
 		if e != nil {
@@ -246,6 +248,12 @@ func (c PhysicsCheckpoint) Validate() error {
 			return p.ErrInvalid
 		}
 		bindings[a.EntityID], boundBodies[a.BodyID] = true, true
+	}
+	if err := validateTrajectoryCheckpoints(c.Trajectories, c.Attachments, bodyIDs, c.Navigation != nil); err != nil {
+		return err
+	}
+	if len(c.Trajectories) > 0 && !c.Physics.Config.Continuous {
+		return p.ErrUnsupported
 	}
 	for _, a := range c.NavigationAgents {
 		if !entities[a.EntityID] || a.Profile == "" || len(a.Profile) > 256 || navAgents[a.EntityID].EntityID != 0 || bindings[a.EntityID] && !a.StagedPhysics {
@@ -493,6 +501,10 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 		agents[a.id], bodyOwners[a.body] = a, a.id
 	}
 	configs := map[int64]NavigationAgentConfig{}
+	trajectories, trajectoryGeneration, err := ps.restoreTrajectoryCandidates(c.Trajectories, agents, c.Attachments, prepared)
+	if err != nil {
+		return err
+	}
 	for _, saved := range c.NavigationAgents {
 		cfg, e := options.NavigationConfig(saved)
 		if e != nil {
@@ -577,6 +589,7 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 		return err
 	}
 	ps.agents, ps.bodies = agents, bodyOwners
+	ps.trajectories, ps.trajectoryGeneration = trajectories, trajectoryGeneration
 	ps.geometry = geometry
 	ps.geometryIdentities, ps.geometryPending = geometryIdentities, nil
 	s.tick = max(s.tick, c.Tick, c.Physics.LastFrame)

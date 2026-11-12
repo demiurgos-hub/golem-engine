@@ -16,8 +16,8 @@ import (
 
 type physicsCheckpointTestWorld struct {
 	*physicsTestWorld
-	prepareErr, commitErr error
-	discards              int
+	prepareErr, commitErr, trajectoryErr error
+	discards                             int
 }
 
 func (w *physicsCheckpointTestWorld) CaptureCheckpoint(id, fingerprint string) (p.Checkpoint, error) {
@@ -51,6 +51,11 @@ type physicsCheckpointTestRestore struct {
 	states map[p.BodyHandle]p.BodyState
 	ids    map[p.ContentID]p.BodyHandle
 	closed bool
+}
+
+func (*physicsCheckpointTestRestore) SupportsPoseMotion() bool { return true }
+func (r *physicsCheckpointTestRestore) ValidatePoseMotion(p.BodyHandle, []p.PoseMotionSegment) error {
+	return r.world.trajectoryErr
 }
 
 func (r *physicsCheckpointTestRestore) Body(id p.ContentID) (p.BodyState, bool) {

@@ -35,6 +35,9 @@ type CheckpointBody struct {
 	Forces              []CheckpointForce
 	Torque              Vec3
 	ControllerFallSpeed float32
+	// External velocities describe the last accepted timed path, not autonomous
+	// motion after restoration. A new timed proposal is required to move again.
+	ExternalVelocity, ExternalAngularVelocity Vec3
 }
 
 // CheckpointCollider replaces body/shape handles with stable content references.
@@ -164,6 +167,9 @@ func (c Checkpoint) Validate() error {
 	}
 	forces := 0
 	for _, body := range c.Bodies {
+		if !body.ExternalVelocity.Valid() || !body.ExternalAngularVelocity.Valid() || body.Description.Mode != ExternalPose && (body.ExternalVelocity != (Vec3{}) || body.ExternalAngularVelocity != (Vec3{})) {
+			return ErrInvalid
+		}
 		if !claim(bodies, body.Description.ID) || body.Description.Validate() != nil || !body.Torque.Valid() || !Finite(body.ControllerFallSpeed) {
 			return fmt.Errorf("%w: checkpoint body", ErrInvalid)
 		}

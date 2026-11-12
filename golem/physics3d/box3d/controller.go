@@ -130,9 +130,11 @@ func predictSupportPose(v *body, dt float32) p.Pose {
 }
 
 type kinematicPath struct {
-	body   p.BodyHandle
-	points []p.Vec3
-	ends   []float32
+	body           p.BodyHandle
+	points         []p.Vec3
+	ends           []float32
+	angular        p.Vec3
+	poseTrajectory bool
 }
 
 func timedKinematicPath(h p.BodyHandle, points []p.Vec3, dt float32) kinematicPath {
@@ -173,6 +175,13 @@ func nextMotionBoundary(motions []p.Motion, at, end float32) float32 {
 	for _, m := range motions {
 		elapsed := float32(0)
 		for _, segment := range m.Segments {
+			elapsed += segment.Delta
+			if elapsed > at && elapsed < end {
+				end = elapsed
+			}
+		}
+		elapsed = 0
+		for _, segment := range m.PoseSegments {
 			elapsed += segment.Delta
 			if elapsed > at && elapsed < end {
 				end = elapsed
@@ -284,75 +293,89 @@ func (w *World) controllerPath(h p.BodyHandle, velocity p.Vec3, dt float32) (kin
 // Kinematic pairs have no finite-mass solver response. Admit their relative
 // trajectories before integration, including a wall moving into an idle rider.
 // Blocking stops the participants and their carried passengers coherently.
-func (w *World) constrainControllerPairs(keys []p.BodyHandle, dt float32) error {
+func (w *World) constrainControllerPairs(keys []p.BodyHandle, dt float32, poseBodies map[p.BodyHandle]bool) error {
 	for pass := 0; pass < 8; pass++ {
 		changed := false
 		for _, key := range keys {
 			v := w.bodies[key]
-			if v.frozen || !v.desc.Controller.Enabled || v.desc.Mode == p.DrivenCharacter {
+			if v.frozen || (!v.desc.Controller.Enabled && !poseBodies[key]) || v.desc.Mode == p.DrivenCharacter {
 				continue
 			}
-			g, err := w.controllerGeometry(key)
-			if err != nil {
-				return err
-			}
-			filter := g.filter
-			var targets []ColliderMotion
-			for _, other := range keys {
-				if other == key {
-					continue
+			var geometries []controllerGeometry
+			if v.desc.Controller.Enabled {
+				g, err := w.controllerGeometry(key)
+				if err != nil {
+					return err
 				}
-				z := w.bodies[other]
-				if z.desc.Mode == p.FreeDynamic || z.desc.Mode == p.DrivenCharacter || v.support.Grounded && v.support.Body == other {
-					filter.ExcludeBodies = append(filter.ExcludeBodies, other)
-					continue
-				}
-				from := w.bodyState(other, z).Pose
-				to := predictSupportPose(z, dt)
-				for _, c := range z.colliders {
-					targets = append(targets, ColliderMotion{c, from, to})
+				geometries = append(geometries, g)
+			} else {
+				for _, ch := range v.colliders {
+					c := w.colliders[ch]
+					if !c.desc.Enabled || !c.desc.Roles.Solid {
+						continue
+					}
+					geometries = append(geometries, controllerGeometry{collider: ch, cfg: character.Config{Skin: .001, MaxHits: 16384}, filter: p.QueryFilter{Mask: ^uint64(0), PhysicalFilter: &c.desc.Filter, ExcludeBodies: []p.BodyHandle{key}, RequireSolid: true, IncludeNonQuery: true, Sensors: p.IncludeSensors}})
 				}
 			}
-			from, to := w.bodyState(key, v).Pose, predictSupportPose(v, dt)
-			hits := make([]p.Hit, g.cfg.MaxHits)
-			r, err := w.QueryColliderMotion(MotionQuery{Motion: ColliderMotion{g.collider, from, to}, Targets: targets, Filter: filter, Mode: p.All, Initial: p.ReportInitial, Backfaces: p.IncludeBackfaces, Tolerance: .00001}, hits)
-			if err != nil {
-				return err
-			}
-			if r.Incomplete {
-				return fmt.Errorf("physics3d: relative controller query overflow")
-			}
-			for _, hit := range hits[:r.Count] {
-				if !hit.Blocking {
-					continue
-				}
-				other := w.colliders[hit.Collider].desc.Body
-				z := w.bodies[other]
-				zfrom, zto := w.bodyState(other, z).Pose, predictSupportPose(z, dt)
-				da := to.Transform(from.Inverse().Transform(hit.Point)).Sub(hit.Point)
-				dz := zto.Transform(zfrom.Inverse().Transform(hit.Point)).Sub(hit.Point)
-				closing := -da.Sub(dz).Dot(hit.Normal)
-				if closing <= 1e-6 {
-					continue
-				}
-				scale := max(float32(0), min(float32(1), hit.Fraction-g.cfg.Skin/closing))
-				if scale >= 1-1e-5 {
-					continue
-				}
-				v.id.SetLinearVelocity(b.MulSV(scale, v.id.GetLinearVelocity()))
-				v.id.SetAngularVelocity(b.MulSV(scale, v.id.GetAngularVelocity()))
-				if z.desc.Mode != p.Static {
-					z.id.SetLinearVelocity(b.MulSV(scale, z.id.GetLinearVelocity()))
-					z.id.SetAngularVelocity(b.MulSV(scale, z.id.GetAngularVelocity()))
-					for _, passenger := range keys {
-						rider := w.bodies[passenger]
-						if passenger != key && rider.desc.Controller.Enabled && rider.desc.Mode != p.DrivenCharacter && rider.support.Grounded && rider.support.Body == other {
-							rider.id.SetLinearVelocity(b.MulSV(scale, rider.id.GetLinearVelocity()))
-						}
+			for _, g := range geometries {
+				filter := g.filter
+				var targets []ColliderMotion
+				for _, other := range keys {
+					if other == key {
+						continue
+					}
+					z := w.bodies[other]
+					if z.desc.Mode == p.FreeDynamic || z.desc.Mode == p.DrivenCharacter || v.support.Grounded && v.support.Body == other {
+						filter.ExcludeBodies = append(filter.ExcludeBodies, other)
+						continue
+					}
+					from := w.bodyState(other, z).Pose
+					to := predictSupportPose(z, dt)
+					for _, c := range z.colliders {
+						targets = append(targets, ColliderMotion{c, from, to})
 					}
 				}
-				changed = true
-				break
+				from, to := w.bodyState(key, v).Pose, predictSupportPose(v, dt)
+				hits := make([]p.Hit, g.cfg.MaxHits)
+				r, err := w.QueryColliderMotion(MotionQuery{Motion: ColliderMotion{g.collider, from, to}, Targets: targets, Filter: filter, Mode: p.All, Initial: p.ReportInitial, Backfaces: p.IncludeBackfaces, Tolerance: .00001}, hits)
+				if err != nil {
+					return err
+				}
+				if r.Incomplete {
+					return fmt.Errorf("physics3d: relative controller query overflow")
+				}
+				for _, hit := range hits[:r.Count] {
+					if !hit.Blocking {
+						continue
+					}
+					other := w.colliders[hit.Collider].desc.Body
+					z := w.bodies[other]
+					zfrom, zto := w.bodyState(other, z).Pose, predictSupportPose(z, dt)
+					da := to.Transform(from.Inverse().Transform(hit.Point)).Sub(hit.Point)
+					dz := zto.Transform(zfrom.Inverse().Transform(hit.Point)).Sub(hit.Point)
+					closing := -da.Sub(dz).Dot(hit.Normal)
+					if closing <= 1e-6 {
+						continue
+					}
+					scale := max(float32(0), min(float32(1), hit.Fraction-g.cfg.Skin/closing))
+					if scale >= 1-1e-5 {
+						continue
+					}
+					v.id.SetLinearVelocity(b.MulSV(scale, v.id.GetLinearVelocity()))
+					v.id.SetAngularVelocity(b.MulSV(scale, v.id.GetAngularVelocity()))
+					if z.desc.Mode != p.Static {
+						z.id.SetLinearVelocity(b.MulSV(scale, z.id.GetLinearVelocity()))
+						z.id.SetAngularVelocity(b.MulSV(scale, z.id.GetAngularVelocity()))
+						for _, passenger := range keys {
+							rider := w.bodies[passenger]
+							if passenger != key && rider.desc.Controller.Enabled && rider.desc.Mode != p.DrivenCharacter && rider.support.Grounded && rider.support.Body == other {
+								rider.id.SetLinearVelocity(b.MulSV(scale, rider.id.GetLinearVelocity()))
+							}
+						}
+					}
+					changed = true
+					break
+				}
 			}
 		}
 		if !changed {
@@ -369,8 +392,10 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 		pathIndex[h] = i
 	}
 	inputs := map[p.BodyHandle]p.Motion{}
+	poseBodies := map[p.BodyHandle]bool{}
 	for _, m := range motions {
 		inputs[m.Body] = m
+		poseBodies[m.Body] = len(m.PoseSegments) > 0
 	}
 	for _, key := range keys {
 		v := w.bodies[key]
@@ -452,17 +477,28 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 			var plans []kinematicPath
 			for _, m := range motions {
 				v := w.bodies[m.Body]
-				if m.Frozen || v.desc.Controller.Enabled || v.desc.Mode == p.DrivenCharacter || v.desc.Mode == p.FreeDynamic {
+				if m.Frozen || v.desc.Controller.Enabled && !poseBodies[m.Body] || v.desc.Mode == p.DrivenCharacter || v.desc.Mode == p.FreeDynamic {
 					continue
 				}
 				velocity, _ := motionVelocity(m, at, dt)
-				velocity, err := w.clipKinematic(m.Body, velocity, dt)
-				if err != nil {
-					return err
+				angular := p.Vec3{}
+				if poseBodies[m.Body] {
+					velocity, angular = poseVelocity(m, at, dt, w.bodyState(m.Body, v).Pose)
+				} else {
+					var err error
+					velocity, err = w.clipKinematic(m.Body, velocity, dt)
+					if err != nil {
+						return err
+					}
 				}
 				v.id.SetLinearVelocity(bv(velocity))
+				if poseBodies[m.Body] || v.desc.Mode == p.ScriptedAction {
+					v.id.SetAngularVelocity(bv(angular))
+				}
 				from := w.bodyState(m.Body, v).Pose.Position
-				plans = append(plans, timedKinematicPath(m.Body, []p.Vec3{from, from.Add(velocity.Mul(dt))}, dt))
+				plan := timedKinematicPath(m.Body, []p.Vec3{from, from.Add(velocity.Mul(dt))}, dt)
+				plan.angular, plan.poseTrajectory = angular, poseBodies[m.Body]
+				plans = append(plans, plan)
 			}
 			basePlans := len(plans)
 			for pass := 0; ; pass++ {
@@ -473,7 +509,7 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 				clamps := map[p.BodyHandle]float32{}
 				for _, key := range keys {
 					v := w.bodies[key]
-					if v.frozen || !v.desc.Controller.Enabled || v.desc.Mode == p.DrivenCharacter {
+					if v.frozen || !v.desc.Controller.Enabled || v.desc.Mode == p.DrivenCharacter || poseBodies[key] {
 						continue
 					}
 					velocity, _ := motionVelocity(inputs[key], at, dt)
@@ -520,6 +556,7 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 					v.id.SetAngularVelocity(b.MulSV(scale, v.id.GetAngularVelocity()))
 					for i := 0; i < basePlans; i++ {
 						if plans[i].body == body {
+							plans[i].angular = plans[i].angular.Mul(scale)
 							start := plans[i].points[0]
 							for j := 1; j < len(plans[i].points); j++ {
 								plans[i].points[j] = start.Add(plans[i].points[j].Sub(start).Mul(scale))
@@ -543,8 +580,11 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 				}
 				for _, plan := range plans {
 					w.bodies[plan.body].id.SetLinearVelocity(bv(plan.velocity(phase)))
+					if plan.poseTrajectory {
+						w.bodies[plan.body].id.SetAngularVelocity(bv(plan.angular))
+					}
 				}
-				if err := w.constrainControllerPairs(keys, interval); err != nil {
+				if err := w.constrainControllerPairs(keys, interval, poseBodies); err != nil {
 					return err
 				}
 				for _, key := range keys {
@@ -579,6 +619,13 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 							path := paths[pathIndex[m.Body]].Positions
 							if !m.Validate(path[len(path)-2], path[len(path)-1]) {
 								return fmt.Errorf("physics3d: captured safety failed after microstep")
+							}
+						}
+						if m.ValidateBounds != nil {
+							poses := paths[pathIndex[m.Body]].Poses
+							low, high := p.AnchorMotionBounds(poses[len(poses)-2], poses[len(poses)-1], w.bodies[m.Body].desc.Anchor.Position)
+							if !m.ValidateBounds(low, high) {
+								return fmt.Errorf("physics3d: captured curved-anchor safety failed after microstep")
 							}
 						}
 					}

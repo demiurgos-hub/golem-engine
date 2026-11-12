@@ -1,10 +1,11 @@
 ---
-description: golem/snapshot — entity snapshots, compatibility validation and boundaries with paired physics/navigation checkpoint recovery.
+description: golem/snapshot — entity snapshots, compatibility validation and boundaries with paired physics/navigation checkpoints and timed-intent recovery.
 globs:
   - golem/snapshot/**/*.go
   - golem/snapshot_api.go
   - golem/physics_checkpoint*.go
   - golem/physics_recovery*.go
+  - golem/physics_trajectory_checkpoint*.go
 alwaysApply: false
 ---
 

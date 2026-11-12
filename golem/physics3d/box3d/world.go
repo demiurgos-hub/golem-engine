@@ -288,6 +288,9 @@ func (w *World) SetVelocity(h p.BodyHandle, linear, angular p.Vec3) error {
 	if v.desc.Controller.Enabled && angular != (p.Vec3{}) {
 		return fmt.Errorf("%w: capsule controller rotation is pose-owned", p.ErrUnsupported)
 	}
+	if v.desc.Mode == p.ExternalPose && (linear != (p.Vec3{}) || angular != (p.Vec3{})) {
+		return fmt.Errorf("%w: external pose requires admitted timed motion", p.ErrUnsupported)
+	}
 	v.id.SetLinearVelocity(bv(linear))
 	v.id.SetAngularVelocity(bv(angular))
 	w.changed()

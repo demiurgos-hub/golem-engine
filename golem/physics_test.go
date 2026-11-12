@@ -24,6 +24,18 @@ type physicsTestWorld struct {
 	placement                                   func(p.BodyHandle, p.Pose, float32) (bool, error)
 }
 
+func (*physicsTestWorld) SupportsPoseMotion() bool                                     { return true }
+func (*physicsTestWorld) ValidatePoseMotion(p.BodyHandle, []p.PoseMotionSegment) error { return nil }
+func (w *physicsTestWorld) SetVelocity(h p.BodyHandle, linear, angular p.Vec3) error {
+	state, err := w.Body(h)
+	if err != nil {
+		return err
+	}
+	state.LinearVelocity, state.AngularVelocity = linear, angular
+	w.bodies[h] = state
+	return nil
+}
+
 func (w *physicsTestWorld) ValidatePlacement(h p.BodyHandle, pose p.Pose, tolerance float32) (bool, error) {
 	if w.placement != nil {
 		return w.placement(h, pose, tolerance)
