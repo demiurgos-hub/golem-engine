@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using Unity.Collections;
 using UnityEditor;
 using UnityEngine;
 #if UNITY_6000_0_OR_NEWER
@@ -188,7 +189,7 @@ namespace GolemEngine.Unity.Editor
             {
                 result.Shape = mesh.convex ? "convex" : "mesh";
                 var assetSource = AssetIdentity(mesh.sharedMesh);
-                var captured = GolemNavigationExporter.CaptureMesh(mesh.sharedMesh, assetSource, 0);
+                var captured = CaptureMesh(mesh.sharedMesh, assetSource);
                 result.AssetID = result.ID + "/geometry";
                 assets.Add(TransformAsset(captured, result.AssetID, assetSource, local));
                 return result;
@@ -252,6 +253,58 @@ namespace GolemEngine.Unity.Editor
                     throw new InvalidOperationException("Terrain tree instance references a missing prototype.");
                 if (prototypes[index].prefab.GetComponentsInChildren<Collider>(true).Length != 0)
                     throw new InvalidOperationException("Terrain-generated tree colliders are not yet exported. Resolve the tree colliders as explicit saved scene instances before exporting; heightfield-only export would omit collision geometry.");
+            }
+        }
+
+        private static NavigationAsset CaptureMesh(Mesh mesh, string id)
+        {
+            if (mesh == null) throw new InvalidOperationException("Physics mesh is missing.");
+            // Editor snapshots can read imported collision geometry without enabling
+            // a runtime CPU copy or changing the asset's importer settings.
+            using (var snapshot = MeshUtility.AcquireReadOnlyMeshData(mesh))
+            {
+                var data = snapshot[0];
+                if (data.vertexCount > 8 * 1024 * 1024) throw new InvalidOperationException(mesh.name + ": mesh vertex limit exceeded.");
+                long indexCount = 0;
+                for (var submesh = 0; submesh < data.subMeshCount; submesh++)
+                {
+                    var section = data.GetSubMesh(submesh);
+                    if (section.topology != MeshTopology.Triangles) throw new InvalidOperationException(mesh.name + ": non-triangle submesh is unsupported.");
+                    if (section.indexCount % 3 != 0) throw new InvalidOperationException(mesh.name + ": invalid triangle array.");
+                    indexCount += section.indexCount;
+                    if (indexCount / 3 > 8 * 1024 * 1024) throw new InvalidOperationException(mesh.name + ": mesh triangle limit exceeded.");
+                }
+                var vertices = new NavigationVector[data.vertexCount];
+                using (var nativeVertices = new NativeArray<Vector3>(data.vertexCount, Allocator.TempJob, NativeArrayOptions.UninitializedMemory))
+                {
+                    data.GetVertices(nativeVertices);
+                    for (var i = 0; i < vertices.Length; i++)
+                    {
+                        var vertex = nativeVertices[i];
+                        vertices[i] = new NavigationVector(vertex.x, vertex.y, vertex.z);
+                    }
+                }
+                var triangles = new NavigationTriangle[checked((int)(indexCount / 3))];
+                var triangle = 0;
+                for (var submesh = 0; submesh < data.subMeshCount; submesh++)
+                {
+                    using (var indices = new NativeArray<int>(data.GetSubMesh(submesh).indexCount, Allocator.TempJob, NativeArrayOptions.UninitializedMemory))
+                    {
+                        data.GetIndices(indices, submesh, true);
+                        for (var i = 0; i < indices.Length; i += 3)
+                        {
+                            var face = new uint[3];
+                            for (var corner = 0; corner < 3; corner++)
+                            {
+                                var index = indices[i + corner];
+                                if (index < 0 || index >= vertices.Length) throw new InvalidOperationException(mesh.name + ": triangle vertex index is outside the mesh.");
+                                face[corner] = (uint)index;
+                            }
+                            triangles[triangle++] = new NavigationTriangle { Indices = face };
+                        }
+                    }
+                }
+                return new NavigationAsset { ID = id, Vertices = vertices, Triangles = triangles };
             }
         }
 

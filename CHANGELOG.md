@@ -99,6 +99,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Unity physics export reads imported mesh geometry even when runtime Read/Write is disabled, without changing importer settings. Submesh indices, source identity and geometry validation remain preserved.
+
 - Relative-motion queries and continuous contact intervals resolve exact rotational endpoint tangencies without loosening geometric tolerance. Bounded interval certificates preserve separation and reentry when conservative advancement stalls.
 
 - Physics advances the configured native intervals without the former global refinement stalls. Native TOI/contact response regressions cover fast crossings and thin-wall impacts while retaining momentum transfer, bounded drives and the captured navigation safety checks. Focused correctness results do not establish full workload or platform qualification.

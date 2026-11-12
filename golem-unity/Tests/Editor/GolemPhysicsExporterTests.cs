@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Linq;
 using NUnit.Framework;
 using UnityEditor;
@@ -30,6 +31,36 @@ namespace GolemEngine.Unity.Editor.Tests
             if (scene.IsValid() && scene.isLoaded) EditorSceneManager.CloseScene(scene, true);
             if (previousSetup != null && previousSetup.Length > 0 && previousSetup.All(s => !string.IsNullOrEmpty(s.path))) EditorSceneManager.RestoreSceneManagerSetup(previousSetup);
             AssetDatabase.DeleteAsset(folder);
+        }
+
+        [Test]
+        public void ImportedNonReadableMeshExportsWithoutChangingImporter()
+        {
+            var path = folder + "/read-only.obj";
+            File.WriteAllText(path, "o Collision\nv 0 0 0\nv 0 0 2\nv 3 0 0\nf 1 2 3\n");
+            AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport);
+            var importer = (ModelImporter)AssetImporter.GetAtPath(path);
+            importer.isReadable = true;
+            importer.SaveAndReimport();
+            var mesh = AssetDatabase.LoadAllAssetsAtPath(path).OfType<Mesh>().Single();
+            var world = new GameObject("Physics").AddComponent<GolemPhysicsWorld>();
+            var collider = world.gameObject.AddComponent<MeshCollider>();
+            collider.sharedMesh = mesh;
+            Save();
+            var readable = GolemPhysicsDocument.Build(GolemPhysicsExporter.Capture(world));
+
+            importer.isReadable = false;
+            importer.SaveAndReimport();
+            mesh = AssetDatabase.LoadAllAssetsAtPath(path).OfType<Mesh>().Single();
+            collider.sharedMesh = mesh;
+            Assert.That(mesh.isReadable, Is.False);
+            var originalMetadata = File.ReadAllBytes(path + ".meta");
+            var readOnly = GolemPhysicsDocument.Build(GolemPhysicsExporter.Capture(world));
+
+            Assert.That(readOnly, Is.EqualTo(readable));
+            Assert.That(mesh.isReadable, Is.False);
+            Assert.That(((ModelImporter)AssetImporter.GetAtPath(path)).isReadable, Is.False);
+            Assert.That(File.ReadAllBytes(path + ".meta"), Is.EqualTo(originalMetadata));
         }
 
         [Test]
