@@ -155,6 +155,19 @@
     "hitPointErrorMetres": 0.001,
     "distanceAndPenetrationErrorMetres": 0.0001,
     "missingOrUnsupportedGate": "fail",
+    "selectedDeliveryEvidence": {
+      "report": "D:/Demiurgos/tests/physics-validation/runs/final-four-gates-summary-20261112-06.json",
+      "sourceManifestSHA256": "42c8f2e7e7980f2d386fb45e27c3c6ea4f41aac6d11655a22fa06c7e88fd97b1",
+      "engineCommit": "32d211fb7edf3880d2829d47cb0d1db8a7d77610",
+      "forkCommit": "8a6d2ef383d0426902390f15b4544074295dbc2b",
+      "buildTags": ["box3d_simd", "box3d_noassert"],
+      "focusedCollision": "pass",
+      "engineIntegration": "pass, including thirteen saved Unity simulation cases",
+      "windowsCapacity": "fail: full-tick p99 92.1ms; eleven ticks have 998 moving characters",
+      "linuxSmoke": "pass: native x64 CGO-disabled build, simulation, save and fresh-process restore",
+      "publishedResolution": false,
+      "workstreamComplete": false
+    },
     "qualificationStatus": "not-yet-qualified"
   }
 }
