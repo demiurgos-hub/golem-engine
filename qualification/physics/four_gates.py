@@ -12,6 +12,8 @@ import json
 import math
 import os
 from pathlib import Path
+import re
+import shlex
 import sys
 
 sys.dont_write_bytecode = True
@@ -78,6 +80,8 @@ def same_hash(left, right):
 
 
 def tags_from_command(command):
+    if isinstance(command, str):
+        command = shlex.split(command)
     for index, value in enumerate(command):
         if value == "-tags":
             return command[index + 1].split(",")
@@ -109,6 +113,8 @@ def validate_config(gate, tags, environment, expected_tags, experiment):
 
 def focused(gate, directory, evidence, source, digest, tags, experiment, required):
     result = evidence.read(directory / "result.json")
+    if isinstance(result.get("checks"), dict):
+        return focused_checks(gate, directory, evidence, source, digest, tags, experiment, required, result)
     invocation = evidence.read(directory / "invocation.json")
     check(gate, same_hash(evidence.digest(directory / "source-manifest.json"), digest), "copied source manifest differs")
     for record in (result, invocation):
@@ -129,6 +135,64 @@ def focused(gate, directory, evidence, source, digest, tags, experiment, require
     check(gate, not any(item.get("Action") in ("fail", "skip") for item in events), "native log contains a failure or skip")
     check(gate, set(required) <= passed, "required native tests did not pass: " + ", ".join(sorted(set(required) - passed)))
     gate.update(requiredTests=required, passedTests=len(passed), toolchain=result.get("toolchain"))
+
+
+def focused_checks(gate, directory, evidence, source, digest, tags, experiment, required, result):
+    capture = evidence.read(directory / "capture.json")
+    environment = evidence.read(directory / "go-env.json")
+    toolchain = evidence.bytes(directory / "toolchain.txt").decode("utf-8-sig").strip()
+    for record in (capture, result):
+        check(gate, same_hash(record.get("sourceManifestSHA256"), digest), "native checks used another source snapshot")
+        check(gate, same_hash(evidence.digest(recorded_path(record["sourceManifest"], directory)), digest), "native source manifest bytes differ")
+        check(gate, record.get("nativeCommit") == source["box3d-go"]["commit"], "native commit differs")
+    validate_config(gate, result["tags"], result, tags, experiment)
+    validate_config(gate, result["tags"], environment, tags, experiment)
+    check(gate, environment.get("GOOS") == "windows" and environment.get("GOARCH") == "amd64" and
+          environment.get("GOAMD64") == result.get("GOAMD64") == "v1" and
+          environment.get("GOWORK") == result.get("GOWORK") == "off" and
+          toolchain.endswith("go1.27.1 windows/amd64"), "native platform/toolchain configuration differs")
+    before_path, after_path = directory / "source-before.json", directory / "source-after.json"
+    before, after = evidence.read(before_path), evidence.read(after_path)
+    expected = {item["path"]: item["sha256"].lower() for item in source["box3d-go"]["files"]}
+    check(gate, before == after == expected and result.get("sourceUnchanged") is True, "native before/after inventory differs from the selected source files")
+    check(gate, len(expected) == capture.get("nativeFileCount") == result.get("nativeFileCount"), "native source inventory count differs")
+    check(gate, same_hash(evidence.digest(before_path), result.get("sourceBeforeSHA256")) and
+          same_hash(evidence.digest(after_path), result.get("sourceAfterSHA256")), "native inventory checksum differs")
+    discovered = capture["discoveredTopLevelTests"]
+    families = capture["familyAllowlist"]
+    check(gate, discovered == result.get("discoveredTopLevelTests") and families == result.get("familyAllowlist") and
+          len(discovered) == len(set(discovered)), "captured native selection differs from the result")
+    check(gate, {"TestNativeContinuation", "TestLocalJoint"} <= set(families) and
+          all(any(name.startswith(family) for family in families) for name in discovered), "native family selection is incomplete or inconsistent")
+    check(gate, set(result["checks"]) == {"focused", "original-c"}, "expected focused regressions and the selected original-C mesh comparison")
+    for name, record in result["checks"].items():
+        if name not in ("focused", "original-c"):
+            continue
+        events = evidence.events(directory / (name + ".jsonl"))
+        check(gate, same_hash(evidence.digest(directory / (name + ".jsonl")), record.get("logSHA256")), f"{name}: log checksum differs")
+        exit_code = int(evidence.bytes(directory / (name + ".exit")).decode("utf-8-sig").strip())
+        check(gate, exit_code == record.get("exit") == 0, f"{name}: execution failed")
+        check(gate, sorted(tags_from_command(record["command"])) == tags, f"{name}: build tags differ")
+        check(gate, not record.get("failures") and not record.get("skips") and
+              not any(item.get("Action") in ("fail", "skip") for item in events), f"{name}: log contains a failure or skip")
+        passed = test_passes(events)
+        top = {test for test in passed if "/" not in test}
+        check(gate, len(passed) == record.get("passesIncludingSubtests") and len(top) == record.get("topLevelPasses"), f"{name}: pass counts differ from the log")
+        check(gate, any(item.get("Action") == "pass" and not item.get("Test") and
+                        item.get("Package") == "github.com/gataengine/box3d-go" for item in events), f"{name}: native package completion is missing")
+        if name == "focused":
+            check(gate, set(required) <= top and top == set(discovered), "required/captured native tests did not all pass")
+            counts = {family: sum(test.startswith(family) for test in top) for family in families}
+            check(gate, all(counts.values()) and counts == result.get("familyTopLevelPasses"), "native family pass counts differ")
+            gate.update(requiredTests=required, capturedTests=discovered, topLevelPasses=len(top), passedTests=len(passed), familyPasses=counts)
+        else:
+            check(gate, "-ginkgo.focus=MeshContactGoldenTest" in shlex.split(record["command"]) and top == {"TestBox3D"}, "original-C check did not select the required mesh spec")
+            output = re.sub(r"\x1b?\[[0-9;]*m", "", "".join(item.get("Output", "") for item in events))
+            specs = result["selectedOriginalCSpecs"]
+            check(gate, specs.get("passed") == 1 and specs.get("failed") == 0 and
+                  re.search(r"\b1 Passed\b[^\n]*\b0 Failed\b", output) is not None, "selected original-C mesh spec did not pass")
+            gate["selectedOriginalCSpecs"] = specs
+    gate["toolchain"] = toolchain
 
 
 def integration(gate, path, evidence, digest, tags, experiment):
