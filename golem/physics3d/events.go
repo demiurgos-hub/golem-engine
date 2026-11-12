@@ -1,6 +1,6 @@
 package physics3d
 
-import "sort"
+import "slices"
 
 type ContactKind uint8
 
@@ -50,7 +50,10 @@ type ContactEvent struct {
 
 // ContactTracker tracks exact generational collider pairs. Copies are returned;
 // callback mutation cannot change the stored contacts or another event.
-type ContactTracker struct{ pairs map[ContactPair]ContactEvent }
+type ContactTracker struct {
+	pairs map[ContactPair]ContactEvent
+	spare map[ContactPair]ContactEvent
+}
 
 // Clone returns independent contact history for a private simulation transaction.
 func (t *ContactTracker) Clone() ContactTracker {
@@ -80,6 +83,7 @@ func (t *ContactTracker) Drain(reason CleanupReason, frame, revision uint64) []C
 		out = append(out, event)
 	}
 	t.pairs = nil
+	t.spare = nil
 	sortEvents(out)
 	return out
 }
@@ -94,7 +98,12 @@ type ShutdownWorld interface {
 // Update emits enter/stay/exit transitions for a complete accepted frame.
 // Restoring classifies existing contacts as Restored instead of ordinary entry.
 func (t *ContactTracker) Update(current []ContactEvent, frame, revision uint64, restoring bool) []ContactEvent {
-	next := make(map[ContactPair]ContactEvent, len(current))
+	next := t.spare
+	if next == nil {
+		next = make(map[ContactPair]ContactEvent, len(current))
+	} else {
+		clear(next)
+	}
 	out := make([]ContactEvent, 0, len(current)+len(t.pairs))
 	for _, v := range current {
 		v = canonicalContact(v)
@@ -123,7 +132,7 @@ func (t *ContactTracker) Update(current []ContactEvent, frame, revision uint64, 
 			out = append(out, v)
 		}
 	}
-	t.pairs = next
+	t.spare, t.pairs = t.pairs, next
 	sortEvents(out)
 	return out
 }
@@ -162,14 +171,26 @@ func lessHandle(a, b ColliderHandle) bool {
 	return a.Generation < b.Generation
 }
 func sortEvents(v []ContactEvent) {
-	sort.Slice(v, func(i, j int) bool {
-		a, b := v[i].Pair, v[j].Pair
+	slices.SortFunc(v, func(x, y ContactEvent) int {
+		a, b := x.Pair, y.Pair
 		if a.A != b.A {
-			return lessHandle(a.A, b.A)
+			if lessHandle(a.A, b.A) {
+				return -1
+			}
+			return 1
 		}
 		if a.B != b.B {
-			return lessHandle(a.B, b.B)
+			if lessHandle(a.B, b.B) {
+				return -1
+			}
+			return 1
 		}
-		return a.Kind < b.Kind
+		if a.Kind < b.Kind {
+			return -1
+		}
+		if a.Kind > b.Kind {
+			return 1
+		}
+		return 0
 	})
 }

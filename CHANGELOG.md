@@ -85,6 +85,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Changed
 
+- Continuous physics reuses private traversal and contact scratch while preserving every solver step, manifold impulse, sensor transition and independently owned event record. Focused allocation checks cover these paths; full workload capacity still requires qualification.
+
 - Navigation qualification's `Suite` and `Full` launchers now run the three mixed scene families at 1,000 agents only; `Full` retains the two-hour 1,000-agent soak. Existing diagnostic agent-count controls remain available.
 
 ### Fixed

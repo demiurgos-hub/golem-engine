@@ -5,7 +5,10 @@ import (
 	b "github.com/gataengine/box3d-go"
 )
 
-type motionContactState struct{ sensors map[[2]b.ShapeID]bool }
+type motionContactState struct {
+	sensors map[[2]b.ShapeID]bool
+	current map[p.ContactPair]int
+}
 
 func motionSensorKey(a, z b.ShapeID) [2]b.ShapeID {
 	if z.Index1 < a.Index1 {
@@ -40,10 +43,16 @@ func motionCanonicalEvent(v p.ContactEvent) p.ContactEvent {
 }
 
 func (s *motionContactState) capture(w *World, sample b.MotionStepSample, fraction float32) []p.ContactEvent {
-	current := map[p.ContactPair]p.ContactEvent{}
+	if s.current == nil {
+		s.current = make(map[p.ContactPair]int)
+	}
+	values := make([]p.ContactEvent, 0, len(s.current))
+	clear(s.current)
 	add := func(v p.ContactEvent) {
 		v = motionCanonicalEvent(v)
-		if old, ok := current[v.Pair]; ok {
+		index, ok := s.current[v.Pair]
+		if ok {
+			old := values[index]
 			force := old.Force.Add(v.Force)
 			if old.Depth >= v.Depth {
 				v = old
@@ -51,7 +60,12 @@ func (s *motionContactState) capture(w *World, sample b.MotionStepSample, fracti
 			v.Force = force
 		}
 		v.Fraction = fraction
-		current[v.Pair] = v
+		if ok {
+			values[index] = v
+		} else {
+			s.current[v.Pair] = len(values)
+			values = append(values, v)
+		}
 	}
 	for _, c := range sample.Contacts {
 		a, aok := w.shapeOwners[c.ShapeIdA]
@@ -95,10 +109,6 @@ func (s *motionContactState) capture(w *World, sample b.MotionStepSample, fracti
 			continue
 		}
 		add(p.ContactEvent{Pair: p.ContactPair{A: a, B: z, Kind: p.SensorContact}, OwnerA: ca.desc.Owner, OwnerB: cz.desc.Owner})
-	}
-	values := make([]p.ContactEvent, 0, len(current))
-	for _, v := range current {
-		values = append(values, v)
 	}
 	return values
 }
