@@ -193,6 +193,7 @@ type stagedTraversalTestAction struct {
 	prepared, committed, discarded int
 	last                           NavigationTraversalUpdate
 	onCommit                       func()
+	onPrepare, onDiscard           func()
 }
 
 func (a *stagedTraversalTestAction) AdvanceNavigationTraversal(float64) (NavigationTraversalUpdate, error) {
@@ -201,6 +202,9 @@ func (a *stagedTraversalTestAction) AdvanceNavigationTraversal(float64) (Navigat
 func (a *stagedTraversalTestAction) CancelNavigationTraversal(string) {}
 func (a *stagedTraversalTestAction) PrepareNavigationTraversal(float64) (NavigationTraversalUpdate, error) {
 	a.prepared++
+	if a.onPrepare != nil {
+		a.onPrepare()
+	}
 	return NavigationTraversalUpdate{Position: surface.Vec3{X: .1}}, nil
 }
 func (a *stagedTraversalTestAction) CommitNavigationTraversal(update NavigationTraversalUpdate) {
@@ -210,7 +214,12 @@ func (a *stagedTraversalTestAction) CommitNavigationTraversal(update NavigationT
 		a.onCommit()
 	}
 }
-func (a *stagedTraversalTestAction) DiscardNavigationTraversal() { a.discarded++ }
+func (a *stagedTraversalTestAction) DiscardNavigationTraversal() {
+	a.discarded++
+	if a.onDiscard != nil {
+		a.onDiscard()
+	}
+}
 
 func TestNavigationFrameTraversalCommitsOrDiscardsExactlyOnce(t *testing.T) {
 	for _, commit := range []bool{false, true} {
@@ -320,5 +329,49 @@ func TestNavigationFrameCapturesFrozenIdleAndRestoreBarrier(t *testing.T) {
 	}
 	if err := s.CommitNavigationFrame(f, []NavigationMotionResult{{EntityID: 1}}); err != nil {
 		t.Fatalf("stationary restoration frame faulted: %v", err)
+	}
+}
+
+func TestNavigationFrameDiscardsSupersededPlansBeforeSealing(t *testing.T) {
+	s, _ := navigationTestServer(t, &navigationTestBackend{revision: 1})
+	cfg := s.navigation.agents[1].config
+	cfg.StagedPhysics = true
+	for id := int64(2); id <= 4; id++ {
+		if err := s.CreateEntity(&navigationTestEntity{id: id}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.AttachNavigation(id, cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for id := int64(1); id <= 4; id++ {
+		stagedNavigationRoute(t, s, id, surface.Corner{}, surface.Corner{Position: surface.Vec3{X: 10}})
+	}
+	actions := []*stagedTraversalTestAction{{}, {}, {}}
+	actions[1].onPrepare = func() {
+		if err := s.SetNavigationDestination(1, surface.Vec3{X: 20}); err != nil {
+			t.Error(err)
+		}
+	}
+	actions[0].onDiscard = func() {
+		if err := s.SetNavigationDestination(3, surface.Vec3{X: 30}); err != nil {
+			t.Error(err)
+		}
+	}
+	for i, action := range actions {
+		a := s.navigation.agents[int64(i+1)]
+		a.state.Mode = NavigationTraversing
+		a.traversal = &navigationTraversal{action: action}
+	}
+	f := stagedFrame(t, s, .05)
+	if err := s.ValidateNavigationFrame(f); err != nil {
+		t.Fatalf("preparation left stale snapshots: %v", err)
+	}
+	proposals := f.Proposals()
+	if len(proposals) != 2 || proposals[0].EntityID != 2 || proposals[1].EntityID != 4 {
+		t.Fatalf("unaffected plans did not survive filtering: %+v", proposals)
+	}
+	if actions[0].discarded != 1 || actions[2].discarded != 1 || actions[1].prepared != 1 {
+		t.Fatal("discard filtering repeated movement scheduling")
 	}
 }

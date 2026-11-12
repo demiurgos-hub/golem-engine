@@ -1,10 +1,15 @@
 ---
-description: golem/snapshot — non-blocking entity snapshot save/load with binary-compatibility fingerprint validation.
-globs: golem/snapshot/**/*.go, golem/snapshot_api.go
+description: golem/snapshot — entity snapshots, compatibility validation and boundaries with paired physics/navigation checkpoint recovery.
+globs:
+  - golem/snapshot/**/*.go
+  - golem/snapshot_api.go
+  - golem/physics_checkpoint*.go
 alwaysApply: false
 ---
 
 # `golem/snapshot`
+
+Entity-only snapshot behavior remains separate from root `PhysicsCheckpoint`. The latter captures all authoritative entities together with physical state, source ownership and navigation intents; it writes hashed data then the manifest, reconstructs private candidates before publication and uses hook-free registry replacement. Do not route paired recovery through `LoadSnapshot` or ordinary `CreateEntity` spawn effects. Hosts must stop connection acceptance and gameplay for the whole recovery operation; explicit recovery hooks rebuild ephemeral membership after readiness.
 
 **Non-blocking entity snapshot save and load.** `Save(entities []registry.Entity, fingerprint, path string) <-chan error` iterates entities, skips those where `IsPersistent()` returns false (via the `Persister` interface), calls authoritative `FullUpdate()` on each survivor (owner-only vars are included; public replication redaction does not apply), encodes a binary file in memory, then writes atomically via a `.tmp` rename—all in a background goroutine; the channel receives exactly one value (nil or error). `Load(path, expectedFingerprint string) ([]Record, error)` validates magic bytes (`Golem\x01`), file format version (`uint32 = 1`), and the stored schema fingerprint; returns `ErrFingerprintMismatch` (sentinel error) when the fingerprint differs so callers can fail fast before touching entity state. `Record` holds `EntityID int64`, `TypeName string`, and `StateData []byte` (raw `FullUpdate()` bytes, proto-encoded `*XState`). Visibility attributes do not affect the schema fingerprint.
 

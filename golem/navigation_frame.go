@@ -125,54 +125,73 @@ func (s *Server) PrepareNavigationFrame(dt float64) (*NavigationFrame, error) {
 	if n.frame != f || f.closed {
 		return nil, fmt.Errorf("%w: frame interrupted during preparation", ErrNavigationFrameFault)
 	}
-	f.barrier = n.navigationFrameBarrier()
-	// Traversal preparation can replace attachments or intents. Capture safety
-	// after all callbacks, and drop any proposals superseded by a later callback.
-	for _, id := range n.order {
-		a := n.agents[id]
-		if a == nil || !a.config.StagedPhysics {
-			continue
+	for {
+		if n.frame != f || f.closed {
+			return nil, fmt.Errorf("%w: frame interrupted before sealing", ErrNavigationFrameFault)
 		}
-		position, _, ok := n.position(id)
-		if !ok || !fitsNavigationEntity(position) {
-			_ = s.AbortNavigationFrame(f)
-			return nil, fmt.Errorf("%w: invalid starting position for entity %d", ErrNavigationFrameFault, id)
+		f.agents = make(map[int64]navigationFrameAgent)
+		f.order = f.order[:0]
+		f.barrier = n.navigationFrameBarrier()
+		// Traversal preparation can replace attachments or intents. Capture safety
+		// after all callbacks, and drop any proposals superseded by a later callback.
+		for _, id := range n.order {
+			a := n.agents[id]
+			if a == nil || !a.config.StagedPhysics {
+				continue
+			}
+			position, _, ok := n.position(id)
+			if !ok || !fitsNavigationEntity(position) {
+				_ = s.AbortNavigationFrame(f)
+				return nil, fmt.Errorf("%w: invalid starting position for entity %d", ErrNavigationFrameFault, id)
+			}
+			n.ensureStagedSupport(a, position)
+			safety := n.agentSafety(a)
+			revision := n.backend.CurrentRevision(a.config.Profile)
+			pending := n.pending(a.config.Profile)
+			ready := !f.barrier && revision != 0 && !a.quarantined
+			if safety == nil {
+				ready = ready && !pending
+			} else {
+				ready = ready && safety.SafeSegment(position, position)
+			}
+			capture := navigationFrameAgent{agent: a, generation: a.state.Generation,
+				attachment: a.attachment, position: position, view: a.view, safety: safety,
+				revision: revision, ready: ready, pending: pending, traversal: a.traversal}
+			if a.traversal != nil {
+				capture.bounded, capture.bounds = a.traversal.bounded, a.traversal.bounds
+			}
+			f.agents[id], f.order = capture, append(f.order, id)
 		}
-		n.ensureStagedSupport(a, position)
-		safety := n.agentSafety(a)
-		revision := n.backend.CurrentRevision(a.config.Profile)
-		pending := n.pending(a.config.Profile)
-		ready := !f.barrier && revision != 0 && !a.quarantined
-		if safety == nil {
-			ready = ready && !pending
-		} else {
-			ready = ready && safety.SafeSegment(position, position)
+		dropped := false
+		for _, id := range f.order {
+			plan := f.plans[id]
+			if plan == nil {
+				continue
+			}
+			capture := f.agents[id]
+			if !capture.ready || plan.agent != capture.agent || plan.generation != capture.generation || plan.traversal != nil && plan.traversal != capture.traversal || len(plan.proposal.Segments) > 0 && plan.proposal.Segments[0].From != capture.position {
+				delete(f.plans, id)
+				dropped = true
+				plan.discard()
+				continue
+			}
 		}
-		capture := navigationFrameAgent{agent: a, generation: a.state.Generation,
-			attachment: a.attachment, position: position, view: a.view, safety: safety,
-			revision: revision, ready: ready, pending: pending, traversal: a.traversal}
-		if a.traversal != nil {
-			capture.bounded, capture.bounds = a.traversal.bounded, a.traversal.bounds
+		for id, plan := range f.plans {
+			if _, ok := f.agents[id]; !ok {
+				delete(f.plans, id)
+				dropped = true
+				plan.discard()
+			}
 		}
-		f.agents[id], f.order = capture, append(f.order, id)
+		// Discard callbacks may supersede other prepared intents. Each pass removes
+		// at least one plan, so recapture finishes without rerunning fair scheduling.
+		if !dropped {
+			break
+		}
 	}
 	for _, id := range f.order {
-		plan := f.plans[id]
-		if plan == nil {
-			continue
-		}
-		capture := f.agents[id]
-		if !capture.ready || plan.agent != capture.agent || plan.generation != capture.generation || plan.traversal != nil && plan.traversal != capture.traversal {
-			plan.discard()
-			delete(f.plans, id)
-			continue
-		}
-		f.proposals = append(f.proposals, plan.proposal)
-	}
-	for id, plan := range f.plans {
-		if _, ok := f.agents[id]; !ok {
-			plan.discard()
-			delete(f.plans, id)
+		if plan := f.plans[id]; plan != nil {
+			f.proposals = append(f.proposals, plan.proposal)
 		}
 	}
 	return f, nil

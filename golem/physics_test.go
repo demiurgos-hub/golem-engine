@@ -87,6 +87,9 @@ func (w *physicsTestWorld) Accept(id uint64) error {
 }
 func (w *physicsTestWorld) Reject(uint64, error) error { w.rejected++; return nil }
 func (w *physicsTestWorld) Close() error               { w.closed = true; return nil }
+func (w *physicsTestWorld) Metrics() p.Metrics {
+	return p.Metrics{Bodies: len(w.bodies), AcceptedFrames: uint64(w.accepted), RejectedFrames: uint64(w.rejected)}
+}
 
 func physicsTestAttach(t *testing.T, s *Server, w *physicsTestWorld, id int64, mode p.MotionMode, cfg PhysicsAttachmentConfig) p.BodyHandle {
 	t.Helper()
@@ -520,6 +523,37 @@ func TestPhysicsStaticAndNavigationRejectAtAttachment(t *testing.T) {
 				if err := s.AttachNavigation(1, cfg); err == nil || len(s.navigation.agents) != 0 {
 					t.Fatal("navigation attached to static body")
 				}
+			}
+		})
+	}
+}
+
+func TestPhysicsFrameObserverReportsAcceptedAndRejectedAttempts(t *testing.T) {
+	for _, rejected := range []bool{false, true} {
+		t.Run(map[bool]string{false: "accepted", true: "rejected"}[rejected], func(t *testing.T) {
+			s := NewServer(ServerConfig{})
+			w := &physicsTestWorld{}
+			if rejected {
+				w.acceptErr = errors.New("test rejection")
+			}
+			if err := s.SetPhysicsWorld(w); err != nil {
+				t.Fatal(err)
+			}
+			var observations []PhysicsFrameMetrics
+			if err := s.ObservePhysicsFrames(func(m PhysicsFrameMetrics) { observations = append(observations, m) }); err != nil {
+				t.Fatal(err)
+			}
+			s.tick = 1
+			_ = s.physics.step(.05)
+			if len(observations) != 1 {
+				t.Fatal("observer cadence differs from attempted frames")
+			}
+			m := observations[0]
+			if m.Frame != 1 || m.RequestedDelta != .05 || m.Accepted == rejected || (m.Err != nil) != rejected || m.Duration < m.Solve {
+				t.Fatalf("metrics=%+v", m)
+			}
+			if !rejected && (m.Elapsed != .05 || m.Substeps != 4) {
+				t.Fatal("accepted simulated time absent")
 			}
 		})
 	}

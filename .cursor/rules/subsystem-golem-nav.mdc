@@ -3,6 +3,8 @@ description: nav — 2D backends, independent 3D surface/regional safety and cor
 globs:
   - golem/nav/**/*
   - golem/navigation*.go
+  - golem/physics_checkpoint*.go
+  - golem/physics_geometry*.go
   - examples/navigation-stress/**/*
   - examples/physics-stress/**/*
   - qualification/**/*
@@ -10,6 +12,8 @@ alwaysApply: false
 ---
 
 # Navigation
+
+Paired physical restoration and prepared geometry publication live in root `golem/physics_checkpoint.go` and `golem/physics_geometry.go`, using the existing navigation restoration barrier and bounded stable-key build queue. Keep immutable physics/navigation identity captures paired. Establish full regional quarantine before physical changes, preserve unaffected agents, and open restoration readiness only after entity/body/support intent publication. Source lease handles are rebuilt from stable IDs; routes and query handles are never restored. Before a staged frame seals, discard superseded plans and recapture all safety after callbacks without rerunning the scheduler.
 
 `golem/nav`, `nav/pathing`, and `nav/kelindar` are separate Go modules developed through the ignored local `go.work`. The shared nav module does not depend on the root runtime, map loaders, or either pathfinding library.
 

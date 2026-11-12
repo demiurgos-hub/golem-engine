@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Paired physics checkpoints capture authoritative entities, body/joint state, pending forces, geometry ownership and navigation intents under one identity, with manifest-last storage and fresh handles on recovery. Recovery suppresses ordinary lifecycle/contact-entry effects and holds readiness closed after a partial publication failure. Prepared geometry changes share navigation's quarantine and build queue while retaining unaffected bodies. Physics frame observations report accepted cadence, solve time and failures. These correctness features do not establish workload or platform qualification.
+
 - A separate `examples/physics-stress` workload exercises actual server physics, staged navigation, dynamic bodies, swept projectiles and mixed queries. Full mode retains the required population and resident geometry counts; reduced correctness/rehearsal modes report their scope explicitly. The source snapshot runner preserves failures, timing tails, movement cadence and memory evidence without declaring missing qualification gates passed.
 
 - An experimental pure-Go Box3D adapter provides rigid bodies, eight joint families, explicit frame acceptance, bounded character drives and capsule movement helpers. Geometric sweeps and penetration queries use tolerances independent of solver contact slop. Physics unit checks can run from recorded source snapshots with `qualification/Run-PhysicsTests.ps1`; the fork and new modules still require release publication and full workload/platform qualification.

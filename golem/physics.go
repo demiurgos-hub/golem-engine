@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"time"
 
 	"github.com/demiurgos-hub/golem-engine/golem/nav/surface"
 	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
+	"github.com/demiurgos-hub/golem-engine/golem/physics3d/content"
 	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
@@ -34,6 +36,21 @@ type PhysicsAttachmentConfig struct {
 // navigation support and entity bindings have committed. QueuePhysicsCommand
 // schedules mutations for the next tick; never mutate the World in this callback.
 type PhysicsContactFunc func([]p.ContactEvent)
+
+// PhysicsFrameMetrics describes one attempted server physics frame. Elapsed is
+// accepted simulation time; RequestedDelta remains visible when an attempt fails.
+// Duration includes navigation preparation, readback and callbacks. Solve measures
+// only World.Simulate. The observer itself is excluded from both durations.
+type PhysicsFrameMetrics struct {
+	Frame           uint64
+	RequestedDelta  float64
+	Elapsed         float32
+	Substeps        int
+	Duration, Solve time.Duration
+	Accepted        bool
+	World           p.Metrics
+	Err             error
+}
 
 // PhysicsCommand is executed on the tick goroutine before gameplay and simulation.
 // It must not integrate time, dispatch callbacks or change bound body anchors;
@@ -67,8 +84,11 @@ type physicsService struct {
 	dispatching bool
 	stepping    bool
 	closed      bool
+	restoring   bool
 	fault       error
 	onContact   PhysicsContactFunc
+	observe     func(PhysicsFrameMetrics)
+	geometry    map[string]*content.Instance
 }
 
 // SetPhysicsWorld installs a tick-owned physics world before Run. The server
@@ -268,6 +288,17 @@ func (s *Server) OnPhysicsContact(fn PhysicsContactFunc) error {
 	return nil
 }
 
+// ObservePhysicsFrames installs a read-only, tick-owned observation callback.
+// It runs once per attempted physics frame, including failures; it must not mutate
+// server/world state. No timing evidence is implied by enabling this observer.
+func (s *Server) ObservePhysicsFrames(fn func(PhysicsFrameMetrics)) error {
+	if err := s.physics.mutable(); err != nil {
+		return err
+	}
+	s.physics.observe = fn
+	return nil
+}
+
 // QueuePhysicsCommand schedules a command for the next tick's input boundary.
 // The queue is bounded by PostQueueCapacity and never executes recursively.
 // It is tick-owned; use Server.Post when submitting from another goroutine.
@@ -296,7 +327,7 @@ func (ps *physicsService) mutable() error {
 	if ps.fault != nil {
 		return fmt.Errorf("%w: %v", p.ErrFaulted, ps.fault)
 	}
-	if ps.stepping || ps.dispatching {
+	if ps.stepping || ps.dispatching || ps.restoring {
 		return p.ErrBusy
 	}
 	return nil
@@ -331,7 +362,15 @@ func (ps *physicsService) drain() error {
 	return nil
 }
 
-func (ps *physicsService) step(dt float64) error {
+func (ps *physicsService) step(dt float64) (stepErr error) {
+	metrics := PhysicsFrameMetrics{Frame: ps.server.tick, RequestedDelta: dt}
+	started := NavigationNow()
+	defer func() {
+		if ps.observe != nil {
+			metrics.Duration, metrics.Err, metrics.World = navigationSince(started), stepErr, ps.world.Metrics()
+			ps.observe(metrics)
+		}
+	}()
 	if err := ps.mutable(); err != nil {
 		return err
 	}
@@ -389,7 +428,9 @@ func (ps *physicsService) step(dt float64) error {
 	}
 	ps.stepping = true
 	defer func() { ps.stepping, ps.dispatching = false, false }()
+	solveStarted := NavigationNow()
 	result, err := ps.world.Simulate(frame)
+	metrics.Solve = navigationSince(solveStarted)
 	if err != nil {
 		ps.fault = err
 		return err
@@ -438,6 +479,7 @@ func (ps *physicsService) step(dt float64) error {
 	if err := ps.world.Accept(result.ID); err != nil {
 		return reject(err)
 	}
+	metrics.Accepted, metrics.Elapsed, metrics.Substeps = true, result.Elapsed, result.Substeps
 	// There are no gameplay callbacks between result validation, world acceptance
 	// and data-only binding writes. All entities are visible before reconciliation.
 	for _, id := range ids {

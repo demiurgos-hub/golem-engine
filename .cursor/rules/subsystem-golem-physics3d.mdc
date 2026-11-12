@@ -1,5 +1,5 @@
 ---
-description: physics3d — independent float32 contracts, pure-Go Box3D adapter, physics content cooking, staged frames and actual-server qualification.
+description: physics3d — independent float32 contracts, pure-Go Box3D adapter, source cooking/ownership, staged frames, stable-ID checkpoints and actual-server qualification.
 globs:
   - golem/physics3d/**/*
   - golem/physics*.go
@@ -10,6 +10,10 @@ alwaysApply: false
 ---
 
 # Physics 3D
+
+Portable `CheckpointWorld` recovery captures accepted poses, velocities, activation, joint descriptions and unconsumed forces under stable content IDs. Never serialize backend handles or contact caches. `PrepareRestore` builds an isolated world and rejects commitment after any target mutation; successful commitment changes world identity so every old handle becomes stale. Restore contact classification is `RestoredContact`, not ordinary `Enter`. This reconstructs valid physical state without promising bitwise solver continuation. Root paired entity/navigation recovery and manifest publication remain separate from the backend.
+
+Content leases capture source/settings/fingerprint identity and rebind through `ContentLookup` only after a paired world restore. `ContentIDs` exposes owned identity lists without copying large geometry; reject overlapping ownership. Implicit world-joint anchors are scoped by source fingerprint. `Prepared.Bounds` uses authored geometry; `Instance.Bounds` uses current accepted poses, including disabled geometry, for complete old/new quarantine checks. Neither includes navigation bake clearance; the host must add that influence.
 
 `golem/physics3d` is a separate Go module without root runtime imports. It owns portable descriptions, identity, validation, query and explicit-frame contracts. `golem/physics3d/box3d` is a separate module using Go 1.27.1 and the pure-Go Box3D solver. Root server attachment and navigation coordination belong in `golem`, never the backend or portable content loader. Test these modules explicitly; root `./...` excludes them.
 

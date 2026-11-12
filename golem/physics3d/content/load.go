@@ -125,7 +125,7 @@ func (prepared *Prepared) Load(world p.World, resolve OwnerResolver) (*Instance,
 		if joint.ConnectedBodyID == "" {
 			if fixedWorld == (p.BodyHandle{}) {
 				body := p.DefaultBody(p.Static)
-				body.ID = p.ContentID(source.WorldID + "/world-joint-anchor")
+				body.ID = prepared.worldAnchorID()
 				fixedWorld, err = world.CreateBody(body)
 				if err != nil {
 					return fail(err)
