@@ -1,5 +1,5 @@
 ---
-description: physics3d — independent float32 contracts, pure-Go Box3D adapter, source cooking/ownership, staged frames, stable-ID checkpoints and actual-server qualification.
+description: physics3d — independent float32 contracts, pure-Go Box3D adapter, relative-motion admission, source cooking/ownership, staged frames, stable-ID checkpoints and actual-server qualification.
 globs:
   - golem/physics3d/**/*
   - golem/physics*.go
@@ -28,6 +28,10 @@ Queries distinguish initial overlap, touching, penetration, solid and sensor rol
 `physics3d/content` owns strict bounded Scribe source decoding, immutable `Prepared` captures, explicit solver-margin/CCD policy hashes, owner resolution and rollback of only newly constructed handles. It has no runtime/server or backend imports. Unsupported authored joint/material controls remain inspectable diagnostics and prevent loading; never silently drop them. `physics3d/box3d` cooks private hull/BVH leaves before registering reusable shapes. Native image artifacts include format/settings/source/fork identities and are separate from portable source; an empty source snapshot hash is not release evidence. Nonidentity local mesh poses must transform and recook the instance geometry. Source identity lookup survives neither removal nor an incomplete rollback.
 
 Simulation is tick-owned and staged: validate proposals before solving, freeze mutations through the frame, integrate fixed substeps once, then accept all body/entity state or fault the whole world. Never restore one pushed character after impulses have affected other bodies. Driven characters apply bounded tangential forces once per substep; the solver owns contact transfer. No extra push impulses, proxy bodies or unsupported vertical hovering.
+
+With continuous simulation enabled, the Box3D adapter admits relative translations and rotations through bounded internal microsteps, then validates actual solver paths. Preserve force/torque duration and every microstep's body-origin pose, anchor, fraction and contact transition. Sum manifold-point impulses into collider-pair forces before owner aggregation. Report actual microstep/candidate counts; limits, unresolved casts and unsafe joint-generated paths fault the whole frame. Query tolerances remain independent of solver penetration bounds. Kinematic triangle meshes require this path; dynamic concave geometry remains unsupported. Triangle winding still controls solver response, and unresolved passenger crushing needs host transport policy rather than individual-body rewinds.
+
+`CastColliderMotion` and `QueryColliderMotion` use existing persistent geometry and supplied BODY trajectories. Sweep bounds include full rotational arcs; static candidates come from the backend tree and supplied moving targets are tested against swept bounds. Pair normals point A-to-B, world-query normals target-to-query. Earliest hits do not define complete concave sensor exit/re-entry intervals. Never infer a union MTD from a leaf penetration or omit numerical failure/overflow from clearance decisions.
 
 New physics execution artifacts, Unity projects, caches, temporary files and qualification evidence belong under `D:/Demiurgos/tests/physics-validation`. Preserve completed runs and existing navigation evidence. Record exact source snapshots and distinguish local fork checks from published dependency resolution. Missing, unsupported or unmeasured release gates are failures to qualify; an early vertical slice is not workstream completion.
 

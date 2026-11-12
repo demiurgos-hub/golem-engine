@@ -32,13 +32,13 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 		}
 		from := w.bodyState(m.Body, v).Anchor.Position
 		elapsed := float32(0)
-		for _, segment := range m.Segments {
+		for index, segment := range m.Segments {
 			if !segment.From.InBounds() || !segment.Target.InBounds() || !segment.SurfaceNormal.Valid() || !p.Finite(segment.Delta) || segment.Delta < 0 || segment.Projection && segment.Delta != 0 || !segment.Projection && segment.Delta == 0 || segment.From.Sub(from).Length() > 0.00001 {
 				err = p.ErrInvalid
 				return
 			}
-			if segment.Projection && segment.Target != segment.From {
-				err = fmt.Errorf("%w: zero-time projection requires placement admission", p.ErrUnsupported)
+			if segment.Projection && (index != 0 || segment.Target.Sub(segment.From).Length() > .5) {
+				err = fmt.Errorf("%w: initial projection exceeds its bounded admission", p.ErrInvalid)
 				return
 			}
 			if m.Validate != nil && !m.Validate(segment.From, segment.Target) {
@@ -61,11 +61,38 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 	if err = w.Synchronize(); err != nil {
 		return
 	}
+	projections := map[p.BodyHandle]p.Pose{}
+	var rejected []p.MotionRejection
+	for i, m := range motions {
+		if m.Frozen || len(m.Segments) == 0 || !m.Segments[0].Projection {
+			continue
+		}
+		delta := m.Segments[0].Target.Sub(m.Segments[0].From)
+		if delta == (p.Vec3{}) {
+			continue
+		}
+		var clear bool
+		clear, err = w.projectionClear(m.Body, delta)
+		if err != nil {
+			return
+		}
+		if !clear {
+			rejected = append(rejected, p.MotionRejection{Body: m.Body, Reason: "initial projection blocked"})
+			motions[i].Segments = nil
+			motions[i].Velocity = p.Vec3{}
+			motions[i].MaxDriveForce = 0
+			continue
+		}
+		pose := w.bodyState(m.Body, w.bodies[m.Body]).Pose
+		pose.Position = pose.Position.Add(delta)
+		projections[m.Body] = pose
+	}
 	frozen := make(map[p.BodyHandle]bool, len(motions))
 	for _, m := range motions {
 		frozen[m.Body] = m.Frozen
 	}
-	for key, v := range w.bodies {
+	for key := range w.activeBodies {
+		v := w.bodies[key]
 		if frozen[key] {
 			if !v.frozen {
 				v.id.SetType(b.KinematicBody)
@@ -91,9 +118,11 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 		}
 	}
 	keys := w.orderedActiveBodies()
+	pathIndex := make(map[p.BodyHandle]int, len(keys))
 	paths := make([]p.BodyPath, len(keys))
 	for i, h := range keys {
-		paths[i] = p.BodyPath{Body: h, Positions: []p.Vec3{w.bodies[h].committed.Anchor.Position}}
+		pathIndex[h] = i
+		paths[i] = p.BodyPath{Body: h, Positions: []p.Vec3{w.bodies[h].committed.Anchor.Position}, Poses: []p.Pose{w.bodies[h].committed.Pose}, Fractions: []float32{0}}
 	}
 	started := false
 	w.mutation++
@@ -106,6 +135,17 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 			w.stats.RejectedFrames++
 		}
 	}()
+	for i, key := range keys {
+		if pose, ok := projections[key]; ok {
+			started = true
+			w.bodies[key].id.SetTransform(bp(pose.Position), bq(pose.Rotation))
+			paths[i].Positions = append(paths[i].Positions, w.bodyState(key, w.bodies[key]).Anchor.Position)
+			paths[i].Poses = append(paths[i].Poses, pose)
+			paths[i].Fractions = append(paths[i].Fractions, 0)
+		}
+	}
+	result = p.FrameResult{ID: f.ID, Revision: w.revision + 1, Substeps: w.config.Substeps, Paths: paths, RejectedMotions: rejected, Events: append([]p.ContactEvent(nil), w.cleanup...)}
+	contactState := w.newMotionContactState()
 	h := f.Delta / float32(w.config.Substeps)
 	for sub := 0; sub < w.config.Substeps; sub++ {
 		for _, key := range keys {
@@ -145,38 +185,51 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 			}
 		}
 		started = true
-		w.backend.Step(h, 1)
-		for i, key := range keys {
-			state := w.bodyState(key, w.bodies[key])
-			if !w.bodyInBounds(w.bodies[key], state.Pose) || !state.Anchor.Position.InBounds() || !state.LinearVelocity.Valid() || !state.AngularVelocity.Valid() {
-				err = fmt.Errorf("physics3d: body %v left supported state", key)
-				return
+		observe := func(sample b.MotionStepSample) error {
+			fraction := (float32(sub) + sample.EndFraction) / float32(w.config.Substeps)
+			for i, key := range keys {
+				state := w.bodyState(key, w.bodies[key])
+				if !w.bodyInBounds(w.bodies[key], state.Pose) || !state.Anchor.Position.InBounds() || !state.LinearVelocity.Valid() || !state.AngularVelocity.Valid() {
+					return fmt.Errorf("physics3d: body %v left supported state", key)
+				}
+				paths[i].Positions = append(paths[i].Positions, state.Anchor.Position)
+				paths[i].Poses = append(paths[i].Poses, state.Pose)
+				paths[i].Fractions = append(paths[i].Fractions, fraction)
 			}
-			paths[i].Positions = append(paths[i].Positions, state.Anchor.Position)
-		}
-		for _, m := range motions {
-			if m.Validate != nil {
-				v := w.bodies[m.Body]
-				now := w.bodyState(m.Body, v).Anchor.Position
-				var previous p.Vec3
-				for i, key := range keys {
-					if key == m.Body {
-						previous = paths[i].Positions[len(paths[i].Positions)-2]
-						break
+			for _, m := range motions {
+				if m.Validate != nil {
+					path := paths[pathIndex[m.Body]].Positions
+					if !m.Validate(path[len(path)-2], path[len(path)-1]) {
+						return fmt.Errorf("physics3d: captured safety failed after microstep")
 					}
 				}
-				if !m.Validate(previous, now) {
-					err = fmt.Errorf("physics3d: captured safety failed after substep")
-					return
-				}
+			}
+			result.Events = append(result.Events, contactState.observe(w, sample, f.ID, result.Revision, fraction)...)
+			return nil
+		}
+		if w.config.Continuous {
+			work, stepErr := w.backend.StepMotion(h, b.DefaultMotionStepOptions(), observe)
+			result.Microsteps += work.Microsteps
+			result.MotionPairTests += work.PairTests
+			result.Elapsed += work.Elapsed
+			if stepErr != nil {
+				err = fmt.Errorf("physics3d: relative motion: %w", stepErr)
+				return
+			}
+		} else {
+			w.backend.Step(h, 1)
+			result.Microsteps++
+			result.Elapsed += h
+			err = observe(w.captureMotionSample(h))
+			if err != nil {
+				return
 			}
 		}
 	}
-	result = p.FrameResult{ID: f.ID, Revision: w.revision + 1, Substeps: w.config.Substeps, Elapsed: f.Delta, Paths: paths}
+	result.Elapsed = f.Delta
 	for _, key := range keys {
 		result.Bodies = append(result.Bodies, w.bodyState(key, w.bodies[key]))
 	}
-	result.Events = w.contacts(f.ID, result.Revision, h)
 	private := result
 	private.Bodies = append([]p.BodyState(nil), result.Bodies...)
 	private.Events = append([]p.ContactEvent(nil), result.Events...)
@@ -243,8 +296,13 @@ func (w *World) clipKinematic(h p.BodyHandle, velocity p.Vec3, dt float32) (p.Ve
 			continue
 		}
 		s := w.shapes[c.desc.Shape].desc
+		if containsMesh(s) {
+			// Kinematic triangle response is admitted by StepMotion. Passenger
+			// and ceiling transport policy is handled by the host before solving.
+			continue
+		}
 		pose := w.bodyState(h, v).Pose.Compose(c.desc.LocalPose)
-		filter := p.QueryFilter{Mask: c.desc.Filter.Mask, ExcludeBodies: []p.BodyHandle{h}, RequireSolid: true, IncludeNonQuery: true, Sensors: p.IncludeSensors}
+		filter := p.QueryFilter{Mask: ^uint64(0), PhysicalFilter: &c.desc.Filter, ExcludeBodies: []p.BodyHandle{h}, RequireSolid: true, IncludeNonQuery: true, Sensors: p.IncludeSensors}
 		if s.Kind == p.Capsule && s.PointA.X == s.PointB.X && s.PointA.Z == s.PointB.Z && pose.Rotation == (p.Quat{W: 1}) {
 			cfg := character.DefaultConfig()
 			cfg.Radius = s.Radius
@@ -298,57 +356,4 @@ func (w *World) Reject(id uint64, cause error) error {
 	w.stats.RejectedFrames++
 	w.pending = nil
 	return nil
-}
-func (w *World) contacts(frame, revision uint64, h float32) []p.ContactEvent {
-	var current []p.ContactEvent
-	for _, key := range w.orderedActiveBodies() {
-		v := w.bodies[key]
-		data := make([]b.ContactData, v.id.GetContactCapacity())
-		n := v.id.GetContactData(data)
-		for _, c := range data[:n] {
-			a, aok := w.shapeOwners[c.ShapeIdA]
-			z, zok := w.shapeOwners[c.ShapeIdB]
-			if !aok || !zok {
-				continue
-			}
-			for _, m := range c.Manifolds {
-				for i := int32(0); i < m.PointCount; i++ {
-					pt := m.Points[i]
-					if pt.Separation > 0 && pt.TotalNormalImpulse == 0 {
-						continue
-					}
-					ca, cb := w.colliders[a], w.colliders[z]
-					point := pp(c.ShapeIdA.GetBody().GetWorldCenter()).Add(pv(pt.AnchorA))
-					current = append(current, p.ContactEvent{Pair: p.ContactPair{A: a, B: z, Kind: p.SolidContact}, OwnerA: ca.desc.Owner, OwnerB: cb.desc.Owner, Point: point, Normal: pv(m.Normal), Force: pv(m.Normal).Mul(pt.TotalNormalImpulse / h), Depth: max(0, -pt.Separation)})
-					if ca.desc.Roles.Sensor || cb.desc.Roles.Sensor {
-						sensor := current[len(current)-1]
-						sensor.Pair.Kind = p.SensorContact
-						sensor.Force = p.Vec3{}
-						current = append(current, sensor)
-					}
-				}
-			}
-		}
-	}
-	for handle, c := range w.colliders {
-		if !c.desc.Roles.Sensor {
-			continue
-		}
-		for _, id := range c.shapes {
-			if !id.IsSensor() {
-				continue
-			}
-			visitors := make([]b.ShapeID, id.GetSensorCapacity())
-			n := id.GetSensorData(visitors)
-			for _, other := range visitors[:n] {
-				o, ok := w.shapeOwners[other]
-				if !ok {
-					continue
-				}
-				current = append(current, p.ContactEvent{Pair: p.ContactPair{A: handle, B: o, Kind: p.SensorContact}, OwnerA: c.desc.Owner, OwnerB: w.colliders[o].desc.Owner})
-			}
-		}
-	}
-	events := w.tracker.Update(current, frame, revision, w.restoring)
-	return append(append([]p.ContactEvent(nil), w.cleanup...), events...)
 }

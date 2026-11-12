@@ -40,28 +40,29 @@ type joint struct {
 	desc p.JointDesc
 }
 type World struct {
-	id            uint64
-	backend       b.WorldID
-	config        p.Config
-	next          uint32
-	shapes        map[p.ShapeHandle]*shape
-	bodies        map[p.BodyHandle]*body
-	activeBodies  map[p.BodyHandle]struct{}
-	colliders     map[p.ColliderHandle]*collider
-	shapeOwners   map[b.ShapeID]p.ColliderHandle
-	joints        map[p.JointHandle]*joint
-	revision      uint64
-	mutation      uint64
-	lastFrame     uint64
-	dirty, closed bool
-	pending       *p.FrameResult
-	stats         p.Metrics
-	tracker       p.ContactTracker
-	cleanup       []p.ContactEvent
-	restoring     bool
-	materials     map[uint64]p.Material
-	materialKeys  map[p.Material]uint64
-	nextMaterial  uint64
+	id              uint64
+	backend         b.WorldID
+	config          p.Config
+	next            uint32
+	shapes          map[p.ShapeHandle]*shape
+	bodies          map[p.BodyHandle]*body
+	activeBodies    map[p.BodyHandle]struct{}
+	colliders       map[p.ColliderHandle]*collider
+	sensorColliders map[p.ColliderHandle]*collider
+	shapeOwners     map[b.ShapeID]p.ColliderHandle
+	joints          map[p.JointHandle]*joint
+	revision        uint64
+	mutation        uint64
+	lastFrame       uint64
+	dirty, closed   bool
+	pending         *p.FrameResult
+	stats           p.Metrics
+	tracker         p.ContactTracker
+	cleanup         []p.ContactEvent
+	restoring       bool
+	materials       map[uint64]p.Material
+	materialKeys    map[p.Material]uint64
+	nextMaterial    uint64
 }
 
 // New creates an isolated physics world with validated simulation settings.
@@ -390,6 +391,7 @@ func (w *World) Close() error {
 	w.closed = true
 	w.bodies = nil
 	w.colliders = nil
+	w.sensorColliders = nil
 	w.shapes = nil
 	w.joints = nil
 	return nil

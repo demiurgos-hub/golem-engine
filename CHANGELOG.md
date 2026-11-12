@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Continuous physics frames now admit relative translations and rotations through bounded solver microsteps, retaining intermediate body poses and contact/sensor transitions. Kinematic triangle meshes can transfer solver momentum to passive bodies; unsupported dynamic concave geometry, unresolved paths and crush bounds fail explicitly. Persistent-collider motion queries preserve exact geometry identity and caller-buffer completeness. Capacity, transport policy and platform qualification remain separate gates.
+
 - Capsule movement now checks stairs with headroom, walkable and steep slopes, corners, narrow openings, ledges, ceilings and support loss. Physical placement/movement queries can apply symmetric collision masks and signed group overrides independently of gameplay query masks.
 
 - Physics queries support bounded parallel batches against one synchronized revision with caller-owned, nonoverlapping buffers. Nearest/any queries retain explicit initial-overlap and overflow semantics. Optional owner contact aggregation counts exact child pairs and preserves swept entry/exit ordering; restored contacts have a distinct phase. The full mixed-load diagnostic now records solver/query worker counts; its timing gate remains unqualified.

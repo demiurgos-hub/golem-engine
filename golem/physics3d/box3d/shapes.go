@@ -32,8 +32,8 @@ func (w *World) CreateCollider(d p.ColliderDesc) (p.ColliderHandle, error) {
 	if v.id.GetJointCount() != 0 {
 		return p.ColliderHandle{}, fmt.Errorf("%w: rebuild joints before changing body mass", p.ErrBusy)
 	}
-	if containsMesh(s.desc) && v.desc.Mode != p.Static {
-		return p.ColliderHandle{}, fmt.Errorf("%w: moving triangle collision has not qualified", p.ErrUnsupported)
+	if containsMesh(s.desc) && v.desc.Mode != p.Static && (!w.config.Continuous || v.desc.Mode == p.FreeDynamic || v.desc.Mode == p.DrivenCharacter) {
+		return p.ColliderHandle{}, fmt.Errorf("%w: moving triangle collision requires a kinematic body and continuous motion admission", p.ErrUnsupported)
 	}
 	d.Material, err = w.registerMaterial(d.Material)
 	if err != nil {
@@ -50,6 +50,12 @@ func (w *World) CreateCollider(d p.ColliderDesc) (p.ColliderHandle, error) {
 		}
 	}
 	w.colliders[h] = c
+	if c.desc.Roles.Sensor {
+		if w.sensorColliders == nil {
+			w.sensorColliders = map[p.ColliderHandle]*collider{}
+		}
+		w.sensorColliders[h] = c
+	}
 	s.refs++
 	v.colliders = append(v.colliders, h)
 	for _, id := range c.shapes {
@@ -142,6 +148,7 @@ func (w *World) DestroyCollider(h p.ColliderHandle, reason p.CleanupReason) erro
 	w.shapes[c.desc.Shape].refs--
 	w.cleanup = append(w.cleanup, w.tracker.Remove(h, reason, w.revision+1)...)
 	delete(w.colliders, h)
+	delete(w.sensorColliders, h)
 	w.adjustMass(v)
 	w.changed()
 	return nil

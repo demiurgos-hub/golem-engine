@@ -227,14 +227,27 @@ type FrameResult struct {
 	Bodies       []BodyState
 	Events       []ContactEvent
 	Substeps     int
-	Elapsed      float32
-	Paths        []BodyPath
+	// Microsteps and MotionPairTests report actual internal collision work.
+	Microsteps, MotionPairTests int
+	Elapsed                     float32
+	Paths                       []BodyPath
+	RejectedMotions             []MotionRejection
+}
+
+// MotionRejection records an intent denied before the interacting frame solved.
+type MotionRejection struct {
+	Body   BodyHandle
+	Reason string
 }
 
 // BodyPath records every simulated anchor pose, including the frame's start.
 type BodyPath struct {
 	Body      BodyHandle
 	Positions []Vec3
+	// Poses are body-origin transforms; Positions remain gameplay anchors.
+	// Fractions records their time within the accepted frame, including zero.
+	Poses     []Pose
+	Fractions []float32
 }
 type Metrics struct {
 	Revision, AcceptedFrames, RejectedFrames           uint64
