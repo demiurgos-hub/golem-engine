@@ -146,8 +146,6 @@ def main():
                 if path == engine:
                     packages = ["./cmd/...", "./schema/...", "./codegen/...", "./golem/...", "./golem-go-client/...", "./internal/..."]
                     passed = command("test-root-server", [go, "test", *tags, "-count=1", "-json", *packages], path, settings, required=False) and passed
-                    client_env = dict(settings, CGO_ENABLED="1")
-                    passed = command("test-ebiten-client-cgo", [go, "test", "-count=1", "-json", "./golem-ebiten/..."], path, client_env, required=False) and passed
                     continue
                 passed = command(f"test-{index:02d}-{path.name}", [go, "test", *tags, "-count=1", "-json", "./..."], path, settings, required=False) and passed
             if not passed:

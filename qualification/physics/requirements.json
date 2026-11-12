@@ -53,18 +53,30 @@
       "goComparison": "D:/Demiurgos/tests/physics-validation/unity/runs/terrain-reference-20261112-02/go-reference-report.json",
       "scope": "Two actual 513x513 HeightOnly tiles, 1048576 triangles, zero authored holes. All 42 rays pass after physics-specific native cell triangulation correction. Sphere precision/convergence remains under investigation. Repeated 768/2304 metre offsets test coordinates, not additional resident area.",
       "remaining": ["AssetsByObject/Fortress/Fortress Parts/Wall_LordRoom_Stair_R_Server.prefab and its nested source dependencies", "WorldStreamer server-prefab/catalog choices, object-state variants and database-driven full world assembly"],
-      "unresolvedFortressDependency": {
+      "excludedFortressDependency": {
         "reference": "AssetsByObject/Fortress/Fortress Parts/Wall_LordRoom_Stair_R.prefab:1019",
         "sourceGUID": "d792e15c3c2895d4daa70bfc04ab5509",
         "instanceName": "vfx_Campfire (1)",
         "evidence": "D:/Demiurgos/tests/physics-validation/unity/fractured-missing-fortress-prefab.json",
-        "scope": "The running original Unity Editor reports Unknown GUID. No assumption is made that a missing nested prefab is collision-free; the original repository remains read-only."
+        "authority": "User: Vfx are never part of server content.",
+        "decisionEvidence": "D:/Demiurgos/tests/physics-validation/unity/fortress-vfx-scope-decision-20261112.json",
+        "prefabInstanceFileID": "4287085134066881779",
+        "strippedTransformFileID": "4282982801080943723",
+        "scope": "This exact missing VFX source is explicitly excluded from server content by user authority and is not a fortress blocker. Qualification must record the exact exclusion and original/filtered input hashes; the generic missing-prefab guard remains unchanged. Other required fortress geometry and full assembly remain unqualified. The original repository remains read-only."
       },
       "status": "not-qualified"
     }
   },
   "qualification": {
     "workspace": "D:/Demiurgos/tests/physics-validation",
+    "frontendScopeDecision": {
+      "date": "2026-11-12",
+      "authority": "User: Ebiten is a front-end integration; this work is backend physics qualification.",
+      "excluded": ["Ebiten graphical client build/tests and graphics prerequisites"],
+      "historicalResult": "D:/Demiurgos/tests/physics-validation/linux/cadence-native-tests-20261112-02/manifest.json",
+      "cancelledSupplement": "D:/Demiurgos/tests/physics-validation/linux/cadence-native-ebiten-supplement-20261112-01/cancelled-by-scope-decision.json",
+      "policy": "Preserve the historical missing-GL-header failure and prerequisite evidence. The supplemental check was stopped before tests; no graphical pass is claimed. Future native physics qualification omits the graphical client lane and retains CGO_ENABLED=0 for backend checks."
+    },
     "unityEditorScopeDecision": {
       "date": "2026-11-12",
       "authority": "User explicitly excluded Unity 2021.3 compatibility testing and requested cancellation and cleanup of that prerequisite.",
