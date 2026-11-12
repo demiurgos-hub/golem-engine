@@ -28,6 +28,27 @@ func TestShapeValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestQueryEnvelopeIncludesOrientedGeometry(t *testing.T) {
+	q := Query{Kind: Sweep, Pose: Identity(), Shape: ShapeDesc{Kind: Capsule, Radius: .25, PointB: Vec3{Y: 1}}}
+	q.Pose.Position = Vec3{X: CoordinateLimit - .5}
+	if err := q.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	q.Translation.X = .3
+	if q.Validate() == nil {
+		t.Fatal("query radius crossed envelope")
+	}
+	q.Translation = Vec3{}
+	q.Pose.Rotation = Quat{Z: float32(math.Sqrt(.5)), W: float32(math.Sqrt(.5))}
+	if q.Validate() != nil {
+		t.Fatal("inward rotated capsule rejected")
+	}
+	q.Pose.Rotation.Z *= -1
+	if q.Validate() == nil {
+		t.Fatal("rotated capsule endpoint crossed envelope")
+	}
+}
 func TestTransformSpaces(t *testing.T) {
 	p := Pose{Vec3{3, 4, 5}, Quat{Y: float32(math.Sqrt(.5)), W: float32(math.Sqrt(.5))}}
 	v := Vec3{1, 2, 3}

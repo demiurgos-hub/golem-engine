@@ -25,7 +25,11 @@ func (w *World) QueryBatch(tasks []p.QueryTask, outcomes []p.QueryOutcome, worke
 	}
 	var next atomic.Int64
 	var group sync.WaitGroup
-	run := func() {
+	contexts := make([]*queryScratch, min(workers, len(tasks)))
+	for i := range contexts {
+		contexts[i] = w.queryScratch(i)
+	}
+	run := func(scratch *queryScratch) {
 		defer group.Done()
 		for {
 			start := int(next.Add(32)) - 32
@@ -34,14 +38,14 @@ func (w *World) QueryBatch(tasks []p.QueryTask, outcomes []p.QueryOutcome, worke
 			}
 			for i := start; i < min(start+32, len(tasks)); i++ {
 				task := tasks[i]
-				r, err := w.query(task.Query, task.Hits)
+				r, err := w.queryWithScratch(task.Query, task.Hits, scratch)
 				outcomes[i] = p.QueryOutcome{Result: r, Err: err}
 			}
 		}
 	}
-	for i := 0; i < min(workers, len(tasks)); i++ {
+	for _, scratch := range contexts {
 		group.Add(1)
-		go run()
+		go run(scratch)
 	}
 	group.Wait()
 	w.stats.Queries += uint64(len(tasks))

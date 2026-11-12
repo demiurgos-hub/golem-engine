@@ -119,3 +119,25 @@ func TestPhysicalQueryFiltersMatchSymmetricMasksAndGroups(t *testing.T) {
 		})
 	}
 }
+
+func TestAllHitOverflowRetainsStableNearestPrefix(t *testing.T) {
+	w := world(t)
+	var expected []p.ColliderHandle
+	for i := 0; i < 32; i++ {
+		_, collider := add(t, w, p.Static, p.Vec3{X: float32(64 - i*2)}, p.ShapeDesc{Kind: p.Sphere, Radius: .4})
+		expected = append(expected, collider)
+	}
+	q := p.Query{Kind: p.Ray, Mode: p.All, Pose: p.Identity(), Translation: p.Vec3{X: 66}, Filter: p.QueryFilter{Mask: ^uint64(0)}}
+	for _, capacity := range []int{0, 1, 3, 8, 32, 40} {
+		hits := make([]p.Hit, capacity)
+		r, err := w.Query(q, hits)
+		if err != nil || r.Total != 32 || r.Count != min(capacity, 32) || r.Incomplete != (capacity < 32) || !r.Blocked {
+			t.Fatalf("capacity%d: %+v %v", capacity, r, err)
+		}
+		for i, hit := range hits[:r.Count] {
+			if hit.Collider != expected[len(expected)-1-i] {
+				t.Fatalf("capacity%d index%d: wrong nearest prefix", capacity, i)
+			}
+		}
+	}
+}

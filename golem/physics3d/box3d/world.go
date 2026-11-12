@@ -43,13 +43,15 @@ type World struct {
 	id              uint64
 	backend         b.WorldID
 	config          p.Config
-	next            uint32
+	generations     []uint32
+	freeHandles     []uint32
 	shapes          map[p.ShapeHandle]*shape
 	bodies          map[p.BodyHandle]*body
 	activeBodies    map[p.BodyHandle]struct{}
 	colliders       map[p.ColliderHandle]*collider
 	sensorColliders map[p.ColliderHandle]*collider
 	shapeOwners     map[b.ShapeID]p.ColliderHandle
+	queryContexts   []*queryScratch
 	joints          map[p.JointHandle]*joint
 	revision        uint64
 	mutation        uint64
@@ -91,10 +93,6 @@ func (w *World) guard() error {
 		return p.ErrBusy
 	}
 	return nil
-}
-func (w *World) handle() p.Handle {
-	w.next++
-	return p.Handle{World: w.id, Index: w.next, Generation: 1}
 }
 func (w *World) changed()     { w.mutation++; w.dirty = true }
 func bv(v p.Vec3) b.Vec3      { return b.Vec3{X: v.X, Y: v.Y, Z: v.Z} }
@@ -146,6 +144,7 @@ func (w *World) DestroyShape(h p.ShapeHandle) error {
 		return fmt.Errorf("%w: shape in use", p.ErrBusy)
 	}
 	delete(w.shapes, h)
+	w.releaseHandle(p.Handle(h))
 	w.mutation++
 	return nil
 }
@@ -187,7 +186,11 @@ func (w *World) CreateBody(d p.BodyDesc) (p.BodyHandle, error) {
 		def.MotionLocks.AngularZ = true
 		def.EnableContactRecycling = false
 	}
-	h := p.BodyHandle(w.handle())
+	identity, err := w.claimHandle()
+	if err != nil {
+		return p.BodyHandle{}, err
+	}
+	h := p.BodyHandle(identity)
 	v := &body{id: w.backend.CreateBody(&def), desc: d}
 	w.adjustMass(v)
 	w.bodies[h] = v
@@ -235,6 +238,7 @@ func (w *World) DestroyBody(h p.BodyHandle, reason p.CleanupReason) error {
 	}
 	v.id.Destroy()
 	delete(w.bodies, h)
+	w.releaseHandle(p.Handle(h))
 	delete(w.activeBodies, h)
 	w.changed()
 	return nil
@@ -394,6 +398,13 @@ func (w *World) Close() error {
 	w.sensorColliders = nil
 	w.shapes = nil
 	w.joints = nil
+	w.shapeOwners = nil
+	w.activeBodies = nil
+	w.queryContexts = nil
+	w.generations, w.freeHandles = nil, nil
+	w.pending, w.cleanup = nil, nil
+	w.tracker = p.ContactTracker{}
+	w.materials, w.materialKeys = nil, nil
 	return nil
 }
 func (w *World) orderedBodies() []p.BodyHandle {

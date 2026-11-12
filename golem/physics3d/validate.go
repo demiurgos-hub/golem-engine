@@ -80,7 +80,15 @@ func (q Query) Validate() error {
 	case Ray:
 		return nil
 	case Sweep, Overlap:
-		return q.Shape.Validate()
+		if err := q.Shape.Validate(); err != nil {
+			return err
+		}
+		end := q.Pose
+		end.Position = end.Position.Add(q.Translation)
+		if !q.Shape.InBounds(q.Pose) || !q.Shape.InBounds(end) {
+			return ErrInvalid
+		}
+		return nil
 	default:
 		return ErrInvalid
 	}
@@ -102,7 +110,7 @@ func (d BodyDesc) Validate() error {
 
 // Validate checks finite world settings and bounded scheduling configuration.
 func (c Config) Validate() error {
-	if !c.Gravity.Valid() || c.Substeps < 1 || c.Substeps > 128 || c.TickRate < 1 || c.TickRate > 1000 || c.Workers < 1 || c.Workers > 64 {
+	if !c.Gravity.Valid() || c.Substeps < 1 || c.Substeps > 128 || c.TickRate < 1 || c.TickRate > 1000 || c.Workers < 1 || c.Workers > 64 || !Finite(c.CCDContactTolerance) || c.CCDContactTolerance <= 0 || c.CCDContactTolerance >= .005 {
 		return ErrInvalid
 	}
 	return nil

@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Physics handles now recycle with advancing generations, rejecting stale pooled-body commands and rebuilding replacement contacts. Query scratch is reused per worker, all-hit retention is bounded by the caller's buffer, and the coordinate envelope includes the query's full oriented geometry.
+
 - Physics stress diagnostics can explicitly select Box3D's pure-Go SIMD build and solver/query worker counts. Evidence records the Go experiment, build tags and target architecture; the SIMD candidate retains its CPU requirements and does not imply workload or platform qualification.
 
 - Physical geometry can activate under quarantine before its asynchronous navigation rebuild. Failed navigation retains the new physical state and supports retries without recreating bodies. Pending-edit checkpoints preserve accepted and desired worlds separately and require matching private physics/navigation reconstruction before recovery opens readiness.

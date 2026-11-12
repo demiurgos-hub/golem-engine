@@ -1,6 +1,6 @@
 package physics3d
 
-import "sort"
+import "slices"
 
 type QueryKind uint8
 
@@ -110,8 +110,14 @@ type PenetrationResult struct {
 
 // SortHits orders by distance, collider generation and exact feature identity.
 func SortHits(h []Hit) {
-	sort.SliceStable(h, func(i, j int) bool {
-		return HitLess(h[i], h[j])
+	slices.SortStableFunc(h, func(a, b Hit) int {
+		if HitLess(a, b) {
+			return -1
+		}
+		if HitLess(b, a) {
+			return 1
+		}
+		return 0
 	})
 }
 

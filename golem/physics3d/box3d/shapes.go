@@ -40,12 +40,17 @@ func (w *World) CreateCollider(d p.ColliderDesc) (p.ColliderHandle, error) {
 		return p.ColliderHandle{}, err
 	}
 	c := &collider{desc: d, children: map[b.ShapeID]uint32{}}
-	h := p.ColliderHandle(w.handle())
+	identity, err := w.claimHandle()
+	if err != nil {
+		return p.ColliderHandle{}, err
+	}
+	h := p.ColliderHandle(identity)
 	if d.Enabled {
 		if err := w.attachCookedGeometry(v, c, s.cooked, d.LocalPose); err != nil {
 			for _, id := range c.shapes {
 				id.Destroy(true)
 			}
+			w.releaseHandle(identity)
 			return p.ColliderHandle{}, err
 		}
 	}
@@ -148,6 +153,7 @@ func (w *World) DestroyCollider(h p.ColliderHandle, reason p.CleanupReason) erro
 	w.shapes[c.desc.Shape].refs--
 	w.cleanup = append(w.cleanup, w.tracker.Remove(h, reason, w.revision+1)...)
 	delete(w.colliders, h)
+	w.releaseHandle(p.Handle(h))
 	delete(w.sensorColliders, h)
 	w.adjustMass(v)
 	w.changed()

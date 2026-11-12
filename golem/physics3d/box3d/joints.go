@@ -37,6 +37,13 @@ func (w *World) CreateJoint(d p.JointDesc) (p.JointHandle, error) {
 	base.LocalFrameA = bt(d.FrameA)
 	base.LocalFrameB = bt(d.FrameB)
 	base.CollideConnected = d.CollideConnected
+	if d.Kind == p.Spherical && !d.TargetRotation.Valid() {
+		return p.JointHandle{}, p.ErrInvalid
+	}
+	identity, err := w.claimHandle()
+	if err != nil {
+		return p.JointHandle{}, err
+	}
 	var id b.JointID
 	switch d.Kind {
 	case p.Weld:
@@ -90,9 +97,6 @@ func (w *World) CreateJoint(d p.JointDesc) (p.JointHandle, error) {
 		x.MotorSpeed = d.Speed
 		id = w.backend.CreatePrismaticJoint(&x)
 	case p.Spherical:
-		if !d.TargetRotation.Valid() {
-			return p.JointHandle{}, p.ErrInvalid
-		}
 		x := b.DefaultSphericalJointDef()
 		x.Base = base
 		x.EnableSpring = d.Spring
@@ -148,7 +152,7 @@ func (w *World) CreateJoint(d p.JointDesc) (p.JointHandle, error) {
 		x.MaxSteeringTorque = d.MaxSteeringTorque
 		id = w.backend.CreateWheelJoint(&x)
 	}
-	h := p.JointHandle(w.handle())
+	h := p.JointHandle(identity)
 	w.joints[h] = &joint{id: id, desc: d}
 	w.changed()
 	return h, nil
@@ -165,6 +169,7 @@ func (w *World) DestroyJoint(h p.JointHandle) error {
 	}
 	v.id.Destroy(true)
 	delete(w.joints, h)
+	w.releaseHandle(p.Handle(h))
 	w.changed()
 	return nil
 }
