@@ -106,7 +106,13 @@ func TestMotionStepRetainsSensorEnterAndExitInsideFrame(t *testing.T) {
 }
 
 func TestMotionStepAggregatesManifoldPointForces(t *testing.T) {
-	w := world(t)
+	config := p.DefaultConfig()
+	config.AllowSleep = false
+	w, err := box.New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
 	add(t, w, p.Static, p.Vec3{Y: -.5}, p.ShapeDesc{Kind: p.Box, HalfExtents: p.Vec3{X: 4, Y: .5, Z: 4}})
 	body, _ := add(t, w, p.FreeDynamic, p.Vec3{Y: .505}, p.ShapeDesc{Kind: p.Box, HalfExtents: p.Vec3{X: .5, Y: .5, Z: .5}})
 	var r p.FrameResult
@@ -114,6 +120,9 @@ func TestMotionStepAggregatesManifoldPointForces(t *testing.T) {
 		r = step(t, w, i)
 	}
 	state, _ := w.Body(body)
+	if !state.Awake {
+		t.Fatal("force aggregation requires a body solved in the current interval")
+	}
 	last := float32(0)
 	for _, event := range r.Events {
 		if event.Pair.Kind == p.SolidContact && event.Fraction == 1 {
