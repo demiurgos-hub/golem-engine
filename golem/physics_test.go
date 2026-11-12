@@ -484,3 +484,43 @@ func TestPhysicsAttachmentAdoptsUnownedBodyIdentity(t *testing.T) {
 		t.Fatalf("body identity was not bound: state=%+v err=%v", state, err)
 	}
 }
+
+func TestPhysicsFreeDynamicRejectsDriveWithoutChangingIntent(t *testing.T) {
+	s, _, w := physicsNavigationTestServer(t)
+	physicsTestAttach(t, s, w, 1, p.FreeDynamic, PhysicsAttachmentConfig{})
+	a := s.navigation.agents[1]
+	generation := a.state.Generation
+	if err := s.SetNavigationDestination(1, surface.Vec3{X: 1}); err == nil {
+		t.Fatal("free body accepted drive intent")
+	}
+	if a.state.Generation != generation || a.state.HasDestination || a.needsPath {
+		t.Fatal("rejected drive changed navigation state")
+	}
+}
+
+func TestPhysicsStaticAndNavigationRejectAtAttachment(t *testing.T) {
+	for _, navigationFirst := range []bool{false, true} {
+		t.Run(map[bool]string{false: "physics-first", true: "navigation-first"}[navigationFirst], func(t *testing.T) {
+			s, _, w := physicsNavigationTestServer(t)
+			cfg := s.navigation.agents[1].config
+			if !navigationFirst {
+				s.DetachNavigation(1)
+			}
+			h := p.BodyHandle{World: 1, Index: 1, Generation: 1}
+			w.bodies = map[p.BodyHandle]p.BodyState{h: {Handle: h, Owner: 1, Mode: p.Static, Pose: p.Identity(), Anchor: p.Identity()}}
+			err := s.AttachPhysics(1, h, PhysicsAttachmentConfig{})
+			if navigationFirst {
+				if err == nil || len(s.physics.agents) != 0 {
+					t.Fatal("static body accepted an existing navigation attachment")
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := s.AttachNavigation(1, cfg); err == nil || len(s.navigation.agents) != 0 {
+					t.Fatal("navigation attached to static body")
+				}
+			}
+		})
+	}
+}

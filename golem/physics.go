@@ -139,6 +139,11 @@ func (s *Server) AttachPhysics(id int64, body p.BodyHandle, cfg PhysicsAttachmen
 	if err != nil {
 		return err
 	}
+	if n := s.navigation; n != nil {
+		if agent := n.agents[id]; agent != nil && (!physicsNavigationMode(state.Mode) || agent.state.HasDestination && state.Mode == p.FreeDynamic) {
+			return errors.New("golem: body mode cannot consume this navigation attachment or intent")
+		}
+	}
 	x, y, z := position.Position3D()
 	if !validPhysicsState(state) || state.Handle != body || state.Owner != 0 && state.Owner != id || state.Anchor.Position != (p.Vec3{X: x, Y: y, Z: z}) {
 		return errors.New("golem: physics body owner or gameplay anchor does not match entity")
@@ -363,7 +368,7 @@ func (ps *physicsService) step(dt float64) error {
 		if !f.Contains(id) {
 			continue
 		}
-		if state.Mode != p.DrivenCharacter && state.Mode != p.Kinematic && state.Mode != p.ScriptedAction && state.Mode != p.FreeDynamic {
+		if !physicsNavigationMode(state.Mode) {
 			return fmt.Errorf("golem: body mode cannot participate in staged navigation for entity %d", id)
 		}
 		motion := p.Motion{Body: a.body, MaxDriveForce: a.config.MaxDriveForce, Frozen: f.Frozen(id)}
@@ -485,6 +490,24 @@ func (ps *physicsService) stop() {
 
 func validPhysicsState(state p.BodyState) bool {
 	return state.Pose.Valid() && state.Anchor.Valid() && state.LinearVelocity.Valid() && state.AngularVelocity.Valid() && state.CenterOfMass.InBounds()
+}
+
+func physicsNavigationMode(mode p.MotionMode) bool {
+	return mode == p.DrivenCharacter || mode == p.Kinematic || mode == p.ScriptedAction || mode == p.FreeDynamic
+}
+
+func (s *Server) validatePhysicsNavigation(id int64, drive bool) error {
+	if s.physics == nil || s.physics.agents[id] == nil {
+		return nil
+	}
+	state, err := s.PhysicsBody(id)
+	if err != nil {
+		return err
+	}
+	if !physicsNavigationMode(state.Mode) || drive && state.Mode == p.FreeDynamic {
+		return errors.New("golem: body mode does not support this navigation operation")
+	}
+	return nil
 }
 
 func physicsNavPoint(v p.Vec3) surface.Vec3 {
