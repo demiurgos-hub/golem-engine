@@ -14,7 +14,6 @@ type queryScratch struct {
 	proxy           b.ShapeProxy
 	points          [b.MaxShapeCastPoints]b.Vec3
 	initial         map[b.ShapeID]bool
-	penetrations    []b.CapsulePenetration
 	hits            []p.Hit
 	nearest         p.Hit
 	length          float32
@@ -25,7 +24,7 @@ type queryScratch struct {
 
 func (w *World) queryScratch(index int) *queryScratch {
 	for len(w.queryContexts) <= index {
-		w.queryContexts = append(w.queryContexts, &queryScratch{initial: make(map[b.ShapeID]bool), penetrations: make([]b.CapsulePenetration, 8)})
+		w.queryContexts = append(w.queryContexts, &queryScratch{initial: make(map[b.ShapeID]bool)})
 	}
 	return w.queryContexts[index]
 }
@@ -132,26 +131,18 @@ func queryInitial(id b.ShapeID, context any) bool {
 			return true
 		}
 		h.Point, h.Normal, h.Penetrating, h.Touching = pp(r.Point), pv(r.Normal), r.Inside, !r.Inside
+		h.Feature.LocalID, h.Feature.Detail = r.Feature.FeatureID, p.ClosestFeatureDetail
 	} else {
-		n, total, valid := id.ProxyPenetrations(bp(q.Pose.Position), &s.proxy, q.Backfaces == p.IncludeBackfaces, s.penetrations)
-		if valid && total > len(s.penetrations) {
-			s.penetrations = make([]b.CapsulePenetration, total)
-			n, _, valid = id.ProxyPenetrations(bp(q.Pose.Position), &s.proxy, q.Backfaces == p.IncludeBackfaces, s.penetrations)
-		}
+		best, found, valid := id.ProxyPenetrationDeepest(bp(q.Pose.Position), &s.proxy, q.Backfaces == p.IncludeBackfaces)
 		if !valid {
 			s.err = fmt.Errorf("%w: initial penetration", p.ErrUnsupported)
 			return false
 		}
-		if n == 0 {
+		if !found {
 			return true
 		}
-		best := s.penetrations[0]
-		for _, v := range s.penetrations[1:n] {
-			if v.Depth > best.Depth {
-				best = v
-			}
-		}
 		h.Point, h.Normal, h.Depth = pp(best.Point), pv(best.Normal), best.Depth
+		h.Feature.LocalID, h.Feature.Detail = best.Feature.FeatureID, p.PenetrationFeatureDetail
 		h.Penetrating, h.Touching = best.Depth > 0, best.Depth == 0
 		if best.Feature.TriangleIndex >= 0 {
 			h.Feature.Triangle = uint32(best.Feature.TriangleIndex)

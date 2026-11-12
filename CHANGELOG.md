@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Closest-point and penetration results expose available backend-local feature details alongside collider/child/triangle identity. Closest points inside solid geometry remain at the supplied point and are classified as penetrating; initial-overlap queries retain the deepest constraint without allocating a complete triangle contact list.
+
 - Opt-in upright capsule controllers retain stair phases and timed navigation corners through shared physics intervals, with moving/rotating support identities, swept passenger transport and relative kinematic obstruction checks. Driven characters retain finite-mass contact response; controller intent and falling state survive checkpoints. Actual-server fixtures cover stairs, platforms, ceilings, support replacement and separate body/anchor/COM transforms; full workload qualification remains pending.
 
 - Physics worlds can explicitly capture bounded diagnostic geometry and identities, accepted state, separately labeled fault poses, and supplied queries, contacts, support and movement annotations. Unity's Physics Preview loads these captures with omission warnings. A runnable Go sample and the stress runner's optional failure capture exercise the versioned format; captures are not checkpoints.

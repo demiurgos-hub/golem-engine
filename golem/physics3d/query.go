@@ -78,7 +78,20 @@ type Query struct {
 type Feature struct {
 	Child, Triangle uint32
 	Valid           bool
+	LocalID         uint32
+	Detail          FeatureDetail
 }
+
+// FeatureDetail identifies the domain of an optional backend-local feature ID.
+// IDs from different query families are not interchangeable or durable content IDs.
+type FeatureDetail uint8
+
+const (
+	NoFeatureDetail FeatureDetail = iota
+	ClosestFeatureDetail
+	PenetrationFeatureDetail
+)
+
 type Hit struct {
 	Collider                                         ColliderHandle
 	Body                                             BodyHandle
@@ -132,7 +145,13 @@ func HitLess(a, b Hit) bool {
 	if a.Feature.Child != b.Feature.Child {
 		return a.Feature.Child < b.Feature.Child
 	}
-	return a.Feature.Triangle < b.Feature.Triangle
+	if a.Feature.Triangle != b.Feature.Triangle {
+		return a.Feature.Triangle < b.Feature.Triangle
+	}
+	if a.Feature.Detail != b.Feature.Detail {
+		return a.Feature.Detail < b.Feature.Detail
+	}
+	return a.Feature.LocalID < b.Feature.LocalID
 }
 
 // AggregateOwners retains the first ordered hit per nonzero owner; unowned

@@ -56,7 +56,8 @@ func (w *World) Query(q p.Query, dst []p.Hit) (p.QueryResult, error) {
 	return r, err
 }
 
-// ClosestPoint returns the nearest surface point and exact available feature.
+// ClosestPoint returns the closest point in solid geometry or on a mesh surface,
+// with exact available feature identity. Interior points remain unchanged.
 func (w *World) ClosestPoint(h p.ColliderHandle, point p.Vec3) (p.Hit, error) {
 	if err := w.queryReady(); err != nil {
 		return p.Hit{}, err
@@ -80,12 +81,15 @@ func (w *World) ClosestPoint(h p.ColliderHandle, point p.Vec3) (p.Hit, error) {
 		x.Normal = pv(r.Normal)
 		x.Distance = r.Distance
 		x.Penetrating = r.Inside
-		x.Touching = r.Distance == 0
+		x.Touching = r.Distance == 0 && !r.Inside
+		x.Feature.LocalID, x.Feature.Detail = r.Feature.FeatureID, p.ClosestFeatureDetail
 		if r.Feature.TriangleIndex >= 0 {
 			x.Feature.Triangle = uint32(r.Feature.TriangleIndex)
 		}
-		best = x
-		found = true
+		if !found || p.HitLess(x, best) {
+			best = x
+			found = true
+		}
 	}
 	if !found {
 		return p.Hit{}, p.ErrInvalid
@@ -122,8 +126,8 @@ func (w *World) Penetration(a, z p.ColliderHandle) (p.PenetrationResult, error) 
 				r.Normal = pv(v.Normal)
 				r.PointA = pp(v.PointA)
 				r.PointB = pp(v.PointB)
-				r.FeatureA = p.Feature{Child: ca.children[ia], Valid: true}
-				r.FeatureB = p.Feature{Child: cz.children[iz], Valid: true}
+				r.FeatureA = p.Feature{Child: ca.children[ia], Valid: true, LocalID: v.FeatureA.FeatureID, Detail: p.PenetrationFeatureDetail}
+				r.FeatureB = p.Feature{Child: cz.children[iz], Valid: true, LocalID: v.FeatureB.FeatureID, Detail: p.PenetrationFeatureDetail}
 				if v.FeatureA.TriangleIndex >= 0 {
 					r.FeatureA.Triangle = uint32(v.FeatureA.TriangleIndex)
 				}
