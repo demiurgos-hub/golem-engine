@@ -103,6 +103,20 @@ namespace GolemEngine.Unity.Editor.Tests
         }
 
         [Test]
+        public void MissingPrefabSourceCannotSilentlyRemoveCollision()
+        {
+            var original = new GameObject("Missing source"); original.AddComponent<BoxCollider>();
+            var path = folder + "/missing.prefab";
+            var prefab = PrefabUtility.SaveAsPrefabAsset(original, path); UnityEngine.Object.DestroyImmediate(original);
+            var world = new GameObject("Physics").AddComponent<GolemPhysicsWorld>();
+            var instance = (GameObject)PrefabUtility.InstantiatePrefab(prefab); instance.transform.SetParent(world.transform); Save();
+            Assert.That(AssetDatabase.DeleteAsset(path), Is.True); Save();
+            Assert.That(PrefabUtility.GetPrefabInstanceStatus(instance), Is.EqualTo(PrefabInstanceStatus.MissingAsset));
+            Assert.That(GolemPhysicsExporter.TryCollect(world, out _, out var error), Is.False);
+            Assert.That(error, Does.Contain("missing prefab source"));
+        }
+
+        [Test]
         public void GeneratedTerrainTreeCollisionCannotDisappearFromExport()
         {
             var prototype = new GameObject("Tree"); prototype.AddComponent<CapsuleCollider>();

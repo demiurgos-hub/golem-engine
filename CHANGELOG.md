@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Physics export refuses missing prefab sources before capturing a potentially incomplete collider hierarchy.
+
 - Authored Unity character capsules now require an explicit `content.GolemKinematicCharacters` conversion policy. It maps step, slope and skin settings onto the server controller, retains separate support/work budgets and defaults controller gravity off. Unsupported deadband, disabled collision/recovery and incompatible geometry are diagnosed before loading. Preparation policy fingerprints use version 2; re-prepare existing captures.
 
 - Unity physics terrain export now matches the native cell diagonal on non-planar heightfields, without changing navigation source triangulation. Copied terrain and prefab qualification fixtures preserve input hashes and compare actual native queries at recorded coordinate offsets.

@@ -48,6 +48,13 @@
       "goComparison": "D:/Demiurgos/tests/physics-validation/unity/runs/terrain-reference-20261112-02/go-reference-report.json",
       "scope": "Two actual 513x513 HeightOnly tiles, 1048576 triangles, zero authored holes. All 42 rays pass after physics-specific native cell triangulation correction. Sphere precision/convergence remains under investigation. Repeated 768/2304 metre offsets test coordinates, not additional resident area.",
       "remaining": ["AssetsByObject/Fortress/Fortress Parts/Wall_LordRoom_Stair_R_Server.prefab and its nested source dependencies", "WorldStreamer server-prefab/catalog choices, object-state variants and database-driven full world assembly"],
+      "unresolvedFortressDependency": {
+        "reference": "AssetsByObject/Fortress/Fortress Parts/Wall_LordRoom_Stair_R.prefab:1019",
+        "sourceGUID": "d792e15c3c2895d4daa70bfc04ab5509",
+        "instanceName": "vfx_Campfire (1)",
+        "evidence": "D:/Demiurgos/tests/physics-validation/unity/fractured-missing-fortress-prefab.json",
+        "scope": "The running original Unity Editor reports Unknown GUID. No assumption is made that a missing nested prefab is collision-free; the original repository remains read-only."
+      },
       "status": "not-qualified"
     }
   },

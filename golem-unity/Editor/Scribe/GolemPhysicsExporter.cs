@@ -95,6 +95,9 @@ namespace GolemEngine.Unity.Editor
             if (string.IsNullOrWhiteSpace(world.OutputPath) || !world.OutputPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("Physics output must be a project-relative .json path.");
             if (world.Revision <= 0) throw new InvalidOperationException("Physics world revision must be positive.");
+            foreach (var transform in world.GetComponentsInChildren<Transform>(true))
+                if (transform.GetComponentInParent<GolemPhysicsWorld>(true) == world && PrefabUtility.GetPrefabInstanceStatus(transform.gameObject) == PrefabInstanceStatus.MissingAsset)
+                    throw new InvalidOperationException(Hierarchy(transform) + ": missing prefab source prevents complete physics capture; restore the source or explicitly resolve the authored instance before exporting.");
             foreach (var articulation in world.GetComponentsInChildren<ArticulationBody>(true))
                 if (articulation.GetComponentInParent<GolemPhysicsWorld>(true) == world)
                     throw new InvalidOperationException(articulation.name + ": ArticulationBody simulation is unsupported; export cannot reinterpret it as static geometry.");
