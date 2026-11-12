@@ -87,6 +87,7 @@ type results struct {
 	Samples, MeasuredSamples                                                           uint64
 	FullTick, Cadence, Physics, Solve, Navigation                                      histogram
 	StartupRouteAdmission, RenewedRouteAdmission                                       histogram
+	AutomaticRouteAdmissions, UnmeasuredStartupAdmissions                              uint64
 	MinMoving, MinFollowing, MinScheduled, MinAwakeDynamic, MinProjectiles, MinQueries int
 	MovementDeficitTicks, CadenceMisses, RejectedFrames, QueryOverflows                uint64
 	ProjectileSweeps, ProjectileHits, GameplayQueries                                  uint64
@@ -164,6 +165,7 @@ func run(o options) (runErr error) {
 	if info, ok := debug.ReadBuildInfo(); ok {
 		manifest["buildInfo"] = info
 	}
+	manifest["admissionMeasurement"] = "startup: first OnTickStart to first route admission, excluding scene construction; renewed: explicitly requested matching generation only; automatic admissions counted separately with unknown duration"
 	if o.SourceManifest != "" {
 		data, e := os.ReadFile(o.SourceManifest)
 		if e != nil {
@@ -226,6 +228,9 @@ func run(o options) (runErr error) {
 	var queryCount, projectileCount, projectileHits int
 	s.server.OnTickStart(func(tick uint64) {
 		tickStart = golem.NavigationNow()
+		if s.admissionStarted.IsZero() {
+			s.beginAdmissionMeasurement(tickStart)
+		}
 		cadence = 0
 		if !lastStart.IsZero() {
 			cadence = tickStart.Sub(lastStart)
@@ -275,8 +280,7 @@ func run(o options) (runErr error) {
 			}
 			if state.Mode == golem.NavigationArrived {
 				a.target = 1 - a.target
-				a.requestAt = golem.NavigationNow()
-				if e := s.server.SetNavigationDestination(a.ID, a.ends[a.target]); e != nil {
+				if e := s.requestDestination(a); e != nil {
 					loopErr = e
 					cancel()
 					return
@@ -439,6 +443,7 @@ func run(o options) (runErr error) {
 	runtime.GC()
 	r.StartupRouteAdmission = s.admissionLatency
 	r.RenewedRouteAdmission = s.renewalLatency
+	r.AutomaticRouteAdmissions, r.UnmeasuredStartupAdmissions = s.automaticAdmissions, s.unmeasuredStartupAdmissions
 	runtime.ReadMemStats(&r.AfterCloseGC)
 	if o.Profiles {
 		file, e := os.Create(filepath.Join(o.Out, "after-close-heap.pprof"))

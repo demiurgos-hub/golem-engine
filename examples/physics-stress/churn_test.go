@@ -3,11 +3,58 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
 	"testing"
 	"time"
 
 	"github.com/demiurgos-hub/golem-engine/golem"
+	"github.com/demiurgos-hub/navmesh-go/bake"
+	"github.com/demiurgos-hub/navmesh-go/geom"
 )
+
+func TestFullChurnAvoidsPaddedRouteCorridorTiles(t *testing.T) {
+	c, err := counts("full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns := int(math.Ceil(math.Sqrt(float64(c.Characters))))
+	for _, extent := range []int{768, 2304} {
+		for _, radius := range []float64{.4, .8} {
+			t.Run(fmt.Sprintf("extent%d/radius%g", extent, radius), func(t *testing.T) {
+				half := float32(extent / 2)
+				cfg := navigationBakeConfig(geom.Profile{ID: "test", Radius: radius, Height: 2.4, MaxSlope: 40, MaxClimb: .3}, half)
+				keys, err := bake.TileKeys(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, minLaneZ := characterLane(0, columns, half)
+				tileWidth := cfg.Settings.CellSize * float64(cfg.Settings.TileSize)
+				corridorMinZ := cfg.Settings.Origin.Z + math.Floor((float64(minLaneZ)-cfg.Settings.Origin.Z)/tileWidth)*tileWidth
+				for sequence := uint64(1); sequence <= 2; sequence++ {
+					source, changed, err := churnSource(sequence, extent)
+					if err != nil || source == nil {
+						t.Fatalf("source %d: %v", sequence, err)
+					}
+					dirty := 0
+					for _, key := range keys {
+						padded := bake.TileBounds(cfg, key)
+						if !padded.Intersects(changed) {
+							continue
+						}
+						dirty++
+						if padded.Max.Z >= corridorMinZ {
+							t.Fatalf("sequence %d dirty tile %v padded to Z=%g reaches route corridor Z=%g", sequence, key, padded.Max.Z, corridorMinZ)
+						}
+					}
+					if dirty == 0 {
+						t.Fatal("door change no longer rebuilds any navigation tile")
+					}
+				}
+			})
+		}
+	}
+}
 
 func TestActualServerPublishesRepeatedGeometryAndUnloads(t *testing.T) {
 	c := workload{Characters: 2, DynamicBodies: 2, Projectiles: 1, StaticColliders: 2, Triangles: 8, Queries: 4, TilesX: 1, TilesZ: 1, Cells: 2}

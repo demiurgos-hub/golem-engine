@@ -74,8 +74,13 @@ func prepareProfiles(ctx context.Context, worlds []*dynamic.World) (golem.Naviga
 	return b, nil
 }
 
+func churnOrigin(extent int) (float32, float32) {
+	// Capacity routes must avoid the full padded dirty tile, not only the door.
+	return -float32(extent) * .3, -float32(extent) * .45
+}
+
 func churnSource(sequence uint64, extent int) (*content.Prepared, geom.Bounds, error) {
-	x, z := -float32(extent)*.3, -float32(extent)*.3
+	x, z := churnOrigin(extent)
 	if sequence%3 == 2 {
 		x += 2
 	}
@@ -140,7 +145,8 @@ func (s *scene) beginChurn(o options) error {
 		return err
 	}
 	// Union both positions and leave clearance padding within the known world.
-	x, z := -float64(o.Extent)*.3, -float64(o.Extent)*.3
+	px, pz := churnOrigin(o.Extent)
+	x, z := float64(px), float64(pz)
 	identity := golem.PhysicsGeometryIdentity{Key: churnKey, Revision: sequence, PhysicsFingerprint: fingerprint, NavigationFingerprint: hash(data)}
 	generation, err := s.server.ActivatePhysicsGeometry(golem.PhysicsGeometryActivation{Identity: identity, Profiles: []surface.ProfileID{"human", "large"}, Bounds: golem.NavigationTraversalBounds{Min: surface.Vec3{X: x - 3, Y: -1, Z: z - 3}, Max: surface.Vec3{X: x + 5, Y: 5, Z: z + 3}}, Source: source,
 		Quarantine: func() error {

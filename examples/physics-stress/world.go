@@ -41,14 +41,15 @@ func counts(mode string) (workload, error) {
 }
 
 type actor struct {
-	ID               int64
-	position, before p.Vec3
-	body             p.BodyHandle
-	ends             [2]surface.Vec3
-	target           int
-	admitted         bool
-	travel           float32
-	requestAt        time.Time
+	ID                int64
+	position, before  p.Vec3
+	body              p.BodyHandle
+	ends              [2]surface.Vec3
+	target            int
+	admitted          bool
+	travel            float32
+	requestAt         time.Time
+	requestGeneration uint64
 }
 
 // EntityID identifies the qualification actor.
@@ -80,22 +81,24 @@ func (a *actor) FullUpdate() ([]byte, error) {
 }
 
 type scene struct {
-	world                            *box3d.World
-	server                           *golem.Server
-	actors                           []*actor
-	dynamics                         []p.BodyHandle
-	projectiles                      []projectile
-	counts                           workload
-	boxCenters                       []p.Vec3
-	queryTasks                       []p.QueryTask
-	queryOutcomes                    []p.QueryOutcome
-	queryHits                        []p.Hit
-	queryWorkers                     int
-	admissionLatency, renewalLatency histogram
-	navWorlds                        []*dynamic.World
-	navBackend                       *replaceableNavigation
-	restoredBodies                   map[p.ContentID]p.BodyState
-	churn                            churnEvidence
+	world                                            *box3d.World
+	server                                           *golem.Server
+	actors                                           []*actor
+	dynamics                                         []p.BodyHandle
+	projectiles                                      []projectile
+	counts                                           workload
+	boxCenters                                       []p.Vec3
+	queryTasks                                       []p.QueryTask
+	queryOutcomes                                    []p.QueryOutcome
+	queryHits                                        []p.Hit
+	queryWorkers                                     int
+	admissionLatency, renewalLatency                 histogram
+	admissionStarted                                 time.Time
+	automaticAdmissions, unmeasuredStartupAdmissions uint64
+	navWorlds                                        []*dynamic.World
+	navBackend                                       *replaceableNavigation
+	restoredBodies                                   map[p.ContentID]p.BodyState
+	churn                                            churnEvidence
 }
 
 func makeScene(o options, c workload, observeNav func(golem.NavigationTickMetrics)) (*scene, error) {
@@ -165,12 +168,7 @@ func makeScene(o options, c workload, observeNav func(golem.NavigationTickMetric
 	ground := geom.Asset{ID: "floor", Vertices: []geom.Vec3{{X: -float64(half), Z: -float64(half)}, {X: float64(half), Z: -float64(half)}, {X: -float64(half), Z: float64(half)}, {X: float64(half), Z: float64(half)}}, Triangles: []geom.Triangle{{Indices: [3]uint32{0, 2, 1}, Area: 1}, {Indices: [3]uint32{1, 2, 3}, Area: 1}}}
 	navScene := geom.Scene{Assets: []geom.Asset{ground}, Instances: []geom.Instance{{ID: "floor", AssetID: "floor", Revision: 1, Transform: geom.Identity()}}, Volumes: []geom.Volume{{ID: "static-field", Shape: "box", Exclude: true, Bounds: geom.Bounds{Min: geom.Vec3{X: float64(half) * .64, Y: -1, Z: -float64(half)}, Max: geom.Vec3{X: float64(half), Y: 8, Z: float64(half)}}}}}
 	for _, profile := range profiles {
-		cfg := bake.DefaultConfig("physics-stress-plane", geom.Bounds{Min: geom.Vec3{X: -float64(half), Y: -2, Z: -float64(half)}, Max: geom.Vec3{X: float64(half), Y: 8, Z: float64(half)}})
-		cfg.Profile = profile
-		cfg.Settings.CellSize = 1
-		cfg.Settings.CellHeight = .1
-		cfg.Settings.TileSize = 128
-		cfg.Settings.BuildLayers = true
+		cfg := navigationBakeConfig(profile, half)
 		nw, e := dynamic.New(context.Background(), navScene, cfg)
 		if e != nil {
 			return nil, e
@@ -196,17 +194,7 @@ func makeScene(o options, c workload, observeNav func(golem.NavigationTickMetric
 		return nil, e
 	}
 	s.navWorlds, s.navBackend = worlds, &replaceableNavigation{Backend: backend}
-	if e = s.server.SetSurfaceNavigation(s.navBackend, golem.NavigationConfig{PathWorkers: o.Workers, BuildWorkers: 1, PathQueueCapacity: c.Characters * 2, CompletionCapacity: c.Characters * 2, PathResultsPerTick: c.Characters, PathDrainBudget: timeBudget, MovementAgentsPerTick: c.Characters, MovementBudget: timeBudget, RequiredProfiles: []surface.ProfileID{"human", "large"}, ObserveTick: observeNav, ObservePathAdmission: func(m golem.NavigationPathAdmissionMetrics) {
-		if m.EntityID > 0 && m.EntityID <= int64(len(s.actors)) {
-			a := s.actors[m.EntityID-1]
-			if a.admitted {
-				s.renewalLatency.add(m.AdmittedAt.Sub(a.requestAt))
-			} else {
-				s.admissionLatency.add(m.AdmittedAt.Sub(a.requestAt))
-			}
-			a.admitted = true
-		}
-	}}); e != nil {
+	if e = s.server.SetSurfaceNavigation(s.navBackend, golem.NavigationConfig{PathWorkers: o.Workers, BuildWorkers: 1, PathQueueCapacity: c.Characters * 2, CompletionCapacity: c.Characters * 2, PathResultsPerTick: c.Characters, PathDrainBudget: timeBudget, MovementAgentsPerTick: c.Characters, MovementBudget: timeBudget, RequiredProfiles: []surface.ProfileID{"human", "large"}, ObserveTick: observeNav, ObservePathAdmission: s.observePathAdmission}); e != nil {
 		return nil, e
 	}
 	columns := int(math.Ceil(math.Sqrt(float64(c.Characters))))
@@ -216,9 +204,7 @@ func makeScene(o options, c workload, observeNav func(golem.NavigationTickMetric
 		if e != nil {
 			return nil, e
 		}
-		spacing := float32(2.8)
-		x := -half*.75 + float32(i%columns)*spacing
-		z := float32(i/columns-columns/2) * spacing
+		x, z := characterLane(i, columns, half)
 		query, e := worlds[i%2].Snapshot().NewQuery(navigation.Limits{})
 		if e != nil {
 			return nil, e
@@ -236,29 +222,6 @@ func makeScene(o options, c workload, observeNav func(golem.NavigationTickMetric
 		a := &actor{ID: int64(i + 1), position: pos, body: body, target: 1, ends: [2]surface.Vec3{{X: float64(pos.X), Y: float64(pos.Y), Z: float64(pos.Z)}, {X: float64(pos.X + half*.8), Y: float64(pos.Y), Z: float64(pos.Z)}}}
 		s.actors = append(s.actors, a)
 		if e = s.server.CreateEntity(a); e != nil {
-			return nil, e
-		}
-		if e = s.server.AttachPhysics(a.ID, body, golem.PhysicsAttachmentConfig{MaxDriveForce: 1000}); e != nil {
-			if o.DebugCapture {
-				state, _ := w.Body(body)
-				query := p.Query{Kind: p.Overlap, Mode: p.All, Shape: p.ShapeDesc{Kind: p.Capsule, Radius: float32(profile.Radius), PointA: p.Vec3{Y: float32(profile.Radius)}, PointB: p.Vec3{Y: float32(profile.Height - profile.Radius)}}, Pose: state.Pose, Filter: p.QueryFilter{Mask: ^uint64(0), ExcludeBodies: []p.BodyHandle{body}, RequireSolid: true, IncludeNonQuery: true, Sensors: p.IncludeSensors}}
-				hits := make([]p.Hit, 128)
-				result, queryErr := w.Query(query, hits)
-				diagnostic := map[string]any{"entity": a.ID, "body": state, "query": query, "result": result, "hits": hits[:result.Count], "placementError": e.Error()}
-				if queryErr != nil {
-					diagnostic["queryError"] = queryErr.Error()
-				}
-				if writeErr := writeJSON(filepath.Join(o.Out, "spawn-failure.json"), diagnostic); writeErr != nil {
-					return nil, fmt.Errorf("character %d placement: %w; writing diagnostics: %v", i, e, writeErr)
-				}
-			}
-			return nil, fmt.Errorf("character %d anchor %v placement: %w", i, pos, e)
-		}
-		if e = s.server.AttachNavigation(a.ID, golem.NavigationAgentConfig{Profile: surface.ProfileID(profile.ID), Speed: 3, Acceleration: 12, StoppingDistance: .2, SupportTolerance: .2, Projection: surface.ProjectionOptions{Horizontal: 1, Up: .4, Down: .4}, StagedPhysics: true}); e != nil {
-			return nil, e
-		}
-		a.requestAt = golem.NavigationNow()
-		if e = s.server.SetNavigationDestination(a.ID, a.ends[1]); e != nil {
 			return nil, e
 		}
 	}
@@ -286,6 +249,34 @@ func makeScene(o options, c workload, observeNav func(golem.NavigationTickMetric
 	if e = w.Synchronize(); e != nil {
 		return nil, e
 	}
+	// Build and synchronize the complete scene before admission. AttachPhysics
+	// retains its public checks without rescanning a dirty static world per actor.
+	for i, a := range s.actors {
+		profile := profiles[i%len(profiles)]
+		body, pos := a.body, a.position
+		if e = s.server.AttachPhysics(a.ID, body, golem.PhysicsAttachmentConfig{MaxDriveForce: 1000}); e != nil {
+			if o.DebugCapture {
+				state, _ := w.Body(body)
+				query := p.Query{Kind: p.Overlap, Mode: p.All, Shape: p.ShapeDesc{Kind: p.Capsule, Radius: float32(profile.Radius), PointA: p.Vec3{Y: float32(profile.Radius)}, PointB: p.Vec3{Y: float32(profile.Height - profile.Radius)}}, Pose: state.Pose, Filter: p.QueryFilter{Mask: ^uint64(0), ExcludeBodies: []p.BodyHandle{body}, RequireSolid: true, IncludeNonQuery: true, Sensors: p.IncludeSensors}}
+				hits := make([]p.Hit, 128)
+				result, queryErr := w.Query(query, hits)
+				diagnostic := map[string]any{"entity": a.ID, "body": state, "query": query, "result": result, "hits": hits[:result.Count], "placementError": e.Error()}
+				if queryErr != nil {
+					diagnostic["queryError"] = queryErr.Error()
+				}
+				if writeErr := writeJSON(filepath.Join(o.Out, "spawn-failure.json"), diagnostic); writeErr != nil {
+					return nil, fmt.Errorf("character %d placement: %w; writing diagnostics: %v", i, e, writeErr)
+				}
+			}
+			return nil, fmt.Errorf("character %d anchor %v placement: %w", i, pos, e)
+		}
+		if e = s.server.AttachNavigation(a.ID, golem.NavigationAgentConfig{Profile: surface.ProfileID(profile.ID), Speed: 3, Acceleration: 12, StoppingDistance: .2, SupportTolerance: .2, Projection: surface.ProjectionOptions{Horizontal: 1, Up: .4, Down: .4}, StagedPhysics: true}); e != nil {
+			return nil, e
+		}
+		if e = s.server.SetNavigationDestination(a.ID, a.ends[1]); e != nil {
+			return nil, e
+		}
+	}
 	actual := w.Metrics()
 	if createdTriangles != c.Triangles || actual.Colliders != c.StaticColliders+c.Characters+c.DynamicBodies {
 		return nil, fmt.Errorf("constructed workload count mismatch: %d triangles, %+v", createdTriangles, actual)
@@ -295,6 +286,62 @@ func makeScene(o options, c workload, observeNav func(golem.NavigationTickMetric
 	}
 	ok = true
 	return s, nil
+}
+
+func navigationBakeConfig(profile geom.Profile, half float32) bake.Config {
+	cfg := bake.DefaultConfig("physics-stress-plane", geom.Bounds{Min: geom.Vec3{X: -float64(half), Y: -2, Z: -float64(half)}, Max: geom.Vec3{X: float64(half), Y: 8, Z: float64(half)}})
+	cfg.Profile = profile
+	cfg.Settings.CellSize = 1
+	cfg.Settings.CellHeight = .1
+	cfg.Settings.TileSize = 128
+	cfg.Settings.BuildLayers = true
+	return cfg
+}
+
+func characterLane(index, columns int, half float32) (float32, float32) {
+	const spacing = float32(2.8)
+	return -half*.75 + float32(index%columns)*spacing, float32(index/columns-columns/2) * spacing
+}
+
+func (s *scene) beginAdmissionMeasurement(now time.Time) {
+	s.admissionStarted = now
+	for _, a := range s.actors {
+		a.requestAt, a.requestGeneration = time.Time{}, 0
+	}
+}
+
+func (s *scene) observePathAdmission(m golem.NavigationPathAdmissionMetrics) {
+	if m.EntityID <= 0 || m.EntityID > int64(len(s.actors)) {
+		return
+	}
+	a := s.actors[m.EntityID-1]
+	if !a.admitted {
+		if !s.admissionStarted.IsZero() && !m.AdmittedAt.Before(s.admissionStarted) {
+			s.admissionLatency.add(m.AdmittedAt.Sub(s.admissionStarted))
+		} else {
+			s.unmeasuredStartupAdmissions++
+		}
+	} else if !a.requestAt.IsZero() && a.requestGeneration == m.Generation && !m.AdmittedAt.Before(a.requestAt) {
+		s.renewalLatency.add(m.AdmittedAt.Sub(a.requestAt))
+	} else {
+		// The public observer has no automatic-replan request timestamp.
+		s.automaticAdmissions++
+	}
+	a.admitted = true
+	a.requestAt, a.requestGeneration = time.Time{}, 0
+}
+
+func (s *scene) requestDestination(a *actor) error {
+	requestedAt := golem.NavigationNow()
+	if err := s.server.SetNavigationDestination(a.ID, a.ends[a.target]); err != nil {
+		return err
+	}
+	state, ok := s.server.NavigationAgentState(a.ID)
+	if !ok {
+		return fmt.Errorf("navigation attachment disappeared after destination request")
+	}
+	a.requestAt, a.requestGeneration = requestedAt, state.Generation
+	return nil
 }
 
 func floorTile(tx, tz int, c workload, half float32) p.ShapeDesc {
