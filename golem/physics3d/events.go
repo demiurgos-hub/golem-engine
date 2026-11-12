@@ -44,7 +44,7 @@ type ContactEvent struct {
 	Point, Normal, Force Vec3
 	Depth                float32
 	Frame, Revision      uint64
-	// Fraction is the microstep endpoint within the containing frame.
+	// Fraction is the contact boundary or microstep endpoint within the frame.
 	Fraction float32
 }
 
@@ -59,6 +59,16 @@ func (t *ContactTracker) Clone() ContactTracker {
 		next.pairs[pair] = event
 	}
 	return next
+}
+
+// Current returns independent, stably ordered copies of retained contact pairs.
+func (t *ContactTracker) Current() []ContactEvent {
+	out := make([]ContactEvent, 0, len(t.pairs))
+	for _, event := range t.pairs {
+		out = append(out, event)
+	}
+	sortEvents(out)
+	return out
 }
 
 // Drain ends every retained pair once and clears its history.

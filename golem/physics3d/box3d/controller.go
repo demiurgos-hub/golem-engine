@@ -559,6 +559,7 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 						v.id.ApplyForceToCenter(bv(force), true)
 					}
 				}
+				var contactRecords []motionContactRecord
 				observe := func(sample b.MotionStepSample) error {
 					fraction := (at + phase + sample.EndFraction*interval) / f.Delta
 					for i, key := range keys {
@@ -581,7 +582,11 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 							}
 						}
 					}
-					result.Events = append(result.Events, contactState.observe(w, sample, f.ID, result.Revision, fraction)...)
+					if w.config.Continuous && len(w.sensorColliders) > 0 {
+						contactRecords = append(contactRecords, motionContactRecord{sample: sample, values: contactState.capture(w, sample, fraction), start: (at + phase + sample.StartFraction*interval) / f.Delta, end: fraction})
+					} else {
+						result.Events = append(result.Events, contactState.observe(w, sample, f.ID, result.Revision, fraction)...)
+					}
 					return nil
 				}
 				result.Intervals++
@@ -607,6 +612,13 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 					if err := observe(w.captureMotionSample(interval)); err != nil {
 						return err
 					}
+				}
+				for _, record := range contactRecords {
+					events, err := contactState.replay(w, record, f.ID, result.Revision)
+					if err != nil {
+						return err
+					}
+					result.Events = append(result.Events, events...)
 				}
 				phase = next
 			}

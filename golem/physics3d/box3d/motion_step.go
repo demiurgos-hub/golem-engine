@@ -39,7 +39,7 @@ func motionCanonicalEvent(v p.ContactEvent) p.ContactEvent {
 	return v
 }
 
-func (s *motionContactState) observe(w *World, sample b.MotionStepSample, frame, revision uint64, fraction float32) []p.ContactEvent {
+func (s *motionContactState) capture(w *World, sample b.MotionStepSample, fraction float32) []p.ContactEvent {
 	current := map[p.ContactPair]p.ContactEvent{}
 	add := func(v p.ContactEvent) {
 		v = motionCanonicalEvent(v)
@@ -100,7 +100,11 @@ func (s *motionContactState) observe(w *World, sample b.MotionStepSample, frame,
 	for _, v := range current {
 		values = append(values, v)
 	}
-	events := w.pendingTracker.Update(values, frame, revision, w.restoring)
+	return values
+}
+
+func (s *motionContactState) observe(w *World, sample b.MotionStepSample, frame, revision uint64, fraction float32) []p.ContactEvent {
+	events := w.pendingTracker.Update(s.capture(w, sample, fraction), frame, revision, w.restoring)
 	for i := range events {
 		events[i].Fraction = fraction
 	}

@@ -8,6 +8,12 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Continuous sensors now retain entry and exit between solver samples, including separate concave and rotational re-entry intervals. Fraction-ordered replay preserves owner aggregation and accepted-only cleanup; bounded or unresolved geometry reports failure instead of dropping transitions. This correctness coverage does not establish full-load sensor capacity.
+
+- Timed scripted and external physics trajectories retain bounded translation/rotation across ticks, expose cancellation tokens and accepted progress, pause under regional quarantine, and preserve active intent through paired checkpoints. Blocked actions keep their actual collision result and cancellation preserves momentum already transferred to other bodies. External poses require admitted timed motion; explicit teleports remain placement-only.
+
+- Unity physics export now rejects enabled terrain-generated tree collision instead of silently omitting it from the heightfield source. Prefab variant coverage verifies removed collider components and child objects alongside independent scene-instance identities.
+
 - Continuous physics exposes bounded internal cadence and constraint-iteration settings, retaining all elapsed time and reporting path refinements. Defaults improve dense rotating-body contacts and sleeping stacks while keeping contact tuning unchanged; contact forces count each final relaxed impulse once. Fresh geometric guards retain explicit whole-frame failure on unresolved or excessive penetration. Workload capacity remains unqualified.
 
 - Closest-point and penetration results expose available backend-local feature details alongside collider/child/triangle identity. Closest points inside solid geometry remain at the supplied point and are classified as penetrating; initial-overlap queries retain the deepest constraint without allocating a complete triangle contact list.

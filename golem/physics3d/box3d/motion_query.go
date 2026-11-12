@@ -97,6 +97,10 @@ func (w *World) castColliderMotion(a, z ColliderMotion, tolerance float32, backf
 // IgnoreInitial omits pairs already geometrically touching/penetrating at t=0;
 // this does not infer later exits/re-entry intervals for concave geometry.
 func (w *World) QueryColliderMotion(q MotionQuery, dst []p.Hit) (p.QueryResult, error) {
+	return w.queryColliderMotion(q, dst, false)
+}
+
+func (w *World) queryColliderMotion(q MotionQuery, dst []p.Hit, physicalParticipants bool) (p.QueryResult, error) {
 	if err := w.queryReady(); err != nil {
 		return p.QueryResult{}, err
 	}
@@ -176,6 +180,9 @@ func (w *World) QueryColliderMotion(q MotionQuery, dst []p.Hit) (p.QueryResult, 
 	}
 	for handle := range candidates {
 		c := w.colliders[handle]
+		if physicalParticipants && !c.desc.Roles.Solid && !c.desc.Roles.Sensor {
+			continue
+		}
 		if c.desc.Body == query.desc.Body || len(c.shapes) == 0 {
 			continue
 		}
