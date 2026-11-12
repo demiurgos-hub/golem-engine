@@ -1,0 +1,23 @@
+---
+description: physics3d — independent float32 contracts, pure-Go Box3D adapter, physics content cooking, staged frames and qualification.
+globs:
+  - golem/physics3d/**/*
+  - golem/physics*.go
+  - qualification/physics/**/*
+  - qualification/*Physics*
+alwaysApply: false
+---
+
+# Physics 3D
+
+`golem/physics3d` is a separate Go module without root runtime imports. It owns portable descriptions, identity, validation, query and explicit-frame contracts. `golem/physics3d/box3d` is a separate module using Go 1.27.1 and the pure-Go Box3D solver. Root server attachment and navigation coordination belong in `golem`, never the backend or portable content loader. Test these modules explicitly; root `./...` excludes them.
+
+Authoritative positions and wire positions remain float32. Validate finite poses and the supported ±4,096 metre envelope. Keep gameplay/navigation anchors distinct from body origins and centres of mass. Legacy collision3d, 2D backends and footprint v1 retain their existing semantics.
+
+Queries distinguish initial overlap, touching, penetration, solid and sensor roles. Results retain exact generational collider/subshape identity and optional entity owner. Caller buffers must report truncation; full buffers are never proof of clearance. Mutations require an explicit synchronization boundary before queries. Keep source geometry and backend acceleration data separate, and reject malformed or unsupported content without substituting bounding boxes.
+
+Simulation is tick-owned and staged: validate proposals before solving, freeze mutations through the frame, integrate fixed substeps once, then accept all body/entity state or fault the whole world. Never restore one pushed character after impulses have affected other bodies. Driven characters apply bounded tangential forces once per substep; the solver owns contact transfer. No extra push impulses, proxy bodies or unsupported vertical hovering.
+
+New physics execution artifacts, Unity projects, caches, temporary files and qualification evidence belong under `D:/Demiurgos/tests/physics-validation`. Preserve completed runs and existing navigation evidence. Record exact source snapshots and distinguish local fork checks from published dependency resolution. Missing, unsupported or unmeasured release gates are failures to qualify; an early vertical slice is not workstream completion.
+
+Library changes belong in `C:/Demiurgos/box3d-go`, with upstream attribution, focused regression coverage and a patch ledger. Preserve upstream cast semantics; Golem's initial-overlap policy belongs in the adapter. No native fallback or float64 migration is authorized. Local workspace/replace overrides remain uncommitted.
