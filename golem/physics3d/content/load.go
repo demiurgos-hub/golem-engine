@@ -31,6 +31,7 @@ type Instance struct {
 
 // Load prepares and transactionally constructs one source using DefaultSettings.
 // Use Prepare(...).Load when solver-policy settings or diagnostics are needed.
+// Authored characters require an explicit CharacterPolicy through Prepare.
 func Load(world p.World, source *Source, resolve OwnerResolver) (*Instance, error) {
 	prepared, err := Prepare(source, DefaultSettings())
 	if err != nil {
@@ -77,6 +78,10 @@ func (prepared *Prepared) Load(world p.World, resolve OwnerResolver) (*Instance,
 	sort.Slice(bodies, func(i, j int) bool { return bodies[i].ID < bodies[j].ID })
 	for _, body := range bodies {
 		desc := bodyDescription(body)
+		if character, ok := prepared.characters[body.ID]; ok {
+			desc.Controller = character.config
+			desc.Enabled = desc.Enabled && character.active
+		}
 		desc.Owner = owners[body.OwnerID]
 		handle, err := world.CreateBody(desc)
 		if err != nil {

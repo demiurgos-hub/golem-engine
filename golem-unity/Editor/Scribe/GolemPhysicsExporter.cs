@@ -193,9 +193,10 @@ namespace GolemEngine.Unity.Editor
             if (collider is TerrainCollider terrain)
             {
                 GolemNavigationExporter.ValidateTerrainTransform(terrain.transform);
+                RejectGeneratedTreeColliders(terrain);
                 result.Shape = "terrain"; result.AssetID = result.ID + "/geometry";
                 var assetSource = AssetIdentity(terrain.terrainData);
-                assets.Add(TransformAsset(GolemNavigationExporter.CaptureTerrain(terrain.terrainData, assetSource, 0), result.AssetID, assetSource, local));
+                assets.Add(TransformAsset(CaptureTerrain(terrain.terrainData, assetSource), result.AssetID, assetSource, local));
                 return result;
             }
             var scale = PrimitiveScale(local, out var rotation);
@@ -229,6 +230,41 @@ namespace GolemEngine.Unity.Editor
             }
             else throw new InvalidOperationException("Unsupported collider type; no AABB substitution is allowed.");
             return result;
+        }
+
+        private static void RejectGeneratedTreeColliders(TerrainCollider terrain)
+        {
+            var data = terrain.terrainData;
+            if (!data || data.treeInstanceCount == 0) return;
+            var enabled = new SerializedObject(terrain).FindProperty("m_EnableTreeColliders");
+            if (enabled == null) throw new InvalidOperationException("Cannot inspect TerrainCollider tree collision settings.");
+            if (!enabled.boolValue) return;
+            var prototypes = data.treePrototypes;
+            var checkedPrototypes = new HashSet<int>();
+            for (var i = 0; i < data.treeInstanceCount; i++)
+            {
+                var index = data.GetTreeInstance(i).prototypeIndex;
+                if (!checkedPrototypes.Add(index)) continue;
+                if (index < 0 || index >= prototypes.Length || !prototypes[index].prefab)
+                    throw new InvalidOperationException("Terrain tree instance references a missing prototype.");
+                if (prototypes[index].prefab.GetComponentsInChildren<Collider>(true).Length != 0)
+                    throw new InvalidOperationException("Terrain-generated tree colliders are not yet exported. Resolve the tree colliders as explicit saved scene instances before exporting; heightfield-only export would omit collision geometry.");
+            }
+        }
+
+        private static NavigationAsset CaptureTerrain(TerrainData data, string id)
+        {
+            var asset = GolemNavigationExporter.CaptureTerrain(data, id, 0);
+            // Native Terrain collision splits each retained cell across a-d. Keep the
+            // navigation source's historical diagonal separate from physical geometry.
+            for (var i = 0; i < asset.Triangles.Length; i += 2)
+            {
+                var first = asset.Triangles[i].Indices; var second = asset.Triangles[i + 1].Indices;
+                var a = first[0]; var b = first[2]; var c = first[1]; var d = second[2];
+                asset.Triangles[i].Indices = new[] { a, c, d };
+                asset.Triangles[i + 1].Indices = new[] { a, d, b };
+            }
+            return asset;
         }
 
         internal static Vector3 PrimitiveScale(Matrix4x4 matrix, out Quaternion rotation)

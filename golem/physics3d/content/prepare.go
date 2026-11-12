@@ -11,20 +11,28 @@ import (
 )
 
 // PreparationVersion identifies portable source-to-contract conversion rules.
-const PreparationVersion = "golem-physics-content-v1"
+const PreparationVersion = "golem-physics-content-v2"
 
 // Settings makes solver-policy differences from Unity explicit and hashable.
 // Backend contact margins never enlarge source or query geometry. Sweep CCD is
 // the Golem policy; speculative CCD requires a different implementation.
+// Authored characters require an explicit CharacterPolicy; its controller base
+// owns support, gravity and work budgets independently of navigation geometry.
 type Settings struct {
 	Limits              Limits
 	ContactMarginPolicy string
 	CCDPolicy           string
+	CharacterPolicy     CharacterPolicy
+	CharacterController p.CharacterControllerConfig
 }
 
-// DefaultSettings selects Golem's fixed backend contact margins and swept CCD.
+// DefaultSettings selects fixed backend contact margins and swept CCD, while
+// refusing implicit authored-character conversion. The opt-in controller base
+// has gravity disabled because Unity CharacterController does not supply it.
 func DefaultSettings() Settings {
-	return Settings{Limits: DefaultLimits(), ContactMarginPolicy: "backend-fixed", CCDPolicy: "swept"}
+	controller := p.DefaultCharacterController(p.Kinematic)
+	controller.Gravity = false
+	return Settings{Limits: DefaultLimits(), ContactMarginPolicy: "backend-fixed", CCDPolicy: "swept", CharacterController: controller}
 }
 
 // Diagnostic identifies authored semantics that cannot currently be constructed.
@@ -40,6 +48,7 @@ type Prepared struct {
 	sourceHash  string
 	fingerprint string
 	diagnostics []Diagnostic
+	characters  map[string]preparedCharacter
 }
 
 // Prepare captures portable source independently of any backend acceleration
@@ -47,6 +56,9 @@ type Prepared struct {
 func Prepare(source *Source, settings Settings) (*Prepared, error) {
 	if settings.ContactMarginPolicy != "backend-fixed" || settings.CCDPolicy != "swept" {
 		return nil, fmt.Errorf("%w: explicit contact/CCD policy required", p.ErrUnsupported)
+	}
+	if settings.CharacterPolicy != "" && settings.CharacterPolicy != GolemKinematicCharacters {
+		return nil, fmt.Errorf("%w: character conversion policy", p.ErrUnsupported)
 	}
 	if err := source.Validate(settings.Limits); err != nil {
 		return nil, err
@@ -63,11 +75,15 @@ func Prepare(source *Source, settings Settings) (*Prepared, error) {
 		return nil, err
 	}
 	prepared := &Prepared{source: copy, settings: settings, sourceBytes: data, sourceHash: digest(data)}
-	identity, _ := json.Marshal(struct {
+	identity, err := json.Marshal(struct {
 		Version, Source string
 		Settings        Settings
 	}{PreparationVersion, prepared.sourceHash, settings})
+	if err != nil {
+		return nil, fmt.Errorf("%w: conversion settings cannot be hashed: %v", p.ErrInvalid, err)
+	}
 	prepared.fingerprint = digest(identity)
+	prepared.characters, prepared.diagnostics = prepareCharacters(copy, settings)
 	for _, body := range copy.Bodies {
 		if body.CollisionDetection == "continuousSpeculative" {
 			prepared.diagnostics = append(prepared.diagnostics, Diagnostic{body.ID, "CollisionDetection", "speculative CCD is not implemented by the swept CCD policy"})

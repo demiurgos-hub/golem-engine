@@ -76,6 +76,56 @@ namespace GolemEngine.Unity.Editor.Tests
         }
 
         [Test]
+        public void ServerVariantRemovalsAndIndependentInstanceIdentitiesAreResolved()
+        {
+            var original = new GameObject("Cart Base"); original.AddComponent<BoxCollider>();
+            original.AddComponent<SphereCollider>();
+            var visual = new GameObject("Client-only collision"); visual.transform.SetParent(original.transform); visual.AddComponent<CapsuleCollider>();
+            var prefab = PrefabUtility.SaveAsPrefabAsset(original, folder + "/cart.prefab"); UnityEngine.Object.DestroyImmediate(original);
+            var variantInstance = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
+            UnityEngine.Object.DestroyImmediate(variantInstance.GetComponent<SphereCollider>());
+            UnityEngine.Object.DestroyImmediate(variantInstance.transform.GetChild(0).gameObject);
+            var variant = PrefabUtility.SaveAsPrefabAsset(variantInstance, folder + "/cart-server.prefab"); UnityEngine.Object.DestroyImmediate(variantInstance);
+            var world = new GameObject("Physics").AddComponent<GolemPhysicsWorld>();
+            for (var i = 0; i < 2; i++)
+            {
+                var instance = (GameObject)PrefabUtility.InstantiatePrefab(variant); instance.transform.SetParent(world.transform);
+                instance.transform.position = new Vector3(i * 4, 0, 0);
+                instance.AddComponent<GolemPhysicsMetadata>().OwnerID = "cart/" + i;
+            }
+            Save();
+            var source = GolemPhysicsExporter.Capture(world);
+            Assert.That(source.Colliders.Length, Is.EqualTo(2));
+            Assert.That(source.Colliders.All(c => c.Shape == "box"), Is.True);
+            Assert.That(source.Colliders.Select(c => c.ID).Distinct().Count(), Is.EqualTo(2));
+            Assert.That(source.Colliders.Select(c => c.OwnerID), Is.EquivalentTo(new[] { "cart/0", "cart/1" }));
+            Assert.That(source.Bodies.Select(b => b.Position.X), Is.EquivalentTo(new[] { 0f, 4f }));
+        }
+
+        [Test]
+        public void GeneratedTerrainTreeCollisionCannotDisappearFromExport()
+        {
+            var prototype = new GameObject("Tree"); prototype.AddComponent<CapsuleCollider>();
+            var prefab = PrefabUtility.SaveAsPrefabAsset(prototype, folder + "/tree.prefab"); UnityEngine.Object.DestroyImmediate(prototype);
+            var data = new TerrainData { heightmapResolution = 33, size = new Vector3(32, 8, 32) };
+            data.treePrototypes = new[] { new TreePrototype { prefab = prefab } };
+            data.SetTreeInstances(new[] { new TreeInstance { prototypeIndex = 0, position = new Vector3(0.5f, 0, 0.5f), widthScale = 1, heightScale = 1, color = Color.white, lightmapColor = Color.white } }, false);
+            AssetDatabase.CreateAsset(data, folder + "/tree-terrain.asset");
+            var world = new GameObject("Physics").AddComponent<GolemPhysicsWorld>();
+            var terrain = world.gameObject.AddComponent<TerrainCollider>(); terrain.terrainData = data;
+            var serialized = new SerializedObject(terrain); serialized.FindProperty("m_EnableTreeColliders").boolValue = true; serialized.ApplyModifiedPropertiesWithoutUndo(); Save();
+            Assert.That(GolemPhysicsExporter.TryCollect(world, out _, out var error), Is.False);
+            Assert.That(error, Does.Contain("Terrain-generated tree colliders"));
+            serialized.Update(); serialized.FindProperty("m_EnableTreeColliders").boolValue = false; serialized.ApplyModifiedPropertiesWithoutUndo(); Save();
+            Assert.That(GolemPhysicsExporter.Capture(world).Colliders.Single().Shape, Is.EqualTo("terrain"));
+            var decorative = GameObject.CreatePrimitive(PrimitiveType.Cube); UnityEngine.Object.DestroyImmediate(decorative.GetComponent<Collider>());
+            var decorativePrefab = PrefabUtility.SaveAsPrefabAsset(decorative, folder + "/decorative-tree.prefab"); UnityEngine.Object.DestroyImmediate(decorative);
+            data.treePrototypes = new[] { new TreePrototype { prefab = decorativePrefab } };
+            serialized.Update(); serialized.FindProperty("m_EnableTreeColliders").boolValue = true; serialized.ApplyModifiedPropertiesWithoutUndo(); Save();
+            Assert.That(GolemPhysicsExporter.Capture(world).Colliders.Single().Shape, Is.EqualTo("terrain"));
+        }
+
+        [Test]
         public void PrimitiveShearIsAnActionableFailureWhileReflectedMeshBakesOnce()
         {
             var world = new GameObject("Physics").AddComponent<GolemPhysicsWorld>();
@@ -106,6 +156,29 @@ namespace GolemEngine.Unity.Editor.Tests
             var source = GolemPhysicsExporter.Capture(world);
             Assert.That(source.Assets.Single().Indices.Length, Is.EqualTo((32 * 32 * 2 - 2) * 3));
             var shape = source.Colliders.Single(c => c.Shape == "capsule"); Assert.That(shape.Radius, Is.EqualTo(2)); Assert.That(shape.Height, Is.EqualTo(6));
+        }
+
+        [Test]
+        public void NonPlanarTerrainCellMatchesNativeCollisionTriangulation()
+        {
+            var data = new TerrainData { heightmapResolution = 33, size = new Vector3(32, 8, 32) };
+            var heights = new float[33, 33]; heights[0, 1] = 0.5f; heights[1, 0] = 0.2f; heights[1, 1] = 0.9f;
+            data.SetHeights(0, 0, heights); AssetDatabase.CreateAsset(data, folder + "/nonplanar.asset");
+            var world = new GameObject("Physics").AddComponent<GolemPhysicsWorld>();
+            var terrain = world.gameObject.AddComponent<TerrainCollider>(); terrain.terrainData = data; Save();
+            var source = GolemPhysicsExporter.Capture(world).Assets.Single();
+            UnityEngine.Physics.SyncTransforms();
+            var ray = new Ray(new Vector3(0.25f, 10, 0.6f), Vector3.down);
+            Assert.That(terrain.Raycast(ray, out var native, 20), Is.True);
+            var mesh = new Mesh { vertices = source.Vertices.Select(v => new Vector3(v.X, v.Y, v.Z)).ToArray(), triangles = source.Indices.Select(v => (int)v).ToArray() };
+            try
+            {
+                var exported = world.gameObject.AddComponent<MeshCollider>(); exported.sharedMesh = mesh; UnityEngine.Physics.SyncTransforms();
+                Assert.That(exported.Raycast(ray, out var captured, 20), Is.True);
+                Assert.That(Vector3.Distance(captured.point, native.point), Is.LessThan(0.0001f));
+                Assert.That(Vector3.Distance(captured.normal, native.normal), Is.LessThan(0.0001f));
+            }
+            finally { UnityEngine.Object.DestroyImmediate(mesh); }
         }
 
         [Test]

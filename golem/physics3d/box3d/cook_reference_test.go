@@ -47,10 +47,10 @@ func TestUnityReferenceScene(t *testing.T) {
 	var reference struct {
 		Version, UnityVersion string
 		Queries               []struct {
-			Name, Type       string
-			From, Direction  p.Vec3
-			Radius, Distance float32
-			Hits             []struct {
+			Name, Type                   string
+			From, Direction, WorldOffset p.Vec3
+			Radius, Distance             float32
+			Hits                         []struct {
 				ColliderID    string
 				Distance      float32
 				Point, Normal p.Vec3
@@ -65,6 +65,7 @@ func TestUnityReferenceScene(t *testing.T) {
 	}
 	type observation struct {
 		Name                                            string
+		WorldOffset                                     p.Vec3
 		Hits                                            int
 		MaxDistanceError, MaxPointError, MaxNormalError float32
 		InitialOverlap                                  bool
@@ -77,23 +78,44 @@ func TestUnityReferenceScene(t *testing.T) {
 		Tolerance                                                                   float32
 		Observations                                                                []observation
 		Passed                                                                      bool
+		Config                                                                      p.Config
+		ContentSettings                                                             content.Settings
+		CookSettings                                                                CookSettings
 	}{UnityVersion: reference.UnityVersion, SourceHash: sourceHash, ReferenceHash: cookDigest(referenceData), PreparedFingerprint: prepared.Fingerprint(), Backend: UpstreamCommit, Fork: RequiredFork,
-		Bodies: len(source.Bodies), Colliders: len(source.Colliders), Assets: len(source.Assets), Tolerance: .0001, Passed: true}
+		Bodies: len(source.Bodies), Colliders: len(source.Colliders), Assets: len(source.Assets), Tolerance: .0001, Passed: true,
+		Config: w.config, ContentSettings: content.DefaultSettings(), CookSettings: DefaultCookSettings()}
 	for _, referenceQuery := range reference.Queries {
 		t.Run(referenceQuery.Name, func(t *testing.T) {
+			for _, sourceBody := range source.Bodies {
+				body, ok := instance.Body(sourceBody.ID)
+				if !ok {
+					t.Fatal("missing source body")
+				}
+				pose := p.Pose{Position: sourceBody.Position.Add(referenceQuery.WorldOffset), Rotation: sourceBody.Rotation}
+				if err := w.SetPose(body, pose); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := w.Synchronize(); err != nil {
+				t.Fatal(err)
+			}
 			// The Unity capture includes trigger hits (the thin-wall trigger is
 			// explicitly present in its sphere-cast observation).
 			q := p.Query{Kind: p.Ray, Mode: p.All, Pose: p.Identity(), Translation: referenceQuery.Direction.Mul(referenceQuery.Distance), Filter: p.QueryFilter{Mask: ^uint64(0), Sensors: p.IncludeSensors}}
 			q.Pose.Position = referenceQuery.From
+			// Unity raycasts omit colliders containing the origin; Golem reports
+			// them by default, so select the matching explicit policy for comparison.
+			q.Initial = p.IgnoreInitial
 			if referenceQuery.Type == "sphere" {
 				q.Kind = p.Sweep
+				q.Initial = p.ReportInitial
 				q.Shape = p.ShapeDesc{Kind: p.Sphere, Radius: referenceQuery.Radius}
 			} else if referenceQuery.Type != "ray" {
 				t.Fatal("unrecognized reference query")
 			}
 			hits := make([]p.Hit, len(source.Colliders)+1)
 			result, err := w.Query(q, hits)
-			observation := observation{Name: referenceQuery.Name, Hits: result.Count, Passed: true}
+			observation := observation{Name: referenceQuery.Name, WorldOffset: referenceQuery.WorldOffset, Hits: result.Count, Passed: true}
 			defer func() {
 				observation.Passed = !t.Failed()
 				report.Passed = report.Passed && observation.Passed

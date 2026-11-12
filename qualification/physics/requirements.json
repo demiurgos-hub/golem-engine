@@ -26,8 +26,41 @@
     {"id":"resolved-content","references":["Scripts/World/WorldStreamer.cs:267","Scripts/World/WorldStreamer.cs:859","AssetsByObject/Terrains/Prefabs/Server/Terrain 0,0 Server.prefab:77","AssetsByObject/Fortress/Fortress Parts/Wall_LordRoom_Stair_R.prefab:233"],"requires":["resolved server variants and overrides","full hierarchy transforms","reflected winding once","static concave meshes","terrain holes","portable source versus cooked geometry","stable component identity"],"policy":"World-definition and world-assembly ownership stays outside physics."},
     {"id":"general-dynamics","authority":"explicit user requirement","requires":["finite-mass driven characters","free dynamic bodies","forces and torque","angular inertia","sleep and wake","CCD","fixed/distance/hinge/slider/spherical/motor/upright/wheel constraints","constraint limits and drives","coherent checkpoint and restart"]}
   ],
+  "contentEvidence": {
+    "projectiles": {
+      "reference": "AssetsByType/Prefabs/Projectiles/Weapons/prefab_Projectile_Staff.prefab",
+      "inputHashes": "D:/Demiurgos/tests/physics-validation/unity/runs/prefab-reference-20261112-01/inputs.json",
+      "unityCapture": "D:/Demiurgos/tests/physics-validation/unity/runs/prefab-reference-20261112-01/reference",
+      "goComparison": "D:/Demiurgos/tests/physics-validation/unity/runs/prefab-reference-20261112-01/go-reference-report-ray-policy.json",
+      "scope": "Copied authored dynamic sphere geometry and native queries; no projectile gameplay, lifetime or relative-motion qualification."
+    },
+    "cart-support": {
+      "references": ["AssetsByType/Prefabs/Carts/prefab_Wagon_Server.prefab", "AssetsByType/Prefabs/Carts/prefab_handcart_server.prefab", "AssetsByType/Prefabs/Carts/prefab_BallistaWagon_Server.prefab", "AssetsByObject/Entities/entity_Cart.prefab"],
+      "serializedAudit": "D:/Demiurgos/tests/physics-validation/content-audit-carts.json",
+      "inputHashes": "D:/Demiurgos/tests/physics-validation/unity/runs/prefab-reference-20261112-01/inputs.json",
+      "goComparison": "D:/Demiurgos/tests/physics-validation/unity/runs/prefab-reference-20261112-01/go-reference-report-ray-policy.json",
+      "scope": "Actual resolved variant removals leave 2/2/3 trigger colliders on kinematic cart parents. Shared Staff/cart capture passes 48 geometry queries with explicit Unity ray initial-overlap policy; scripted towing, seating and passenger transport remain independent gates."
+    },
+    "resolved-content": {
+      "references": ["AssetsByObject/Terrains/Prefabs/Server/Terrain 0,0 Server.prefab", "AssetsByObject/Terrains/Prefabs/Server/Terrain 1,0 Server.prefab"],
+      "inputHashes": "D:/Demiurgos/tests/physics-validation/unity/runs/terrain-reference-20261112-02/inputs.json",
+      "unityCapture": "D:/Demiurgos/tests/physics-validation/unity/runs/terrain-reference-20261112-02/reference",
+      "goComparison": "D:/Demiurgos/tests/physics-validation/unity/runs/terrain-reference-20261112-02/go-reference-report.json",
+      "scope": "Two actual 513x513 HeightOnly tiles, 1048576 triangles, zero authored holes. All 42 rays pass after physics-specific native cell triangulation correction. Sphere precision/convergence remains under investigation. Repeated 768/2304 metre offsets test coordinates, not additional resident area.",
+      "remaining": ["AssetsByObject/Fortress/Fortress Parts/Wall_LordRoom_Stair_R_Server.prefab and its nested source dependencies", "WorldStreamer server-prefab/catalog choices, object-state variants and database-driven full world assembly"],
+      "status": "not-qualified"
+    }
+  },
   "qualification": {
     "workspace": "D:/Demiurgos/tests/physics-validation",
+    "unityEditorScopeDecision": {
+      "date": "2026-11-12",
+      "authority": "User explicitly excluded Unity 2021.3 compatibility testing and requested cancellation and cleanup of that prerequisite.",
+      "requiredEditor": "6000.3.13f1",
+      "excluded": ["2021.3"],
+      "evidence": "D:/Demiurgos/tests/physics-validation/unity2021/install/cancelled-by-scope-decision.json",
+      "policy": "Retain historical Unity results and the package's declared version separately; this physics qualification does not establish compatibility with excluded Editors."
+    },
     "platforms": ["windows/amd64", "linux/amd64"],
     "platformScopeDecision": {
       "date": "2026-11-12",

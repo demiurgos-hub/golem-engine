@@ -8,6 +8,10 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Authored Unity character capsules now require an explicit `content.GolemKinematicCharacters` conversion policy. It maps step, slope and skin settings onto the server controller, retains separate support/work budgets and defaults controller gravity off. Unsupported deadband, disabled collision/recovery and incompatible geometry are diagnosed before loading. Preparation policy fingerprints use version 2; re-prepare existing captures.
+
+- Unity physics terrain export now matches the native cell diagonal on non-planar heightfields, without changing navigation source triangulation. Copied terrain and prefab qualification fixtures preserve input hashes and compare actual native queries at recorded coordinate offsets.
+
 - Continuous sensors now retain entry and exit between solver samples, including separate concave and rotational re-entry intervals. Fraction-ordered replay preserves owner aggregation and accepted-only cleanup; bounded or unresolved geometry reports failure instead of dropping transitions. This correctness coverage does not establish full-load sensor capacity.
 
 - Timed scripted and external physics trajectories retain bounded translation/rotation across ticks, expose cancellation tokens and accepted progress, pause under regional quarantine, and preserve active intent through paired checkpoints. Blocked actions keep their actual collision result and cancellation preserves momentum already transferred to other bodies. External poses require admitted timed motion; explicit teleports remain placement-only.
