@@ -8,6 +8,10 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Physics stress diagnostics can explicitly select Box3D's pure-Go SIMD build and solver/query worker counts. Evidence records the Go experiment, build tags and target architecture; the SIMD candidate retains its CPU requirements and does not imply workload or platform qualification.
+
+- Physical geometry can activate under quarantine before its asynchronous navigation rebuild. Failed navigation retains the new physical state and supports retries without recreating bodies. Pending-edit checkpoints preserve accepted and desired worlds separately and require matching private physics/navigation reconstruction before recovery opens readiness.
+
 - Continuous physics frames now admit relative translations and rotations through bounded solver microsteps, retaining intermediate body poses and contact/sensor transitions. Kinematic triangle meshes can transfer solver momentum to passive bodies; unsupported dynamic concave geometry, unresolved paths and crush bounds fail explicitly. Persistent-collider motion queries preserve exact geometry identity and caller-buffer completeness. Capacity, transport policy and platform qualification remain separate gates.
 
 - Capsule movement now checks stairs with headroom, walkable and steep slopes, corners, narrow openings, ledges, ceilings and support loss. Physical placement/movement queries can apply symmetric collision masks and signed group overrides independently of gameplay query masks.

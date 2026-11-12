@@ -10,6 +10,7 @@ param(
     [string]$Warmup = '2s',
     [ValidateRange(1,64)][int]$PhysicsWorkers = 6,
     [ValidateRange(1,64)][int]$QueryWorkers = 6,
+    [switch]$SIMD,
     [switch]$Profiles,
     [switch]$BuildOnly
 )
@@ -31,6 +32,10 @@ $env:TEMP = $env:GOTMPDIR
 $env:TMP = $env:GOTMPDIR
 $env:GOTOOLCHAIN = 'go1.27.1'
 $env:CGO_ENABLED = '0'
+$env:GOEXPERIMENT = if ($SIMD) { 'simd' } else { '' }
+$buildTags = if ($SIMD) { @('-tags','box3d_simd') } else { @() }
+$tagNames = @()
+if ($SIMD) { $tagNames = @('box3d_simd') }
 $snapshots = @()
 foreach ($source in @(@{Name='engine';Root=$engineRoot},@{Name='box3d-go';Root=$ForkRoot},@{Name='navmesh-go';Root=$NavigationRoot})) {
     $destination = Join-Path $workspacePath $source.Name
@@ -69,13 +74,13 @@ $workText += (($modulePaths | ForEach-Object { '  ' + $_.Module + ' ' + $_.Versi
 $sourceManifest = Join-Path $runPath 'source-manifest.json'
 [ordered]@{version=1;source=$snapshots;workspaceSHA256=(Get-FileHash -LiteralPath $env:GOWORK -Algorithm SHA256).Hash.ToLowerInvariant();publishedResolution=$false} | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $sourceManifest -Encoding utf8
 $executable = Join-Path $runPath 'physics-stress.exe'
-$record = [ordered]@{runID=$RunID;startedUTC=[DateTime]::UtcNow.ToString('o');mode=$Mode;extent=$Extent;duration=$Duration;warmup=$Warmup;buildOnly=[bool]$BuildOnly;toolchain=(& go version);cgo=$env:CGO_ENABLED;nativeHost=[Runtime.InteropServices.RuntimeInformation]::OSDescription;hostArchitecture=[Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString();processArchitecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString();sourceManifest=$sourceManifest;qualified=$false}
+$record = [ordered]@{runID=$RunID;startedUTC=[DateTime]::UtcNow.ToString('o');mode=$Mode;extent=$Extent;duration=$Duration;warmup=$Warmup;buildOnly=[bool]$BuildOnly;toolchain=(& go version);cgo=$env:CGO_ENABLED;goexperiment=$env:GOEXPERIMENT;buildTags=$tagNames;goamd64=(& go env GOAMD64);simdRequested=[bool]$SIMD;nativeHost=[Runtime.InteropServices.RuntimeInformation]::OSDescription;hostArchitecture=[Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString();processArchitecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString();sourceManifest=$sourceManifest;qualified=$false}
 try {
     Push-Location $stressModule
     try {
-        & go test -json ./... 2>&1 | Out-File -LiteralPath (Join-Path $runPath 'tests.jsonl') -Encoding utf8
+        & go test @buildTags -json ./... 2>&1 | Out-File -LiteralPath (Join-Path $runPath 'tests.jsonl') -Encoding utf8
         if ($LASTEXITCODE -ne 0) { throw 'Harness checks failed.' }
-        & go build -trimpath -o $executable . 2>&1 | Out-File -LiteralPath (Join-Path $runPath 'build.log') -Encoding utf8
+        & go build @buildTags -trimpath -o $executable . 2>&1 | Out-File -LiteralPath (Join-Path $runPath 'build.log') -Encoding utf8
         if ($LASTEXITCODE -ne 0) { throw 'Harness build failed.' }
     } finally { Pop-Location }
     $record.executableSHA256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
