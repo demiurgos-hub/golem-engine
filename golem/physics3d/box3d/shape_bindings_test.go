@@ -143,6 +143,7 @@ func TestShapeBindingsCompoundChildrenAndPartialCreationRollback(t *testing.T) {
 	if len(w.shapeOwners) != 0 || len(w.shapeBindings) != 0 || len(w.colliders) != 0 || w.bodies[body].id.GetShapeCount() != 0 {
 		t.Fatal("failed creation published native ownership")
 	}
+	assertPortableBindings(t, w)
 	w.shapes[shape].cooked = original
 	h, err := w.CreateCollider(p.DefaultCollider(body, shape))
 	if err != nil {

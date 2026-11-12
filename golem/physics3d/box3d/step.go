@@ -96,7 +96,7 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 		}
 	}
 	for key := range w.activeBodies {
-		if w.bodies[key].desc.Controller.Enabled {
+		if w.bodyForHandle(key).desc.Controller.Enabled {
 			if _, err = w.controllerGeometry(key); err != nil {
 				return
 			}
@@ -124,7 +124,7 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 			motions[i].MaxDriveForce = 0
 			continue
 		}
-		pose := w.bodyState(m.Body, w.bodies[m.Body]).Pose
+		pose := w.bodyState(m.Body, w.bodyForHandle(m.Body)).Pose
 		pose.Position = pose.Position.Add(delta)
 		projections[m.Body] = pose
 	}
@@ -133,7 +133,7 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 		frozen[m.Body] = m.Frozen
 	}
 	for key := range w.activeBodies {
-		v := w.bodies[key]
+		v := w.bodyForHandle(key)
 		if v.desc.Mode == p.ExternalPose {
 			v.id.SetLinearVelocity(b.Vec3{})
 			v.id.SetAngularVelocity(b.Vec3{})
@@ -172,8 +172,8 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 		start, end := i*pathCapacity, (i+1)*pathCapacity
 		// Capacity fences keep each body's appended observations independently owned.
 		paths[i] = p.BodyPath{Body: h, Positions: positions[start : start+1 : end], Poses: poses[start : start+1 : end], Fractions: fractions[start : start+1 : end]}
-		paths[i].Positions[0] = w.bodies[h].committed.Anchor.Position
-		paths[i].Poses[0] = w.bodies[h].committed.Pose
+		paths[i].Positions[0] = w.bodyForHandle(h).committed.Anchor.Position
+		paths[i].Poses[0] = w.bodyForHandle(h).committed.Pose
 	}
 	started := false
 	tracker := w.tracker.Clone()
@@ -194,8 +194,8 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 	for i, key := range keys {
 		if pose, ok := projections[key]; ok {
 			started = true
-			w.bodies[key].id.SetTransform(bp(pose.Position), bq(pose.Rotation))
-			paths[i].Positions = append(paths[i].Positions, w.bodyState(key, w.bodies[key]).Anchor.Position)
+			w.bodyForHandle(key).id.SetTransform(bp(pose.Position), bq(pose.Rotation))
+			paths[i].Positions = append(paths[i].Positions, w.bodyState(key, w.bodyForHandle(key)).Anchor.Position)
 			paths[i].Poses = append(paths[i].Poses, pose)
 			paths[i].Fractions = append(paths[i].Fractions, 0)
 		}
@@ -207,7 +207,7 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 	}
 	result.Elapsed = f.Delta
 	for _, key := range keys {
-		result.Bodies = append(result.Bodies, w.bodyState(key, w.bodies[key]))
+		result.Bodies = append(result.Bodies, w.bodyState(key, w.bodyForHandle(key)))
 	}
 	private := result
 	private.Bodies = append([]p.BodyState(nil), result.Bodies...)
@@ -230,9 +230,9 @@ func (w *World) Accept(id uint64) error {
 	}
 	r := w.pending
 	for _, state := range r.Bodies {
-		w.bodies[state.Handle].committed = state
-		w.bodies[state.Handle].forces = nil
-		w.bodies[state.Handle].torque = p.Vec3{}
+		w.bodyForHandle(state.Handle).committed = state
+		w.bodyForHandle(state.Handle).forces = nil
+		w.bodyForHandle(state.Handle).torque = p.Vec3{}
 	}
 	w.revision = r.Revision
 	w.stats.AcceptedFrames++
@@ -266,14 +266,14 @@ func motionVelocity(m p.Motion, start, dt float32) (p.Vec3, p.Vec3) {
 }
 
 func (w *World) clipKinematic(h p.BodyHandle, velocity p.Vec3, dt float32) (p.Vec3, error) {
-	v := w.bodies[h]
+	v := w.bodyForHandle(h)
 	delta := velocity.Mul(dt)
 	for _, ch := range v.colliders {
-		c := w.colliders[ch]
+		c := w.colliderForHandle(ch)
 		if !c.desc.Enabled || !c.desc.Roles.Solid {
 			continue
 		}
-		s := w.shapes[c.desc.Shape].desc
+		s := w.shapeForHandle(c.desc.Shape).desc
 		if containsMesh(s) {
 			// Kinematic triangle response uses native continuous contact solving. Passenger
 			// and ceiling transport policy is handled by the host before solving.

@@ -38,24 +38,24 @@ func (w *World) SetCharacterVelocity(h p.BodyHandle, velocity p.Vec3) error {
 }
 
 func (w *World) controllerGeometry(h p.BodyHandle) (controllerGeometry, error) {
-	return w.controllerGeometryAt(h, w.bodyState(h, w.bodies[h]).Pose)
+	return w.controllerGeometryAt(h, w.bodyState(h, w.bodyForHandle(h)).Pose)
 }
 
 func (w *World) controllerGeometryAt(h p.BodyHandle, bodyPose p.Pose) (controllerGeometry, error) {
-	return w.controllerGeometryFor(h, bodyPose, w.bodies[h].desc.Controller)
+	return w.controllerGeometryFor(h, bodyPose, w.bodyForHandle(h).desc.Controller)
 }
 
 func (w *World) controllerGeometryFor(h p.BodyHandle, bodyPose p.Pose, cfg p.CharacterControllerConfig) (controllerGeometry, error) {
-	v := w.bodies[h]
+	v := w.bodyForHandle(h)
 	var result controllerGeometry
 	count := 0
 	for _, ch := range v.colliders {
-		c := w.colliders[ch]
+		c := w.colliderForHandle(ch)
 		if !c.desc.Enabled || !c.desc.Roles.Solid {
 			continue
 		}
 		count++
-		s := w.shapes[c.desc.Shape].desc
+		s := w.shapeForHandle(c.desc.Shape).desc
 		pose := bodyPose.Compose(c.desc.LocalPose)
 		up := pose.Rotation.Rotate(p.Vec3{Y: 1})
 		if s.Kind != p.Capsule || s.PointA.X != s.PointB.X || s.PointA.Z != s.PointB.Z || math.Abs(float64(up.X))+math.Abs(float64(up.Z)) > 1e-5 || up.Y < .99999 {
@@ -75,7 +75,7 @@ func (w *World) controllerGeometryFor(h p.BodyHandle, bodyPose p.Pose, cfg p.Cha
 }
 
 func (w *World) probeController(h p.BodyHandle) (controllerGeometry, character.Support, error) {
-	v := w.bodies[h]
+	v := w.bodyForHandle(h)
 	g, err := w.controllerGeometry(h)
 	if err != nil {
 		return g, character.Support{}, err
@@ -195,7 +195,7 @@ func nextMotionBoundary(motions []p.Motion, at, end float32) float32 {
 }
 
 func (w *World) controllerPath(h p.BodyHandle, velocity p.Vec3, dt float32) (kinematicPath, map[p.BodyHandle]float32, error) {
-	v := w.bodies[h]
+	v := w.bodyForHandle(h)
 	g, support, err := w.probeController(h)
 	if err != nil {
 		return kinematicPath{}, nil, err
@@ -211,7 +211,7 @@ func (w *World) controllerPath(h p.BodyHandle, velocity p.Vec3, dt float32) (kin
 	var retainedEnds []float32
 	clamps := map[p.BodyHandle]float32{}
 	if v.support.Grounded && v.desc.Controller.FollowSupport {
-		platform := w.bodies[v.support.Body]
+		platform := w.bodyForHandle(v.support.Body)
 		if platform == nil {
 			return kinematicPath{}, nil, p.ErrStale
 		}
@@ -300,7 +300,7 @@ func (w *World) constrainControllerPairs(keys []p.BodyHandle, dt float32, poseBo
 	for pass := 0; pass < 8; pass++ {
 		changed := false
 		for _, key := range keys {
-			v := w.bodies[key]
+			v := w.bodyForHandle(key)
 			if v.frozen || (!v.desc.Controller.Enabled && !poseBodies[key]) || v.desc.Mode == p.DrivenCharacter {
 				continue
 			}
@@ -313,7 +313,7 @@ func (w *World) constrainControllerPairs(keys []p.BodyHandle, dt float32, poseBo
 				geometries = append(geometries, g)
 			} else {
 				for _, ch := range v.colliders {
-					c := w.colliders[ch]
+					c := w.colliderForHandle(ch)
 					if !c.desc.Enabled || !c.desc.Roles.Solid {
 						continue
 					}
@@ -327,7 +327,7 @@ func (w *World) constrainControllerPairs(keys []p.BodyHandle, dt float32, poseBo
 					if other == key {
 						continue
 					}
-					z := w.bodies[other]
+					z := w.bodyForHandle(other)
 					if z.desc.Mode == p.FreeDynamic || z.desc.Mode == p.DrivenCharacter || v.support.Grounded && v.support.Body == other {
 						filter.ExcludeBodies = append(filter.ExcludeBodies, other)
 						continue
@@ -351,8 +351,8 @@ func (w *World) constrainControllerPairs(keys []p.BodyHandle, dt float32, poseBo
 					if !hit.Blocking {
 						continue
 					}
-					other := w.colliders[hit.Collider].desc.Body
-					z := w.bodies[other]
+					other := w.colliderForHandle(hit.Collider).desc.Body
+					z := w.bodyForHandle(other)
 					zfrom, zto := w.bodyState(other, z).Pose, predictSupportPose(z, dt)
 					da := to.Transform(from.Inverse().Transform(hit.Point)).Sub(hit.Point)
 					dz := zto.Transform(zfrom.Inverse().Transform(hit.Point)).Sub(hit.Point)
@@ -370,7 +370,7 @@ func (w *World) constrainControllerPairs(keys []p.BodyHandle, dt float32, poseBo
 						z.id.SetLinearVelocity(b.MulSV(scale, z.id.GetLinearVelocity()))
 						z.id.SetAngularVelocity(b.MulSV(scale, z.id.GetAngularVelocity()))
 						for _, passenger := range keys {
-							rider := w.bodies[passenger]
+							rider := w.bodyForHandle(passenger)
 							if passenger != key && rider.desc.Controller.Enabled && rider.desc.Mode != p.DrivenCharacter && rider.support.Grounded && rider.support.Body == other {
 								rider.id.SetLinearVelocity(b.MulSV(scale, rider.id.GetLinearVelocity()))
 							}
@@ -401,7 +401,7 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 		poseBodies[m.Body] = len(m.PoseSegments) > 0
 	}
 	for _, key := range keys {
-		v := w.bodies[key]
+		v := w.bodyForHandle(key)
 		if _, exists := inputs[key]; !exists && v.desc.Controller.Enabled {
 			m := p.Motion{Body: key, Velocity: v.desc.Controller.Velocity, MaxDriveForce: v.desc.Controller.MaxDriveForce, SurfaceNormal: p.Vec3{Y: 1}, Frozen: v.frozen}
 			motions = append(motions, m)
@@ -416,7 +416,7 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 		}
 		drives := map[p.BodyHandle]p.Vec3{}
 		for _, key := range keys {
-			v := w.bodies[key]
+			v := w.bodyForHandle(key)
 			if v.frozen || !v.desc.Controller.Enabled {
 				continue
 			}
@@ -432,7 +432,7 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 			}
 		}
 		for _, m := range motions {
-			v := w.bodies[m.Body]
+			v := w.bodyForHandle(m.Body)
 			if m.Frozen || v.desc.Mode != p.DrivenCharacter {
 				continue
 			}
@@ -459,7 +459,7 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 		for at := begin; at < end; {
 			boundary := nextMotionBoundary(motions, at, end)
 			for _, key := range keys {
-				v := w.bodies[key]
+				v := w.bodyForHandle(key)
 				if v.frozen || !v.desc.Controller.Enabled {
 					continue
 				}
@@ -467,7 +467,7 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 					return err
 				}
 				if v.support.Grounded && v.desc.Controller.FollowSupport {
-					platform := w.bodies[v.support.Body]
+					platform := w.bodyForHandle(v.support.Body)
 					if speed := pv(platform.id.GetAngularVelocity()).Length(); speed > 0 {
 						boundary = min(boundary, at+v.desc.Controller.MaxSupportRotation/speed)
 					}
@@ -479,7 +479,7 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 			}
 			var plans []kinematicPath
 			for _, m := range motions {
-				v := w.bodies[m.Body]
+				v := w.bodyForHandle(m.Body)
 				if m.Frozen || v.desc.Controller.Enabled && !poseBodies[m.Body] || v.desc.Mode == p.DrivenCharacter || v.desc.Mode == p.FreeDynamic {
 					continue
 				}
@@ -511,7 +511,7 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 				plans = plans[:basePlans]
 				clamps := map[p.BodyHandle]float32{}
 				for _, key := range keys {
-					v := w.bodies[key]
+					v := w.bodyForHandle(key)
 					if v.frozen || !v.desc.Controller.Enabled || v.desc.Mode == p.DrivenCharacter || poseBodies[key] {
 						continue
 					}
@@ -535,7 +535,7 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 							}
 							plan = timedKinematicPath(key, []p.Vec3{plan.points[0]}, dt)
 							if v.support.Grounded && v.desc.Controller.FollowSupport {
-								platform := w.bodies[v.support.Body]
+								platform := w.bodyForHandle(v.support.Body)
 								if platform.desc.Mode != p.Static && platform.desc.Mode != p.FreeDynamic && platform.desc.Mode != p.DrivenCharacter && (platform.id.GetLinearVelocity() != (b.Vec3{}) || platform.id.GetAngularVelocity() != (b.Vec3{})) {
 									blocked[v.support.Body] = 0
 								}
@@ -554,7 +554,7 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 					break
 				}
 				for body, scale := range clamps {
-					v := w.bodies[body]
+					v := w.bodyForHandle(body)
 					v.id.SetLinearVelocity(b.MulSV(scale, v.id.GetLinearVelocity()))
 					v.id.SetAngularVelocity(b.MulSV(scale, v.id.GetAngularVelocity()))
 					for i := 0; i < basePlans; i++ {
@@ -582,16 +582,16 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 					return fmt.Errorf("physics3d: shared motion interval limit")
 				}
 				for _, plan := range plans {
-					w.bodies[plan.body].id.SetLinearVelocity(bv(plan.velocity(phase)))
+					w.bodyForHandle(plan.body).id.SetLinearVelocity(bv(plan.velocity(phase)))
 					if plan.poseTrajectory {
-						w.bodies[plan.body].id.SetAngularVelocity(bv(plan.angular))
+						w.bodyForHandle(plan.body).id.SetAngularVelocity(bv(plan.angular))
 					}
 				}
 				if err := w.constrainControllerPairs(keys, interval, poseBodies); err != nil {
 					return err
 				}
 				for _, key := range keys {
-					v := w.bodies[key]
+					v := w.bodyForHandle(key)
 					for _, force := range v.forces {
 						v.id.ApplyForce(bv(force.force), bp(force.point), true)
 					}
@@ -620,7 +620,7 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 					}
 					fraction := (at + phase + sample.EndFraction*interval) / f.Delta
 					for i, key := range keys {
-						body := w.bodies[key]
+						body := w.bodyForHandle(key)
 						if body.desc.Enabled && body.desc.Mode != p.Static {
 							if _, ok := contactState.bodies[body.id]; !ok {
 								return fmt.Errorf("physics3d: native observation omitted body %v", key)
@@ -646,7 +646,7 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 						}
 						if m.ValidateBounds != nil {
 							poses := paths[pathIndex[m.Body]].Poses
-							low, high := p.AnchorMotionBounds(poses[len(poses)-2], poses[len(poses)-1], w.bodies[m.Body].desc.Anchor.Position)
+							low, high := p.AnchorMotionBounds(poses[len(poses)-2], poses[len(poses)-1], w.bodyForHandle(m.Body).desc.Anchor.Position)
 							if !m.ValidateBounds(low, high) {
 								return fmt.Errorf("physics3d: captured curved-anchor safety failed after microstep")
 							}
@@ -679,7 +679,7 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 				phase = next
 			}
 			for _, key := range keys {
-				if w.bodies[key].desc.Controller.Enabled && !w.bodies[key].frozen {
+				if w.bodyForHandle(key).desc.Controller.Enabled && !w.bodyForHandle(key).frozen {
 					if _, _, err := w.probeController(key); err != nil {
 						return err
 					}

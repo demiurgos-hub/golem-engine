@@ -20,8 +20,8 @@ func (w *World) bodyInBounds(v *body, pose p.Pose) bool {
 		return false
 	}
 	for _, h := range v.colliders {
-		c := w.colliders[h]
-		if c.desc.Enabled && !geometryInBounds(w.shapes[c.desc.Shape].desc, pose.Compose(c.desc.LocalPose)) {
+		c := w.colliderForHandle(h)
+		if c.desc.Enabled && !geometryInBounds(w.shapeForHandle(c.desc.Shape).desc, pose.Compose(c.desc.LocalPose)) {
 			return false
 		}
 	}

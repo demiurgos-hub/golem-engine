@@ -55,6 +55,7 @@ func (w *World) CreateCollider(d p.ColliderDesc) (p.ColliderHandle, error) {
 		}
 	}
 	w.colliders[h] = c
+	w.handleBindings[h.Index].collider = c
 	if c.desc.Roles.Sensor {
 		if w.sensorColliders == nil {
 			w.sensorColliders = map[p.ColliderHandle]*collider{}
@@ -67,7 +68,7 @@ func (w *World) CreateCollider(d p.ColliderDesc) (p.ColliderHandle, error) {
 		w.bindNativeShape(id, h, c, v)
 	}
 	w.adjustMass(v)
-	w.changed()
+	w.changedBody(d.Body)
 	return h, nil
 }
 func containsMesh(s p.ShapeDesc) bool {
@@ -156,6 +157,6 @@ func (w *World) DestroyCollider(h p.ColliderHandle, reason p.CleanupReason) erro
 	w.releaseHandle(p.Handle(h))
 	delete(w.sensorColliders, h)
 	w.adjustMass(v)
-	w.changed()
+	w.changedBody(c.desc.Body)
 	return nil
 }

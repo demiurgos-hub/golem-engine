@@ -47,9 +47,11 @@ type World struct {
 	config          p.Config
 	generations     []uint32
 	freeHandles     []uint32
+	handleBindings  []portableHandleBinding
 	shapes          map[p.ShapeHandle]*shape
 	bodies          map[p.BodyHandle]*body
 	activeBodies    map[p.BodyHandle]struct{}
+	dirtyStatics    map[p.BodyHandle]struct{}
 	colliders       map[p.ColliderHandle]*collider
 	sensorColliders map[p.ColliderHandle]*collider
 	shapeOwners     map[b.ShapeID]p.ColliderHandle
@@ -117,8 +119,8 @@ func bp(v p.Vec3) b.Pos       { return b.Pos{X: v.X, Y: v.Y, Z: v.Z} }
 func pp(v b.Pos) p.Vec3       { return p.Vec3{X: v.X, Y: v.Y, Z: v.Z} }
 func bt(v p.Pose) b.Transform { return b.Transform{P: bv(v.Position), Q: bq(v.Rotation)} }
 func (w *World) findBody(h p.BodyHandle) (*body, error) {
-	v, ok := w.bodies[h]
-	if !ok {
+	v := w.bodyForHandle(h)
+	if v == nil {
 		return nil, p.ErrStale
 	}
 	return v, nil
@@ -208,11 +210,12 @@ func (w *World) CreateBody(d p.BodyDesc) (p.BodyHandle, error) {
 	v := &body{id: w.backend.CreateBody(&def), desc: d}
 	w.adjustMass(v)
 	w.bodies[h] = v
+	w.handleBindings[h.Index].body = v
 	if d.Mode != p.Static || d.Owner != 0 {
 		w.activeBodies[h] = struct{}{}
 	}
 	v.committed = w.bodyState(h, v)
-	w.changed()
+	w.changedBody(h)
 	return h, nil
 }
 func (w *World) bodyState(h p.BodyHandle, v *body) p.BodyState {
@@ -254,6 +257,7 @@ func (w *World) DestroyBody(h p.BodyHandle, reason p.CleanupReason) error {
 	delete(w.bodies, h)
 	w.releaseHandle(p.Handle(h))
 	delete(w.activeBodies, h)
+	delete(w.dirtyStatics, h)
 	w.changed()
 	return nil
 }
@@ -279,7 +283,7 @@ func (w *World) SetPose(h p.BodyHandle, pose p.Pose) error {
 		}
 	}
 	v.id.SetTransform(bp(pose.Position), bq(pose.Rotation))
-	w.changed()
+	w.changedBody(h)
 	return nil
 }
 
@@ -303,7 +307,7 @@ func (w *World) SetVelocity(h p.BodyHandle, linear, angular p.Vec3) error {
 	}
 	v.id.SetLinearVelocity(bv(linear))
 	v.id.SetAngularVelocity(bv(angular))
-	w.changed()
+	w.changedBody(h)
 	return nil
 }
 
@@ -325,7 +329,7 @@ func (w *World) SetEnabled(h p.BodyHandle, enabled bool) error {
 		}
 	}
 	v.desc.Enabled = enabled
-	w.changed()
+	w.changedBody(h)
 	return nil
 }
 
@@ -376,7 +380,7 @@ func (w *World) ApplyImpulse(h p.BodyHandle, impulse, point p.Vec3) error {
 		return err
 	}
 	v.id.ApplyLinearImpulse(bv(impulse), bp(point), true)
-	w.changed()
+	w.changedBody(h)
 	return nil
 }
 
@@ -387,9 +391,7 @@ func (w *World) Synchronize() error {
 	}
 	if w.dirty {
 		w.revision++
-		for h, v := range w.bodies {
-			v.committed = w.bodyState(h, v)
-		}
+		w.synchronizeBodies()
 		w.dirty = false
 	}
 	return nil
@@ -435,8 +437,10 @@ func (w *World) CloseWithEvents() ([]p.ContactEvent, error) {
 	w.shapeOwners = nil
 	w.shapeBindings = nil
 	w.activeBodies = nil
+	w.dirtyStatics = nil
 	w.queryContexts = nil
 	w.generations, w.freeHandles = nil, nil
+	w.handleBindings = nil
 	w.pending, w.cleanup = nil, nil
 	w.pendingTracker = nil
 	w.tracker = p.ContactTracker{}

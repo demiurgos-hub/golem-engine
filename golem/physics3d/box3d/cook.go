@@ -229,6 +229,7 @@ func (w *World) CreateCookedShape(cooked *CookedShape) (p.ShapeHandle, error) {
 	}
 	h := p.ShapeHandle(identity)
 	w.shapes[h] = &shape{desc: cooked.Source(), cooked: cooked}
+	w.handleBindings[h.Index].shape = w.shapes[h]
 	w.mutation++
 	return h, nil
 }

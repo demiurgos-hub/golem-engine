@@ -88,7 +88,7 @@ func (w *World) SetMotionPolicy(h p.BodyHandle, policy p.MotionPolicy) error {
 	for _, pair := range contacts {
 		w.policyContacts[pair] = struct{}{}
 	}
-	w.changed()
+	w.changedBody(h)
 	return nil
 }
 
