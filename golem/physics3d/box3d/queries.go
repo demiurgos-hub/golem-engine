@@ -29,6 +29,9 @@ func (w *World) eligible(id b.ShapeID, f p.QueryFilter) (p.ColliderHandle, *coll
 	if f.Sensors == p.ExcludeSensors && c.desc.Roles.Sensor || f.Sensors == p.OnlySensors && !c.desc.Roles.Sensor {
 		return h, c, false
 	}
+	if f.PhysicalFilter != nil && !p.CollisionAllowed(*f.PhysicalFilter, c.desc.Filter) {
+		return h, c, false
+	}
 	return h, c, true
 }
 func (w *World) hit(id b.ShapeID) p.Hit {
@@ -115,13 +118,10 @@ func (w *World) query(q p.Query, dst []p.Hit) (p.QueryResult, error) {
 		}
 	}
 	initial := map[b.ShapeID]bool{}
-	w.backend.OverlapShape(bp(q.Pose.Position), &pr, filter, func(id b.ShapeID, _ any) bool {
+	bounds := b.OffsetAABB(b.MakeAABB(pr.Points, pr.Radius), bp(q.Pose.Position))
+	w.backend.OverlapAABB(bounds, filter, func(id b.ShapeID, _ any) bool {
 		_, _, ok := w.eligible(id, q.Filter)
 		if !ok {
-			return true
-		}
-		initial[id] = true
-		if q.Initial == p.IgnoreInitial && q.Kind != p.Overlap && length != 0 {
 			return true
 		}
 		h := w.hit(id)
@@ -129,8 +129,8 @@ func (w *World) query(q p.Query, dst []p.Hit) (p.QueryResult, error) {
 		h.Fraction = 0
 		h.Distance = 0
 		if q.Kind == p.Ray {
-			r, ok := id.ClosestPointFeature(bp(q.Pose.Position), 4*p.CoordinateLimit)
-			if !ok {
+			r, ok := id.ClosestPointFeature(bp(q.Pose.Position), 0)
+			if !ok || r.Distance > 0 {
 				return true
 			}
 			h.Point = pp(r.Point)
@@ -167,6 +167,10 @@ func (w *World) query(q p.Query, dst []p.Hit) (p.QueryResult, error) {
 			} else {
 				return true
 			}
+		}
+		initial[id] = true
+		if q.Initial == p.IgnoreInitial && q.Kind != p.Overlap && length != 0 {
+			return true
 		}
 		if q.Initial == p.BlockInitial {
 			h.Blocking = true

@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Capsule movement now checks stairs with headroom, walkable and steep slopes, corners, narrow openings, ledges, ceilings and support loss. Physical placement/movement queries can apply symmetric collision masks and signed group overrides independently of gameplay query masks.
+
 - Physics queries support bounded parallel batches against one synchronized revision with caller-owned, nonoverlapping buffers. Nearest/any queries retain explicit initial-overlap and overflow semantics. Optional owner contact aggregation counts exact child pairs and preserves swept entry/exit ordering; restored contacts have a distinct phase. The full mixed-load diagnostic now records solver/query worker counts; its timing gate remains unqualified.
 
 - Paired physics checkpoints capture authoritative entities, body/joint state, pending forces, geometry ownership and navigation intents under one identity, with manifest-last storage and fresh handles on recovery. Recovery suppresses ordinary lifecycle/contact-entry effects and holds readiness closed after a partial publication failure. Prepared geometry changes share navigation's quarantine and build queue while retaining unaffected bodies. Physics frame observations report accepted cadence, solve time and failures. These correctness features do not establish workload or platform qualification.

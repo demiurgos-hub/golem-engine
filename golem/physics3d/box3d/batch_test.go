@@ -75,3 +75,47 @@ func TestInitialPoliciesAndNearestAgreeWithAll(t *testing.T) {
 		}
 	}
 }
+
+func TestPhysicalQueryFiltersMatchSymmetricMasksAndGroups(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		query, target p.CollisionFilter
+		hit           bool
+	}{
+		{"one-way-rejected", p.CollisionFilter{Category: 1, Mask: 2}, p.CollisionFilter{Category: 2, Mask: 0}, false},
+		{"symmetric", p.CollisionFilter{Category: 1, Mask: 2}, p.CollisionFilter{Category: 2, Mask: 1}, true},
+		{"positive-group", p.CollisionFilter{Category: 1, Group: 7}, p.CollisionFilter{Category: 2, Group: 7}, true},
+		{"negative-group", p.CollisionFilter{Category: 1, Mask: 2, Group: -7}, p.CollisionFilter{Category: 2, Mask: 1, Group: -7}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := world(t)
+			shape, err := w.CreateShape(p.ShapeDesc{Kind: p.Sphere, Radius: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := w.CreateBody(p.DefaultBody(p.Static))
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := p.DefaultCollider(body, shape)
+			d.Filter = tc.target
+			if _, err = w.CreateCollider(d); err != nil {
+				t.Fatal(err)
+			}
+			if err = w.Synchronize(); err != nil {
+				t.Fatal(err)
+			}
+			q := p.Query{Kind: p.Overlap, Mode: p.Any, Shape: p.ShapeDesc{Kind: p.Sphere, Radius: .2}, Pose: p.Identity(), Filter: p.QueryFilter{Mask: ^uint64(0), PhysicalFilter: &tc.query}}
+			var hits [1]p.Hit
+			r, err := w.Query(q, hits[:])
+			if err != nil || (r.Count > 0) != tc.hit {
+				t.Fatalf("%+v %v", r, err)
+			}
+			q.Filter.PhysicalFilter = nil
+			r, err = w.Query(q, hits[:])
+			if err != nil || r.Count != 1 {
+				t.Fatalf("ordinary query used target mask: %+v %v", r, err)
+			}
+		})
+	}
+}

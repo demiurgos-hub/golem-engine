@@ -146,6 +146,8 @@ func (c Config) Move(world Queries, start p.Pose, translation p.Vec3, filter p.Q
 		return r, e
 	}
 	remaining := translation
+	var planes []p.Vec3
+	cosSlope := float32(math.Cos(float64(c.MaxSlopeDegrees) * math.Pi / 180))
 	for i := 0; i < c.Iterations && remaining.Length() > 1e-7; i++ {
 		hits, e := c.query(world, r.Pose, remaining, filter)
 		if e != nil {
@@ -174,11 +176,40 @@ func (c Config) Move(world Queries, start p.Pose, translation p.Vec3, filter p.Q
 		fraction := min(1, distance/length)
 		r.Pose.Position = r.Pose.Position.Add(remaining.Mul(fraction))
 		remaining = remaining.Mul(1 - fraction)
-		dot := remaining.Dot(hit.Normal)
-		if dot < 0 {
-			remaining = remaining.Sub(hit.Normal.Mul(dot))
-		} else {
-			remaining = p.Vec3{}
+		normal := hit.Normal
+		if normal.Y > 0 && normal.Y < cosSlope {
+			// Horizontal intent must not turn a steep surface or stair edge into
+			// an upward ramp. Downward motion can still slide along that surface.
+			horizontalNormal := p.Vec3{X: normal.X, Z: normal.Z}.Unit()
+			horizontal := p.Vec3{X: remaining.X, Z: remaining.Z}
+			vertical := p.Vec3{Y: remaining.Y}
+			if dot := horizontal.Dot(horizontalNormal); dot < 0 {
+				horizontal = horizontal.Sub(horizontalNormal.Mul(dot))
+			}
+			if dot := vertical.Dot(normal); dot < 0 {
+				vertical = vertical.Sub(normal.Mul(dot))
+			}
+			remaining = horizontal.Add(vertical)
+			normal = horizontalNormal
+		}
+		planes = append(planes, normal)
+		for pass := 0; pass < len(planes)+1; pass++ {
+			changed := false
+			for _, plane := range planes {
+				if dot := remaining.Dot(plane); dot < -1e-7 {
+					remaining = remaining.Sub(plane.Mul(dot))
+					changed = true
+				}
+			}
+			if !changed {
+				break
+			}
+		}
+		for _, plane := range planes {
+			if remaining.Dot(plane) < -1e-6 {
+				remaining = p.Vec3{}
+				break
+			}
 		}
 	}
 	r.Support, r.Grounded, e = c.ground(world, r.Pose, filter)

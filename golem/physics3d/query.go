@@ -42,7 +42,10 @@ const (
 )
 
 type QueryFilter struct {
-	Mask             uint64
+	Mask uint64
+	// PhysicalFilter optionally also applies symmetric body-collision masks and
+	// signed group overrides. Mask remains an independent query category filter.
+	PhysicalFilter   *CollisionFilter
 	Sensors          SensorPolicy
 	RequireSolid     bool
 	IncludeNonQuery  bool // reserved for physical movement/support policy
@@ -50,6 +53,15 @@ type QueryFilter struct {
 	ExcludeColliders []ColliderHandle
 	ExcludeOwners    []int64
 }
+
+// CollisionAllowed applies symmetric masks and signed same-group overrides.
+func CollisionAllowed(a, b CollisionFilter) bool {
+	if a.Group != 0 && a.Group == b.Group {
+		return a.Group > 0
+	}
+	return a.Category&b.Mask != 0 && b.Category&a.Mask != 0
+}
+
 type Query struct {
 	Kind        QueryKind
 	Mode        QueryMode

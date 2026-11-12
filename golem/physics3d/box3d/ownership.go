@@ -4,6 +4,7 @@ import p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
 
 // SetOwner binds a previously unowned body to an entity. Collider owners that
 // were inherited from that body follow the binding; explicit other owners remain.
+// Metadata publishes immediately with a new revision and does not dirty geometry.
 func (w *World) SetOwner(h p.BodyHandle, owner int64) error {
 	if err := w.guard(); err != nil {
 		return err
@@ -29,7 +30,8 @@ func (w *World) SetOwner(h p.BodyHandle, owner int64) error {
 		}
 	}
 	v.committed.Owner = owner
-	w.changed()
+	w.mutation++
+	w.revision++
 	return nil
 }
 
