@@ -94,6 +94,7 @@ namespace GolemEngine.Unity.Editor
             }
 
             if (GolemNavigationDocument.IsOwned(fileText)) return true;
+            if (GolemPhysicsDocument.IsOwned(fileText)) return true;
 
             using (var reader = new System.IO.StringReader(fileText))
             {

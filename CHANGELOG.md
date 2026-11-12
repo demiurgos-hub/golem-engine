@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Unity Scribe exports versioned portable physics source from saved scenes, including resolved prefab colliders, body-local scaled geometry, terrain holes, materials, activation, owner metadata, character settings and supported joint declarations. Explicit export/validate actions preserve manifest ownership and rollback; a scene preview compares exported geometry with Unity reference queries. Unsupported authoring settings fail before writing. Backend equivalence and workload qualification remain separate gates.
+
 - Independent `golem/physics3d` contracts define float32 body and anchor poses, world-qualified geometry identities, explicit simulation frames, bounded query results, and contact cleanup/restore classifications. These opt-in foundations leave existing collision and footprint APIs unchanged; the full physics workstream is still undergoing implementation and qualification.
 - Regional surface safety lets distant agents continue through local world edits. Quarantined agents retain their destination and support; unchanged routes transfer to the latest snapshot without losing velocity or floor identity. `NavigationReady` reports usable pending regional worlds as ready and degraded; backends without regional support keep profile-wide pauses.
 - Retirement-aware backends spread snapshot transfers across a separate fair rebase budget. Safe old views keep their movement cadence; per-view safety protects their changed columns while allowing current views to resume independently. Readiness stays degraded during local retirement. Completed paths crossing quarantine retain their owned results and wait for safety changes instead of repeating searches.

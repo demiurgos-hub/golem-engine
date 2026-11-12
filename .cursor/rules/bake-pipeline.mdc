@@ -1,5 +1,5 @@
 ---
-description: bake pipeline — schema/code generation, explicit navigation geometry and prepared-source ownership, qualification tool separation, integration output selection, codec compatibility and consumer checks.
+description: bake pipeline — schema/code generation, portable navigation/physics source ownership, qualification tool separation, integration output selection, codec compatibility and consumer checks.
 globs:
   - schema/**/*.go
   - codegen/**/*.go
@@ -8,10 +8,13 @@ globs:
   - golem/nav/navmesh/cmd/golem-nav-bake/**/*.go
   - examples/navigation-stress/**/*.go
   - qualification/**/*
+  - golem-unity/Editor/Scribe/GolemPhysics*.cs
 alwaysApply: false
 ---
 
 # `bake` pipeline
+
+Portable physics source is a separate versioned JSON authoring contract, not entity/world YAML or native backend cooking. Unity captures resolved body-local geometry and metadata; the Go physics content layer validates/cooks it separately. Keep the Scribe exact ownership signature and manifest-last source transaction intact. Canonical small cross-language JSON fixtures are committed; generated Unity projects, observations and caches remain under `D:/Demiurgos/tests/physics-validation`.
 
 `golem-bake` remains the schema/code-generation CLI. Explicit server navigation geometry is processed by the separate navmesh adapter module's `navbuild` package and `golem-nav-bake` command, which delegate pure-Go baking to navmesh-go. Its bounded `{Generator?, Scene, Config}` JSON is not entity/world schema YAML and is not inferred from collision footprints. Do not add a native navigation build subprocess to codegen. Optional Scribe export is authoring-only; preserve its managed artifact planning and transaction ownership.
 
