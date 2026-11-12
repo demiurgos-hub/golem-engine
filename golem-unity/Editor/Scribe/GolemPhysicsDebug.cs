@@ -46,12 +46,13 @@ namespace GolemEngine.Unity.Editor
     [Serializable] internal sealed class GoDebugQuery { public string Label, Error; public GoDebugQueryInput Query; public GoDebugQueryResult Result; public GoDebugHit[] Hits; }
     [Serializable] internal sealed class GoDebugTarget { public GoDebugHandle Body; public GoDebugVector From, Target; public string Label; }
     [Serializable] internal sealed class GoDebugOmissions { public int Bodies, Colliders, Geometry, Vertices, Triangles, Records; internal bool Any => Bodies != 0 || Colliders != 0 || Geometry != 0 || Vertices != 0 || Triangles != 0 || Records != 0; }
-    [Serializable] internal sealed class GoDebugConfig { public GoDebugVector Gravity; public int Substeps, TickRate, Workers; public bool AllowSleep, Continuous; public float CCDContactTolerance, CCDMaxDelta; public int CCDVelocityIterations, CCDRelaxIterations, CCDMaxPathRefinements; }
+    [Serializable] internal sealed class GoDebugConfig { public GoDebugVector Gravity; public int Substeps, TickRate, Workers; public bool AllowSleep, Continuous; public int SolverVelocityIterations, SolverRelaxIterations; }
     [Serializable] internal sealed class GoPhysicsDebugCapture
     {
         public int Version; public string Backend, SourceSnapshot, Status, Fault;
         public GoDebugConfig Config;
         public ulong Revision, AcceptedFrame, Frame; public bool Incomplete, FrameAccepted;
+        public int CCDCandidatePairs, CCDPairTests, CCDPredictiveContacts;
         public GoDebugOmissions Omitted; public GoDebugBody[] Bodies; public GoDebugCollider[] Colliders;
         public GoDebugGeometry[] Geometry; public GoDebugPath[] Paths; public GoDebugContact[] Contacts;
         public GoDebugQuery[] Queries; public GoDebugTarget[] Targets;
@@ -60,8 +61,9 @@ namespace GolemEngine.Unity.Editor
     /// <summary>Reads bounded server diagnostic documents; never imports them as scene physics or recovery state.</summary>
     internal static class GolemPhysicsDebug
     {
+        internal const int Version = 2;
         internal const int MaxBytes = 32 * 1024 * 1024;
-        private static readonly HashSet<string> RootFields = new HashSet<string>(StringComparer.Ordinal) { "Version", "Config", "Backend", "SourceSnapshot", "Status", "Fault", "Revision", "AcceptedFrame", "Incomplete", "Omitted", "Bodies", "Colliders", "Geometry", "Frame", "FrameAccepted", "Paths", "Contacts", "Queries", "Targets" };
+        private static readonly HashSet<string> RootFields = new HashSet<string>(StringComparer.Ordinal) { "Version", "Config", "Backend", "SourceSnapshot", "Status", "Fault", "Revision", "AcceptedFrame", "Incomplete", "Omitted", "Bodies", "Colliders", "Geometry", "Frame", "FrameAccepted", "CCDCandidatePairs", "CCDPairTests", "CCDPredictiveContacts", "Paths", "Contacts", "Queries", "Targets" };
         internal static GoPhysicsDebugCapture ReadFile(string path)
         {
             using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
@@ -107,11 +109,15 @@ namespace GolemEngine.Unity.Editor
         }
         internal static void Validate(GoPhysicsDebugCapture c)
         {
-            if (c == null || c.Version != 1 || (c.Status != "accepted" && c.Status != "pending" && c.Status != "faulted" && c.Status != "unsynchronized")) throw Invalid("version/status");
+            if (c == null) throw Invalid("missing capture");
+            if (c.Version == 1) throw Invalid("capture version 1 uses retired solver settings; regenerate using version " + Version);
+            if (c.Version != Version || (c.Status != "accepted" && c.Status != "pending" && c.Status != "faulted" && c.Status != "unsynchronized")) throw Invalid("version/status");
             if (c.Config == null || c.Config.Substeps < 1 || c.Config.Substeps > 128 || c.Config.TickRate < 1 || c.Config.TickRate > 1000 || c.Config.Workers < 1 || c.Config.Workers > 64) throw Invalid("solver config");
-            Vector(c.Config.Gravity); Number(c.Config.CCDContactTolerance); Number(c.Config.CCDMaxDelta);
+            if (c.Config.SolverVelocityIterations < 1 || c.Config.SolverVelocityIterations > 16 || c.Config.SolverRelaxIterations < 1 || c.Config.SolverRelaxIterations > 16) throw Invalid("solver iteration counts");
+            Vector(c.Config.Gravity);
             if (c.Omitted == null || c.Omitted.Bodies < 0 || c.Omitted.Colliders < 0 || c.Omitted.Geometry < 0 || c.Omitted.Vertices < 0 || c.Omitted.Triangles < 0 || c.Omitted.Records < 0 || c.Incomplete != c.Omitted.Any) throw Invalid("omissions");
             if (c.FrameAccepted && c.Frame != c.AcceptedFrame) throw Invalid("accepted frame identity");
+            if (c.CCDCandidatePairs < 0 || c.CCDPairTests < 0 || c.CCDPredictiveContacts < 0) throw Invalid("native CCD work counts");
             c.Bodies = c.Bodies ?? Array.Empty<GoDebugBody>(); c.Colliders = c.Colliders ?? Array.Empty<GoDebugCollider>(); c.Geometry = c.Geometry ?? Array.Empty<GoDebugGeometry>();
             c.Paths = c.Paths ?? Array.Empty<GoDebugPath>(); c.Contacts = c.Contacts ?? Array.Empty<GoDebugContact>(); c.Queries = c.Queries ?? Array.Empty<GoDebugQuery>(); c.Targets = c.Targets ?? Array.Empty<GoDebugTarget>();
             if (c.Bodies.Length > 4096 || c.Colliders.Length > 8192 || c.Geometry.Length > 8192) throw Invalid("object limit");

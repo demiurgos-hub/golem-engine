@@ -5,6 +5,25 @@ import (
 	"testing"
 )
 
+func TestNativeSolverConfigDefaultsAndBounds(t *testing.T) {
+	c := DefaultConfig()
+	if err := c.Validate(); err != nil || c.Substeps != 4 || c.TickRate != 20 || c.SolverVelocityIterations != 1 || c.SolverRelaxIterations != 1 {
+		t.Fatalf("native defaults: %+v error=%v", c, err)
+	}
+	for _, invalid := range []int{0, 17} {
+		c = DefaultConfig()
+		c.SolverVelocityIterations = invalid
+		if c.Validate() == nil {
+			t.Fatalf("velocity pass count %d accepted", invalid)
+		}
+		c = DefaultConfig()
+		c.SolverRelaxIterations = invalid
+		if c.Validate() == nil {
+			t.Fatalf("relaxation pass count %d accepted", invalid)
+		}
+	}
+}
+
 func TestQueryValidationAndEnvelope(t *testing.T) {
 	q := Query{Kind: Ray, Pose: Identity()}
 	if q.Validate() != nil {

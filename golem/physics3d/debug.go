@@ -7,7 +7,8 @@ import (
 	"io"
 )
 
-const DebugVersion = 1
+// DebugVersion identifies captures containing fixed native solver settings.
+const DebugVersion = 2
 const MaxDebugBytes int64 = 32 << 20
 
 // DebugOptions bounds an explicit tick-owned capture. Zero limits are invalid.
@@ -45,21 +46,22 @@ type DebugWorld interface {
 // Geometry is exact included native collider geometry in body-origin local space.
 // Omitted leaves are absent, not replaced with bounding geometry.
 type DebugCapture struct {
-	Version                                int
-	Config                                 Config
-	Backend, SourceSnapshot, Status, Fault string
-	Revision, AcceptedFrame                uint64
-	Incomplete                             bool
-	Omitted                                DebugOmissions
-	Bodies                                 []DebugBody
-	Colliders                              []DebugCollider
-	Geometry                               []DebugGeometry
-	Frame                                  uint64
-	FrameAccepted                          bool
-	Paths                                  []BodyPath
-	Contacts                               []ContactEvent
-	Queries                                []DebugQuery
-	Targets                                []DebugTarget
+	Version                                                int
+	Config                                                 Config
+	Backend, SourceSnapshot, Status, Fault                 string
+	Revision, AcceptedFrame                                uint64
+	Incomplete                                             bool
+	Omitted                                                DebugOmissions
+	Bodies                                                 []DebugBody
+	Colliders                                              []DebugCollider
+	Geometry                                               []DebugGeometry
+	Frame                                                  uint64
+	FrameAccepted                                          bool
+	CCDCandidatePairs, CCDPairTests, CCDPredictiveContacts int
+	Paths                                                  []BodyPath
+	Contacts                                               []ContactEvent
+	Queries                                                []DebugQuery
+	Targets                                                []DebugTarget
 }
 type DebugOmissions struct{ Bodies, Colliders, Geometry, Vertices, Triangles, Records int }
 type DebugBody struct {
@@ -104,7 +106,8 @@ type DebugTarget struct {
 	Label        string
 }
 
-// CopyAnnotations copies bounded frame paths, contacts, queries and targets.
+// CopyAnnotations copies native CCD work counts and bounded frame paths, contacts,
+// queries and targets. Work counts include an unaccepted frame's attempted work.
 // FrameAccepted must only be true after the host accepts that exact result.
 func (c *DebugCapture) CopyAnnotations(o DebugOptions) error {
 	if err := o.Validate(); err != nil {
@@ -112,6 +115,7 @@ func (c *DebugCapture) CopyAnnotations(o DebugOptions) error {
 	}
 	c.Paths, c.Contacts, c.Queries, c.Targets = nil, nil, nil, nil
 	c.Frame, c.FrameAccepted, c.Omitted.Records = 0, false, 0
+	c.CCDCandidatePairs, c.CCDPairTests, c.CCDPredictiveContacts = 0, 0, 0
 	remaining := o.MaxRecords
 	vertices, triangles := o.MaxVertices, o.MaxTriangles
 	for _, g := range c.Geometry {
@@ -121,6 +125,7 @@ func (c *DebugCapture) CopyAnnotations(o DebugOptions) error {
 	take := func(n int) int { k := min(n, remaining); remaining -= k; c.Omitted.Records += n - k; return k }
 	if o.Frame != nil {
 		c.Frame, c.FrameAccepted = o.Frame.ID, o.FrameAccepted
+		c.CCDCandidatePairs, c.CCDPairTests, c.CCDPredictiveContacts = o.Frame.CCDCandidatePairs, o.Frame.CCDPairTests, o.Frame.CCDPredictiveContacts
 		for _, path := range o.Frame.Paths {
 			if remaining == 0 {
 				c.Omitted.Records += 1 + len(path.Positions)
@@ -172,17 +177,23 @@ func (c *DebugCapture) CopyAnnotations(o DebugOptions) error {
 
 // Validate rejects malformed geometry and documents beyond hard viewer limits.
 func (c DebugCapture) Validate() error {
+	if err := validateDebugVersion(c.Version); err != nil {
+		return err
+	}
 	bad := func() error { return fmt.Errorf("%w: physics debug capture", ErrInvalid) }
 	if err := c.Config.Validate(); err != nil {
 		return bad()
 	}
-	if c.Version != DebugVersion || len(c.Bodies) > 4096 || len(c.Colliders) > 8192 || len(c.Geometry) > 8192 || len(c.Fault) > 65536 || len(c.SourceSnapshot) > 4096 || len(c.Backend) > 4096 {
+	if len(c.Bodies) > 4096 || len(c.Colliders) > 8192 || len(c.Geometry) > 8192 || len(c.Fault) > 65536 || len(c.SourceSnapshot) > 4096 || len(c.Backend) > 4096 {
 		return bad()
 	}
 	if c.Status != "accepted" && c.Status != "pending" && c.Status != "faulted" && c.Status != "unsynchronized" {
 		return bad()
 	}
 	if c.FrameAccepted && c.Frame != c.AcceptedFrame {
+		return bad()
+	}
+	if c.CCDCandidatePairs < 0 || c.CCDPairTests < 0 || c.CCDPredictiveContacts < 0 {
 		return bad()
 	}
 	o := c.Omitted
@@ -319,7 +330,8 @@ func WriteDebug(w io.Writer, c DebugCapture) error {
 	return err
 }
 
-// ReadDebug bounds input bytes before parsing and rejects unknown/trailing JSON.
+// ReadDebug bounds input bytes before parsing and rejects unknown/trailing JSON
+// and obsolete captures containing the retired solver-refinement configuration.
 func ReadDebug(r io.Reader) (DebugCapture, error) {
 	var c DebugCapture
 	data, err := io.ReadAll(io.LimitReader(r, MaxDebugBytes+1))
@@ -328,6 +340,13 @@ func ReadDebug(r io.Reader) (DebugCapture, error) {
 	}
 	if int64(len(data)) > MaxDebugBytes {
 		return c, fmt.Errorf("%w: debug byte limit", ErrInvalid)
+	}
+	var header struct{ Version int }
+	if err := json.Unmarshal(data, &header); err != nil {
+		return c, err
+	}
+	if err := validateDebugVersion(header.Version); err != nil {
+		return c, err
 	}
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
@@ -339,4 +358,14 @@ func ReadDebug(r io.Reader) (DebugCapture, error) {
 		return c, ErrInvalid
 	}
 	return c, c.Validate()
+}
+
+func validateDebugVersion(version int) error {
+	if version == 1 {
+		return fmt.Errorf("%w: debug capture version 1 uses retired solver settings; regenerate using version %d", ErrUnsupported, DebugVersion)
+	}
+	if version != DebugVersion {
+		return fmt.Errorf("%w: debug capture version %d (required %d)", ErrUnsupported, version, DebugVersion)
+	}
+	return nil
 }

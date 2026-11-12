@@ -293,11 +293,23 @@ func EncodePhysicsCheckpoint(c PhysicsCheckpoint) ([]byte, error) {
 	return data, err
 }
 
-// DecodePhysicsCheckpoint rejects unknown fields, oversized input and trailing data.
+// DecodePhysicsCheckpoint rejects unknown fields, oversized input, trailing data
+// and obsolete embedded physics versions requiring explicit state migration.
 func DecodePhysicsCheckpoint(data []byte) (PhysicsCheckpoint, error) {
 	var c PhysicsCheckpoint
 	if len(data) > maxPhysicsCheckpointBytes {
 		return c, p.ErrInvalid
+	}
+	var header struct {
+		Physics struct {
+			Version uint32 `json:"version"`
+		}
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return c, err
+	}
+	if header.Physics.Version != p.CheckpointVersion {
+		return c, (p.Checkpoint{Version: header.Physics.Version}).Validate()
 	}
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()

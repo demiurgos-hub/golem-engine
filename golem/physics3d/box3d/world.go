@@ -82,6 +82,10 @@ func New(config p.Config) (*World, error) {
 	d.EnableContinuous = config.Continuous
 	d.WorkerCount = config.Workers
 	w := &World{id: nextWorld.Add(1), backend: b.CreateWorld(&d), config: config, shapes: map[p.ShapeHandle]*shape{}, bodies: map[p.BodyHandle]*body{}, colliders: map[p.ColliderHandle]*collider{}, shapeOwners: map[b.ShapeID]p.ColliderHandle{}, joints: map[p.JointHandle]*joint{}, revision: 1}
+	if err := w.backend.SetSpeculativeCCD(config.Continuous); err != nil {
+		w.backend.Destroy()
+		return nil, err
+	}
 	w.backend.SetConsistentParallelWarmStart(true)
 	w.initMaterials()
 	w.activeBodies = map[p.BodyHandle]struct{}{}

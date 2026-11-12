@@ -10,6 +10,10 @@ import (
 
 const MaxCheckpointBytes = 512 << 20
 
+// CheckpointVersion identifies fixed native stepping and explicit solver settings.
+// Version 1 used the retired, unreleased global motion-refinement configuration.
+const CheckpointVersion uint32 = 2
+
 // Checkpoint is an owned, portable accepted-world capture. References are stable
 // content IDs; native/generational handles, contact caches and solver scratch are
 // never persisted. Rebuilding a checkpoint does not promise bitwise continuation.
@@ -139,7 +143,10 @@ func (j CheckpointJoint) DecodeJoint(a, b BodyHandle) (JointDesc, error) {
 // Validate checks identity, resource bounds and references before restoration.
 // The selected backend must additionally qualify collider and joint semantics.
 func (c Checkpoint) Validate() error {
-	if c.Version != 1 || c.ID == "" || len(c.ID) > 4096 || c.SourceFingerprint == "" || len(c.SourceFingerprint) > 4096 || c.Revision == 0 {
+	if err := validateCheckpointVersion(c.Version); err != nil {
+		return err
+	}
+	if c.ID == "" || len(c.ID) > 4096 || c.SourceFingerprint == "" || len(c.SourceFingerprint) > 4096 || c.Revision == 0 {
 		return ErrInvalid
 	}
 	if len(c.Shapes) > 200000 || len(c.Bodies) > 200000 || len(c.Colliders) > 500000 || len(c.Joints) > 500000 {
@@ -211,11 +218,21 @@ func EncodeCheckpoint(c Checkpoint) ([]byte, error) {
 	return data, err
 }
 
-// DecodeCheckpoint rejects unknown fields, trailing data and oversized captures.
+// DecodeCheckpoint rejects unknown fields, trailing data, oversized captures and
+// obsolete checkpoint versions rather than ignoring their old solver settings.
 func DecodeCheckpoint(data []byte) (Checkpoint, error) {
 	var c Checkpoint
 	if len(data) > MaxCheckpointBytes {
 		return c, fmt.Errorf("%w: checkpoint byte limit", ErrInvalid)
+	}
+	var header struct {
+		Version uint32 `json:"version"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return c, err
+	}
+	if err := validateCheckpointVersion(header.Version); err != nil {
+		return c, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -229,4 +246,14 @@ func DecodeCheckpoint(data []byte) (Checkpoint, error) {
 		return Checkpoint{}, err
 	}
 	return c, nil
+}
+
+func validateCheckpointVersion(version uint32) error {
+	if version == 1 {
+		return fmt.Errorf("%w: checkpoint version 1 uses retired global motion-refinement settings; an explicit state migration is required", ErrUnsupported)
+	}
+	if version != CheckpointVersion {
+		return fmt.Errorf("%w: checkpoint version %d (required %d)", ErrUnsupported, version, CheckpointVersion)
+	}
+	return nil
 }

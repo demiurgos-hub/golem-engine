@@ -55,8 +55,10 @@
       "unityCapture": "D:/Demiurgos/tests/physics-validation/unity/runs/fortress-reference-20261112-03/reference",
       "goComparison": "D:/Demiurgos/tests/physics-validation/unity/runs/fortress-reference-20261112-03/go-reference-report.json",
       "failureInputs": "D:/Demiurgos/tests/physics-validation/unity/runs/fortress-reference-20261112-03/failure-inputs.json",
-      "scope": "Explicitly filtered server-only fixture: 17 copied assets, two user-authorized VFX child exclusions keyed by hashes/GUIDs/fileIDs, nine prefab reference checks, original physics/layer settings, untouched variant removals and retained torch BoxCollider. Unity exports eight static colliders (one box, six convex, one concave mesh), 3147 triangles and 48 native queries. Go Load succeeds; 43/48 strict comparisons pass. Five point/normal/initial-overlap differences remain unresolved. This is neither an unchanged visual prefab nor full catalog/world assembly qualification.",
-      "status": "captured-query-mismatches"
+      "independentAnalyticReference": "D:/Demiurgos/tests/physics-validation/motion/fortress-analytic-report.json",
+      "independentAnalyticInputs": "D:/Demiurgos/tests/physics-validation/motion/fortress-analytic-fixtures.json",
+      "scope": "Explicitly filtered server-only fixture: 17 copied assets, two user-authorized VFX child exclusions keyed by hashes/GUIDs/fileIDs, nine prefab reference checks, original physics/layer settings, untouched variant removals and retained torch BoxCollider. Unity exports eight static colliders (one box, six convex, one concave mesh), 3147 triangles and 48 native queries. Go Load succeeds; 43/48 strict comparisons pass. Independent authored-geometry analysis classifies two sphere-witness differences, two valid adjacent-face ray normals and one initial mesh backface-policy difference. Golem sphere witnesses satisfy unchanged analytic distance/point targets; the strict Unity comparison remains 43/48. This is neither an unchanged visual prefab nor full catalog/world assembly qualification.",
+      "status": "captured-query-differences-classified"
     },
     "resolved-content": {
       "references": ["AssetsByObject/Terrains/Prefabs/Server/Terrain 0,0 Server.prefab", "AssetsByObject/Terrains/Prefabs/Server/Terrain 1,0 Server.prefab"],
@@ -65,7 +67,7 @@
       "goComparison": "D:/Demiurgos/tests/physics-validation/motion/terrain-sphere-final-report.json",
       "independentAnalyticReference": "D:/Demiurgos/tests/physics-validation/motion/terrain-analytic-report.json",
       "scope": "Two actual 513x513 HeightOnly tiles, 1048576 triangles, zero authored holes. All 42 rays pass; final strict Unity comparison is 81/84 with sphere casts converging. Three offset-2304 witness disagreements remain recorded separately from passing unchanged independent analytic distance/point targets. Repeated 768/2304 metre offsets test coordinates, not additional resident area. Historical earlier failures are preserved.",
-      "remaining": ["Five query differences in the explicitly filtered Wall_LordRoom_Stair_R_Server prefab fixture", "WorldStreamer server-prefab/catalog choices, object-state variants and database-driven full world assembly"],
+      "remaining": ["WorldStreamer server-prefab/catalog choices, object-state variants and database-driven full world assembly"],
       "excludedFortressDependency": {
         "reference": "AssetsByObject/Fortress/Fortress Parts/Wall_LordRoom_Stair_R.prefab:1019",
         "sourceGUID": "d792e15c3c2895d4daa70bfc04ab5509",

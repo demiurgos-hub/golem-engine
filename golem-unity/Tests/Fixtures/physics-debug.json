@@ -1,5 +1,5 @@
 {
-  "Version": 1,
+  "Version": 2,
   "Config": {
     "Gravity": {
       "X": 0,
@@ -11,11 +11,8 @@
     "AllowSleep": true,
     "Continuous": false,
     "Workers": 1,
-    "CCDContactTolerance": 0.001,
-    "CCDVelocityIterations": 4,
-    "CCDRelaxIterations": 2,
-    "CCDMaxDelta": 0.004166667,
-    "CCDMaxPathRefinements": 8192
+    "SolverVelocityIterations": 1,
+    "SolverRelaxIterations": 1
   },
   "Backend": "box3d-go",
   "SourceSnapshot": "",
@@ -598,6 +595,9 @@
   ],
   "Frame": 1,
   "FrameAccepted": true,
+  "CCDCandidatePairs": 0,
+  "CCDPairTests": 0,
+  "CCDPredictiveContacts": 0,
   "Paths": [
     {
       "Body": {

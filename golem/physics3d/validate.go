@@ -119,13 +119,10 @@ func (d BodyDesc) Validate() error {
 
 // Validate checks finite world settings and bounded scheduling configuration.
 func (c Config) Validate() error {
-	if !Finite(c.CCDMaxDelta) || c.CCDMaxDelta <= 0 || c.CCDMaxDelta > .05 || c.CCDMaxPathRefinements < 1 || c.CCDMaxPathRefinements > 131072 {
+	if c.SolverVelocityIterations < 1 || c.SolverVelocityIterations > 16 || c.SolverRelaxIterations < 1 || c.SolverRelaxIterations > 16 {
 		return ErrInvalid
 	}
-	if c.CCDVelocityIterations < 1 || c.CCDVelocityIterations > 16 || c.CCDRelaxIterations < 1 || c.CCDRelaxIterations > 16 {
-		return ErrInvalid
-	}
-	if !c.Gravity.Valid() || c.Substeps < 1 || c.Substeps > 128 || c.TickRate < 1 || c.TickRate > 1000 || c.Workers < 1 || c.Workers > 64 || !Finite(c.CCDContactTolerance) || c.CCDContactTolerance <= 0 || c.CCDContactTolerance >= .005 {
+	if !c.Gravity.Valid() || c.Substeps < 1 || c.Substeps > 128 || c.TickRate < 1 || c.TickRate > 1000 || c.Workers < 1 || c.Workers > 64 {
 		return ErrInvalid
 	}
 	return nil

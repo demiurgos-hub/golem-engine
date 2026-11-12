@@ -2,7 +2,9 @@ package physics3d
 
 import (
 	"bytes"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -34,7 +36,7 @@ func TestCheckpointJointRoundTripContainsNoHandles(t *testing.T) {
 func TestCheckpointRejectsForeignStableReferencesAndUnknownFields(t *testing.T) {
 	d := DefaultBody(FreeDynamic)
 	d.ID = "body"
-	c := Checkpoint{Version: 1, ID: "checkpoint", SourceFingerprint: "source", Revision: 1, Config: DefaultConfig(),
+	c := Checkpoint{Version: CheckpointVersion, ID: "checkpoint", SourceFingerprint: "source", Revision: 1, Config: DefaultConfig(),
 		Shapes: []ShapeDesc{{ID: "shape", Kind: Sphere, Radius: 1}}, Bodies: []CheckpointBody{{Description: d}},
 		Colliders: []CheckpointCollider{{ID: "collider", Body: "body", Shape: "shape", LocalPose: Identity(), Roles: Roles{Solid: true}}}}
 	data, err := EncodeCheckpoint(c)
@@ -51,5 +53,25 @@ func TestCheckpointRejectsForeignStableReferencesAndUnknownFields(t *testing.T) 
 	c.Colliders[0].Body = "other-world-body"
 	if err := c.Validate(); err == nil {
 		t.Fatal("dangling stable reference accepted")
+	}
+}
+
+func TestCheckpointRejectsObsoleteRefinementSettingsExplicitly(t *testing.T) {
+	legacy := []byte(`{"Config":{"CCDMaxDelta":0.004166667,"CCDContactTolerance":0.001,"CCDMaxPathRefinements":8192},"version":1}`)
+	if _, err := DecodeCheckpoint(legacy); !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), "retired global motion-refinement") {
+		t.Fatalf("obsolete checkpoint was not explicitly rejected: %v", err)
+	}
+	if err := (Checkpoint{Version: 1}).Validate(); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("typed obsolete checkpoint accepted: %v", err)
+	}
+	c := Checkpoint{Version: CheckpointVersion, ID: "native", SourceFingerprint: "source", Revision: 1, Config: DefaultConfig()}
+	c.Config.SolverVelocityIterations, c.Config.SolverRelaxIterations = 3, 2
+	data, err := EncodeCheckpoint(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeCheckpoint(data)
+	if err != nil || got.Config != c.Config {
+		t.Fatalf("native solver settings did not round trip: config=%+v error=%v", got.Config, err)
 	}
 }

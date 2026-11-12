@@ -603,7 +603,12 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 					}
 				}
 				var contactRecords []motionContactRecord
+				stepped := false
 				observe := func(sample b.MotionStepSample) error {
+					stepped = true
+					result.CCDCandidatePairs += sample.SpeculativeCCD.Candidates
+					result.CCDPairTests += sample.SpeculativeCCD.PairTests
+					result.CCDPredictiveContacts += sample.SpeculativeCCD.Contacts
 					fraction := (at + phase + sample.EndFraction*interval) / f.Delta
 					for i, key := range keys {
 						state := w.bodyState(key, w.bodies[key])
@@ -640,28 +645,14 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 					return nil
 				}
 				result.Intervals++
-				if w.config.Continuous {
-					options := b.DefaultMotionStepOptions()
-					options.Tolerance = w.config.CCDContactTolerance
-					options.VelocityIterations = w.config.CCDVelocityIterations
-					options.RelaxIterations = w.config.CCDRelaxIterations
-					options.MaxDelta = w.config.CCDMaxDelta
-					options.MaxPathRefinements = w.config.CCDMaxPathRefinements
-					work, err := w.backend.StepMotion(interval, options, observe)
-					result.Microsteps += work.Microsteps
-					result.MotionPairTests += work.PairTests
-					result.MotionPathRefinements += work.PathRefinements
-					result.Elapsed += work.Elapsed
-					if err != nil {
-						return fmt.Errorf("physics3d: relative motion: %w", err)
-					}
-				} else {
-					w.backend.Step(interval, 1)
+				options := b.ObservedStepOptions{VelocityIterations: w.config.SolverVelocityIterations, RelaxIterations: w.config.SolverRelaxIterations}
+				err := w.backend.StepObserved(interval, options, observe)
+				if stepped {
 					result.Microsteps++
 					result.Elapsed += interval
-					if err := observe(w.captureMotionSample(interval)); err != nil {
-						return err
-					}
+				}
+				if err != nil {
+					return fmt.Errorf("physics3d: native step: %w", err)
 				}
 				for _, record := range contactRecords {
 					events, err := contactState.replay(w, record, f.ID, result.Revision)

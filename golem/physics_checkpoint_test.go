@@ -14,6 +14,13 @@ import (
 	"github.com/demiurgos-hub/golem-engine/golem/snapshot"
 )
 
+func TestPhysicsCheckpointRejectsRetiredSolverSchema(t *testing.T) {
+	legacy := []byte(`{"Physics":{"Config":{"CCDMaxDelta":0.004166667},"version":1},"Version":1}`)
+	if _, err := DecodePhysicsCheckpoint(legacy); !errors.Is(err, p.ErrUnsupported) || !strings.Contains(err.Error(), "retired global motion-refinement") {
+		t.Fatalf("obsolete solver settings were not explicitly rejected: %v", err)
+	}
+}
+
 type physicsCheckpointTestWorld struct {
 	*physicsTestWorld
 	prepareErr, commitErr, trajectoryErr error
@@ -21,7 +28,7 @@ type physicsCheckpointTestWorld struct {
 }
 
 func (w *physicsCheckpointTestWorld) CaptureCheckpoint(id, fingerprint string) (p.Checkpoint, error) {
-	c := p.Checkpoint{Version: 1, ID: id, SourceFingerprint: fingerprint, Revision: 1, LastFrame: w.pending.ID, Config: p.DefaultConfig()}
+	c := p.Checkpoint{Version: p.CheckpointVersion, ID: id, SourceFingerprint: fingerprint, Revision: 1, LastFrame: w.pending.ID, Config: p.DefaultConfig()}
 	for _, state := range w.bodies {
 		d := p.DefaultBody(state.Mode)
 		d.ID, d.Owner, d.Pose = state.ID, state.Owner, state.Pose

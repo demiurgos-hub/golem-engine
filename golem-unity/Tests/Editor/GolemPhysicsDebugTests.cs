@@ -13,7 +13,8 @@ namespace GolemEngine.Unity.Editor.Tests
         public void ActualGoCapturePreservesGeometryIdentitiesAndAcceptedObservations()
         {
             var capture = GolemPhysicsDebug.ReadFile(FixturePath());
-            Assert.That(capture.Version, Is.EqualTo(1)); Assert.That(capture.Status, Is.EqualTo("accepted"));
+            Assert.That(capture.Version, Is.EqualTo(GolemPhysicsDebug.Version)); Assert.That(capture.Status, Is.EqualTo("accepted"));
+            Assert.That(capture.Config.SolverVelocityIterations, Is.EqualTo(1)); Assert.That(capture.Config.SolverRelaxIterations, Is.EqualTo(1));
             Assert.That(capture.AcceptedFrame, Is.EqualTo(1)); Assert.That(capture.FrameAccepted, Is.True);
             Assert.That(capture.Bodies.Length, Is.EqualTo(3)); Assert.That(capture.Geometry.Length, Is.EqualTo(4));
             Assert.That(capture.Bodies.All(b => b.Uncommitted == null), Is.True);
@@ -35,7 +36,7 @@ namespace GolemEngine.Unity.Editor.Tests
         public void MalformedOversizedAndMislabeledDocumentsAreRejected()
         {
             var json = File.ReadAllText(FixturePath());
-            foreach (var invalid in new[] { "{}", json.Replace("\"Version\": 1", "\"Version\": 2"), json + " {}", "{\"Unknown\":1," + json.Substring(1), "{\"Version\":1," + json.Substring(1), new string(' ', GolemPhysicsDebug.MaxBytes + 1) })
+            foreach (var invalid in new[] { "{}", json.Replace("\"Version\": 2", "\"Version\": 3"), json + " {}", "{\"Unknown\":1," + json.Substring(1), "{\"Version\":2," + json.Substring(1), new string(' ', GolemPhysicsDebug.MaxBytes + 1) })
                 Assert.Throws<InvalidDataException>(() => GolemPhysicsDebug.Read(invalid));
             var capture = GolemPhysicsDebug.Read(json);
             capture.Geometry.First(g => g.Indices.Length != 0).Indices[0] = uint.MaxValue;
@@ -44,6 +45,32 @@ namespace GolemEngine.Unity.Editor.Tests
             Assert.Throws<InvalidDataException>(() => GolemPhysicsDebug.Validate(capture));
             capture.Status = "faulted"; capture.FrameAccepted = false; GolemPhysicsDebug.Validate(capture);
             capture.Bodies[0].Uncommitted.Pose.Position.X = float.NaN;
+            Assert.Throws<InvalidDataException>(() => GolemPhysicsDebug.Validate(capture));
+        }
+
+        [Test]
+        public void RetiredSolverCapturesAndInvalidNativeIterationCountsAreRejected()
+        {
+            var json = File.ReadAllText(FixturePath());
+            var error = Assert.Throws<InvalidDataException>(() => GolemPhysicsDebug.Read(json.Replace("\"Version\": 2", "\"Version\": 1")));
+            Assert.That(error.Message, Does.Contain("retired solver settings"));
+            foreach (var count in new[] { 0, 17 })
+            {
+                var capture = GolemPhysicsDebug.Read(json); capture.Config.SolverVelocityIterations = count;
+                Assert.Throws<InvalidDataException>(() => GolemPhysicsDebug.Validate(capture));
+                capture = GolemPhysicsDebug.Read(json); capture.Config.SolverRelaxIterations = count;
+                Assert.Throws<InvalidDataException>(() => GolemPhysicsDebug.Validate(capture));
+            }
+        }
+
+        [Test]
+        public void NativeCCDWorkIsReadWithoutBecomingGameplayContactData()
+        {
+            var json = File.ReadAllText(FixturePath()).Replace("\"CCDCandidatePairs\": 0", "\"CCDCandidatePairs\": 12").Replace("\"CCDPairTests\": 0", "\"CCDPairTests\": 9").Replace("\"CCDPredictiveContacts\": 0", "\"CCDPredictiveContacts\": 2");
+            var capture = GolemPhysicsDebug.Read(json);
+            Assert.That(capture.CCDCandidatePairs, Is.EqualTo(12)); Assert.That(capture.CCDPairTests, Is.EqualTo(9)); Assert.That(capture.CCDPredictiveContacts, Is.EqualTo(2));
+            Assert.That(capture.Contacts.Length, Is.EqualTo(4));
+            capture.CCDPairTests = -1;
             Assert.Throws<InvalidDataException>(() => GolemPhysicsDebug.Validate(capture));
         }
 

@@ -120,19 +120,3 @@ func (s *motionContactState) observe(w *World, sample b.MotionStepSample, frame,
 	}
 	return events
 }
-
-func (w *World) captureMotionSample(delta float32) b.MotionStepSample {
-	s := b.MotionStepSample{Delta: delta, EndFraction: 1, SensorEvents: w.backend.GetSensorEvents()}
-	seen := map[b.ContactID]bool{}
-	for key := range w.activeBodies {
-		id := w.bodies[key].id
-		contacts := make([]b.ContactData, id.GetContactCapacity())
-		for _, c := range contacts[:id.GetContactData(contacts)] {
-			if !seen[c.ContactId] {
-				seen[c.ContactId] = true
-				s.Contacts = append(s.Contacts, c)
-			}
-		}
-	}
-	return s
-}

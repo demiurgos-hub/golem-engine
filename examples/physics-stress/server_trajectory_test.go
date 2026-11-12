@@ -111,6 +111,7 @@ func TestServerScriptedTrajectoryCancellationKeepsTransferredMomentum(t *testing
 	var pushed p.BodyHandle
 	var token golem.PhysicsTrajectoryToken
 	var before, after p.BodyState
+	var cancelledAt p.Vec3
 	runControllerServer(t, p.ScriptedAction, p.Vec3{Y: .901}, 3, func(w *box3d.World) {
 		world = w
 		controllerBody(t, w, p.Static, p.Vec3{Y: -.5}, p.ShapeDesc{Kind: p.Box, HalfExtents: p.Vec3{X: 10, Y: .5, Z: 10}}, false)
@@ -126,9 +127,19 @@ func TestServerScriptedTrajectoryCancellationKeepsTransferredMomentum(t *testing
 			}
 		}
 		if tick == 2 {
+			actor, err := s.PhysicsBody(1)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			cancelledAt = actor.Anchor.Position
 			before, _ = world.Body(pushed)
 			if err := s.CancelPhysicsTrajectory(token); err != nil {
 				t.Error(err)
+			}
+			actorAfter, err := s.PhysicsBody(1)
+			if err != nil || actorAfter.Pose != actor.Pose {
+				t.Errorf("cancellation changed the actor's accepted pose: before=%+v after=%+v error=%v", actor, actorAfter, err)
 			}
 			after, _ = world.Body(pushed)
 			if before.Pose != after.Pose || before.LinearVelocity != after.LinearVelocity {
@@ -136,8 +147,8 @@ func TestServerScriptedTrajectoryCancellationKeepsTransferredMomentum(t *testing
 			}
 		}
 	}, func(state p.BodyState, r p.FrameResult) {
-		if r.ID >= 2 && (state.Anchor.Position.X < .95 || state.Anchor.Position.X > 1.05) {
-			t.Errorf("cancelled scripted actor drifted or rewound: %+v", state)
+		if r.ID >= 2 && state.Anchor.Position.Sub(cancelledAt).Length() > 1e-5 {
+			t.Errorf("cancelled scripted actor moved from %v to %+v", cancelledAt, state)
 		}
 		if r.ID == 3 {
 			after, _ = world.Body(pushed)

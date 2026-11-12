@@ -80,8 +80,12 @@ type BodyDesc struct {
 	Anchor                                            Pose // body-local transform to gameplay/navigation anchor, not centre of mass
 	LinearVelocity, AngularVelocity                   Vec3
 	Mass, GravityScale, LinearDamping, AngularDamping float32
-	Enabled, Awake, AllowSleep, Continuous            bool
-	Locks                                             MotionLocks
+	Enabled, Awake, AllowSleep                        bool
+	// Continuous selects the backend's per-body bullet policy. In Box3D it adds
+	// built-in sweeps against non-bullet dynamic/kinematic targets; it does not
+	// toggle world CCD or replace the targeted moving-pair coverage.
+	Continuous bool
+	Locks      MotionLocks
 	// Manual mass properties are body-local. InertiaTensor contains principal
 	// moments about CenterOfMass, rotated into the body frame by InertiaRotation.
 	ManualCenterOfMass, ManualInertia bool
@@ -112,26 +116,23 @@ type BodyState struct {
 	Enabled, Awake                                bool
 }
 type Config struct {
-	Gravity                Vec3
-	Substeps               int
-	TickRate               int
-	AllowSleep, Continuous bool
-	Workers                uint32
-	// CCDContactTolerance bounds internal solver motion admission, independently
-	// of geometric queries and placement policy.
-	CCDContactTolerance float32
-	// Solver iterations refine constraints without advancing physical time.
-	CCDVelocityIterations, CCDRelaxIterations int
-	// CCDMaxDelta bounds the internal solver interval. Refinement limits fail
-	// the complete frame; they never omit unresolved motion from acceptance.
-	CCDMaxDelta           float32
-	CCDMaxPathRefinements int
+	Gravity    Vec3
+	Substeps   int
+	TickRate   int
+	AllowSleep bool
+	// Continuous enables world CCD. The Box3D adapter combines native static sweeps
+	// with targeted predictive contacts for fast moving pairs, and admits bounded
+	// pose trajectories/continuous moving-mesh and sensor handling only in this mode.
+	Continuous bool
+	Workers    uint32
+	// Solver iterations refine native constraints without advancing physical time.
+	SolverVelocityIterations, SolverRelaxIterations int
 }
 
-// DefaultConfig returns the 20 Hz / four configured substep defaults, with
-// additional bounded internal intervals for continuous collision response.
+// DefaultConfig returns 20 Hz with four native solver steps and native constraint
+// iteration counts. Retained gameplay trajectory boundaries may add intervals.
 func DefaultConfig() Config {
-	return Config{Gravity: Vec3{Y: -9.81}, Substeps: 4, TickRate: 20, AllowSleep: true, Continuous: true, Workers: 1, CCDContactTolerance: .001, CCDVelocityIterations: 4, CCDRelaxIterations: 2, CCDMaxDelta: 1.0 / 240, CCDMaxPathRefinements: 8192}
+	return Config{Gravity: Vec3{Y: -9.81}, Substeps: 4, TickRate: 20, AllowSleep: true, Continuous: true, Workers: 1, SolverVelocityIterations: 1, SolverRelaxIterations: 1}
 }
 
 // DefaultBody returns a live body description with explicit identity transforms.
@@ -257,12 +258,18 @@ type FrameResult struct {
 	Bodies       []BodyState
 	Events       []ContactEvent
 	Substeps     int
-	// Microsteps and MotionPairTests report actual internal collision work.
+	// Microsteps counts actual native solver calls. The retained global-guard
+	// counters remain zero with native stepping.
 	Microsteps, MotionPairTests, MotionPathRefinements int
-	Intervals                                          int // shared subdivisions; their durations still sum to Elapsed
-	Elapsed                                            float32
-	Paths                                              []BodyPath
-	RejectedMotions                                    []MotionRejection
+	// Targeted native CCD counts sum each attempted step, including steps later
+	// rejected by safety validation: unique overlapping swept moving-pair candidates,
+	// native TOI calls after policy filters, and predictive solver manifolds
+	// (not gameplay events). Built-in static sweep work is separate.
+	CCDCandidatePairs, CCDPairTests, CCDPredictiveContacts int
+	Intervals                                              int // shared subdivisions; their durations still sum to Elapsed
+	Elapsed                                                float32
+	Paths                                                  []BodyPath
+	RejectedMotions                                        []MotionRejection
 }
 
 // MotionRejection records an intent denied before the interacting frame solved.

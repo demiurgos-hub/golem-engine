@@ -16,7 +16,7 @@ const CookVersion = "golem-box3d-cook-v1"
 
 // RequiredFork identifies the minimum query, joint and motion patch set.
 // UpstreamCommit identifies the original library baseline separately.
-const RequiredFork = "e5b36b9a6890c873866218d821b2b00a8f29b9bc"
+const RequiredFork = "0a964461990d7fd9f5e5cf9b904daa502559f430"
 
 // CookSettings bounds source expansion and backend image retention. Edge identity
 // must be enabled so coplanar mesh seams are not treated as physical walls.

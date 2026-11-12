@@ -640,7 +640,9 @@ func TestPhysicsFrameObserverReportsAcceptedAndRejectedAttempts(t *testing.T) {
 	for _, rejected := range []bool{false, true} {
 		t.Run(map[bool]string{false: "accepted", true: "rejected"}[rejected], func(t *testing.T) {
 			s := NewServer(ServerConfig{})
-			w := &physicsTestWorld{}
+			w := &physicsTestWorld{simulate: func(_ p.Frame, r *p.FrameResult) {
+				r.CCDCandidatePairs, r.CCDPairTests, r.CCDPredictiveContacts = 7, 4, 2
+			}}
 			if rejected {
 				w.acceptErr = errors.New("test rejection")
 			}
@@ -659,6 +661,9 @@ func TestPhysicsFrameObserverReportsAcceptedAndRejectedAttempts(t *testing.T) {
 			m := observations[0]
 			if m.Frame != 1 || m.RequestedDelta != .05 || m.Accepted == rejected || (m.Err != nil) != rejected || m.Duration < m.Solve {
 				t.Fatalf("metrics=%+v", m)
+			}
+			if m.CCDCandidatePairs != 7 || m.CCDPairTests != 4 || m.CCDPredictiveContacts != 2 {
+				t.Fatalf("attempted native work was not reported: %+v", m)
 			}
 			if !rejected && (m.Elapsed != .05 || m.Substeps != 4) {
 				t.Fatal("accepted simulated time absent")

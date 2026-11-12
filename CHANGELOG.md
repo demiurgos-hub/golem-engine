@@ -26,7 +26,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 - Unity physics export now rejects enabled terrain-generated tree collision instead of silently omitting it from the heightfield source. Prefab variant coverage verifies removed collider components and child objects alongside independent scene-instance identities.
 
-- Continuous physics exposes bounded internal cadence and constraint-iteration settings, retaining all elapsed time and reporting path refinements. Defaults improve dense rotating-body contacts and sleeping stacks while keeping contact tuning unchanged; contact forces count each final relaxed impulse once. Fresh geometric guards retain explicit whole-frame failure on unresolved or excessive penetration. Workload capacity remains unqualified.
+- Physics frame observations, stress reports and debug captures expose targeted native CCD candidate pairs, TOI tests and predictive solver manifolds, including work performed before a failed frame. These counts remain separate from gameplay contact events and the retired global-refinement counters. Workload capacity remains unqualified.
 
 - Closest-point and penetration results expose available backend-local feature details alongside collider/child/triangle identity. Closest points inside solid geometry remain at the supplied point and are classified as penetrating; initial-overlap queries retain the deepest constraint without allocating a complete triangle contact list.
 
@@ -40,7 +40,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 - Physical geometry can activate under quarantine before its asynchronous navigation rebuild. Failed navigation retains the new physical state and supports retries without recreating bodies. Pending-edit checkpoints preserve accepted and desired worlds separately and require matching private physics/navigation reconstruction before recovery opens readiness.
 
-- Continuous physics frames now admit relative translations and rotations through bounded solver microsteps, retaining intermediate body poses and contact/sensor transitions. Kinematic triangle meshes can transfer solver momentum to passive bodies; unsupported dynamic concave geometry, unresolved paths and crush bounds fail explicitly. Persistent-collider motion queries preserve exact geometry identity and caller-buffer completeness. Capacity, transport policy and platform qualification remain separate gates.
+- Continuous physics combines built-in static sweeps with targeted native predictive contacts for fast moving pairs, including translating/rotating kinematic meshes. Observed native steps retain body poses and contact/sensor transitions. Persistent-collider motion queries preserve exact geometry identity and caller-buffer completeness; dynamic concave bodies remain unsupported. Predictive contacts do not certify arbitrary solver-induced acceleration. Capacity, transport policy and platform qualification remain separate gates.
 
 - Capsule movement now checks stairs with headroom, walkable and steep slopes, corners, narrow openings, ledges, ceilings and support loss. Physical placement/movement queries can apply symmetric collision masks and signed group overrides independently of gameplay query masks.
 
@@ -89,7 +89,11 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Changed
 
-- Continuous physics reuses private traversal and contact scratch while preserving every solver step, manifold impulse, sensor transition and independently owned event record. Focused allocation checks cover these paths; full workload capacity still requires qualification.
+- The unreleased Box3D adapter now uses fixed native stepping: four steps per 20 Hz frame by default, with `SolverVelocityIterations` and `SolverRelaxIterations` both defaulting to 1. Retained navigation/controller/support boundaries share the same elapsed time. The experimental global adaptive-refinement settings and penetration ceiling are removed; captured navigation safety still rejects an unsafe interacting frame as a whole, and query/placement precision is unchanged. World `Config.Continuous` controls CCD; per-body `Continuous` selects the native bullet policy separately.
+
+- Breaking change to unreleased physics captures: portable physics checkpoints and Go/Unity debug captures now use version 2 with native solver settings. Version-1 physics checkpoints require explicit state migration; old debug captures must be regenerated. The paired root checkpoint envelope, entity snapshots and portable Scribe source keep their existing versions. Readers reject obsolete physical payloads explicitly instead of ignoring retired configuration fields.
+
+- Motion queries reuse private traversal scratch while preserving geometry coverage and independently owned event records. Focused allocation checks cover query and contact capture paths; full workload capacity still requires qualification.
 
 - Navigation qualification's `Suite` and `Full` launchers now run the three mixed scene families at 1,000 agents only; `Full` retains the two-hour 1,000-agent soak. Existing diagnostic agent-count controls remain available.
 
@@ -97,7 +101,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 - Relative-motion queries and continuous contact intervals resolve exact rotational endpoint tangencies without loosening geometric tolerance. Bounded interval certificates preserve separation and reentry when conservative advancement stalls.
 
-- Continuous contact recovery no longer shrinks solver time toward zero near its penetration bound. An exact falling-body grid regression covers the previous multi-second tick; predicted motion remains bounded and actual path/penetration checks remain unchanged.
+- Physics advances the configured native intervals without the former global refinement stalls. Native TOI/contact response regressions cover fast crossings and thin-wall impacts while retaining momentum transfer, bounded drives and the captured navigation safety checks. Focused correctness results do not establish full workload or platform qualification.
 
 - Geometric sphere/capsule queries preserve exact touching on flat triangle faces, avoiding spurious rejection by zero-penetration spawn admission. Touching pair results retain their feature identity and witnesses. The correction keeps float32 geometry and does not relax penetration thresholds.
 

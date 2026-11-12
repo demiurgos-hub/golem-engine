@@ -267,7 +267,7 @@ func (w *World) clipKinematic(h p.BodyHandle, velocity p.Vec3, dt float32) (p.Ve
 		}
 		s := w.shapes[c.desc.Shape].desc
 		if containsMesh(s) {
-			// Kinematic triangle response is admitted by StepMotion. Passenger
+			// Kinematic triangle response uses native continuous contact solving. Passenger
 			// and ceiling transport policy is handled by the host before solving.
 			continue
 		}

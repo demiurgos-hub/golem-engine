@@ -8,7 +8,7 @@ import (
 	b "github.com/gataengine/box3d-go"
 )
 
-func TestMotionFallingJointedGridMakesBoundedProgress(t *testing.T) {
+func TestNativeStepFallingJointedGridMakesBoundedProgress(t *testing.T) {
 	config := p.DefaultConfig()
 	config.Workers = 8
 	w, err := New(config)
@@ -87,10 +87,8 @@ func TestMotionFallingJointedGridMakesBoundedProgress(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	options := b.DefaultMotionStepOptions()
-	options.MaxMicrosteps = 100
+	options := b.DefaultObservedStepOptions()
 	for frame := 1; frame <= 40; frame++ {
-		steps := 0
 		for sub := 0; sub < 4; sub++ {
 			for _, handle := range characters {
 				body := w.bodies[handle].id
@@ -101,14 +99,9 @@ func TestMotionFallingJointedGridMakesBoundedProgress(t *testing.T) {
 			if sub == 3 {
 				end = .05
 			}
-			result, err := w.backend.StepMotion(end-begin, options, nil)
-			if err != nil {
-				t.Fatalf("frame%d sub%d work=%+v: %v", frame, sub, result, err)
+			if err := w.backend.StepObserved(end-begin, options, nil); err != nil {
+				t.Fatalf("frame%d sub%d: %v", frame, sub, err)
 			}
-			steps += result.Microsteps
-		}
-		if steps > 30 {
-			t.Logf("frame%d microsteps%d", frame, steps)
 		}
 	}
 }

@@ -17,7 +17,7 @@ func (w *World) CaptureCheckpoint(id, fingerprint string) (p.Checkpoint, error) 
 	if w.dirty {
 		return p.Checkpoint{}, fmt.Errorf("%w: synchronize before checkpoint capture", p.ErrBusy)
 	}
-	c := p.Checkpoint{Version: 1, ID: id, SourceFingerprint: fingerprint, Revision: w.revision, LastFrame: w.lastFrame, Config: w.config}
+	c := p.Checkpoint{Version: p.CheckpointVersion, ID: id, SourceFingerprint: fingerprint, Revision: w.revision, LastFrame: w.lastFrame, Config: w.config}
 	for _, shape := range w.shapes {
 		c.Shapes = append(c.Shapes, copyShape(shape.desc))
 	}

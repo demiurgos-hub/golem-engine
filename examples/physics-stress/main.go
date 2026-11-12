@@ -72,6 +72,7 @@ type sample struct {
 	Substeps                                                              int
 	Intervals, Microsteps                                                 int
 	MotionPairTests, MotionPathRefinements                                int
+	CCDCandidatePairs, CCDPairTests, CCDPredictiveContacts                int
 	Bodies, Colliders, Shapes                                             int
 	Error                                                                 string `json:",omitempty"`
 }
@@ -87,18 +88,20 @@ type results struct {
 	MinMoving, MinFollowing, MinScheduled, MinAwakeDynamic, MinProjectiles, MinQueries int
 	MovementDeficitTicks, CadenceMisses, RejectedFrames, QueryOverflows                uint64
 	ProjectileSweeps, ProjectileHits, GameplayQueries                                  uint64
-	StartupNS, MeasurementWallNS                                                       int64
-	CheckpointCaptureNS, CheckpointWriteNS                                             int64
-	CheckpointID                                                                       string
-	WorstObservedTickNS, MeasurementOverrunNS                                          int64
-	Churn                                                                              churnEvidence
-	TotalAllocBytes, Mallocs                                                           uint64
-	PeakHeapBytes, PeakRSSBytes                                                        uint64
-	StartMemory, EndMemory, AfterCloseGC                                               runtime.MemStats
-	MinimumActorTravel                                                                 float32
-	Gates                                                                              map[string]bool
-	Missing                                                                            []string
-	Failure                                                                            string `json:",omitempty"`
+	// Native CCD totals cover measured attempted frames, including rejected frames.
+	CCDCandidatePairs, CCDPairTests, CCDPredictiveContacts uint64
+	StartupNS, MeasurementWallNS                           int64
+	CheckpointCaptureNS, CheckpointWriteNS                 int64
+	CheckpointID                                           string
+	WorstObservedTickNS, MeasurementOverrunNS              int64
+	Churn                                                  churnEvidence
+	TotalAllocBytes, Mallocs                               uint64
+	PeakHeapBytes, PeakRSSBytes                            uint64
+	StartMemory, EndMemory, AfterCloseGC                   runtime.MemStats
+	MinimumActorTravel                                     float32
+	Gates                                                  map[string]bool
+	Missing                                                []string
+	Failure                                                string `json:",omitempty"`
 }
 
 func run(o options) (runErr error) {
@@ -288,6 +291,7 @@ func run(o options) (runErr error) {
 		v := sample{Tick: tick, Measured: tickMeasured, FullTickNS: int64(full), ServerWallNS: int64(wall), CadenceNS: int64(cadence), PhysicsNS: int64(physics.Duration), SolveNS: int64(physics.Solve), NavigationNS: int64(nav.Prepare + nav.Movement + nav.Reconcile), Scheduled: nav.AgentsScheduled, Projectiles: projectileCount, Queries: queryCount, Accepted: physics.Accepted, Simulated: physics.Elapsed, Substeps: physics.Substeps, Bodies: physics.World.Bodies, Colliders: physics.World.Colliders, Shapes: physics.World.Shapes}
 		v.Intervals, v.Microsteps, v.MotionPairTests = physics.Intervals, physics.Microsteps, physics.MotionPairTests
 		v.MotionPathRefinements = physics.MotionPathRefinements
+		v.CCDCandidatePairs, v.CCDPairTests, v.CCDPredictiveContacts = physics.CCDCandidatePairs, physics.CCDPairTests, physics.CCDPredictiveContacts
 		v.Measured = complete
 		for _, a := range s.actors {
 			state, _ := s.server.NavigationAgentState(a.ID)
@@ -322,6 +326,9 @@ func run(o options) (runErr error) {
 			r.GameplayQueries += uint64(queryCount)
 			r.ProjectileSweeps += uint64(projectileCount)
 			r.ProjectileHits += uint64(projectileHits)
+			r.CCDCandidatePairs += uint64(v.CCDCandidatePairs)
+			r.CCDPairTests += uint64(v.CCDPairTests)
+			r.CCDPredictiveContacts += uint64(v.CCDPredictiveContacts)
 			r.MeasuredSamples++
 			r.FullTick.add(full)
 			r.Cadence.add(cadence)

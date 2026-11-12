@@ -47,12 +47,14 @@ type PhysicsContactFunc func([]p.ContactEvent)
 // accepted simulation time; RequestedDelta remains visible when an attempt fails.
 // Duration includes navigation preparation, readback and callbacks. Solve measures
 // only World.Simulate. The observer itself is excluded from both durations.
+// Native CCD counters include attempted work even when the frame is rejected.
 type PhysicsFrameMetrics struct {
 	Frame                                                         uint64
 	RequestedDelta                                                float64
 	Elapsed                                                       float32
 	Substeps                                                      int
 	Intervals, Microsteps, MotionPairTests, MotionPathRefinements int
+	CCDCandidatePairs, CCDPairTests, CCDPredictiveContacts        int
 	Duration, Solve                                               time.Duration
 	Accepted                                                      bool
 	World                                                         p.Metrics
@@ -530,6 +532,7 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 	metrics.Solve = navigationSince(solveStarted)
 	metrics.Intervals, metrics.Microsteps, metrics.MotionPairTests = result.Intervals, result.Microsteps, result.MotionPairTests
 	metrics.MotionPathRefinements = result.MotionPathRefinements
+	metrics.CCDCandidatePairs, metrics.CCDPairTests, metrics.CCDPredictiveContacts = result.CCDCandidatePairs, result.CCDPairTests, result.CCDPredictiveContacts
 	if err != nil {
 		ps.fault = err
 		return err
