@@ -20,6 +20,7 @@ Golem Engine is a Go module for building multiplayer game backends. It includes 
 | `golem/nav/navmesh/` | Separate module adapting navmesh-go; explicit geometry source parser and `golem-nav-bake` CLI. |
 | `golem/navigation*.go` | Server-owned navigation scheduling, movement/motor/traversal policy, lifecycle and checkpoint intents. |
 | `examples/navigation-stress/` | Separate module exercising the actual server against seeded worlds, churn and checkpoint/restart. |
+| `examples/physics-stress/` | Separate actual-server physics/navigation workload with fixed full counts, explicit reduced diagnostics and validation-workspace evidence. |
 | `qualification/` | Isolated candidate archives and workload/platform qualification tooling; generated evidence belongs in the validation workspace. |
 | `golem/auth/` | Token-in-query-param `OnUpgrade` handshake helper (not an account/JWT framework). |
 | `golem-go-client/` | Native Go client runtime. |

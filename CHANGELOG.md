@@ -8,6 +8,68 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Continuous physics resolves coupled fast impacts through bounded native contact and joint continuation, including thin objects pushed against walls and motor-driven collisions. It retains the original force/gravity duration and drive budgets, reports owned intermediate poses, and faults the interacting frame if required work cannot complete.
+
+- Physics qualification provides source-matched focused, engine integration, Windows capacity and Linux save/restore evidence, with a combined report that preserves failed and missing gates. The runner can select upstream's native release build while retaining explicit Golem validation. Extended matrices and the soak are excluded from the selected delivery; full-size Windows counts and the 50 ms p99 threshold remain required.
+
+- Physics frame metrics, stress results and debug captures expose separate local TOI continuation work counts, including failed attempts. Participant and contact-row totals describe work performed; native solver call counts remain independent of the number of observed path samples.
+
+- Physics qualification includes actual Unity 6 simulation comparisons for forces, impulses, torque, falling, bouncing, stacks, physical pushing and hinge constraints. Captures retain the initial exported source and commands; simulation tolerances remain separate from query accuracy and full workload gates.
+
+- Resolved-content qualification captures copied server prefab catalogs, activation recipes and database pose variants in bounded Unity batches, preserving source identities, variant removals and complete physical signatures. Loader checks retain inactive geometry and compare native queries by collider identity; missing content and unsupported geometry remain explicit failures.
+
+- Physics cooking preserves small nonzero triangles and unreduced convex geometry with up to 256 hull vertices, 512 faces and 768 edges. Version-2 cooked artifacts and the widened native hull format require recooking; old native snapshots are rejected. Unity source normalization removes only exactly zero-area faces, retaining original triangle ordinals and a hash of the original geometry in metadata. Full geometry/workload qualification remains separate.
+
+- Physics qualification can exercise repeated coordinated geometry activation/replacement/unloading and save complete paired checkpoints for fresh-process recovery, including projectile and route-direction state. Latency results retain the complete final frame when it exceeds the requested measurement duration; elapsed time alone does not qualify a churn/restart soak.
+
+- Live physics bodies can atomically switch movement mode and controller configuration with explicit velocity retention or clearing, preserving body/collider/joint handles and entity attachment. Server policy changes invalidate old trajectory tokens; callback requests can be queued for the next tick. Accepted contact continuity uses actual geometry and swept intervals without synthetic forces.
+
+- Precise sphere sweeps solve terrain triangle features directly, preventing numerical stalls on long casts. Exact captured float32 geometry is checked against an independent analytic reference; production normals remain geometric when Unity's rounded world witnesses differ.
+
+- Physics export refuses missing prefab sources before capturing a potentially incomplete collider hierarchy.
+
+- Authored Unity character capsules now require an explicit `content.GolemKinematicCharacters` conversion policy. It maps step, slope and skin settings onto the server controller, retains separate support/work budgets and defaults controller gravity off. Unsupported deadband, disabled collision/recovery and incompatible geometry are diagnosed before loading. Preparation policy fingerprints use version 2; re-prepare existing captures.
+
+- Unity physics terrain export now matches the native cell diagonal on non-planar heightfields, without changing navigation source triangulation. Copied terrain and prefab qualification fixtures preserve input hashes and compare actual native queries at recorded coordinate offsets.
+
+- Continuous sensors now retain entry and exit between solver samples, including separate concave and rotational re-entry intervals. Fraction-ordered replay preserves owner aggregation and accepted-only cleanup; bounded or unresolved geometry reports failure instead of dropping transitions. This correctness coverage does not establish full-load sensor capacity.
+
+- Timed scripted and external physics trajectories retain bounded translation/rotation across ticks, expose cancellation tokens and accepted progress, pause under regional quarantine, and preserve active intent through paired checkpoints. Blocked actions keep their actual collision result and cancellation preserves momentum already transferred to other bodies. External poses require admitted timed motion; explicit teleports remain placement-only.
+
+- Unity physics export now rejects enabled terrain-generated tree collision instead of silently omitting it from the heightfield source. Prefab variant coverage verifies removed collider components and child objects alongside independent scene-instance identities.
+
+- Physics frame observations, stress reports and debug captures expose targeted native CCD candidate pairs, TOI tests and predictive solver manifolds, including work performed before a failed frame. These counts remain separate from gameplay contact events and the retired global-refinement counters. Workload capacity remains unqualified.
+
+- Closest-point and penetration results expose available backend-local feature details alongside collider/child/triangle identity. Closest points inside solid geometry remain at the supplied point and are classified as penetrating; initial-overlap queries retain the deepest constraint without allocating a complete triangle contact list.
+
+- Opt-in upright capsule controllers retain stair phases and timed navigation corners through shared physics intervals, with moving/rotating support identities, swept passenger transport and relative kinematic obstruction checks. Driven characters retain finite-mass contact response; controller intent and falling state survive checkpoints. Actual-server fixtures cover stairs, platforms, ceilings, support replacement and separate body/anchor/COM transforms; full workload qualification remains pending.
+
+- Physics worlds can explicitly capture bounded diagnostic geometry and identities, accepted state, separately labeled fault poses, and supplied queries, contacts, support and movement annotations. Unity's Physics Preview loads these captures with omission warnings. A runnable Go sample and the stress runner's optional failure capture exercise the versioned format; captures are not checkpoints.
+
+- Physics handles now recycle with advancing generations, rejecting stale pooled-body commands and rebuilding replacement contacts. Query scratch is reused per worker, all-hit retention is bounded by the caller's buffer, and the coordinate envelope includes the query's full oriented geometry.
+
+- Physics stress diagnostics can explicitly select Box3D's pure-Go SIMD build and solver/query worker counts. Evidence records the Go experiment, build tags and target architecture; the SIMD candidate retains its CPU requirements and does not imply workload or platform qualification.
+
+- Physical geometry can activate under quarantine before its asynchronous navigation rebuild. Failed navigation retains the new physical state and supports retries without recreating bodies. Pending-edit checkpoints preserve accepted and desired worlds separately and require matching private physics/navigation reconstruction before recovery opens readiness.
+
+- Continuous physics combines built-in static sweeps with targeted native predictive contacts for fast moving pairs, including translating/rotating kinematic meshes. Observed native steps retain body poses and contact/sensor transitions. Persistent-collider motion queries preserve exact geometry identity and caller-buffer completeness; dynamic concave bodies remain unsupported. Predictive contacts do not certify arbitrary solver-induced acceleration. Capacity, transport policy and platform qualification remain separate gates.
+
+- Capsule movement now checks stairs with headroom, walkable and steep slopes, corners, narrow openings, ledges, ceilings and support loss. Physical placement/movement queries can apply symmetric collision masks and signed group overrides independently of gameplay query masks.
+
+- Physics queries support bounded parallel batches against one synchronized revision with caller-owned, nonoverlapping buffers. Nearest/any queries retain explicit initial-overlap and overflow semantics. Optional owner contact aggregation counts exact child pairs and preserves swept entry/exit ordering; restored contacts have a distinct phase. The full mixed-load diagnostic now records solver/query worker counts; its timing gate remains unqualified.
+
+- Paired physics checkpoints capture authoritative entities, body/joint state, pending forces, geometry ownership and navigation intents under one identity, with manifest-last storage and fresh handles on recovery. Recovery suppresses ordinary lifecycle/contact-entry effects and holds readiness closed after a partial publication failure. Prepared geometry changes share navigation's quarantine and build queue while retaining unaffected bodies. Physics frame observations report accepted cadence, solve time and failures. These correctness features do not establish workload or platform qualification.
+
+- A separate `examples/physics-stress` workload exercises actual server physics, staged navigation, dynamic bodies, swept projectiles and mixed queries. Full mode retains the required population and resident geometry counts; reduced correctness/rehearsal modes report their scope explicitly. The source snapshot runner preserves failures, timing tails, movement cadence and memory evidence without declaring missing qualification gates passed.
+
+- An experimental pure-Go Box3D adapter provides rigid bodies, eight joint families, explicit frame acceptance, bounded character drives and capsule movement helpers. Geometric sweeps and penetration queries use tolerances independent of solver contact slop. Physics unit checks can run from recorded source snapshots with `qualification/Run-PhysicsTests.ps1`; the fork and new modules still require release publication and full workload/platform qualification.
+- Portable physics content can be validated, captured with explicit solver policies and loaded with stable source identities, owner resolution and rollback. The Box3D adapter cooks reusable private hull/BVH data, retains separate source/native artifact identities, preserves manual mass properties and rejects unsupported authored controls before loading. Actual Unity scene query comparisons are available as an explicit qualification gate; this does not declare the full physics workstream qualified.
+- Entity vars can opt into accepted physics orientation, linear/angular velocity and activation through explicit `physics:` tags. Generated Go server writers update the ordinary replicated fields; tags, owner visibility, snapshots and implicit position encoding are unchanged. Unity Scribe exposes the same metadata through `GolemVar(Physics = "...")`. Bindings require complete component groups and writable `sync: tick` fields; body attachment remains explicit.
+
+- Opt-in server physics attachments bind accepted gameplay anchors, rotation, velocity and activation state to entities. Staged navigation prepares ordered movement once per tick, validates complete physical paths including idle agents, and reconciles support before traversal/contact callbacks. Physics mutations and deletions from accepted-frame callbacks run on a later tick; legacy synchronous motors and collision backends remain available. Full backend and workload qualification remains in progress.
+- Unity Scribe exports versioned portable physics source from saved scenes, including resolved prefab colliders, body-local scaled geometry, terrain holes, materials, activation, owner metadata, character settings and supported joint declarations. Explicit export/validate actions preserve manifest ownership and rollback; a scene preview compares exported geometry with Unity reference queries. Unsupported authoring settings fail before writing. Backend equivalence and workload qualification remain separate gates.
+
+- Independent `golem/physics3d` contracts define float32 body and anchor poses, world-qualified geometry identities, explicit simulation frames, bounded query results, and contact cleanup/restore classifications. These opt-in foundations leave existing collision and footprint APIs unchanged; the full physics workstream is still undergoing implementation and qualification.
 - Regional surface safety lets distant agents continue through local world edits. Quarantined agents retain their destination and support; unchanged routes transfer to the latest snapshot without losing velocity or floor identity. `NavigationReady` reports usable pending regional worlds as ready and degraded; backends without regional support keep profile-wide pauses.
 - Retirement-aware backends spread snapshot transfers across a separate fair rebase budget. Safe old views keep their movement cadence; per-view safety protects their changed columns while allowing current views to resume independently. Readiness stays degraded during local retirement. Completed paths crossing quarantine retain their owned results and wait for safety changes instead of repeating searches.
 - Allowed partial routes preserve their limiting status when rebased or resumed after quarantine, so reaching their reachable prefix is still reported as blocked.
@@ -39,9 +101,37 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Changed
 
+- The unreleased Box3D adapter now uses fixed native stepping: four steps per 20 Hz frame by default, with `SolverVelocityIterations` and `SolverRelaxIterations` both defaulting to 1. Retained navigation/controller/support boundaries share the same elapsed time. The experimental global adaptive-refinement settings and penetration ceiling are removed; captured navigation safety still rejects an unsafe interacting frame as a whole, and query/placement precision is unchanged. World `Config.Continuous` controls CCD; per-body `Continuous` selects the native bullet policy separately.
+
+- Breaking change to unreleased physics captures: portable physics checkpoints and Go/Unity debug captures now use version 2 with native solver settings. Version-1 physics checkpoints require explicit state migration; old debug captures must be regenerated. The paired root checkpoint envelope, entity snapshots and portable Scribe source keep their existing versions. Readers reject obsolete physical payloads explicitly instead of ignoring retired configuration fields.
+
+- Motion queries reuse private traversal scratch while preserving geometry coverage and independently owned event records. Focused allocation checks cover query and contact capture paths; full workload capacity still requires qualification.
+
 - Navigation qualification's `Suite` and `Full` launchers now run the three mixed scene families at 1,000 agents only; `Full` retains the two-hour 1,000-agent soak. Existing diagnostic agent-count controls remain available.
 
 ### Fixed
+
+- Precise sweeps clip subsequent searches after a nearer hit while preserving equal-distance identities and unchanged geometric accuracy. Rounded mesh contacts use bounded scratch sized to their actual maximum output without dropping triangles or contact points.
+
+- Small physics edits synchronize active and changed static bodies without refreshing every untouched static collider. Portable handle lookups retain world, generation and type validation while avoiding repeated hash-table searches during simulation.
+
+- Physics avoids building continuous-collision scratch for intervals with no eligible motion, reuses generation-validated collider lookups, and reduces allocations while retaining every observed path sample. Qualification timing separates scene setup and explicit route admissions from automatic replans; full-load geometry edits preserve the active routes' quarantine boundaries.
+
+- Physics contact exit and cleanup events report zero force instead of repeating the previous impact. Owned native observations retain the correct body pose and contact witness through rebounds, with solver-response impulses counted once and kept separate from sensor overlap.
+
+- Unity physics export reads imported mesh geometry even when runtime Read/Write is disabled, without changing importer settings. Submesh indices, source identity and geometry validation remain preserved.
+
+- Relative-motion queries and continuous contact intervals resolve exact rotational endpoint tangencies without loosening geometric tolerance. Bounded interval certificates preserve separation and reentry when conservative advancement stalls.
+
+- Physics advances the configured native intervals without the former global refinement stalls. Native TOI/contact response regressions cover fast crossings and thin-wall impacts while retaining momentum transfer, bounded drives and the captured navigation safety checks. Focused correctness results do not establish full workload or platform qualification.
+
+- Geometric sphere/capsule queries preserve exact touching on flat triangle faces, avoiding spurious rejection by zero-penetration spawn admission. Touching pair results retain their feature identity and witnesses. The correction keeps float32 geometry and does not relax penetration thresholds.
+
+- Physics contact transitions remain private until the whole frame is accepted. Shutdown emits terminal cleanup for accepted pairs only and rejects callback commands. Constraint-force reads reject pending or faulted frames. Upright joints use the authored Y-up axis and consistent warm starting through repeated yaw rotations.
+
+- Physics stress scene manifests record the selected solver configuration, including worker count, instead of displaying defaults alongside a tuned run.
+
+- Physics attachment and teleport validate complete solid geometry before changing ownership or poses; geometric penetration requires an explicit placement policy. Rejected motion admission preserves actual displacement and support from the shared solver while discarding proposed navigation and traversal progress.
 
 - Capacity qualification checks complete route segments against the physical cylinder and source obstacles before timing. Its fixture records separate body and bake dimensions and an explicit conservative bake margin, retaining unchanged body sizes and motor behavior; old unsafe fixtures fail preflight with the offending segment and clearance.
 - Terrain qualification uses a tighter contour simplification setting after physical clearance checks identified two wall-clipping routes. Geometry, destinations and physical body dimensions remain unchanged; narrow-gap presence is not claimed as differentiated profile coverage.

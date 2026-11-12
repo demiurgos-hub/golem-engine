@@ -6,9 +6,23 @@ import (
 
 	"{{.GolemImport}}"
 	"{{.GolemImport}}/pb"
+{{- if .Physics}}{{if or .Physics.Rotation .Physics.LinearVelocity}}
+	physics "{{.GolemImport}}/physics3d"
+{{- end}}{{end}}
 )
 
 var _ golem.Entity = (*Synced{{.Name}})(nil)
+{{- if .Physics}}
+{{- if .Physics.Rotation}}
+var _ golem.PhysicsRotationWriter = (*Synced{{.Name}})(nil)
+{{- end}}
+{{- if .Physics.LinearVelocity}}
+var _ golem.PhysicsVelocityWriter = (*Synced{{.Name}})(nil)
+{{- end}}
+{{- if .Physics.Active}}
+var _ golem.PhysicsActivationWriter = (*Synced{{.Name}})(nil)
+{{- end}}
+{{- end}}
 {{- if .HasOwnerVars}}
 var _ golem.OwnerScopedEntity = (*Synced{{.Name}})(nil)
 {{- end}}
@@ -129,6 +143,47 @@ func (s *Synced{{.Name}}) Collider() (golem.CollisionShape, string, bool) {
 {{- end}}
 {{- end}}
 
+{{if .Physics}}{{if .Physics.Rotation}}
+// SetPhysicsRotation stores the accepted gameplay anchor orientation in explicit schema variables.
+func (s *Synced{{.Name}}) SetPhysicsRotation(value physics.Quat) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := false
+{{- range .Physics.Rotation}}
+	if s.{{.FieldName}} != value.{{.Component}} {
+		s.{{.FieldName}} = value.{{.Component}}
+		s.dirty |= {{$.LowerName}}Field{{.GoName}}
+		changed = true
+	}
+{{- end}}
+	if changed { s.revision++ }
+}
+{{end}}{{if .Physics.LinearVelocity}}
+// SetPhysicsVelocity stores accepted centre-of-mass linear and angular velocity in explicit schema variables.
+func (s *Synced{{.Name}}) SetPhysicsVelocity(linear, angular physics.Vec3) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := false
+{{- range .Physics.LinearVelocity}}
+	if s.{{.FieldName}} != linear.{{.Component}} {
+		s.{{.FieldName}} = linear.{{.Component}}
+		s.dirty |= {{$.LowerName}}Field{{.GoName}}
+		changed = true
+	}
+{{- end}}
+{{- range .Physics.AngularVelocity}}
+	if s.{{.FieldName}} != angular.{{.Component}} {
+		s.{{.FieldName}} = angular.{{.Component}}
+		s.dirty |= {{$.LowerName}}Field{{.GoName}}
+		changed = true
+	}
+{{- end}}
+	if changed { s.revision++ }
+}
+{{end}}{{if .Physics.Active}}
+// SetPhysicsActive stores accepted activation using the ordinary schema setter.
+func (s *Synced{{.Name}}) SetPhysicsActive(active bool) { s.Set{{.Physics.Active.GoName}}(active) }
+{{end}}{{end}}
 func (s *Synced{{.Name}}) TypeName() string { return "{{.Name}}" }
 
 // StateRevision returns the current entity state revision used to reject stale updates.

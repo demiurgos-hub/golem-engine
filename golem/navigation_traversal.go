@@ -100,6 +100,15 @@ func (n *navigationService) beginTraversal(a *navigationAgent, link surface.Link
 		n.failAgent(a, surface.Failed, err)
 		return
 	}
+	if a.config.StagedPhysics {
+		if _, ok := action.(NavigationStagedTraversalAction); !ok {
+			action.CancelNavigationTraversal("staged navigation requires a transactional traversal action")
+			if n.current(a, generation) {
+				n.failAgent(a, surface.InvalidInput, errors.New("golem: staged navigation requires NavigationStagedTraversalAction"))
+			}
+			return
+		}
+	}
 	a.traversal = &navigationTraversal{link: link, action: action}
 	if safety := n.agentSafety(a); safety != nil {
 		a.traversal.safetyToken = safety.Token()
@@ -205,7 +214,7 @@ func (n *navigationService) cancelTraversal(a *navigationAgent, reason string) b
 	if a.traversal != nil {
 		action := a.traversal.action
 		a.traversal = nil
-		action.CancelNavigationTraversal(reason)
+		n.dispatchFrameCallback(func() { action.CancelNavigationTraversal(reason) })
 	}
 	return n.current(a, generation)
 }

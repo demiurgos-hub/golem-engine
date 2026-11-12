@@ -1,15 +1,30 @@
 ---
-description: nav — 2D backends, independent 3D surface/regional safety and corridor-transfer contracts, navmesh-go adapter, geometry baking, 1,000-agent mixed-workload qualification and static capacity tools.
+description: nav — 2D backends, independent 3D surface/regional safety and corridor-transfer contracts, staged runtime physics navigation, navmesh-go adapter, geometry baking and qualification.
 globs:
   - golem/nav/**/*
+  - golem/navigation*.go
+  - golem/physics_checkpoint*.go
+  - golem/physics_geometry*.go
+  - golem/physics_recovery*.go
   - examples/navigation-stress/**/*
+  - examples/physics-stress/**/*
   - qualification/**/*
 alwaysApply: false
 ---
 
 # Navigation
 
+Idle staged-physics attachments must refresh regional quarantine after geometry changes even without a destination; stopping navigation for a scripted physical trajectory must not freeze that body forever after safety returns. Timed physical actions use captured navigation safety and actual-path reconciliation while their own intent owns motion. Legacy synchronous idle scheduling remains unchanged.
+
+Activation-first physical edits retain full regional quarantine between tick-side geometry activation and asynchronous navigation publication. Failed builds leave the actual physical state explicit and pending. Restart captures accepted navigation separately from desired navigation; a pending checkpoint requires private matching physics/navigation reconstruction before either becomes ready. Invalidate all worker generations prepared against the replaced world, even completed results waiting to drain.
+
+Paired physical restoration and prepared geometry publication live in root `golem/physics_checkpoint.go` and `golem/physics_geometry.go`, using the existing navigation restoration barrier and bounded stable-key build queue. Keep immutable physics/navigation identity captures paired. Establish full regional quarantine before physical changes, preserve unaffected agents, and open restoration readiness only after entity/body/support intent publication. Source lease handles are rebuilt from stable IDs; routes and query handles are never restored. Before a staged frame seals, discard superseded plans and recapture all safety after callbacks without rerunning the scheduler.
+
 `golem/nav`, `nav/pathing`, and `nav/kelindar` are separate Go modules developed through the ignored local `go.work`. The shared nav module does not depend on the root runtime, map loaders, or either pathfinding library.
+
+Root `golem/navigation_frame.go` coordinates optional staged motion using the existing surface contracts; no physics dependency enters shared nav. Prepare scheduling happens once per tick, with ordered segments apportioned to the physical frame duration. Generation, snapshot, source position and regional safety stay captured until full-path validation. Every physically affected attachment, including idle agents, reconciles actual float32 anchor positions; unsupported physical results are not snapped to another surface. Quarantine requires a solver-side hold before movement, while unexpected post-solve violations reject the entire interacting frame. Transactional traversal actions commit after all navigation state is reconciled. The synchronous navigation/motor API remains separate and compatible.
+
+Fixed native physics stepping preserves this host safety boundary. Validate captured navigation segments and curved-anchor bounds at every observed native step; extra retained corner/support intervals share one frame duration and cannot rerun fairness or multiply force integration. Whole-frame navigation rejection is not a universal physical penetration ceiling. Solver contact compliance does not relax query/placement precision or permit individual-body rollback after interactions.
 
 `nav/surface` belongs to the shared nav module and defines Y-up, float64 world-space contracts with opaque snapshot-qualified locations and immutable route views. Query scratch is exclusively owned. `View.Release` is idempotent; handles cannot outlive their view. `CorridorQuery` repairs paths; optional `RegionalBackend` supplies coherent immutable safety captures with committed/desired revisions and change tokens. Backend-owned location, corridor, segment and bounds checks hide tile identities from the runtime. `RebaseQuery` transfers unchanged polygon support and corridors to a retained latest view; it must not choose another floor. `CornerAppender` uses caller-owned capacity without borrowing query scratch. Optional `SupportIdentity` identifies the same live convex support polygon within one retained view; it is not a proximity or reachability test.
 
@@ -56,3 +71,5 @@ Navigation release order is shared nav v0.4.0 and navmesh-go v0.1.0, adapter nav
 After each dependency is actually published, run `GOWORK=off go mod tidy` in its consumer modules, record real proxy checksums, and repeat ordinary test/vet checks. Candidate file-proxy archive checksums belong only in temporary test copies and must not be committed as release sums. The navigation CI lane intentionally depends on this release preparation.
 
 The pure-Go and server CI matrices include native Linux ARM64 (`ubuntu-24.04-arm`) execution. An ARM64 cross-build alone is not execution qualification; keep the hosted runner gate explicit until that lane has actually passed.
+
+For the physics workstream, the user's 2026-11-12 scope decision selects Windows AMD64 and native Linux AMD64 only after the retained navigation manifests confirmed ARM64 compilation but no native ARM64 execution. Historical navigation evidence and CI configuration stay unchanged; an unexecuted CI entry does not establish a reusable native host.

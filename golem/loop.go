@@ -162,6 +162,7 @@ type Server struct {
 	layers3D             *collision3d.Layers
 	navBackend           nav.Backend
 	navigation           *navigationService
+	physics              *physicsService
 	contactEventsEnabled bool
 	triggerPairs         map[[2]int64]struct{}
 	solidPairs           map[[2]int64]struct{}
@@ -447,7 +448,15 @@ func (s *Server) CreateEntity(e Entity, owner ...int64) error {
 // removed after avatar index cleanup and before registry deletion (and thus
 // before OnRemove). Safe to call repeatedly; does not hold the avatar mutex
 // while invoking registry hooks (OnRemove) or interest operations.
+// Physics attachments are destroyed before OnRemove. During accepted physics
+// callbacks deletion is deferred to the next tick's input boundary.
 func (s *Server) DeleteEntity(id int64) {
+	if ps := s.physics; ps != nil && ps.dispatching {
+		if err := ps.queueDelete(id); err != nil {
+			ps.fault = err
+		}
+		return
+	}
 	if n := s.navigation; n != nil {
 		if n.deleting[id] {
 			return
@@ -456,6 +465,10 @@ func (s *Server) DeleteEntity(id int64) {
 		defer delete(n.deleting, id)
 	}
 	s.clearAvatarByEntity(id)
+	if err := s.DetachPhysics(id); err != nil {
+		s.physics.fault = err
+		return
+	}
 	s.DetachNavigation(id)
 	if e, ok := s.reg.Get(id); ok {
 		s.unregisterCollider(e)
@@ -1206,6 +1219,11 @@ func (s *Server) runLoop(ctx context.Context) error {
 			for _, fn := range s.onTickStart {
 				fn(s.tick)
 			}
+			if s.physics != nil {
+				if err := s.physics.drain(); err != nil {
+					return err
+				}
+			}
 
 			s.drainAsyncCallbacks()
 			s.drainMessages()
@@ -1218,17 +1236,27 @@ func (s *Server) runLoop(ctx context.Context) error {
 			if s.onTick != nil {
 				s.onTick(dt, s)
 			}
-			if s.navigation != nil {
+			if s.physics != nil {
+				if err := s.physics.step(dt); err != nil {
+					return err
+				}
+			} else if s.navigation != nil {
 				s.navigation.advance(dt)
 			}
 
 			if s.collision != nil {
 				for _, e := range s.reg.All() {
+					if s.physics != nil && s.physics.agents[e.EntityID()] != nil {
+						continue
+					}
 					x, y := e.Position()
 					s.collision.Update(e.EntityID(), float64(x), float64(y))
 				}
 				contacts := s.collision.Step(dt)
 				s.collision.ReadBack(func(id int64, x, y float64) {
+					if s.physics != nil && s.physics.agents[id] != nil {
+						return
+					}
 					e, ok := s.reg.Get(id)
 					if !ok {
 						return
@@ -1247,6 +1275,9 @@ func (s *Server) runLoop(ctx context.Context) error {
 
 			if s.collision3D != nil {
 				for _, e := range s.reg.All() {
+					if s.physics != nil && s.physics.agents[e.EntityID()] != nil {
+						continue
+					}
 					sp, ok := e.(registry.Spatial3DEntity)
 					if !ok {
 						continue
@@ -1256,6 +1287,9 @@ func (s *Server) runLoop(ctx context.Context) error {
 				}
 				contacts := s.collision3D.Step(dt)
 				s.collision3D.ReadBack(func(id int64, x, y, z float64) {
+					if s.physics != nil && s.physics.agents[id] != nil {
+						return
+					}
 					e, ok := s.reg.Get(id)
 					if !ok {
 						return

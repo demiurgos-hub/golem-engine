@@ -26,6 +26,7 @@ type SchemaVarDef struct {
 	Sync       string `yaml:"sync"`                 // "tick" (default) or "once"
 	Tag        int    `yaml:"tag"`                  // required user-slot index (1-based); proto field = Tag + 3 for entity vars
 	Visibility string `yaml:"visibility,omitempty"` // empty/"all" = public; "owner" = owner-only replication
+	Physics    string `yaml:"physics,omitempty"`    // explicit optional binding to accepted physics state
 }
 
 // VarInfo holds all computed metadata for a single synced variable across languages.
@@ -52,7 +53,8 @@ type VarInfo struct {
 	ProtoTag      int // wire-format field number (UserTag + per-type offset)
 	BitIndex      int
 	Sync          string
-	OwnerOnly     bool // true when visibility: owner — replicated only to the owning session
+	OwnerOnly     bool   // true when visibility: owner — replicated only to the owning session
+	Physics       string // optional physics component role; does not alter wire layout
 	// Collection fields (non-zero when IsRepeated or IsMap is true)
 	IsRepeated      bool
 	IsMap           bool
@@ -88,9 +90,10 @@ type EntityData struct {
 	LowerName       string
 	Dimensions      int
 	Is3D            bool
-	Global          bool          // always replicated to every client (bypasses FOI)
-	Persistent      bool          // false = omit this entity type from world snapshots
-	Collider        *ColliderData // optional schema collider; not part of wire/snapshot state
+	Global          bool                // always replicated to every client (bypasses FOI)
+	Persistent      bool                // false = omit this entity type from world snapshots
+	Collider        *ColliderData       // optional schema collider; not part of wire/snapshot state
+	Physics         *PhysicsBindingData // optional physics writer bindings to ordinary explicit vars
 	AllVars         []VarInfo
 	TickVars        []VarInfo
 	OnceVars        []VarInfo
@@ -549,6 +552,7 @@ func BuildEntityData(sf SchemaFile, dimensions int, customTypes map[string]Custo
 		vi.UserTag = def.Tag
 		vi.ProtoTag = def.Tag + entityTagOffset
 		vi.Sync = sync
+		vi.Physics = def.Physics
 		ownerOnly, visErr := normalizeVarVisibility(sf.Entity, k, def.Visibility)
 		if visErr != nil {
 			log.Fatal(visErr)
@@ -609,6 +613,10 @@ func BuildEntityData(sf SchemaFile, dimensions int, customTypes map[string]Custo
 		ed.CustomTypeNames = append(ed.CustomTypeNames, name)
 	}
 
+	ed.Physics, err = ResolvePhysicsBindings(ed)
+	if err != nil {
+		log.Fatal(err)
+	}
 	layout := buildEntityWireLayout(ed, dimensions)
 	ed.Wire = &layout
 

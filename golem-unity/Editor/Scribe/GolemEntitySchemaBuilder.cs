@@ -14,6 +14,7 @@ namespace GolemEngine.Unity.Editor
         public string SchemaType;
         public string SyncYaml;
         public string FieldName;
+        public string Physics;
     }
 
     /// <summary>Validated entity schema model produced from a <see cref="GolemEntityAttribute"/> type.</summary>
@@ -164,11 +165,13 @@ namespace GolemEngine.Unity.Editor
                     Tag = varAttr.Tag,
                     SchemaType = schemaType,
                     SyncYaml = syncYaml,
-                    FieldName = field.Name
+                    FieldName = field.Name,
+                    Physics = varAttr.Physics
                 });
             }
 
             model.Vars.Sort((a, b) => a.Tag.CompareTo(b.Tag));
+            GolemPhysicsBindingValidation.Validate(model, dimensions);
             return model;
         }
 
@@ -208,6 +211,8 @@ namespace GolemEngine.Unity.Editor
                     lines.Add("    tag: " + GolemYamlWriter.FormatInt(variable.Tag));
                     lines.Add("    type: " + GolemYamlWriter.FormatScalar(variable.SchemaType));
                     lines.Add("    sync: " + GolemYamlWriter.FormatScalar(variable.SyncYaml));
+                    if (!string.IsNullOrEmpty(variable.Physics))
+                        lines.Add("    physics: " + GolemYamlWriter.FormatScalar(variable.Physics));
                 }
             }
 

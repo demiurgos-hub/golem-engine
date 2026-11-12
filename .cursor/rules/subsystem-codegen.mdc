@@ -1,5 +1,5 @@
 ---
-description: codegen — language-specific payload/envelope/collection emitters, resolved-schema consumers, templates, integration output ownership and containment.
+description: codegen — language-specific payload/envelope/collection emitters, explicit physics writer bindings, resolved-schema consumers, templates, integration output ownership and containment.
 globs:
   - codegen/**/*.go
   - codegen/**/*.tmpl
@@ -7,6 +7,8 @@ alwaysApply: false
 ---
 
 # `codegen`
+
+Opt-in `EntityData.Physics` emits only Go-server `SetPhysicsRotation(physics3d.Quat)`, `SetPhysicsVelocity(linear, angular physics3d.Vec3)` and `SetPhysicsActive(bool)` interfaces. Rotation/velocity groups update ordinary fields under one entity lock, mark only changed tick bits and increment revision once per changed group; activation delegates to its ordinary setter. Keep fields ordinary in Go/JS/C# codecs, models and snapshots, with unchanged owner redaction and no automatic body attachment. Bindings are resolved by schema, never inferred from field names. Generated-consumer tests share encoded state bytes across Go/JS/C# and preserve the proto/fingerprint baseline. Temporary Go consumers explicitly replace all required local nested modules, including physics3d, without adding tracked replacements.
 
 `Bake` orchestrates proto output plus per-integration generation from `schema` DTOs.
 

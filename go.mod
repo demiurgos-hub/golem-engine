@@ -9,6 +9,7 @@ require (
 	// Consumers building outside a workspace need published versions of these.
 	github.com/demiurgos-hub/golem-engine/golem/collision v0.3.1-0.20261013153120-49b2e72c189a
 	github.com/demiurgos-hub/golem-engine/golem/nav v0.4.0
+	github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0
 	github.com/hajimehoshi/ebiten/v2 v2.9.9
 	github.com/quic-go/quic-go v0.59.0
 	github.com/quic-go/webtransport-go v0.10.0

@@ -1,0 +1,13 @@
+{
+  "Generator": "Golem Scribe physics source v1",
+  "Assets": [],
+  "Bodies": [{"Active":true,"AngularDamping":0,"AutomaticCenterOfMass":true,"AutomaticInertiaTensor":true,"CenterOfMass":{"X":0,"Y":0,"Z":0},"CollisionDetection":"discrete","Constraints":0,"Enabled":true,"ID":"actor","InertiaRotation":{"W":1,"X":0,"Y":0,"Z":0},"InertiaTensor":{"X":1,"Y":1,"Z":1},"Kind":"dynamic","LinearDamping":0,"Mass":1,"OwnerID":"actor-owner","Position":{"X":0,"Y":2,"Z":0},"Rotation":{"W":1,"X":0,"Y":0,"Z":0},"UseGravity":true}],
+  "Colliders": [{"Active":true,"AssetID":"","Axis":1,"BodyID":"actor","Center":{"X":0,"Y":0,"Z":0},"Character":null,"ContactOffset":0.01,"Enabled":true,"Height":0,"ID":"actor/sphere","Layer":0,"LayerName":"","MaterialID":"default","Metadata":[],"OwnerID":"actor-owner","ParentID":"","Query":true,"Radius":0.5,"Rotation":{"W":1,"X":0,"Y":0,"Z":0},"Sensor":false,"Shape":"sphere","Size":{"X":0,"Y":0,"Z":0},"Solid":true,"SourceID":"fixture/sphere"}],
+  "CoordinateLimit": 4096,
+  "Joints": [],
+  "LayerCollisionMasks": [4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295],
+  "Materials": [{"BounceCombine":"average","DynamicFriction":0.6,"FrictionCombine":"average","ID":"default","Restitution":0,"StaticFriction":0.6}],
+  "Revision": 1,
+  "Version": 1,
+  "WorldID": "physics-fixture"
+}

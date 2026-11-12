@@ -1,0 +1,174 @@
+{
+  "version": 1,
+  "referenceRoot": "C:/Fractured/fractured-game/workers/unity/Assets",
+  "referenceAccess": "read-only",
+  "positionPrecision": "float32",
+  "coordinateLimitMetres": 4096,
+  "sourceEnvelopesMetres": [768, 2304],
+  "backend": {
+    "repository": "https://github.com/gataengine/box3d-go",
+    "commit": "2a00e926a8d92ae1d57a2e425aadebc4610b0ed5",
+    "localFork": "C:/Demiurgos/box3d-go",
+    "toolchain": "go1.27.1",
+    "productionCGO": false
+  },
+  "requirements": [
+    {"id":"player-admission","references":["Scripts/Player/Server/PlayerMovementManagerServer.cs:61"],"requires":["external-pose admission","spawn and teleport placement"],"policy":"Keep sequence, seat, status, sea and faction/map authority in game code; physics does not automatically change client position authority."},
+    {"id":"monster-navigation","references":["Scripts/Monster/Server/AIMovementManagerServer.cs:58"],"requires":["staged route proposals","collision-clipped capsules","actual support reconciliation","regional quarantine"],"policy":"Physical dimensions remain independent from navmesh agent clearance."},
+    {"id":"mobility-blockers","references":["Scripts/Utils/MobilityBlockerQueries.cs:44","Scripts/Being/Server/MovementManagerServer.cs:260"],"requires":["sphere and capsule sweep","initial-overlap escape versus deeper penetration","0.0001m separation threshold","bounded scripted actions"],"policy":"Exact collider metadata decides blocking and AllowJumps; trigger alone does not."},
+    {"id":"projectiles","references":["Scripts/Being/Projectile.cs:89","Scripts/Being/Projectile.cs:424","Scripts/Being/ProjectileSweep.cs:19","Scripts/Cart/BallistaFlight.cs:10","Scripts/Cart/BallistaProjectile.cs:57","AssetsByType/Prefabs/Projectiles/Weapons/prefab_Projectile_Staff.prefab:45"],"requires":["ordered sweeps and initial overlaps","relative moving-target queries","dynamic spheres","continuous sensors","ballistic trajectory policy"],"policy":"Keep projectile lifetime, damage ownership and game trajectory selection in game code."},
+    {"id":"melee-aoe","references":["Scripts/Being/Server/CombatManagerServer.cs:158","Scripts/Abilities/00. Base Classes/SpellInfo.Damage.cs:31","Scripts/Being/AttackRangeCollider.cs:22"],"requires":["oriented-box and sphere overlap","closest eligible collider point","explicit owner aggregation","child-pair reference counts","overflow retry or failure"]},
+    {"id":"line-of-sight","references":["Scripts/Being/SpellManager.cs:865","Scripts/Being/ProjectileGeometry.cs:42"],"requires":["ray filters","exact collider hierarchy identity","per-collider typed metadata"],"policy":"Preserve configured layer and BlockProjectiles decisions; turrets that intentionally ignore walls keep doing so."},
+    {"id":"placement-reach","references":["Scripts/Placement/PlacementPreview.cs:462","Scripts/Placement/BlueprintPlacementValidator.cs:56","Scripts/Player/Server/PlayerBuildingManagerServer.cs:434","Scripts/Placement/PlacementValidator.cs:13"],"requires":["explicit same-tick synchronization","pair penetration","0.001m placement threshold","closest points","ground ray policy","slope tests"],"policy":"Retain server grid/yaw/height/reach validation and root-distance versus closest-point distinctions."},
+    {"id":"sensors","references":["Scripts/Building/BarbedWireContacts.cs:89","Scripts/Building/BarbedWireContacts.cs:142","Scripts/Building/BarbedWireVolume.cs:43"],"requires":["oriented scaled volumes","swept entry and exit within one tick","generational pairs","owner child counts","accepted-state events","deferred callback commands"]},
+    {"id":"construction-doors","references":["Scripts/Building/BlueprintBuilderStage.cs:60","Scripts/WorldObjects/ObjectStateSwap/ObjectStateSwap.cs:75"],"requires":["prepared physical replacement","shared change identity","navigation quarantine before physical activation","activation and deletion cleanup"],"policy":"Discrete authored door swaps stay discrete; do not silently turn them into hinge-driven game objects."},
+    {"id":"cart-support","references":["Scripts/Cart/CartManagerServer.cs:78","Scripts/Cart/CartSeatPose.cs:30","Scripts/Player/Server/PlayerCartManagerServer.cs:301"],"requires":["body-anchor separation","moving and rotating support","swept passenger transport","support disappearance"],"policy":"Keep scripted towing, seating and visual tilt policies; wheel joints do not convert existing carts into vehicles."},
+    {"id":"resolved-content","references":["Scripts/World/WorldStreamer.cs:267","Scripts/World/WorldStreamer.cs:859","AssetsByObject/Terrains/Prefabs/Server/Terrain 0,0 Server.prefab:77","AssetsByObject/Fortress/Fortress Parts/Wall_LordRoom_Stair_R.prefab:233"],"requires":["resolved server variants and overrides","full hierarchy transforms","reflected winding once","static concave meshes","terrain holes","portable source versus cooked geometry","stable component identity"],"policy":"World-definition and world-assembly ownership stays outside physics."},
+    {"id":"general-dynamics","authority":"explicit user requirement","requires":["finite-mass driven characters","free dynamic bodies","forces and torque","angular inertia","sleep and wake","CCD","fixed/distance/hinge/slider/spherical/motor/upright/wheel constraints","constraint limits and drives","coherent checkpoint and restart"]}
+  ],
+  "contentEvidence": {
+    "authored-settings-inventory": {
+      "materials": "D:/Demiurgos/tests/physics-validation/content-audit-materials-v2.json",
+      "configurableJoints": "D:/Demiurgos/tests/physics-validation/content-audit-configurable-joints.json",
+      "scope": "All 15 PhysicMaterial assets parsed. Two unequal-friction imported materials have no serialized prefab/scene/asset references. Four ConfigurableJoint definitions are confined to two imported horse-wagon prefabs referenced only by their imported demo scene. Runtime string-based loading is not inferred; actual server cart variants were captured independently."
+    },
+    "projectiles": {
+      "reference": "AssetsByType/Prefabs/Projectiles/Weapons/prefab_Projectile_Staff.prefab",
+      "inputHashes": "D:/Demiurgos/tests/physics-validation/unity/runs/prefab-reference-20261112-01/inputs.json",
+      "unityCapture": "D:/Demiurgos/tests/physics-validation/unity/runs/prefab-reference-20261112-01/reference",
+      "goComparison": "D:/Demiurgos/tests/physics-validation/unity/runs/prefab-reference-20261112-01/go-reference-report-ray-policy.json",
+      "scope": "Copied authored dynamic sphere geometry and native queries; no projectile gameplay, lifetime or relative-motion qualification."
+    },
+    "cart-support": {
+      "references": ["AssetsByType/Prefabs/Carts/prefab_Wagon_Server.prefab", "AssetsByType/Prefabs/Carts/prefab_handcart_server.prefab", "AssetsByType/Prefabs/Carts/prefab_BallistaWagon_Server.prefab", "AssetsByObject/Entities/entity_Cart.prefab"],
+      "serializedAudit": "D:/Demiurgos/tests/physics-validation/content-audit-carts.json",
+      "inputHashes": "D:/Demiurgos/tests/physics-validation/unity/runs/prefab-reference-20261112-01/inputs.json",
+      "goComparison": "D:/Demiurgos/tests/physics-validation/unity/runs/prefab-reference-20261112-01/go-reference-report-ray-policy.json",
+      "scope": "Actual resolved variant removals leave 2/2/3 trigger colliders on kinematic cart parents. Shared Staff/cart capture passes 48 geometry queries with explicit Unity ray initial-overlap policy; scripted towing, seating and passenger transport remain independent gates."
+    },
+    "fortress-server-prefab": {
+      "reference": "AssetsByObject/Fortress/Fortress Parts/Wall_LordRoom_Stair_R_Server.prefab",
+      "inputHashes": "D:/Demiurgos/tests/physics-validation/unity/runs/fortress-reference-20261112-03/inputs.json",
+      "explicitVFXExclusions": "D:/Demiurgos/tests/physics-validation/unity/runs/fortress-reference-20261112-03/exclusion-manifest.json",
+      "filteredHashesAndVariantChecks": "D:/Demiurgos/tests/physics-validation/unity/runs/fortress-reference-20261112-03/exclusion-result.json",
+      "closureReferenceChecks": "D:/Demiurgos/tests/physics-validation/unity/runs/fortress-reference-20261112-03/closure-reference-check.json",
+      "unityCapture": "D:/Demiurgos/tests/physics-validation/unity/runs/fortress-reference-20261112-03/reference",
+      "goComparison": "D:/Demiurgos/tests/physics-validation/unity/runs/fortress-reference-20261112-03/go-reference-report.json",
+      "failureInputs": "D:/Demiurgos/tests/physics-validation/unity/runs/fortress-reference-20261112-03/failure-inputs.json",
+      "independentAnalyticReference": "D:/Demiurgos/tests/physics-validation/motion/fortress-analytic-report.json",
+      "independentAnalyticInputs": "D:/Demiurgos/tests/physics-validation/motion/fortress-analytic-fixtures.json",
+      "scope": "Explicitly filtered server-only fixture: 17 copied assets, two user-authorized VFX child exclusions keyed by hashes/GUIDs/fileIDs, nine prefab reference checks, original physics/layer settings, untouched variant removals and retained torch BoxCollider. Unity exports eight static colliders (one box, six convex, one concave mesh), 3147 triangles and 48 native queries. Go Load succeeds; 43/48 strict comparisons pass. Independent authored-geometry analysis classifies two sphere-witness differences, two valid adjacent-face ray normals and one initial mesh backface-policy difference. Golem sphere witnesses satisfy unchanged analytic distance/point targets; the strict Unity comparison remains 43/48. This is neither an unchanged visual prefab nor full catalog/world assembly qualification.",
+      "status": "captured-query-differences-classified"
+    },
+    "resolved-content": {
+      "references": ["AssetsByObject/Terrains/Prefabs/Server/Terrain 0,0 Server.prefab", "AssetsByObject/Terrains/Prefabs/Server/Terrain 1,0 Server.prefab"],
+      "inputHashes": "D:/Demiurgos/tests/physics-validation/unity/runs/terrain-reference-20261112-02/inputs.json",
+      "unityCapture": "D:/Demiurgos/tests/physics-validation/unity/runs/terrain-reference-20261112-02/reference",
+      "goComparison": "D:/Demiurgos/tests/physics-validation/motion/terrain-sphere-final-report.json",
+      "independentAnalyticReference": "D:/Demiurgos/tests/physics-validation/motion/terrain-analytic-report.json",
+      "scope": "Two actual 513x513 HeightOnly tiles, 1048576 triangles, zero authored holes. All 42 rays pass; final strict Unity comparison is 81/84 with sphere casts converging. Three offset-2304 witness disagreements remain recorded separately from passing unchanged independent analytic distance/point targets. Repeated 768/2304 metre offsets test coordinates, not additional resident area. Historical earlier failures are preserved.",
+      "remaining": ["representative backend behavior and unchanged accuracy checks", "full required workload qualification"],
+      "completedCatalogEvidence": {
+        "root": "D:/Demiurgos/tests/physics-validation/catalog/20261112-01",
+        "originalImporterCapture": "capture-04-original",
+        "integrity": "catalog-integrity-01.json",
+        "physicalSignatures": "original-signatures-01.json",
+        "coverage": "193 registered roots, 427 state probes, 411 successful exports and 270 complete physical signatures; 45 exceptional database poses and all 10 registered server terrains also captured. Strict mismatches and unsupported inputs remain preserved, not passed.",
+        "scope": "Historical bounded diagnostic inventory. Exhaustive catalog parity, every collision and complete database-world assembly are not required acceptance gates after the user scope decision below. No full-catalog qualification is claimed."
+      },
+      "excludedFortressDependency": {
+        "reference": "AssetsByObject/Fortress/Fortress Parts/Wall_LordRoom_Stair_R.prefab:1019",
+        "sourceGUID": "d792e15c3c2895d4daa70bfc04ab5509",
+        "instanceName": "vfx_Campfire (1)",
+        "evidence": "D:/Demiurgos/tests/physics-validation/unity/fractured-missing-fortress-prefab.json",
+        "authority": "User: Vfx are never part of server content.",
+        "decisionEvidence": "D:/Demiurgos/tests/physics-validation/unity/fortress-vfx-scope-decision-20261112.json",
+        "prefabInstanceFileID": "4287085134066881779",
+        "strippedTransformFileID": "4282982801080943723",
+        "scope": "This exact missing VFX source is explicitly excluded from server content by user authority and is not a fortress blocker. Qualification must record the exact exclusion and original/filtered input hashes; the generic missing-prefab guard remains unchanged. Other required fortress geometry and full assembly remain unqualified. The original repository remains read-only."
+      },
+      "status": "not-qualified"
+    }
+  },
+  "qualification": {
+    "workspace": "D:/Demiurgos/tests/physics-validation",
+    "representativeContentScopeDecision": {
+      "date": "2026-11-12",
+      "authority": "User clarified that the DeliveryPoint placement collider is obsolete and that every collision does not need testing.",
+      "required": ["representative backend behavior", "unchanged query accuracy", "retained workload counts, cadence and latency gates"],
+      "excluded": ["obsolete DeliveryPoint placement collider", "exhaustive catalog/collision parity", "further missing-asset searches for catalog completion"],
+      "obsoleteCollider": {"catalog": "building-9", "sourceGUID": "8e6893db986fbca4ab45e54fa178fa67", "componentFileID": "6406460348347202773", "missingMeshGUID": "a308754dd72631b49b56290e70ae2de0"},
+      "evidence": "D:/Demiurgos/tests/physics-validation/catalog/20261112-01/scope-decision.json",
+      "policy": "Preserve completed captures and strict mismatches as diagnostics; stop exhaustive reruns and do not fabricate geometry. Investigate a substantive representative mismatch when it may reveal a general backend bug. The obsolete asset is not a qualification blocker."
+    },
+    "deliveryValidationScopeDecision": {
+      "date": "2026-11-12",
+      "authority": "User: Yes keep only the first 4 tests and exclude the last two, as you recommended.",
+      "orderedRequired": [
+        "Focused collision regressions: fast impacts, thin pushed object against a wall, motor movement and physical conservation",
+        "One final relevant engine integration regression run: movement/navigation, contacts, geometry changes, checkpoint/restart and existing collision compatibility",
+        "One short full-size Windows x64 workload with the retained population/query/geometry counts and 50ms full-tick p99 gate",
+        "Linux x64 smoke: build, simulate, save and restore"
+      ],
+      "excluded": ["extended race and geometry/joint/mass/concurrency test matrices", "two-hour churn/restart soak", "duplicate full-size Linux performance run"],
+      "previousSoakSeconds": 7200,
+      "policy": "Preserve completed evidence, reuse captured Unity references, and rerun only checks affected by final code changes. Report this reduced delivery scope explicitly; do not claim excluded long-duration or full-platform performance qualification."
+    },
+    "frontendScopeDecision": {
+      "date": "2026-11-12",
+      "authority": "User: Ebiten is a front-end integration; this work is backend physics qualification.",
+      "excluded": ["Ebiten graphical client build/tests and graphics prerequisites"],
+      "historicalResult": "D:/Demiurgos/tests/physics-validation/linux/cadence-native-tests-20261112-02/manifest.json",
+      "cancelledSupplement": "D:/Demiurgos/tests/physics-validation/linux/cadence-native-ebiten-supplement-20261112-01/cancelled-by-scope-decision.json",
+      "policy": "Preserve the historical missing-GL-header failure and prerequisite evidence. The supplemental check was stopped before tests; no graphical pass is claimed. Future native physics qualification omits the graphical client lane and retains CGO_ENABLED=0 for backend checks."
+    },
+    "unityEditorScopeDecision": {
+      "date": "2026-11-12",
+      "authority": "User explicitly excluded Unity 2021.3 compatibility testing and requested cancellation and cleanup of that prerequisite.",
+      "requiredEditor": "6000.3.13f1",
+      "excluded": ["2021.3"],
+      "evidence": "D:/Demiurgos/tests/physics-validation/unity2021/install/cancelled-by-scope-decision.json",
+      "policy": "Retain historical Unity results and the package's declared version separately; this physics qualification does not establish compatibility with excluded Editors."
+    },
+    "platforms": ["windows/amd64", "linux/amd64"],
+    "platformScopeDecision": {
+      "date": "2026-11-12",
+      "authority": "User: reuse the native Linux ARM64 host used for navmesh if one was used; otherwise skip ARM64 and test only x64.",
+      "navigationAudit": "Saved navmesh final evidence records Linux AMD64 execution via WSL, ARM64 compilation only, and configured-but-unexecuted native ARM64 CI.",
+      "excluded": ["linux/arm64-native"],
+      "evidence": [
+        "D:/Demiurgos/tests/navmesh-validation/final-library-results.json:877",
+        "D:/Demiurgos/tests/navmesh-validation/windows/golem-engine/manifest.json:951",
+        "C:/Demiurgos/navmesh-validation/world-test/runs/final-qualification-181226-20261111T233727Z/manifest.json:8"
+      ]
+    },
+    "tickRate": 20,
+    "substeps": 4,
+    "movingCharacters": 1000,
+    "awakeDynamicBodies": 1000,
+    "concurrentSweptProjectiles": 500,
+    "staticColliderInstances": 100000,
+    "staticTriangles": 5000000,
+    "additionalGameplayQueriesPerTick": 10000,
+    "fullTickP99MillisecondsExclusive": 50,
+    "soakSeconds": 0,
+    "hitPointErrorMetres": 0.001,
+    "distanceAndPenetrationErrorMetres": 0.0001,
+    "missingOrUnsupportedGate": "fail",
+    "selectedDeliveryEvidence": {
+      "report": "D:/Demiurgos/tests/physics-validation/runs/final-four-gates-summary-20261112-06.json",
+      "sourceManifestSHA256": "42c8f2e7e7980f2d386fb45e27c3c6ea4f41aac6d11655a22fa06c7e88fd97b1",
+      "engineCommit": "32d211fb7edf3880d2829d47cb0d1db8a7d77610",
+      "forkCommit": "8a6d2ef383d0426902390f15b4544074295dbc2b",
+      "buildTags": ["box3d_simd", "box3d_noassert"],
+      "focusedCollision": "pass",
+      "engineIntegration": "pass, including thirteen saved Unity simulation cases",
+      "windowsCapacity": "fail: full-tick p99 92.1ms; eleven ticks have 998 moving characters",
+      "linuxSmoke": "pass: native x64 CGO-disabled build, simulation, save and fresh-process restore",
+      "publishedResolution": false,
+      "workstreamComplete": false
+    },
+    "qualificationStatus": "not-yet-qualified"
+  }
+}
+

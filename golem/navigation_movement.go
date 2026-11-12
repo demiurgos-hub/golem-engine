@@ -13,7 +13,7 @@ func (n *navigationService) advanceAgent(a *navigationAgent, dt float64) {
 		n.failAgent(a, surface.InvalidInput, errors.New("golem: invalid navigation entity position"))
 		return
 	}
-	if !a.state.HasDestination {
+	if !a.state.HasDestination && !a.config.StagedPhysics {
 		return
 	}
 	safety := n.agentSafety(a)
@@ -75,6 +75,9 @@ func (n *navigationService) advanceAgent(a *navigationAgent, dt float64) {
 			}
 		}
 	}
+	if !a.state.HasDestination {
+		return
+	}
 	if a.admissionPending && !a.quarantined {
 		if navDistance(position, a.lastPosition) > .01 {
 			// External displacement while waiting invalidates the search origin.
@@ -89,6 +92,12 @@ func (n *navigationService) advanceAgent(a *navigationAgent, dt float64) {
 	}
 	if a.needsPath && !a.requesting {
 		n.requestPath(a, position)
+	}
+	if a.config.StagedPhysics {
+		if n.frame != nil {
+			n.frame.stage(a, position, dt)
+		}
+		return
 	}
 	if a.state.Mode == NavigationTraversing {
 		n.advanceTraversal(a, dt, writer)
@@ -299,7 +308,7 @@ func (n *navigationService) reconcile() {
 	}
 	for _, id := range n.moved {
 		a := n.agents[id]
-		if a == nil || a.state.Mode != NavigationFollowing && a.state.Mode != NavigationTraversing || a.view == nil {
+		if a == nil || a.config.StagedPhysics || a.state.Mode != NavigationFollowing && a.state.Mode != NavigationTraversing || a.view == nil {
 			continue
 		}
 		position, _, ok := n.position(id)

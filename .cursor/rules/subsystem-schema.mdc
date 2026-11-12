@@ -1,10 +1,12 @@
 ---
-description: schema — YAML loading, resolved scalar/collection/payload/catalog metadata, protocol layouts, legacy template DTOs, and naming helpers.
+description: schema — YAML loading, resolved scalar/collection/payload/catalog and opt-in physics binding metadata, protocol layouts, legacy template DTOs, and naming helpers.
 globs: schema/**/*.go
 alwaysApply: false
 ---
 
 # `schema`
+
+Entity variables may explicitly opt into `physics: orientation_x/y/z/w`, `velocity_x/y/z`, `angular_velocity_x/y/z`, or `active`. `ResolvePhysicsBindings` owns role/type/group/name validation and produces read-only `PhysicsBindingData`: dimensions 3, writable tick scalars (`float` / Go float32; `active` bool), complete quaternion and both complete velocity groups, no legacy collider, duplicate roles, reserved metadata or generated writer conflicts. Names/tags remain authored ordinary vars; no implicit orientation/velocity/activation fields are added. Preserve owner visibility, dirty-bit indices, position encoding and the existing fingerprint preimage. Once fields have no setters and cannot bind changing physics state.
 
 Schema resolution owns shared policy. `LookupScalar` returns scalar metadata by value; `CollectionInfo` resolves element/key identities and native types once, with the existing entity scalar-first versus world custom-first precedence. Catalogs explicitly resolve their declared custom type and optional key into `CatalogInfo`; `ValidateCatalogFile` separately validates raw YAML entries without coercion. Flat DTO fields remain compatibility projections (including empty collection `ProtoType` values used by fingerprints).
 

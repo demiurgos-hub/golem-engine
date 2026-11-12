@@ -1,10 +1,23 @@
 ---
-description: golem/snapshot — non-blocking entity snapshot save/load with binary-compatibility fingerprint validation.
-globs: golem/snapshot/**/*.go, golem/snapshot_api.go
+description: golem/snapshot — entity snapshot compatibility, versioned portable/paired physics checkpoints, stable reconstruction and timed-intent recovery boundaries.
+globs:
+  - golem/snapshot/**/*.go
+  - golem/snapshot_api.go
+  - golem/physics_checkpoint*.go
+  - golem/physics_recovery*.go
+  - golem/physics_trajectory_checkpoint*.go
+  - golem/physics3d/checkpoint*.go
+  - golem/physics3d/box3d/checkpoint*.go
 alwaysApply: false
 ---
 
 # `golem/snapshot`
+
+Portable physics payloads use `CheckpointVersion = 2`, retaining fixed native solver configuration (`Substeps`, `SolverVelocityIterations`, `SolverRelaxIterations`; defaults 4, 1, 1 at 20 Hz). The paired root `PhysicsCheckpoint` envelope remains version 1. Check embedded physical versions before strict full decoding so old refinement fields produce an explicit unsupported-version/state-migration error, not silent default substitution. Captured controller/body policy and pending forces remain part of stable-ID reconstruction. This migration does not change entity-only binary snapshot version 1, schema fingerprints, portable authoring source v1 or the independently versioned debug format.
+
+Pending physics/navigation edits require separate accepted and desired captures. `PhysicsCheckpoint.PendingWorld` preserves stable pending change metadata, including physical activation already performed under quarantine. Default restoration rejects it without an exact-identity private `PreparedPhysicsRecovery` pair; never substitute the desired navigation capture for accepted geometry silently. Host source reconstruction migrates dynamic state by stable IDs; root validates binding/lease identities and keeps readiness closed through publication or coherent retry.
+
+Entity-only snapshot behavior remains separate from root `PhysicsCheckpoint`. The latter captures all authoritative entities together with physical state, source ownership and navigation intents; it writes hashed data then the manifest, reconstructs private candidates before publication and uses hook-free registry replacement. Do not route paired recovery through `LoadSnapshot` or ordinary `CreateEntity` spawn effects. Hosts must stop connection acceptance and gameplay for the whole recovery operation; explicit recovery hooks rebuild ephemeral membership after readiness.
 
 **Non-blocking entity snapshot save and load.** `Save(entities []registry.Entity, fingerprint, path string) <-chan error` iterates entities, skips those where `IsPersistent()` returns false (via the `Persister` interface), calls authoritative `FullUpdate()` on each survivor (owner-only vars are included; public replication redaction does not apply), encodes a binary file in memory, then writes atomically via a `.tmp` rename—all in a background goroutine; the channel receives exactly one value (nil or error). `Load(path, expectedFingerprint string) ([]Record, error)` validates magic bytes (`Golem\x01`), file format version (`uint32 = 1`), and the stored schema fingerprint; returns `ErrFingerprintMismatch` (sentinel error) when the fingerprint differs so callers can fail fast before touching entity state. `Record` holds `EntityID int64`, `TypeName string`, and `StateData []byte` (raw `FullUpdate()` bytes, proto-encoded `*XState`). Visibility attributes do not affect the schema fingerprint.
 

@@ -1,23 +1,53 @@
 ---
-description: bake pipeline — schema/code generation, explicit navigation geometry and prepared-source ownership, qualification tool separation, integration output selection, codec compatibility and consumer checks.
+description: bake pipeline — schema/code generation, portable navigation/physics source ownership, physics diagnostic/recovery boundaries, frozen Unity query/simulation qualification and codec compatibility.
 globs:
   - schema/**/*.go
   - codegen/**/*.go
   - codegen/**/*.tmpl
   - golem/nav/navmesh/navbuild/**/*.go
   - golem/nav/navmesh/cmd/golem-nav-bake/**/*.go
+  - golem/physics3d/content/**/*.go
+  - golem/physics3d/box3d/cook*.go
+  - golem/physics3d/box3d/dynamics_reference_test.go
   - examples/navigation-stress/**/*.go
+  - examples/physics-stress/**/*.go
   - qualification/**/*
+  - golem-unity/Editor/Scribe/GolemPhysics*.cs
+  - golem-unity/Tests/Editor/GolemPhysicsDynamicsFixture.cs
 alwaysApply: false
 ---
 
 # `bake` pipeline
+
+Unity dynamics qualification captures the initial saved portable source before applying recorded commands, hashes its exact bytes, and writes actual native simulation observations separately. The Go comparator consumes that source through the ordinary content loader and records its own frozen-source manifest identity. Source export, backend cooking, query precision and simulation comparisons remain distinct gates; do not tune source geometry or query tolerances to match solver contact behavior.
+
+The physics stress consumer owns its synthetic door-change recipe and host checkpoint payload (route direction and projectile generations). It uses public coordinated geometry and paired recovery APIs; these qualification fixtures do not become game-world assembly policy. Preserve complete terminal measurement frames, even those crossing the requested duration. Checkpoint manifests remain the runtime's existing manifest-last format and are saved only after a coherent tick-side capture.
+
+`qualification/Run-PhysicsIntegration.ps1` reuses a committed stress source capture, verifies its files before/after the selected backend integration checks, and replays the saved thirteen-case Unity dynamics capture without starting Unity. Derive SIMD and optional `box3d_noassert` build tags from the frozen runner; Linux smoke must request the same settings explicitly. `qualification/physics/four_gates.py` only reads evidence for the selected focused collision, engine integration, short full-size Windows capacity, and native Linux build/simulate/save/restore gates. Require the exact source-manifest identity and build settings throughout, preserve missing/failed gates and the strict full-tick p99 below 50 ms requirement, and keep timing-isolation evidence separate. These helpers do not add extended matrices, a two-hour soak, ARM64, Unity2021, Ebiten/graphics or published-dependency resolution claims. Save every new report under the physics validation workspace without overwriting prior evidence.
+
+`qualification/physics/filter_prefab.py` is a copied-fixture boundary, never a production exporter fallback. An authorized server-content exclusion must pin the original asset hash, source GUID and exact nested instance/transform IDs, preserve unrelated bytes and variant removals, and reject remaining references to excluded objects. Emit original/filtered hashes and scope evidence under the validation workspace. The production missing-prefab guard stays unchanged; visual-sounding names do not authorize omission.
+
+Physics debug captures are a separate bounded visualization format, not authoring exports or backend cooking images. Debug version 2 records fixed native solver settings and targeted moving-pair CCD work; the Go/Unity readers explicitly reject version 1 and require regeneration. Portable physical checkpoints also use version 2 with explicit state migration for old refinement settings, while their paired root envelope remains version 1. Neither changes portable authoring source v1, its ownership signature, entity wire codecs or schema fingerprints. The optional `physics-debug` sample CLI and Unity Scene-view reader do not run `golem-bake`, alter Scribe manifests, or publish scene state.
+
+Offline sphere-witness analysis consumes frozen geometry/query fixtures and optional captured observations. Its independent analytic roots use higher precision solely as a qualification reference for authored float32 inputs. Preserve raw Unity comparisons and numerical conventions separately; generated reports belong in the physics validation workspace and are not portable source or cooked artifacts.
+
+Runtime physics checkpoint restoration rebinds portable source leases by their exact source/settings fingerprint and stable object identities. This preserves authored ownership separately from live pose/velocity state and native cooking artifacts. Source lease bounds include current physical transforms during replacement; navigation bake clearance remains a host quarantine obligation. These recovery/publication APIs do not change `golem-bake` output or Scribe manifest ownership.
+
+Optional entity-var `physics:` metadata binds ordinary explicit scalar fields to accepted server physics state. Trace these tags through schema resolution, Go writer generation and Scribe attributes; retain identical protobuf/JS/C# codecs and snapshot fingerprints with or without binding metadata. All build outputs and consumer caches for this workstream stay under the physics validation workspace. `qualification/PhysicsUnity.ps1` owns repeatable staged Unity fixture setup and reference capture; it never edits a game repository or installs an Editor implicitly.
+
+Portable physics source is a separate versioned JSON authoring contract, not entity/world YAML or native backend cooking. Unity captures resolved body-local geometry and metadata; the Go physics content layer validates/cooks it separately. Keep the Scribe exact ownership signature and manifest-last source transaction intact. Canonical small cross-language JSON fixtures are committed; generated Unity projects, observations and caches remain under `D:/Demiurgos/tests/physics-validation`.
+
+Physics mesh authoring reads Editor-only mesh snapshots without rewriting ModelImporter Read/Write settings. Exact source/importer hashes distinguish original-content qualification from historical diagnostic copies with explicit readability overrides. Keep that source-access policy separate from navigation's existing export prerequisites and backend cooking limits.
+
+Physics `content.Prepared` owns bounded immutable source/policy captures and transactional world construction. Backend-specific `box3d.CookShape` owns private hull/BVH acceleration and versioned native-image artifacts. These APIs are independent of `golem-bake` and footprint v1. Hash portable source, explicit conversion/cooking settings and backend snapshot separately; no local workspace override or dirty-source test qualifies published dependency resolution.
 
 `golem-bake` remains the schema/code-generation CLI. Explicit server navigation geometry is processed by the separate navmesh adapter module's `navbuild` package and `golem-nav-bake` command, which delegate pure-Go baking to navmesh-go. Its bounded `{Generator?, Scene, Config}` JSON is not entity/world schema YAML and is not inferred from collision footprints. Do not add a native navigation build subprocess to codegen. Optional Scribe export is authoring-only; preserve its managed artifact planning and transaction ownership.
 
 Navigation's `bake.PreparedSource` is an opaque immutable geometry capture bound to exact origin bits and strictness. It owns resolved data and a lazy, concurrency-safe spatial index; repeated builds still validate configuration, precision, limits and artifacts. Dynamic worlds publish the desired source/capsule/revision coherently, while workers retain their captured source through completion. Returned diagnostics and link/profile arrays must remain independently owned. Account for retained source/index memory separately from managed snapshots; neither snapshots nor prepared source captures may keep the other alive. These navigation captures are distinct from schema/codegen resolution and do not change CLI artifact ownership.
 
 Reusable qualification geometry is generated by navmesh-go, with the actual server workload in the separate `examples/navigation-stress` module. Qualification scripts stage source copies and candidate archives under the validation workspace. Generated large worlds, executables, caches and measurements are evidence, not schema/codegen inputs or committed fixtures; canonical small configuration and authoring fixtures remain ordinary Git files.
+
+The separate `examples/physics-stress` consumer constructs deterministic synthetic combined-load geometry and bakes its matching plane through navmesh-go. Its full resident triangle count is unique cooked geometry, not multiplied instance counts. Keep its fixed full workloads and explicit reduced diagnostics distinct; both scene hashes and exact source snapshots belong with generated evidence. Record native solver pass settings, actual interval/call counts and targeted `CCDCandidatePairs`/`CCDPairTests`/`CCDPredictiveContacts` in per-tick samples and measured attempted-frame totals. Predictive manifolds are not gameplay contact events, and old global-guard counters cannot stand in for this work. Source-only/native-stepping audit variants and focused tests remain diagnostic; full workload/platform/release qualification is incomplete. Preserve the independent existing navigation qualification gates.
 
 When a schema-driven feature changes, trace it through schema loading, validation, template DTOs, proto generation, Go generation, JS generation, and any affected templates.
 

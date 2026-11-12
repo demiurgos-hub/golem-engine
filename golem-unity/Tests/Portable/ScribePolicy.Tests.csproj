@@ -20,11 +20,14 @@
     <Compile Include="../../Editor/Scribe/GolemScribeConstants.cs" />
     <Compile Include="../../Editor/Scribe/GolemYamlWriter.cs" />
     <Compile Include="../../Editor/Scribe/GolemNavigationDocument.cs" />
+    <Compile Include="../../Editor/Scribe/GolemPhysicsDocument.cs" />
+    <Compile Include="../Editor/GolemPhysicsDocumentTests.cs" />
     <Compile Include="../Editor/GolemNavigationDocumentTests.cs" />
     <Compile Include="../Editor/GolemScribeManifestTests.cs" />
     <Compile Include="../Editor/GolemYamlWriterTests.cs" />
     <Compile Include="../Editor/GolemScribeArtifactPlanTests.cs" />
     <Compile Include="../Editor/GolemBakeCommandTests.cs" />
     <None Include="../../../golem/nav/navmesh/navbuild/testdata/scribe-source.json" Link="scribe-source.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../Fixtures/physics-source.json" Link="physics-source.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
