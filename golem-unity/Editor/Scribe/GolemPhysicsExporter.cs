@@ -138,8 +138,7 @@ namespace GolemEngine.Unity.Editor
             source.Bodies = bodies.Values.ToArray(); source.Materials = materials.Values.ToArray(); source.Colliders = colliders.ToArray(); source.Assets = assets.ToArray();
             source.Joints = world.GetComponentsInChildren<Joint>(true).Where(j => j.GetComponentInParent<GolemPhysicsWorld>(true) == world)
                 .Select(j => GolemPhysicsJointCapture.Capture(j, world)).ToArray();
-            GolemPhysicsDocument.Validate(source);
-            return source;
+            return GolemPhysicsDocument.Normalize(source);
         }
 
         private static PhysicsBody CaptureBody(string id, Transform transform, Rigidbody body, GolemPhysicsWorld world)

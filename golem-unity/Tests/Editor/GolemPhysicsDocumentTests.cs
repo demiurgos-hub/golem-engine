@@ -58,6 +58,42 @@ namespace GolemEngine.Unity.Editor.Tests
         }
 
         [Test]
+        public void ZeroAreaNormalizationRetainsOrdinalsAndExactInputHash()
+        {
+            var source = Fixture(); source.Bodies[0].Kind = "static"; source.Colliders[0].Shape = "mesh"; source.Colliders[0].AssetID = "mesh";
+            source.Assets = new[] { new PhysicsAsset { ID = "mesh", SourceID = "original",
+                Vertices = new[] { new PhysicsVector(), new PhysicsVector(1), new PhysicsVector(0, 0, 1), new PhysicsVector(2), new PhysicsVector(0, 0, 0.000000000001f) },
+                Indices = new uint[] { 0, 1, 1, 0, 2, 1, 0, 1, 3, 0, 4, 1 }
+            } };
+            var original = source.Assets[0].Indices.ToArray();
+            Assert.Throws<InvalidOperationException>(() => GolemPhysicsDocument.Validate(source));
+            var normalized = GolemPhysicsDocument.Normalize(source);
+            Assert.That(normalized.Assets[0].Indices, Is.EqualTo(new uint[] { 0, 2, 1, 0, 4, 1 }));
+            Assert.That(source.Assets[0].Indices, Is.EqualTo(original));
+            Assert.That(source.Colliders[0].Metadata, Is.Empty);
+            var metadata = normalized.Colliders[0].Metadata.ToDictionary(p => p.Key, p => p.Value);
+            Assert.That(metadata[GolemPhysicsDocument.NormalizationPrefix + "removedTriangleOrdinals"], Is.EqualTo("0,2"));
+            Assert.That(metadata[GolemPhysicsDocument.NormalizationPrefix + "originalTriangleCount"], Is.EqualTo("4"));
+            var hash = metadata[GolemPhysicsDocument.NormalizationPrefix + "originalGeometrySHA256"];
+            Assert.That(hash, Does.Match("^[0-9a-f]{64}$"));
+            Assert.That(GolemPhysicsDocument.Build(normalized), Is.EqualTo(GolemPhysicsDocument.Build(source)));
+            source.Assets[0].Indices[1] = 0;
+            var changed = GolemPhysicsDocument.Normalize(source).Colliders[0].Metadata.Single(p => p.Key.EndsWith("originalGeometrySHA256", StringComparison.Ordinal)).Value;
+            Assert.That(changed, Is.Not.EqualTo(hash));
+        }
+
+        [Test]
+        public void ZeroAreaNormalizationRejectsEmptySurfaceAndConflictingProvenance()
+        {
+            var source = Fixture(); source.Bodies[0].Kind = "static"; source.Colliders[0].Shape = "mesh"; source.Colliders[0].AssetID = "mesh";
+            source.Assets = new[] { new PhysicsAsset { ID = "mesh", Vertices = new[] { new PhysicsVector(), new PhysicsVector(1), new PhysicsVector(0, 0, 1) }, Indices = new uint[] { 0, 1, 1 } } };
+            Assert.Throws<InvalidOperationException>(() => GolemPhysicsDocument.Normalize(source));
+            source.Assets[0].Indices = new uint[] { 0, 1, 1, 0, 2, 1 };
+            source.Colliders[0].Metadata = new[] { new PhysicsProperty { Key = GolemPhysicsDocument.NormalizationPrefix + "originalTriangleCount", Value = "wrong" } };
+            Assert.Throws<InvalidOperationException>(() => GolemPhysicsDocument.Normalize(source));
+        }
+
+        [Test]
         public void PhysicsSourceTransactionPreservesOtherWorldAndRollsBackOnFailure()
         {
             var root = Path.Combine(Path.GetTempPath(), "golem-physics-transaction-" + Guid.NewGuid().ToString("N"));

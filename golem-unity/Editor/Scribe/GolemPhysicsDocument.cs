@@ -2,8 +2,12 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
+using System.Numerics;
 using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace GolemEngine.Unity.Editor
@@ -97,7 +101,7 @@ namespace GolemEngine.Unity.Editor
 
         internal static string Build(PhysicsSource source)
         {
-            Validate(source);
+            source = Normalize(source);
             var ordered = new PhysicsSource
             {
                 Version = source.Version, WorldID = source.WorldID, Revision = source.Revision, CoordinateLimit = source.CoordinateLimit,
@@ -128,7 +132,96 @@ namespace GolemEngine.Unity.Editor
             Axis = x.Axis, ContactOffset = x.ContactOffset, Character = x.Character, Metadata = x.Metadata.OrderBy(p => p.Key, StringComparer.Ordinal).ToArray()
         };
 
-        internal static void Validate(PhysicsSource source)
+        internal const string NormalizationPrefix = "golem.physics.zeroAreaNormalization.v1.";
+
+        // Pure source normalization: only exact zero-area faces have no oriented
+        // collision surface. Preserve every nonzero face, without an epsilon or
+        // vertex welding, and retain the original ordinal map and geometry hash.
+        internal static PhysicsSource Normalize(PhysicsSource source)
+        {
+            ValidateCore(source, true);
+            var replacements = new Dictionary<string, PhysicsAsset>(StringComparer.Ordinal);
+            var records = new Dictionary<string, PhysicsProperty[]>(StringComparer.Ordinal);
+            foreach (var asset in source.Assets)
+            {
+                var removed = new List<int>();
+                for (var i = 0; i < asset.Indices.Length; i += 3)
+                    if (ExactZeroArea(asset.Vertices[asset.Indices[i]], asset.Vertices[asset.Indices[i + 1]], asset.Vertices[asset.Indices[i + 2]])) removed.Add(i / 3);
+                if (removed.Count == 0) continue;
+                Require(removed.Count < asset.Indices.Length / 3, "Geometry contains only zero-area triangles: " + asset.ID);
+                var retained = new uint[asset.Indices.Length - 3 * removed.Count];
+                var nextRemoved = 0; var target = 0;
+                for (var i = 0; i < asset.Indices.Length; i += 3)
+                {
+                    if (nextRemoved < removed.Count && removed[nextRemoved] == i / 3) { nextRemoved++; continue; }
+                    Array.Copy(asset.Indices, i, retained, target, 3); target += 3;
+                }
+                replacements.Add(asset.ID, new PhysicsAsset { ID = asset.ID, SourceID = asset.SourceID, Vertices = asset.Vertices, Indices = retained });
+                records.Add(asset.ID, new[] {
+                    new PhysicsProperty { Key = NormalizationPrefix + "originalGeometrySHA256", Value = OriginalGeometryHash(asset) },
+                    new PhysicsProperty { Key = NormalizationPrefix + "originalTriangleCount", Value = (asset.Indices.Length / 3).ToString(CultureInfo.InvariantCulture) },
+                    new PhysicsProperty { Key = NormalizationPrefix + "removedTriangleOrdinals", Value = string.Join(",", removed.Select(x => x.ToString(CultureInfo.InvariantCulture))) }
+                });
+            }
+            if (replacements.Count == 0) return source;
+            var result = new PhysicsSource {
+                Version = source.Version, WorldID = source.WorldID, Revision = source.Revision, CoordinateLimit = source.CoordinateLimit,
+                LayerCollisionMasks = source.LayerCollisionMasks, Bodies = source.Bodies, Materials = source.Materials, Joints = source.Joints,
+                Assets = source.Assets.Select(x => replacements.TryGetValue(x.ID, out var replacement) ? replacement : x).ToArray(),
+                Colliders = source.Colliders.Select(x => {
+                    if (!records.TryGetValue(x.AssetID, out var record)) return x;
+                    Require(!x.Metadata.Any(p => p.Key.StartsWith(NormalizationPrefix, StringComparison.Ordinal)), "Conflicting geometry normalization provenance: " + x.ID);
+                    var copy = CopyCollider(x); copy.Metadata = copy.Metadata.Concat(record).ToArray(); return copy;
+                }).ToArray()
+            };
+            ValidateCore(result, false);
+            return result;
+        }
+
+        [StructLayout(LayoutKind.Explicit)]
+        private struct FloatBits { [FieldOffset(0)] internal float Value; [FieldOffset(0)] internal uint Bits; }
+
+        // Every finite float32 is an integer multiple of 2^-149. Integer
+        // determinants classify zero area exactly, including cancellation and
+        // subnormals; this does not introduce double-precision geometry.
+        private static BigInteger ExactCoordinate(float value)
+        {
+            var bits = new FloatBits { Value = value }.Bits;
+            var exponent = (int)((bits >> 23) & 255);
+            var significand = new BigInteger(bits & 0x7fffff);
+            if (exponent != 0) significand = (significand + (1 << 23)) << (exponent - 1);
+            return (bits & 0x80000000) == 0 ? significand : -significand;
+        }
+
+        private static bool ExactZeroArea(PhysicsVector a, PhysicsVector b, PhysicsVector c)
+        {
+            var ax = ExactCoordinate(a.X); var ay = ExactCoordinate(a.Y); var az = ExactCoordinate(a.Z);
+            var ux = ExactCoordinate(b.X) - ax; var uy = ExactCoordinate(b.Y) - ay; var uz = ExactCoordinate(b.Z) - az;
+            var vx = ExactCoordinate(c.X) - ax; var vy = ExactCoordinate(c.Y) - ay; var vz = ExactCoordinate(c.Z) - az;
+            return uy * vz == uz * vy && uz * vx == ux * vz && ux * vy == uy * vx;
+        }
+
+        // Hash format: little-endian Int32 vertex count, original XYZ float32
+        // bits, Int32 index count, and original UInt32 indices in authored order.
+        private static string OriginalGeometryHash(PhysicsAsset asset)
+        {
+            var byteCount = checked(8 + 12 * asset.Vertices.Length + 4 * asset.Indices.Length);
+            using (var stream = new MemoryStream(byteCount))
+            {
+                using (var writer = new BinaryWriter(stream, Encoding.UTF8, true))
+                {
+                    writer.Write(asset.Vertices.Length);
+                    foreach (var vertex in asset.Vertices) { writer.Write(vertex.X); writer.Write(vertex.Y); writer.Write(vertex.Z); }
+                    writer.Write(asset.Indices.Length); foreach (var index in asset.Indices) writer.Write(index);
+                }
+                using (var sha = SHA256.Create())
+                    return string.Concat(sha.ComputeHash(stream.GetBuffer(), 0, checked((int)stream.Length)).Select(x => x.ToString("x2", CultureInfo.InvariantCulture)));
+            }
+        }
+
+        internal static void Validate(PhysicsSource source) => ValidateCore(source, false);
+
+        private static void ValidateCore(PhysicsSource source, bool allowZeroArea)
         {
             Require(source != null && source.Version == 1 && !string.IsNullOrWhiteSpace(source.WorldID) && source.Revision > 0, "Invalid physics source identity/version.");
             Require(source.CoordinateLimit == 4096, "Physics v1 requires a 4096-meter absolute coordinate envelope.");
@@ -159,9 +252,7 @@ namespace GolemEngine.Unity.Editor
                 for (var i = 0; i < asset.Indices.Length; i += 3)
                 {
                     var a = asset.Vertices[asset.Indices[i]]; var b = asset.Vertices[asset.Indices[i + 1]]; var c = asset.Vertices[asset.Indices[i + 2]];
-                    double ux = b.X - (double)a.X, uy = b.Y - (double)a.Y, uz = b.Z - (double)a.Z;
-                    double vx = c.X - (double)a.X, vy = c.Y - (double)a.Y, vz = c.Z - (double)a.Z;
-                    Require(uy * vz - uz * vy != 0 || uz * vx - ux * vz != 0 || ux * vy - uy * vx != 0, "Degenerate triangle: " + asset.ID);
+                    Require(allowZeroArea || !ExactZeroArea(a, b, c), "Degenerate triangle: " + asset.ID);
                 }
             }
             var materials = new HashSet<string>(StringComparer.Ordinal);

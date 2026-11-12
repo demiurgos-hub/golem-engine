@@ -12,11 +12,11 @@ import (
 )
 
 // CookVersion identifies backend artifact layout and cooking rules.
-const CookVersion = "golem-box3d-cook-v1"
+const CookVersion = "golem-box3d-cook-v2"
 
-// RequiredFork identifies the minimum query, joint and motion patch set.
+// RequiredFork identifies the minimum query, joint, motion and geometry patch set.
 // UpstreamCommit identifies the original library baseline separately.
-const RequiredFork = "0a964461990d7fd9f5e5cf9b904daa502559f430"
+const RequiredFork = "e9c120c2ebefd1293e5b6da3954ce9d964054ca1"
 
 // CookSettings bounds source expansion and backend image retention. Edge identity
 // must be enabled so coplanar mesh seams are not treated as physical walls.
@@ -54,8 +54,9 @@ type CookedShape struct {
 }
 
 // CookShape validates and cooks portable geometry without creating world objects.
-// It never substitutes bounding boxes, drops triangles, or silently simplifies a
-// convex hull whose submitted point count exceeds the backend's exact limit.
+// It preserves every nonzero-area triangle and constructs unreduced convex
+// hulls. Native hull limits apply to topology, not the submitted point count;
+// exceeding those limits is an error, never implicit simplification.
 func CookShape(source p.ShapeDesc, settings CookSettings) (*CookedShape, error) {
 	if err := source.Validate(); err != nil {
 		return nil, err
@@ -92,13 +93,11 @@ func CookShape(source p.ShapeDesc, settings CookSettings) (*CookedShape, error) 
 			hull := b.MakeBoxHull(shape.HalfExtents.X, shape.HalfExtents.Y, shape.HalfExtents.Z)
 			leaf.hull = b.CloneHull(&hull.Base)
 		case p.Convex:
-			if len(shape.Vertices) > b.MaxHullVertices {
-				return fmt.Errorf("%w: convex source exceeds %d exact hull vertices", p.ErrUnsupported, b.MaxHullVertices)
-			}
 			points := backendVertices(shape.Vertices, p.Identity())
-			leaf.hull = b.CreateHull(points, len(points), len(points))
+			points = uniqueHullPoints(points)
+			leaf.hull = b.CreateHullUnreduced(points, len(points))
 			if leaf.hull == nil {
-				return fmt.Errorf("%w: convex cooking failed", p.ErrInvalid)
+				return fmt.Errorf("%w: unreduced convex cooking failed (%d unique input points; native limits %d vertices/%d faces/%d edges)", p.ErrUnsupported, len(points), b.MaxHullVertices, b.MaxHullFaces, b.MaxHullEdges)
 			}
 		case p.TriangleMesh:
 			var err error
@@ -153,6 +152,18 @@ func backendVertices(vertices []p.Vec3, pose p.Pose) []b.Vec3 {
 	return points
 }
 
+func uniqueHullPoints(points []b.Vec3) []b.Vec3 {
+	seen := make(map[b.Vec3]struct{}, len(points))
+	unique := points[:0]
+	for _, point := range points {
+		if _, exists := seen[point]; !exists {
+			seen[point] = struct{}{}
+			unique = append(unique, point)
+		}
+	}
+	return unique
+}
+
 func cookMesh(shape p.ShapeDesc, pose p.Pose) (*b.MeshData, error) {
 	points := backendVertices(shape.Vertices, pose)
 	indices := make([]int32, len(shape.Indices))
@@ -160,7 +171,7 @@ func cookMesh(shape p.ShapeDesc, pose p.Pose) (*b.MeshData, error) {
 		indices[i] = int32(index)
 	}
 	d := b.MeshDef{Vertices: points, Indices: indices, VertexCount: int32(len(points)), TriangleCount: int32(len(indices) / 3), IdentifyEdges: true}
-	mesh := b.CreateMesh(&d, nil)
+	mesh := b.CreateMeshPreserveSmallTriangles(&d, nil)
 	if mesh == nil || mesh.DegenerateCount != 0 || mesh.TriangleCount != d.TriangleCount {
 		return nil, fmt.Errorf("%w: triangle cooking changed geometry", p.ErrInvalid)
 	}

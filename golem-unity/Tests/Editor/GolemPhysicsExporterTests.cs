@@ -64,6 +64,31 @@ namespace GolemEngine.Unity.Editor.Tests
         }
 
         [Test]
+        public void CaptureNormalizesOnlyExactZeroAreaWithoutChangingMeshAsset()
+        {
+            var mesh = new Mesh { name = "Exact triangles" };
+            mesh.vertices = new[] { Vector3.zero, Vector3.right, Vector3.forward, new Vector3(0, 0, 0.0001f) };
+            var original = new[] { 0, 1, 1, 0, 2, 1, 0, 3, 1 };
+            mesh.triangles = original;
+            var path = folder + "/exact.asset";
+            AssetDatabase.CreateAsset(mesh, path);
+            var world = new GameObject("Physics").AddComponent<GolemPhysicsWorld>();
+            var collider = world.gameObject.AddComponent<MeshCollider>();
+            collider.sharedMesh = mesh;
+            Save();
+            var bytes = File.ReadAllBytes(path);
+
+            var source = GolemPhysicsExporter.Capture(world);
+            Assert.That(source.Assets.Single().Indices, Is.EqualTo(new uint[] { 0, 2, 1, 0, 3, 1 }));
+            var metadata = source.Colliders.Single().Metadata.ToDictionary(p => p.Key, p => p.Value);
+            Assert.That(metadata[GolemPhysicsDocument.NormalizationPrefix + "removedTriangleOrdinals"], Is.EqualTo("0"));
+            Assert.That(metadata[GolemPhysicsDocument.NormalizationPrefix + "originalTriangleCount"], Is.EqualTo("3"));
+            Assert.That(mesh.triangles, Is.EqualTo(original));
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes));
+            Assert.That(GolemPhysicsDocument.Build(source), Does.Contain("originalGeometrySHA256"));
+        }
+
+        [Test]
         public void CompoundCapturesBodyLocalPoseActivationAndColliderLocalMetadata()
         {
             var world = new GameObject("Physics").AddComponent<GolemPhysicsWorld>();
