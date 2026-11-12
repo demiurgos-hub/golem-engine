@@ -34,7 +34,11 @@ type PhysicsCheckpoint struct {
 	EntityCounter                   int64
 	Physics                         p.Checkpoint
 	DesiredPhysicsRevision          uint64
+	DesiredPhysicsFingerprint       string
 	DesiredPhysicsWorld             []byte
+	PendingWorld                    bool
+	PendingGeometry                 []PhysicsGeometryPending
+	AcceptedNavigation              *NavigationCheckpoint
 	Entities                        []PhysicsEntityCheckpoint
 	Attachments                     []PhysicsAttachmentCheckpoint
 	Navigation                      *NavigationCheckpoint
@@ -44,8 +48,9 @@ type PhysicsCheckpoint struct {
 
 // PhysicsGeometryCheckpoint records one source lease's ownership after recovery.
 type PhysicsGeometryCheckpoint struct {
-	Key    string
-	Source content.InstanceState
+	Key      string
+	Identity PhysicsGeometryIdentity
+	Source   content.InstanceState
 }
 
 // PhysicsEntityCheckpoint contains authoritative serialized entity state.
@@ -71,15 +76,24 @@ type PhysicsNavigationCheckpoint struct {
 
 // PhysicsCheckpointOptions supplies immutable desired-world source captures.
 // Navigation fields are required when the server has surface navigation.
+// With pending changes, supply the separately accepted navigation capture and
+// physics fingerprint as well; without them capture returns ErrBusy.
 type PhysicsCheckpointOptions struct {
 	ID, SchemaFingerprint, PhysicsFingerprint, NavigationFingerprint string
 	DesiredPhysicsRevision, DesiredNavigationRevision                uint64
 	DesiredPhysicsWorld, DesiredNavigationWorld                      []byte
+	// Pending changes require a separately captured accepted navigation world and
+	// physical fingerprint, so recovery never mistakes desired bytes for live state.
+	AcceptedPhysicsFingerprint, AcceptedNavigationFingerprint string
+	AcceptedNavigationRevision                                uint64
+	AcceptedNavigationWorld                                   []byte
 }
 
 // CapturePhysicsCheckpoint captures all entities and attached systems on the tick
 // goroutine outside frame callbacks. Queued commands must first drain, because
 // closures cannot be persisted. Direct body changes must already be synchronized.
+// Desired captures must describe the accepted world unless separate accepted
+// captures are supplied for a pending change; worker closures are never captured.
 func (s *Server) CapturePhysicsCheckpoint(options PhysicsCheckpointOptions) (PhysicsCheckpoint, error) {
 	ps := s.physics
 	if err := ps.mutable(); err != nil {
@@ -88,16 +102,30 @@ func (s *Server) CapturePhysicsCheckpoint(options PhysicsCheckpointOptions) (Phy
 	if len(ps.commands) != 0 || s.navigation != nil && s.navigation.frame != nil {
 		return PhysicsCheckpoint{}, p.ErrBusy
 	}
+	pending := s.physicsWorldPending()
+	if s.navigation != nil && (s.navigation.restoring || s.navigation.restoreErr != nil) {
+		return PhysicsCheckpoint{}, p.ErrBusy
+	}
+	if pending && (options.AcceptedPhysicsFingerprint == "" || options.AcceptedNavigationFingerprint == "" || options.AcceptedNavigationRevision == 0 || len(options.AcceptedNavigationWorld) == 0) {
+		return PhysicsCheckpoint{}, fmt.Errorf("%w: pending geometry requires separate accepted-world captures", p.ErrBusy)
+	}
+	if !pending && options.AcceptedPhysicsFingerprint != "" && options.AcceptedPhysicsFingerprint != options.PhysicsFingerprint {
+		return PhysicsCheckpoint{}, p.ErrInvalid
+	}
 	backend, ok := ps.world.(p.CheckpointWorld)
 	if !ok {
 		return PhysicsCheckpoint{}, p.ErrUnsupported
 	}
-	physical, err := backend.CaptureCheckpoint(options.ID, options.PhysicsFingerprint)
+	physicalFingerprint := options.PhysicsFingerprint
+	if options.AcceptedPhysicsFingerprint != "" {
+		physicalFingerprint = options.AcceptedPhysicsFingerprint
+	}
+	physical, err := backend.CaptureCheckpoint(options.ID, physicalFingerprint)
 	if err != nil {
 		return PhysicsCheckpoint{}, err
 	}
 	c := PhysicsCheckpoint{Version: 1, CheckpointID: options.ID, SchemaFingerprint: options.SchemaFingerprint, Tick: s.tick, EntityCounter: atomic.LoadInt64(&s.idCounter), Physics: physical,
-		DesiredPhysicsRevision: options.DesiredPhysicsRevision, DesiredPhysicsWorld: append([]byte(nil), options.DesiredPhysicsWorld...)}
+		DesiredPhysicsRevision: options.DesiredPhysicsRevision, DesiredPhysicsFingerprint: options.PhysicsFingerprint, DesiredPhysicsWorld: append([]byte(nil), options.DesiredPhysicsWorld...), PendingWorld: pending, PendingGeometry: s.PendingPhysicsGeometry()}
 	entities := s.reg.All()
 	sort.Slice(entities, func(i, j int) bool { return entities[i].EntityID() < entities[j].EntityID() })
 	for _, entity := range entities {
@@ -126,6 +154,13 @@ func (s *Server) CapturePhysicsCheckpoint(options PhysicsCheckpointOptions) (Phy
 			return PhysicsCheckpoint{}, e
 		}
 		c.Navigation = &navigation
+		if pending {
+			accepted, e := s.CaptureNavigationCheckpoint(options.ID, options.AcceptedNavigationFingerprint, options.AcceptedNavigationRevision, options.AcceptedNavigationWorld)
+			if e != nil {
+				return PhysicsCheckpoint{}, e
+			}
+			c.AcceptedNavigation = &accepted
+		}
 		for _, id := range n.order {
 			if a := n.agents[id]; a != nil {
 				c.NavigationAgents = append(c.NavigationAgents, PhysicsNavigationCheckpoint{EntityID: id, Profile: a.config.Profile, StagedPhysics: a.config.StagedPhysics})
@@ -137,7 +172,7 @@ func (s *Server) CapturePhysicsCheckpoint(options PhysicsCheckpointOptions) (Phy
 		if e != nil {
 			return PhysicsCheckpoint{}, e
 		}
-		c.Geometry = append(c.Geometry, PhysicsGeometryCheckpoint{Key: key, Source: state})
+		c.Geometry = append(c.Geometry, PhysicsGeometryCheckpoint{Key: key, Identity: ps.geometryIdentities[key], Source: state})
 	}
 	sort.Slice(c.Geometry, func(i, j int) bool { return c.Geometry[i].Key < c.Geometry[j].Key })
 	if err = c.Validate(); err != nil {
@@ -154,12 +189,34 @@ func (c PhysicsCheckpoint) Validate() error {
 	if err := c.Physics.Validate(); err != nil {
 		return err
 	}
+	if c.DesiredPhysicsFingerprint == "" || len(c.DesiredPhysicsFingerprint) > 4096 || len(c.Geometry) > 100000 || len(c.PendingGeometry) > 100000 {
+		return p.ErrInvalid
+	}
+	if c.PendingWorld {
+		if c.Navigation == nil || c.AcceptedNavigation == nil || c.AcceptedNavigation.CheckpointID != c.CheckpointID {
+			return p.ErrInvalid
+		}
+		if err := validateNavigationCheckpoint(*c.AcceptedNavigation); err != nil {
+			return err
+		}
+	} else if c.AcceptedNavigation != nil || len(c.PendingGeometry) != 0 {
+		return p.ErrInvalid
+	}
+	if !c.PendingWorld && c.Physics.SourceFingerprint != c.DesiredPhysicsFingerprint {
+		return p.ErrInvalid
+	}
+	if err := validatePendingPhysicsGeometry(c.PendingGeometry); err != nil {
+		return err
+	}
 	entities := map[int64]bool{}
 	geometryKeys := map[string]bool{}
 	geometryBytes := 0
 	for _, geometry := range c.Geometry {
 		geometryBytes += len(geometry.Source.Source)
 		if geometry.Key == "" || len(geometry.Key) > 4096 || geometryKeys[geometry.Key] || geometryBytes > 512<<20 {
+			return p.ErrInvalid
+		}
+		if geometry.Identity.Key != "" && (geometry.Identity.Key != geometry.Key || geometry.Identity.PhysicsFingerprint != geometry.Source.Fingerprint) {
 			return p.ErrInvalid
 		}
 		geometryKeys[geometry.Key] = true
@@ -252,11 +309,14 @@ func DecodePhysicsCheckpoint(data []byte) (PhysicsCheckpoint, error) {
 // policies. Factories prepare private data only, without registering entities,
 // changing world state or invoking spawn/remove hooks. PrepareNavigation must
 // return an atomic NavigationBuildResult for the captured desired navigation world.
+// PendingWorld checkpoints instead require PreparePendingWorld to reconstruct
+// matching desired physics and navigation privately from both captured states.
 type PhysicsRestoreOptions struct {
 	SchemaFingerprint, PhysicsFingerprint, NavigationFingerprint string
 	Entity                                                       func(snapshot.Record) (Entity, error)
 	NavigationConfig                                             func(PhysicsNavigationCheckpoint) (NavigationAgentConfig, error)
 	PrepareNavigation                                            func(NavigationCheckpoint) (NavigationBuildResult, error)
+	PreparePendingWorld                                          func(PhysicsCheckpoint) (PreparedPhysicsRecovery, error)
 }
 
 // PhysicsRestored is an optional explicit recovery hook, called after complete
@@ -284,14 +344,17 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 	if err = c.Validate(); err != nil {
 		return err
 	}
-	if options.Entity == nil || c.SchemaFingerprint != options.SchemaFingerprint || c.Physics.SourceFingerprint != options.PhysicsFingerprint {
+	if options.Entity == nil || c.SchemaFingerprint != options.SchemaFingerprint || c.DesiredPhysicsFingerprint != options.PhysicsFingerprint {
 		return errors.New("golem: physics checkpoint schema/source mismatch")
 	}
 	if (c.Navigation != nil) != (s.navigation != nil) {
 		return errors.New("golem: physics checkpoint navigation configuration mismatch")
 	}
-	if c.Navigation != nil && (c.Navigation.SourceFingerprint != options.NavigationFingerprint || options.NavigationConfig == nil || options.PrepareNavigation == nil) {
+	if c.Navigation != nil && (c.Navigation.SourceFingerprint != options.NavigationFingerprint || options.NavigationConfig == nil || !c.PendingWorld && options.PrepareNavigation == nil) {
 		return errors.New("golem: navigation restore configuration mismatch")
+	}
+	if c.PendingWorld && options.PreparePendingWorld == nil {
+		return errors.New("golem: pending geometry requires paired private physics/navigation reconstruction")
 	}
 	backend, ok := ps.world.(p.CheckpointWorld)
 	if !ok {
@@ -318,14 +381,37 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 			s.navigation.restoring = priorNavRestoring
 		}
 	}()
-	prepared, err := backend.PrepareRestore(c.Physics)
-	if err != nil {
-		return err
+	var prepared p.PreparedRestore
+	var navigation NavigationBuildResult
+	savedGeometry := c.Geometry
+	if c.PendingWorld {
+		pair, e := options.PreparePendingWorld(c)
+		if e != nil {
+			pair.Discard()
+			return e
+		}
+		if e = pair.validate(c); e != nil {
+			pair.Discard()
+			return e
+		}
+		prepared, navigation, savedGeometry = pair.Physics, pair.Navigation, pair.Geometry
+	} else {
+		prepared, err = backend.PrepareRestore(c.Physics)
+		if err != nil {
+			return err
+		}
 	}
 	defer prepared.Discard()
+	navigationCommitted := false
+	defer func() {
+		if navigation != nil && !navigationCommitted {
+			navigation.Discard()
+		}
+	}()
 	geometry := map[string]*content.Instance{}
+	geometryIdentities := map[string]PhysicsGeometryIdentity{}
 	geometryIDs := [4]map[p.ContentID]bool{{}, {}, {}, {}}
-	for _, saved := range c.Geometry {
+	for _, saved := range savedGeometry {
 		instance, e := content.RestoreInstance(ps.world, saved.Source, prepared)
 		if e != nil {
 			return e
@@ -340,6 +426,9 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 			}
 		}
 		geometry[saved.Key] = instance
+		if saved.Identity.Key != "" {
+			geometryIdentities[saved.Key] = saved.Identity
+		}
 	}
 	entities := make(map[int64]Entity, len(c.Entities))
 	entries := make([]registry.RestoreEntry, 0, len(c.Entities))
@@ -440,25 +529,20 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 			}
 		}
 	}
-	var navigation NavigationBuildResult
 	if c.Navigation != nil {
-		navigation, err = options.PrepareNavigation(*c.Navigation)
-		if err != nil {
-			return err
+		if navigation == nil {
+			navigation, err = options.PrepareNavigation(*c.Navigation)
+			if err != nil {
+				return err
+			}
 		}
 		if navigation == nil {
 			return p.ErrInvalid
 		}
-		committed := false
-		defer func() {
-			if !committed {
-				navigation.Discard()
-			}
-		}()
 		if err = navigation.Commit(); err != nil {
 			return err
 		}
-		committed = true
+		navigationCommitted = true
 		published = true
 	}
 	if err = prepared.Commit(); err != nil {
@@ -470,6 +554,11 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 	old := s.reg.All()
 	var callbacks []func()
 	if n := s.navigation; n != nil {
+		// Worker results were prepared against the replaced world. Invalidate every
+		// generation before readiness reopens, including completed queued results.
+		for key := range n.buildStates {
+			s.CancelNavigationBuild(key)
+		}
 		n.frameCallbacks = make([]func(), 0)
 		if err = s.BeginNavigationRestore(); err != nil {
 			return err
@@ -489,6 +578,7 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 	}
 	ps.agents, ps.bodies = agents, bodyOwners
 	ps.geometry = geometry
+	ps.geometryIdentities, ps.geometryPending = geometryIdentities, nil
 	s.tick = max(s.tick, c.Tick, c.Physics.LastFrame)
 	s.SetEntityIDCounter(max(maxID, c.EntityCounter, atomic.LoadInt64(&s.idCounter)))
 	s.interestMu.Lock()

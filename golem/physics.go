@@ -81,19 +81,21 @@ type physicsAttachment struct {
 }
 
 type physicsService struct {
-	server      *Server
-	world       p.World
-	agents      map[int64]*physicsAttachment
-	bodies      map[p.BodyHandle]int64
-	commands    []queuedPhysicsCommand
-	dispatching bool
-	stepping    bool
-	closed      bool
-	restoring   bool
-	fault       error
-	onContact   PhysicsContactFunc
-	observe     func(PhysicsFrameMetrics)
-	geometry    map[string]*content.Instance
+	server             *Server
+	world              p.World
+	agents             map[int64]*physicsAttachment
+	bodies             map[p.BodyHandle]int64
+	commands           []queuedPhysicsCommand
+	dispatching        bool
+	stepping           bool
+	closed             bool
+	restoring          bool
+	fault              error
+	onContact          PhysicsContactFunc
+	observe            func(PhysicsFrameMetrics)
+	geometry           map[string]*content.Instance
+	geometryIdentities map[string]PhysicsGeometryIdentity
+	geometryPending    map[string]PhysicsGeometryPending
 }
 
 // SetPhysicsWorld installs a tick-owned physics world before Run. The server
@@ -582,6 +584,7 @@ func (ps *physicsService) stop() {
 	ps.closed = true
 	ps.commands = nil
 	_ = ps.world.Close()
+	ps.geometry, ps.geometryIdentities, ps.geometryPending = nil, nil, nil
 }
 
 func validPhysicsState(state p.BodyState) bool {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/demiurgos-hub/golem-engine/golem/nav/surface"
@@ -313,5 +314,100 @@ func TestPhysicsCheckpointRejectsOverlappingRestoredSourceOwnership(t *testing.T
 	}
 	if got, _ := s.Get(1); got != old {
 		t.Fatal("ownership rejection changed live entities")
+	}
+}
+
+func TestPhysicsCheckpointPendingCaptureRequiresAcceptedStateAndRestoresDesiredPair(t *testing.T) {
+	s, w, old, _ := physicsCheckpointFixture(t)
+	s.navigation.buildStates["physics/wall"] = NavigationBuildState{Pending: true}
+	s.physics.geometryPending = map[string]PhysicsGeometryPending{"wall": {Identity: PhysicsGeometryIdentity{Key: "wall", PhysicsFingerprint: "wall-source", NavigationFingerprint: "nav-new", Revision: 2}, Profiles: []surface.ProfileID{"human"}, Bounds: NavigationTraversalBounds{Min: surface.Vec3{X: -1, Y: -1, Z: -1}, Max: surface.Vec3{X: 6, Y: 6, Z: 6}}, Activated: true}}
+	options := PhysicsCheckpointOptions{ID: "pending", SchemaFingerprint: "schema", PhysicsFingerprint: "physics-new", NavigationFingerprint: "nav-new", DesiredPhysicsRevision: 2, DesiredNavigationRevision: 2, DesiredPhysicsWorld: []byte(`{"wall":"new"}`), DesiredNavigationWorld: []byte(`{"nav":"new"}`)}
+	if _, err := s.CapturePhysicsCheckpoint(options); !errors.Is(err, p.ErrBusy) {
+		t.Fatalf("unpaired pending capture admitted: %v", err)
+	}
+	options.AcceptedPhysicsFingerprint, options.AcceptedNavigationFingerprint = "physics-accepted", "nav-accepted"
+	options.AcceptedNavigationRevision, options.AcceptedNavigationWorld = 1, []byte(`{"nav":"accepted"}`)
+	c, err := s.CapturePhysicsCheckpoint(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := EncodePhysicsCheckpoint(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err = DecodePhysicsCheckpoint(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.PendingWorld || c.Physics.SourceFingerprint != "physics-accepted" || c.DesiredPhysicsFingerprint != "physics-new" || c.AcceptedNavigation.SourceFingerprint != "nav-accepted" || len(c.PendingGeometry) != 1 || !c.PendingGeometry[0].Activated {
+		t.Fatal("accepted/desired captures or pending change identity were conflated")
+	}
+	restore := physicsCheckpointOptions(t, s, nil)
+	restore.PhysicsFingerprint, restore.NavigationFingerprint = "physics-new", "nav-new"
+	if err = s.RestorePhysicsCheckpoint(c, restore); err == nil || !strings.Contains(err.Error(), "paired private") {
+		t.Fatal("pending restore admitted an ordinary newer-nav/old-physics pair")
+	}
+	var published bool
+	restore.PreparePendingWorld = func(saved PhysicsCheckpoint) (PreparedPhysicsRecovery, error) {
+		if !s.physics.restoring || !s.navigation.restoring || saved.AcceptedNavigation.DesiredRevision != 1 {
+			t.Error("private pending reconstruction lost accepted state/barrier")
+		}
+		desired := saved.Physics
+		desired.SourceFingerprint = "physics-new"
+		body := p.DefaultBody(p.Static)
+		body.ID = "new-wall"
+		body.Pose.Position.X = 5
+		desired.Bodies = append(append([]p.CheckpointBody(nil), desired.Bodies...), p.CheckpointBody{Description: body})
+		physical, e := w.PrepareRestore(desired)
+		if e != nil {
+			return PreparedPhysicsRecovery{}, e
+		}
+		nav := &physicsCheckpointNavigation{commit: func() error {
+			if entity, _ := s.Get(1); entity != old {
+				t.Error("entities changed before pair publication")
+			}
+			for _, state := range w.bodies {
+				if state.ID == "new-wall" {
+					t.Error("private desired physics leaked before pair commit")
+				}
+			}
+			published = true
+			return nil
+		}}
+		return PreparedPhysicsRecovery{CheckpointID: saved.CheckpointID, PhysicsFingerprint: saved.DesiredPhysicsFingerprint, NavigationFingerprint: saved.Navigation.SourceFingerprint, PhysicsRevision: saved.DesiredPhysicsRevision, NavigationRevision: saved.Navigation.DesiredRevision, Physics: physical, Navigation: nav}, nil
+	}
+	if err = s.RestorePhysicsCheckpoint(c, restore); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, state := range w.bodies {
+		found = found || state.ID == "new-wall"
+	}
+	state, _ := s.PhysicsBody(1)
+	intent, _ := s.NavigationAgentState(1)
+	if !published || !found || state.ID != "character" || state.Anchor.Position.X != 2 || !intent.HasDestination || intent.Destination.X != 10 || len(s.PendingPhysicsGeometry()) != 0 {
+		t.Fatal("desired pair did not preserve stable dynamic state and intent")
+	}
+	if s.navigation.buildStates["physics/wall"].Pending || s.physicsWorldPending() {
+		t.Fatal("obsolete pre-restore world build remained publishable")
+	}
+}
+
+func TestPhysicsPendingRecoveryRejectsMismatchedPairBeforePublication(t *testing.T) {
+	s, w, old, c := physicsCheckpointFixture(t)
+	c.PendingWorld = true
+	accepted := *c.Navigation
+	c.AcceptedNavigation = &accepted
+	options := physicsCheckpointOptions(t, s, nil)
+	build := &physicsCheckpointNavigation{commit: func() error { t.Error("mismatched pair published navigation"); return nil }}
+	options.PreparePendingWorld = func(saved PhysicsCheckpoint) (PreparedPhysicsRecovery, error) {
+		physical, err := w.PrepareRestore(saved.Physics)
+		return PreparedPhysicsRecovery{CheckpointID: saved.CheckpointID, PhysicsFingerprint: "wrong-source", NavigationFingerprint: saved.Navigation.SourceFingerprint, PhysicsRevision: saved.DesiredPhysicsRevision, NavigationRevision: saved.Navigation.DesiredRevision, Physics: physical, Navigation: build}, err
+	}
+	if err := s.RestorePhysicsCheckpoint(c, options); !errors.Is(err, p.ErrInvalid) {
+		t.Fatalf("mismatched pair accepted: %v", err)
+	}
+	if entity, _ := s.Get(1); entity != old || !build.discarded || w.discards != 1 || s.physics.restoring || s.navigation.restoring {
+		t.Fatal("mismatched private pair changed accepted state or leaked candidates")
 	}
 }

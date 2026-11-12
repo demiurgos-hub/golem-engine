@@ -4,10 +4,13 @@ globs:
   - golem/snapshot/**/*.go
   - golem/snapshot_api.go
   - golem/physics_checkpoint*.go
+  - golem/physics_recovery*.go
 alwaysApply: false
 ---
 
 # `golem/snapshot`
+
+Pending physics/navigation edits require separate accepted and desired captures. `PhysicsCheckpoint.PendingWorld` preserves stable pending change metadata, including physical activation already performed under quarantine. Default restoration rejects it without an exact-identity private `PreparedPhysicsRecovery` pair; never substitute the desired navigation capture for accepted geometry silently. Host source reconstruction migrates dynamic state by stable IDs; root validates binding/lease identities and keeps readiness closed through publication or coherent retry.
 
 Entity-only snapshot behavior remains separate from root `PhysicsCheckpoint`. The latter captures all authoritative entities together with physical state, source ownership and navigation intents; it writes hashed data then the manifest, reconstructs private candidates before publication and uses hook-free registry replacement. Do not route paired recovery through `LoadSnapshot` or ordinary `CreateEntity` spawn effects. Hosts must stop connection acceptance and gameplay for the whole recovery operation; explicit recovery hooks rebuild ephemeral membership after readiness.
 

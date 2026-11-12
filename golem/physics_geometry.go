@@ -53,6 +53,9 @@ func (s *Server) QueuePhysicsGeometry(request PhysicsGeometryRequest) (uint64, e
 		return 0, p.ErrInvalid
 	}
 	request.Profiles = append([]surface.ProfileID(nil), request.Profiles...)
+	if err := s.physicsGeometryCapacity(request.Identity.Key); err != nil {
+		return 0, err
+	}
 	for _, profile := range request.Profiles {
 		if profile == "" || len(profile) > 256 {
 			return 0, p.ErrInvalid
@@ -64,7 +67,8 @@ func (s *Server) QueuePhysicsGeometry(request PhysicsGeometryRequest) (uint64, e
 	if !s.physicsGeometryQuarantined(request) {
 		return 0, errors.New("golem: physics geometry requires an active navigation quarantine")
 	}
-	return s.QueueNavigationBuild("physics/"+request.Identity.Key, request.Priority, func(ctx context.Context) (NavigationBuildResult, error) {
+	s.rememberPhysicsGeometry(request, false)
+	generation, err := s.QueueNavigationBuild("physics/"+request.Identity.Key, request.Priority, func(ctx context.Context) (NavigationBuildResult, error) {
 		prepared, err := request.Prepare(ctx)
 		if err != nil {
 			if prepared.Navigation != nil {
@@ -80,6 +84,7 @@ func (s *Server) QueuePhysicsGeometry(request PhysicsGeometryRequest) (uint64, e
 		}
 		return &physicsGeometryBuild{server: s, request: request, prepared: prepared}, nil
 	})
+	return generation, err
 }
 
 // PhysicsGeometry returns the accepted source lease for a stable cell/object key.
@@ -120,6 +125,7 @@ type physicsGeometryBuild struct {
 	request                   PhysicsGeometryRequest
 	prepared                  PreparedPhysicsGeometry
 	done, navigationCommitted bool
+	activation                bool
 }
 
 func (b *physicsGeometryBuild) Commit() error {
@@ -132,6 +138,9 @@ func (b *physicsGeometryBuild) Commit() error {
 	}
 	if s.navigation.frame != nil || !s.physicsGeometryQuarantined(b.request) {
 		return p.ErrBusy
+	}
+	if pending, ok := ps.geometryPending[b.request.Identity.Key]; !b.activation && (!ok || pending.Identity != b.request.Identity) {
+		return p.ErrStale
 	}
 	old := ps.geometry[b.request.Identity.Key]
 	if old != nil {
@@ -209,6 +218,13 @@ func (b *physicsGeometryBuild) Commit() error {
 		delete(ps.geometry, b.request.Identity.Key)
 	} else {
 		ps.geometry[b.request.Identity.Key] = candidate
+	}
+	if ps.geometryIdentities == nil {
+		ps.geometryIdentities = map[string]PhysicsGeometryIdentity{}
+	}
+	ps.geometryIdentities[b.request.Identity.Key] = b.request.Identity
+	if pending, ok := ps.geometryPending[b.request.Identity.Key]; ok && pending.Identity == b.request.Identity {
+		delete(ps.geometryPending, b.request.Identity.Key)
 	}
 	b.done = true
 	return nil
