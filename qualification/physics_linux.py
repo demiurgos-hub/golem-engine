@@ -68,6 +68,7 @@ def main():
     parser.add_argument("--physics-workers", type=int, default=8)
     parser.add_argument("--query-workers", type=int, default=6)
     parser.add_argument("--simd", action="store_true")
+    parser.add_argument("--native-release", action="store_true", help="use box3d_noassert, matching the frozen Windows build")
     parser.add_argument("--profiles", action="store_true")
     parser.add_argument("--debug-capture", action="store_true")
     args = parser.parse_args()
@@ -83,6 +84,19 @@ def main():
     root = args.root.resolve(strict=True)
     source_manifest = root / "runs" / args.source_run / "source-manifest.json"
     source = json.loads(source_manifest.read_text(encoding="utf-8-sig"))
+    runner_path = source_manifest.with_name("runner-manifest.json")
+    runner = json.loads(runner_path.read_text(encoding="utf-8-sig"))
+    if runner.get("cgo") != "0" or runner.get("goamd64") != "v1":
+        parser.error("requires the frozen CGO-disabled GOAMD64=v1 build configuration")
+    names = sorted(item["name"] for item in source["source"])
+    if names != ["box3d-go", "engine", "navmesh-go"] or not all(item["committedSources"] for item in source["source"]):
+        parser.error("requires committed engine, Box3D and navigation snapshots")
+    build_tags = (["box3d_simd"] if args.simd else []) + (["box3d_noassert"] if args.native_release else [])
+    recorded_tags = runner.get("buildTags")
+    if not isinstance(recorded_tags, list) or sorted(recorded_tags) != sorted(build_tags):
+        parser.error("--simd/--native-release must match the source runner's exact buildTags")
+    if runner.get("goexperiment") != ("simd" if args.simd else "") or bool(runner.get("nativeReleaseRequested")) != args.native_release:
+        parser.error("source runner experiment/release settings disagree with build tags")
     workspace = root / "workspaces" / args.source_run
     run = root / "linux" / args.run_id
     run.mkdir()  # Existing or failed evidence is never overwritten.
@@ -110,8 +124,9 @@ def main():
         directory.mkdir(parents=True, exist_ok=True)
         env[key] = str(directory)
     env.update(TMPDIR=env["GOTMPDIR"], TMP=env["GOTMPDIR"], TEMP=env["GOTMPDIR"])
-    tags = ["-tags", "box3d_simd"] if args.simd else []
+    tags = ["-tags", ",".join(build_tags)] if build_tags else []
     evidence = {"version": 1, "startedUTC": stamp(), "platform": platform.uname()._asdict(), "sourceManifest": str(source_manifest), "sourceManifestSHA256": sha(source_manifest), "runnerSHA256": sha(Path(__file__)), "options": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}, "environment": {key: env[key] for key in ("GOTOOLCHAIN", "GOWORK", "CGO_ENABLED", "GOEXPERIMENT", "GOAMD64", "GOCACHE", "GOMODCACHE", "GOTMPDIR")}, "checks": [], "publishedResolution": False, "qualified": False}
+    evidence.update(buildTags=build_tags, sourceRunnerSHA256=sha(runner_path))
 
     def command(name, argv, cwd, settings=None, required=True):
         record = {"name": name, "argv": [str(x) for x in argv], "cwd": str(cwd), "cgo": (settings or env)["CGO_ENABLED"], "startedUTC": stamp()}
