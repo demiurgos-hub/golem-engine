@@ -57,6 +57,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Physics attachment and teleport validate complete solid geometry before changing ownership or poses; geometric penetration requires an explicit placement policy. Rejected motion admission preserves actual displacement and support from the shared solver while discarding proposed navigation and traversal progress.
+
 - Capacity qualification checks complete route segments against the physical cylinder and source obstacles before timing. Its fixture records separate body and bake dimensions and an explicit conservative bake margin, retaining unchanged body sizes and motor behavior; old unsafe fixtures fail preflight with the offending segment and clearance.
 - Terrain qualification uses a tighter contour simplification setting after physical clearance checks identified two wall-clipping routes. Geometry, destinations and physical body dimensions remain unchanged; narrow-gap presence is not claimed as differentiated profile coverage.
 

@@ -42,6 +42,14 @@ type NavigationMotionResult struct {
 	EntityID int64
 	Position surface.Vec3
 	Path     []surface.Vec3
+	// RejectionReason rejects the requested motion, while preserving the accepted
+	// physical path (including displacement caused by other bodies).
+	RejectionReason string
+}
+
+type navigationAcceptedMotion struct {
+	position  surface.Vec3
+	rejection string
 }
 
 // NavigationStagedTraversalAction extends a traversal with transactional motion.
@@ -329,7 +337,7 @@ func (s *Server) CommitNavigationFrame(f *NavigationFrame, results []NavigationM
 	return nil
 }
 
-func (s *Server) validateNavigationResults(f *NavigationFrame, results []NavigationMotionResult) (map[int64]surface.Vec3, error) {
+func (s *Server) validateNavigationResults(f *NavigationFrame, results []NavigationMotionResult) (map[int64]navigationAcceptedMotion, error) {
 	if f == nil {
 		if len(results) != 0 {
 			return nil, fmt.Errorf("%w: results without a navigation frame", ErrNavigationFrameFault)
@@ -339,7 +347,7 @@ func (s *Server) validateNavigationResults(f *NavigationFrame, results []Navigat
 	if err := s.ValidateNavigationFrame(f); err != nil {
 		return nil, err
 	}
-	accepted := make(map[int64]surface.Vec3, len(results))
+	accepted := make(map[int64]navigationAcceptedMotion, len(results))
 	for _, result := range results {
 		capture, ok := f.agents[result.EntityID]
 		if !ok {
@@ -347,6 +355,9 @@ func (s *Server) validateNavigationResults(f *NavigationFrame, results []Navigat
 		}
 		if _, duplicate := accepted[result.EntityID]; duplicate {
 			return nil, fmt.Errorf("%w: duplicate entity %d", ErrNavigationFrameFault, result.EntityID)
+		}
+		if len(result.RejectionReason) > 4096 || result.RejectionReason != "" && f.plans[result.EntityID] == nil {
+			return nil, fmt.Errorf("%w: invalid rejected proposal for entity %d", ErrNavigationFrameFault, result.EntityID)
 		}
 		if !fitsNavigationEntity(result.Position) || len(result.Path) > 1024 {
 			return nil, fmt.Errorf("%w: invalid physical result for entity %d", ErrNavigationFrameFault, result.EntityID)
@@ -372,7 +383,7 @@ func (s *Server) validateNavigationResults(f *NavigationFrame, results []Navigat
 				previous = point
 			}
 		}
-		accepted[result.EntityID] = position
+		accepted[result.EntityID] = navigationAcceptedMotion{position: position, rejection: result.RejectionReason}
 	}
 	for id := range f.plans {
 		if _, ok := accepted[id]; !ok {
@@ -382,29 +393,34 @@ func (s *Server) validateNavigationResults(f *NavigationFrame, results []Navigat
 	return accepted, nil
 }
 
-func (s *Server) commitNavigationResults(f *NavigationFrame, accepted map[int64]surface.Vec3) {
+func (s *Server) commitNavigationResults(f *NavigationFrame, accepted map[int64]navigationAcceptedMotion) {
 	// No game callback or pose setter runs until every result has passed. Physics
 	// setters are required to be data-only, as with ordinary Position3DWriter.
 	for _, id := range f.order {
-		if position, ok := accepted[id]; ok {
+		if result, ok := accepted[id]; ok {
 			_, writer, _ := f.service.position(id)
-			writer.SetPosition3D(float32(position.X), float32(position.Y), float32(position.Z))
+			writer.SetPosition3D(float32(result.position.X), float32(result.position.Y), float32(result.position.Z))
 		}
 	}
 	f.closed, f.service.frame = true, nil
 	f.service.frameCallbacks = make([]func(), 0)
 	for _, id := range f.order {
-		position, changed := accepted[id]
+		result, changed := accepted[id]
 		if !changed {
 			continue
 		}
+		position := result.position
 		capture := f.agents[id]
 		a := f.service.agents[id]
 		if a != capture.agent || a.state.Generation != capture.generation {
 			continue
 		}
 		if plan := f.plans[id]; plan != nil {
-			f.acceptPlan(plan, capture.position, position)
+			if result.rejection != "" {
+				f.rejectPlan(plan, position, result.rejection)
+			} else {
+				f.acceptPlan(plan, capture.position, position)
+			}
 		} else {
 			f.reconcileAffected(a, position)
 		}
@@ -637,6 +653,24 @@ func (f *NavigationFrame) reconcileAffected(a *navigationAgent, position surface
 		n.reconcileAgent(a, position)
 	}
 	a.lastPosition = position
+}
+
+func (f *NavigationFrame) rejectPlan(plan *navigationFramePlan, position surface.Vec3, reason string) {
+	n, a := f.service, plan.agent
+	if plan.actionReady {
+		plan.actionReady = false
+		n.dispatchFrameCallback(plan.action.DiscardNavigationTraversal)
+	}
+	n.cancelTraversal(a, "physical motion admission rejected")
+	// Retain only support that the actual solver position can revalidate. No
+	// proposed corner, initial projection or traversal progress becomes durable.
+	a.route, a.corners, a.next = nil, nil, 0
+	a.routeSafetyChecked, a.initialProjection, a.hasReconciledPosition = false, false, false
+	a.speed, a.state.Velocity, a.lastPosition = 0, surface.Vec3{}, position
+	a.state.Mode, a.state.Status = NavigationBlocked, surface.Status{Code: surface.Unreachable, Err: errors.New(reason)}
+	if a.view != nil && a.location != nil {
+		n.reconcileAgent(a, position)
+	}
 }
 
 func (f *NavigationFrame) acceptPlan(plan *navigationFramePlan, from, position surface.Vec3) {

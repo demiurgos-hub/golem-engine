@@ -21,6 +21,14 @@ type physicsTestWorld struct {
 	simulated, accepted, rejected, synchronized int
 	destroyed                                   []p.BodyHandle
 	closed                                      bool
+	placement                                   func(p.BodyHandle, p.Pose, float32) (bool, error)
+}
+
+func (w *physicsTestWorld) ValidatePlacement(h p.BodyHandle, pose p.Pose, tolerance float32) (bool, error) {
+	if w.placement != nil {
+		return w.placement(h, pose, tolerance)
+	}
+	return true, nil
 }
 
 func (w *physicsTestWorld) Body(h p.BodyHandle) (p.BodyState, error) {
@@ -350,8 +358,78 @@ func TestPhysicsTeleportPreservesLocalAnchor(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := w.Body(h)
-	if got.Anchor != target || got.Pose.Position != (p.Vec3{X: 4, Y: 3}) || e.position != (surface.Vec3{X: 4, Y: 1}) || w.synchronized != 1 {
+	if got.Anchor != target || got.Pose.Position != (p.Vec3{X: 4, Y: 3}) || e.position != (surface.Vec3{X: 4, Y: 1}) || w.synchronized != 3 {
 		t.Fatalf("teleport state=%+v entity=%+v", got, e)
+	}
+}
+
+func TestPhysicsPlacementRejectionPreservesPoseOwnershipAndBindings(t *testing.T) {
+	s := NewServer(ServerConfig{})
+	e := &physicsBoundEntity{navigationTestEntity: navigationTestEntity{id: 1}}
+	if err := s.CreateEntity(e); err != nil {
+		t.Fatal(err)
+	}
+	h := p.BodyHandle{World: 1, Index: 1, Generation: 1}
+	state := p.BodyState{Handle: h, Mode: p.ExternalPose, Pose: p.Identity(), Anchor: p.Identity()}
+	w := &physicsTestWorld{bodies: map[p.BodyHandle]p.BodyState{h: state}}
+	if err := s.SetPhysicsWorld(w); err != nil {
+		t.Fatal(err)
+	}
+	w.placement = func(got p.BodyHandle, pose p.Pose, tolerance float32) (bool, error) {
+		if got != h || pose != state.Pose || tolerance != 0 {
+			t.Error("incorrect attachment placement input")
+		}
+		return false, nil
+	}
+	if err := s.AttachPhysics(1, h, PhysicsAttachmentConfig{}); err == nil {
+		t.Fatal("obstructed attachment admitted")
+	}
+	if len(s.physics.agents) != 0 || w.bodies[h].Owner != 0 || e.position != (surface.Vec3{}) {
+		t.Fatal("rejected admission partially changed authority")
+	}
+	w.placement = nil
+	if err := s.AttachPhysics(1, h, PhysicsAttachmentConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	before := w.bodies[h]
+	target := p.Identity()
+	target.Position.X = 5
+	w.placement = func(got p.BodyHandle, pose p.Pose, tolerance float32) (bool, error) {
+		if got != h || pose != target {
+			t.Error("incorrect teleport placement input")
+		}
+		return tolerance >= .01, nil
+	}
+	if err := s.TeleportPhysics(1, target); err == nil {
+		t.Fatal("obstructed teleport admitted")
+	}
+	if w.bodies[h] != before || e.position != (surface.Vec3{}) || s.physics.fault != nil {
+		t.Fatal("rejected teleport changed accepted state")
+	}
+	if err := s.TeleportPhysicsWithPolicy(1, target, PhysicsPlacementPolicy{MaxPenetration: .01}); err != nil {
+		t.Fatal(err)
+	}
+	if e.position.X != 5 || w.bodies[h].Anchor != target {
+		t.Fatal("explicit admitted external pose did not publish")
+	}
+}
+
+func TestPhysicsRejectedMotionCommitsActualDisplacementWithoutProposedProgress(t *testing.T) {
+	s, entity, w := physicsNavigationTestServer(t)
+	stagedNavigationRoute(t, s, 1, surface.Corner{}, surface.Corner{Position: surface.Vec3{X: .03}}, surface.Corner{Position: surface.Vec3{X: 10}})
+	h := physicsTestAttach(t, s, w, 1, p.DrivenCharacter, PhysicsAttachmentConfig{})
+	w.simulate = func(_ p.Frame, result *p.FrameResult) {
+		result.RejectedMotions = []p.MotionRejection{{Body: h, Reason: "initial projection blocked"}}
+		result.Bodies[0].Pose.Position.X, result.Bodies[0].Anchor.Position.X = .02, .02
+		result.Paths[0].Positions[1].X = .02
+	}
+	s.tick++
+	if err := s.physics.step(.05); err != nil {
+		t.Fatal(err)
+	}
+	a := s.navigation.agents[1]
+	if w.accepted != 1 || w.rejected != 0 || entity.position.X != float64(float32(.02)) || a.state.Mode != NavigationBlocked || a.route != nil || a.next != 0 || a.location == nil || a.state.Destination.X != 10 {
+		t.Fatalf("rejected intent lost actual pose/support or committed progress: entity=%+v state=%+v", entity.position, a.state)
 	}
 }
 

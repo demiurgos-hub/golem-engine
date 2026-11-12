@@ -30,7 +30,12 @@ type PhysicsActivationWriter interface{ SetPhysicsActive(bool) }
 type PhysicsAttachmentConfig struct {
 	BindRotation, BindVelocity, BindActivation bool
 	MaxDriveForce                              float32
+	Placement                                  PhysicsPlacementPolicy
 }
+
+// PhysicsPlacementPolicy explicitly permits geometric penetration at admission.
+// Its zero value rejects every positive penetration; touching remains admissible.
+type PhysicsPlacementPolicy struct{ MaxPenetration float32 }
 
 // PhysicsContactFunc observes copied contact events after all physics bodies,
 // navigation support and entity bindings have committed. QueuePhysicsCommand
@@ -111,6 +116,8 @@ func (s *Server) SetPhysicsWorld(world p.World) error {
 // destroys the body, its colliders and its joints on detach or entity deletion.
 // Configure optional writer interfaces explicitly; legacy collider providers and
 // synchronous navigation cannot share pose authority with this attachment.
+// The world must implement physics3d.PlacementValidator; the complete solid volume
+// is validated before ownership or bindings change, using cfg.Placement.
 // Call before Run or on the tick goroutine, outside physics callbacks.
 func (s *Server) AttachPhysics(id int64, body p.BodyHandle, cfg PhysicsAttachmentConfig) error {
 	ps := s.physics
@@ -155,6 +162,9 @@ func (s *Server) AttachPhysics(id int64, body p.BodyHandle, cfg PhysicsAttachmen
 	if cfg.MaxDriveForce == 0 {
 		cfg.MaxDriveForce = 1000
 	}
+	if err := ps.world.Synchronize(); err != nil {
+		return err
+	}
 	state, err := ps.world.Body(body)
 	if err != nil {
 		return err
@@ -187,6 +197,9 @@ func (s *Server) AttachPhysics(id int64, body p.BodyHandle, cfg PhysicsAttachmen
 		if a.activation == nil {
 			return errors.New("golem: activation binding requires PhysicsActivationWriter")
 		}
+	}
+	if err := ps.validatePlacement(body, state.Pose, cfg.Placement); err != nil {
+		return err
 	}
 	if state.Owner == 0 {
 		binder, ok := ps.world.(p.OwnerBinder)
@@ -249,9 +262,17 @@ func (s *Server) PhysicsBody(id int64) (p.BodyState, error) {
 
 // TeleportPhysics sets the gameplay anchor, preserving the body-local anchor
 // transform. It synchronizes query visibility and entity bindings together.
+// The complete solid volume must pass zero-penetration placement admission.
 // Call before a frame, never from accepted-frame callbacks; queue a Server.Post
 // callback there instead. The next navigation pass revalidates actual support.
 func (s *Server) TeleportPhysics(id int64, anchor p.Pose) error {
+	return s.TeleportPhysicsWithPolicy(id, anchor, PhysicsPlacementPolicy{})
+}
+
+// TeleportPhysicsWithPolicy is TeleportPhysics with explicit geometric penetration
+// tolerance. It also admits externally controlled poses for ExternalPose bodies;
+// rejected placement changes neither body/entity poses nor navigation metadata.
+func (s *Server) TeleportPhysicsWithPolicy(id int64, anchor p.Pose, policy PhysicsPlacementPolicy) error {
 	ps := s.physics
 	if err := ps.mutable(); err != nil {
 		return err
@@ -263,7 +284,14 @@ func (s *Server) TeleportPhysics(id int64, anchor p.Pose) error {
 	if !anchor.Valid() {
 		return p.ErrInvalid
 	}
-	if err := ps.world.SetPose(a.body, anchor.Compose(a.localAnchor.Inverse())); err != nil {
+	pose := anchor.Compose(a.localAnchor.Inverse())
+	if err := ps.world.Synchronize(); err != nil {
+		return err
+	}
+	if err := ps.validatePlacement(a.body, pose, policy); err != nil {
+		return err
+	}
+	if err := ps.world.SetPose(a.body, pose); err != nil {
 		return err
 	}
 	if err := ps.world.Synchronize(); err != nil {
@@ -276,6 +304,24 @@ func (s *Server) TeleportPhysics(id int64, anchor p.Pose) error {
 		return ps.fault
 	}
 	ps.write(a, state, true)
+	return nil
+}
+
+func (ps *physicsService) validatePlacement(body p.BodyHandle, pose p.Pose, policy PhysicsPlacementPolicy) error {
+	if !p.Finite(policy.MaxPenetration) || policy.MaxPenetration < 0 {
+		return p.ErrInvalid
+	}
+	validator, ok := ps.world.(p.PlacementValidator)
+	if !ok {
+		return fmt.Errorf("%w: physics body admission requires PlacementValidator", p.ErrUnsupported)
+	}
+	clear, err := validator.ValidatePlacement(body, pose, policy.MaxPenetration)
+	if err != nil {
+		return err
+	}
+	if !clear {
+		return errors.New("golem: physical placement is obstructed")
+	}
 	return nil
 }
 
@@ -461,6 +507,14 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 		}
 		paths[path.Body] = points
 	}
+	rejectedMotions := make(map[p.BodyHandle]string, len(result.RejectedMotions))
+	for _, motion := range result.RejectedMotions {
+		id, exists := ps.bodies[motion.Body]
+		if _, duplicate := rejectedMotions[motion.Body]; duplicate || !exists || proposals[id].EntityID != id || motion.Reason == "" || len(motion.Reason) > 4096 {
+			return reject(errors.New("golem: invalid rejected physics motion"))
+		}
+		rejectedMotions[motion.Body] = motion.Reason
+	}
 	var navResults []NavigationMotionResult
 	for _, id := range ids {
 		a := ps.agents[id]
@@ -469,7 +523,7 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 			return reject(fmt.Errorf("golem: missing or foreign body result for entity %d", id))
 		}
 		if f.Contains(id) {
-			navResults = append(navResults, NavigationMotionResult{EntityID: id, Position: physicsNavPoint(state.Anchor.Position), Path: paths[a.body]})
+			navResults = append(navResults, NavigationMotionResult{EntityID: id, Position: physicsNavPoint(state.Anchor.Position), Path: paths[a.body], RejectionReason: rejectedMotions[a.body]})
 		}
 	}
 	accepted, err := s.validateNavigationResults(f, navResults)

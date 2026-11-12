@@ -277,6 +277,29 @@ func TestNavigationFrameAbortOnRestoration(t *testing.T) {
 
 var _ NavigationStagedTraversalAction = (*stagedTraversalTestAction)(nil)
 
+func TestNavigationFrameRejectedTraversalDiscardsAfterSupportReconciliation(t *testing.T) {
+	s, entity := navigationTestServer(t, &navigationTestBackend{revision: 1})
+	stagedNavigationRoute(t, s, 1, surface.Corner{}, surface.Corner{Position: surface.Vec3{X: 10}})
+	a := s.navigation.agents[1]
+	action := &stagedTraversalTestAction{}
+	a.state.Mode = NavigationTraversing
+	a.traversal = &navigationTraversal{action: action, bounded: true, bounds: NavigationTraversalBounds{Min: surface.Vec3{X: -1, Y: -1, Z: -1}, Max: surface.Vec3{X: 2, Y: 2, Z: 2}}}
+	traversal := a.traversal
+	actual := surface.Vec3{X: float64(float32(.02))}
+	action.onDiscard = func() {
+		if entity.position != actual || a.location == nil || a.lastPosition != actual || a.state.Mode != NavigationBlocked {
+			t.Error("discard preceded accepted pose/support reconciliation")
+		}
+	}
+	f := stagedFrame(t, s, .05)
+	if err := s.CommitNavigationFrame(f, []NavigationMotionResult{{EntityID: 1, Position: actual, Path: []surface.Vec3{{}, actual}, RejectionReason: "motion blocked"}}); err != nil {
+		t.Fatal(err)
+	}
+	if action.committed != 0 || action.discarded != 1 || traversal.elapsed != 0 || a.traversal != nil {
+		t.Fatal("rejected traversal consumed progress")
+	}
+}
+
 func TestNavigationFrameTraversalCallbackObservesAllReconciledSupport(t *testing.T) {
 	s, _ := navigationTestServer(t, &navigationTestBackend{revision: 1})
 	stagedNavigationRoute(t, s, 1, surface.Corner{}, surface.Corner{Position: surface.Vec3{X: 10}})

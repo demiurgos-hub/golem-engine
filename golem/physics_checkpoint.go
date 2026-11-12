@@ -185,7 +185,7 @@ func (c PhysicsCheckpoint) Validate() error {
 	}
 	for _, a := range c.Attachments {
 		body, ok := bodyIDs[a.BodyID]
-		if !entities[a.EntityID] || bindings[a.EntityID] || boundBodies[a.BodyID] || !ok || body.Owner != a.EntityID || !p.Finite(a.Config.MaxDriveForce) || a.Config.MaxDriveForce < 0 {
+		if !entities[a.EntityID] || bindings[a.EntityID] || boundBodies[a.BodyID] || !ok || body.Owner != a.EntityID || !p.Finite(a.Config.MaxDriveForce) || a.Config.MaxDriveForce < 0 || !p.Finite(a.Config.Placement.MaxPenetration) || a.Config.Placement.MaxPenetration < 0 {
 			return p.ErrInvalid
 		}
 		bindings[a.EntityID], boundBodies[a.BodyID] = true, true
