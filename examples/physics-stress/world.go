@@ -231,7 +231,20 @@ func makeScene(o options, c workload, observeNav func(golem.NavigationTickMetric
 			return nil, e
 		}
 		if e = s.server.AttachPhysics(a.ID, body, golem.PhysicsAttachmentConfig{MaxDriveForce: 1000}); e != nil {
-			return nil, e
+			if o.DebugCapture {
+				state, _ := w.Body(body)
+				query := p.Query{Kind: p.Overlap, Mode: p.All, Shape: p.ShapeDesc{Kind: p.Capsule, Radius: float32(profile.Radius), PointA: p.Vec3{Y: float32(profile.Radius)}, PointB: p.Vec3{Y: float32(profile.Height - profile.Radius)}}, Pose: state.Pose, Filter: p.QueryFilter{Mask: ^uint64(0), ExcludeBodies: []p.BodyHandle{body}, RequireSolid: true, IncludeNonQuery: true, Sensors: p.IncludeSensors}}
+				hits := make([]p.Hit, 128)
+				result, queryErr := w.Query(query, hits)
+				diagnostic := map[string]any{"entity": a.ID, "body": state, "query": query, "result": result, "hits": hits[:result.Count], "placementError": e.Error()}
+				if queryErr != nil {
+					diagnostic["queryError"] = queryErr.Error()
+				}
+				if writeErr := writeJSON(filepath.Join(o.Out, "spawn-failure.json"), diagnostic); writeErr != nil {
+					return nil, fmt.Errorf("character %d placement: %w; writing diagnostics: %v", i, e, writeErr)
+				}
+			}
+			return nil, fmt.Errorf("character %d anchor %v placement: %w", i, pos, e)
 		}
 		if e = s.server.AttachNavigation(a.ID, golem.NavigationAgentConfig{Profile: surface.ProfileID(profile.ID), Speed: 3, Acceleration: 12, StoppingDistance: .2, SupportTolerance: .2, Projection: surface.ProjectionOptions{Horizontal: 1, Up: .4, Down: .4}, StagedPhysics: true}); e != nil {
 			return nil, e
