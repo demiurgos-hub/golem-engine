@@ -164,8 +164,16 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 	}
 	keys := w.orderedActiveBodies()
 	paths := make([]p.BodyPath, len(keys))
+	pathCapacity := w.config.Substeps + 1
+	positions := make([]p.Vec3, len(keys)*pathCapacity)
+	poses := make([]p.Pose, len(keys)*pathCapacity)
+	fractions := make([]float32, len(keys)*pathCapacity)
 	for i, h := range keys {
-		paths[i] = p.BodyPath{Body: h, Positions: []p.Vec3{w.bodies[h].committed.Anchor.Position}, Poses: []p.Pose{w.bodies[h].committed.Pose}, Fractions: []float32{0}}
+		start, end := i*pathCapacity, (i+1)*pathCapacity
+		// Capacity fences keep each body's appended observations independently owned.
+		paths[i] = p.BodyPath{Body: h, Positions: positions[start : start+1 : end], Poses: poses[start : start+1 : end], Fractions: fractions[start : start+1 : end]}
+		paths[i].Positions[0] = w.bodies[h].committed.Anchor.Position
+		paths[i].Poses[0] = w.bodies[h].committed.Pose
 	}
 	started := false
 	tracker := w.tracker.Clone()
@@ -203,7 +211,7 @@ func (w *World) Simulate(f p.Frame) (result p.FrameResult, err error) {
 	}
 	private := result
 	private.Bodies = append([]p.BodyState(nil), result.Bodies...)
-	private.Events = append([]p.ContactEvent(nil), result.Events...)
+	private.Events = nil
 	private.Paths = nil
 	w.pending = &private
 	return

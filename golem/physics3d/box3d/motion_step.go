@@ -22,14 +22,14 @@ func (s *motionContactState) prepareBodies(sample b.MotionStepSample) {
 }
 
 func (s *motionContactState) bodyState(w *World, key p.BodyHandle, body *body) p.BodyState {
-	state := w.bodyState(key, body)
 	if sample, ok := s.bodies[body.id]; ok {
-		state.Pose = p.Pose{Position: pp(sample.End.P), Rotation: pq(sample.End.Q)}
-		state.Anchor = state.Pose.Compose(body.desc.Anchor)
-		state.CenterOfMass = state.Pose.Transform(pv(body.id.GetLocalCenter()))
-		state.LinearVelocity, state.AngularVelocity = pv(sample.LinearVelocity), pv(sample.AngularVelocity)
+		pose := p.Pose{Position: pp(sample.End.P), Rotation: pq(sample.End.Q)}
+		return p.BodyState{Handle: key, ID: body.desc.ID, Owner: body.desc.Owner, Mode: body.desc.Mode,
+			Pose: pose, Anchor: pose.Compose(body.desc.Anchor), CenterOfMass: pose.Transform(pv(body.id.GetLocalCenter())),
+			LinearVelocity: pv(sample.LinearVelocity), AngularVelocity: pv(sample.AngularVelocity),
+			Mass: body.id.GetMass(), Enabled: body.id.IsEnabled(), Awake: body.id.IsAwake(), Support: body.support}
 	}
-	return state
+	return w.bodyState(key, body)
 }
 
 func (s *motionContactState) worldCenter(body b.BodyID) p.Vec3 {
@@ -107,12 +107,13 @@ func (s *motionContactState) capturePrepared(w *World, sample b.MotionStepSample
 		}
 	}
 	captureContact := func(c b.ContactData, impulseOnly bool) {
-		a, aok := w.shapeOwners[c.ShapeIdA]
-		z, zok := w.shapeOwners[c.ShapeIdB]
+		ab, aok := w.lookupShapeBinding(c.ShapeIdA)
+		zb, zok := w.lookupShapeBinding(c.ShapeIdB)
 		if !aok || !zok {
 			return
 		}
-		ca, cz := w.colliders[a], w.colliders[z]
+		a, z, ca, cz := ab.handle, zb.handle, ab.collider, zb.collider
+		center := s.worldCenter(ab.body.id)
 		for _, m := range c.Manifolds {
 			for i := int32(0); i < m.PointCount; i++ {
 				point := m.Points[i]
@@ -123,7 +124,7 @@ func (s *motionContactState) capturePrepared(w *World, sample b.MotionStepSample
 					continue
 				}
 				v := p.ContactEvent{Pair: p.ContactPair{A: a, B: z, Kind: p.SolidContact}, OwnerA: ca.desc.Owner, OwnerB: cz.desc.Owner,
-					Point: s.worldCenter(c.ShapeIdA.GetBody()).Add(pv(point.AnchorA)), Normal: pv(m.Normal),
+					Point: center.Add(pv(point.AnchorA)), Normal: pv(m.Normal),
 					Force: pv(m.Normal).Mul(point.TotalNormalImpulse / impulseDuration), Depth: max(0, -point.Separation)}
 				add(v)
 				if !impulseOnly && point.Separation <= 0 && (ca.desc.Roles.Sensor || cz.desc.Roles.Sensor) {
@@ -149,12 +150,12 @@ func (s *motionContactState) capturePrepared(w *World, sample b.MotionStepSample
 		s.sensors[motionSensorKey(event.SensorShapeId, event.VisitorShapeId)] = true
 	}
 	for pair := range s.sensors {
-		a, aok := w.shapeOwners[pair[0]]
-		z, zok := w.shapeOwners[pair[1]]
+		ab, aok := w.lookupShapeBinding(pair[0])
+		zb, zok := w.lookupShapeBinding(pair[1])
 		if !aok || !zok {
 			continue
 		}
-		ca, cz := w.colliders[a], w.colliders[z]
+		a, z, ca, cz := ab.handle, zb.handle, ab.collider, zb.collider
 		if !ca.desc.Roles.Sensor && !cz.desc.Roles.Sensor {
 			continue
 		}

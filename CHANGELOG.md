@@ -111,6 +111,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Physics avoids building continuous-collision scratch for intervals with no eligible motion, reuses generation-validated collider lookups, and reduces allocations while retaining every observed path sample. Qualification timing separates scene setup and explicit route admissions from automatic replans; full-load geometry edits preserve the active routes' quarantine boundaries.
+
 - Physics contact exit and cleanup events report zero force instead of repeating the previous impact. Owned native observations retain the correct body pose and contact witness through rebounds, with solver-response impulses counted once and kept separate from sensor overlap.
 
 - Unity physics export reads imported mesh geometry even when runtime Read/Write is disabled, without changing importer settings. Submesh indices, source identity and geometry validation remain preserved.

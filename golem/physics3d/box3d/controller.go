@@ -626,8 +626,8 @@ func (w *World) integrateIntervals(f p.Frame, motions []p.Motion, keys []p.BodyH
 								return fmt.Errorf("physics3d: native observation omitted body %v", key)
 							}
 						}
-						state := contactState.bodyState(w, key, w.bodies[key])
-						if !w.bodyInBounds(w.bodies[key], state.Pose) || !state.Anchor.Position.InBounds() || !state.LinearVelocity.Valid() || !state.AngularVelocity.Valid() {
+						state := contactState.bodyState(w, key, body)
+						if !w.bodyInBounds(body, state.Pose) || !state.Anchor.Position.InBounds() || !state.LinearVelocity.Valid() || !state.AngularVelocity.Valid() {
 							return fmt.Errorf("physics3d: body %v left supported state", key)
 						}
 						if len(paths[i].Positions) >= 16384 {
