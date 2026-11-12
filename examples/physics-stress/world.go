@@ -269,7 +269,7 @@ func makeScene(o options, c workload, observeNav func(golem.NavigationTickMetric
 	if createdTriangles != c.Triangles || actual.Colliders != c.StaticColliders+c.Characters+c.DynamicBodies {
 		return nil, fmt.Errorf("constructed workload count mismatch: %d triangles, %+v", createdTriangles, actual)
 	}
-	if e = writeJSON(filepath.Join(o.Out, "scene.json"), map[string]any{"actualStaticTriangles": createdTriangles, "actualStaticColliders": boxCount + c.TilesX*c.TilesZ, "uniqueMeshAssets": c.TilesX * c.TilesZ, "staticGeometrySHA256": hex.EncodeToString(geometryHash.Sum(nil)), "worldMetrics": actual, "projectileStates": len(s.projectiles), "navigationCellSize": 1, "navigationCellHeight": .1, "navigationTileSize": 128, "driveForceNewtons": 1000, "characterMassKG": 80, "dynamicMassKG": 20, "distanceJoints": actual.Joints, "physicalFeetY": 0, "anchorPolicy": "exact projected nav support height is explicit body-local offset above feet", "solver": p.DefaultConfig()}); e != nil {
+	if e = writeJSON(filepath.Join(o.Out, "scene.json"), map[string]any{"actualStaticTriangles": createdTriangles, "actualStaticColliders": boxCount + c.TilesX*c.TilesZ, "uniqueMeshAssets": c.TilesX * c.TilesZ, "staticGeometrySHA256": hex.EncodeToString(geometryHash.Sum(nil)), "worldMetrics": actual, "projectileStates": len(s.projectiles), "navigationCellSize": 1, "navigationCellHeight": .1, "navigationTileSize": 128, "driveForceNewtons": 1000, "characterMassKG": 80, "dynamicMassKG": 20, "distanceJoints": actual.Joints, "physicalFeetY": 0, "anchorPolicy": "exact projected nav support height is explicit body-local offset above feet", "solver": config}); e != nil {
 		return nil, e
 	}
 	ok = true
