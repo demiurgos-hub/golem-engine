@@ -53,7 +53,7 @@ func TestContactGenerationAndRestore(t *testing.T) {
 	a.Generation++
 	e.Pair.A = a
 	out := tr.Update([]ContactEvent{e}, 2, 2, true)
-	if len(out) != 1 || out[0].Phase != Enter || out[0].Reason != Restored {
+	if len(out) != 1 || out[0].Phase != RestoredContact || out[0].Reason != Restored {
 		t.Fatal(out)
 	}
 }

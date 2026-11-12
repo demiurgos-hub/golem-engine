@@ -78,12 +78,32 @@ func (w *World) Query(q p.Query, dst []p.Hit) (p.QueryResult, error) {
 		return p.QueryResult{}, err
 	}
 	w.stats.Queries++
+	r, err := w.query(q, dst)
+	if r.Incomplete {
+		w.stats.Overflows++
+	}
+	return r, err
+}
+
+// query only reads world state. The tick owner validates and accounts for calls.
+func (w *World) query(q p.Query, dst []p.Hit) (p.QueryResult, error) {
 	filter := b.DefaultQueryFilter()
 	filter.CategoryBits = ^uint64(0)
 	filter.MaskBits = q.Filter.Mask
 	filter.IgnoreShapeMask = true
 	filter.BackFaces = q.Backfaces == p.IncludeBackfaces
 	var hits []p.Hit
+	var nearest p.Hit
+	found := false
+	add := func(hit p.Hit) {
+		if q.Mode == p.All {
+			hits = append(hits, hit)
+		} else if !found || p.HitLess(hit, nearest) {
+			nearest = hit
+		}
+		found = true
+	}
+	length := q.Translation.Length()
 	var pr b.ShapeProxy
 	var err error
 	if q.Kind == p.Ray {
@@ -101,7 +121,7 @@ func (w *World) Query(q p.Query, dst []p.Hit) (p.QueryResult, error) {
 			return true
 		}
 		initial[id] = true
-		if q.Initial == p.IgnoreInitial && q.Kind != p.Overlap && q.Translation.Length() != 0 {
+		if q.Initial == p.IgnoreInitial && q.Kind != p.Overlap && length != 0 {
 			return true
 		}
 		h := w.hit(id)
@@ -151,16 +171,16 @@ func (w *World) Query(q p.Query, dst []p.Hit) (p.QueryResult, error) {
 		if q.Initial == p.BlockInitial {
 			h.Blocking = true
 		}
-		hits = append(hits, h)
-		return true
+		add(h)
+		return q.Mode != p.Any
 	}, nil)
 	if err != nil {
 		return p.QueryResult{}, err
 	}
-	if q.Kind != p.Overlap && q.Translation.Length() > 0 {
+	if q.Kind != p.Overlap && length > 0 && !(found && q.Mode != p.All) {
 		callback := func(id b.ShapeID, point b.Pos, normal b.Vec3, fraction float32, _ uint64, triangle, child int, _ any) float32 {
 			_, _, ok := w.eligible(id, q.Filter)
-			if !ok || initial[id] && q.Initial != p.IgnoreInitial {
+			if !ok || initial[id] {
 				return 1
 			}
 			h := w.hit(id)
@@ -169,7 +189,7 @@ func (w *World) Query(q p.Query, dst []p.Hit) (p.QueryResult, error) {
 			h.SurfaceNormal = pv(normal)
 			h.HasSurfaceNormal = q.Kind == p.Ray
 			h.Fraction = fraction
-			h.Distance = fraction * q.Translation.Length()
+			h.Distance = fraction * length
 			h.Touching = true
 			if triangle >= 0 {
 				h.Feature.Triangle = uint32(triangle)
@@ -177,7 +197,13 @@ func (w *World) Query(q p.Query, dst []p.Hit) (p.QueryResult, error) {
 			if child >= 0 {
 				h.Feature.Child = uint32(child)
 			}
-			hits = append(hits, h)
+			add(h)
+			if q.Mode == p.Any {
+				return 0
+			}
+			if q.Mode == p.Nearest {
+				return fraction
+			}
 			return 1
 		}
 		if q.Kind == p.Ray {
@@ -188,19 +214,24 @@ func (w *World) Query(q p.Query, dst []p.Hit) (p.QueryResult, error) {
 			}
 		}
 	}
+	if q.Mode != p.All {
+		r := p.QueryResult{Revision: w.revision}
+		if found {
+			r.Total, r.Blocked = 1, nearest.Blocking
+			if len(dst) > 0 {
+				dst[0], r.Count = nearest, 1
+			} else {
+				r.Incomplete = true
+			}
+		}
+		return r, nil
+	}
 	p.SortHits(hits)
 	total := len(hits)
-	if q.Mode != p.All && total > 1 {
-		hits = hits[:1]
-		total = 1
-	}
 	count := copy(dst, hits)
 	r := p.QueryResult{Count: count, Total: total, Incomplete: count < total, Revision: w.revision}
 	for _, h := range hits {
 		r.Blocked = r.Blocked || h.Blocking
-	}
-	if r.Incomplete {
-		w.stats.Overflows++
 	}
 	return r, nil
 }

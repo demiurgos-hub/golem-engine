@@ -29,6 +29,7 @@ type options struct {
 	Mode, Out, SourceManifest        string
 	Extent                           int
 	Workers                          int
+	PhysicsWorkers, QueryWorkers     int
 	Profiles                         bool
 	Warmup, Duration, StartupTimeout time.Duration
 }
@@ -40,6 +41,8 @@ func main() {
 	flag.StringVar(&o.SourceManifest, "source-manifest", "", "exact staged source manifest; required for full mode")
 	flag.IntVar(&o.Extent, "extent", 0, "world side length: full mode requires 768 or 2304 metres")
 	flag.IntVar(&o.Workers, "workers", 4, "navigation path workers")
+	flag.IntVar(&o.PhysicsWorkers, "physics-workers", 6, "rigid-body solver workers")
+	flag.IntVar(&o.QueryWorkers, "query-workers", 6, "bounded gameplay query workers")
 	flag.BoolVar(&o.Profiles, "profiles", false, "record CPU and retained heap profiles; includes warmup, affects timing")
 	flag.DurationVar(&o.Warmup, "warmup", 2*time.Second, "minimum warmup after server starts")
 	flag.DurationVar(&o.Duration, "duration", 2*time.Second, "measurement interval; full soak requires at least 2h")
@@ -67,6 +70,7 @@ type results struct {
 	Qualified                                                                          bool
 	Mode                                                                               string
 	Workload                                                                           workload
+	PhysicsWorkers, QueryWorkers                                                       int
 	Samples, MeasuredSamples                                                           uint64
 	FullTick, Cadence, Physics, Solve, Navigation                                      histogram
 	StartupRouteAdmission, RenewedRouteAdmission                                       histogram
@@ -96,7 +100,7 @@ func run(o options) (runErr error) {
 			o.Extent = 256
 		}
 	}
-	if o.Out == "" || o.Duration <= 0 || o.Warmup < 0 || o.StartupTimeout <= o.Warmup || o.Workers < 1 || o.Extent < 64 || o.Extent > 2304 {
+	if o.Out == "" || o.Duration <= 0 || o.Warmup < 0 || o.StartupTimeout <= o.Warmup || o.Workers < 1 || o.PhysicsWorkers < 1 || o.PhysicsWorkers > 64 || o.QueryWorkers < 1 || o.QueryWorkers > 64 || o.Extent < 64 || o.Extent > 2304 {
 		return errors.New("invalid options")
 	}
 	if o.Mode == "full" && (o.Extent != 768 && o.Extent != 2304 || o.SourceManifest == "") {
@@ -111,6 +115,7 @@ func run(o options) (runErr error) {
 		return err
 	}
 	r := results{Mode: o.Mode, Workload: c, MinMoving: c.Characters, MinFollowing: c.Characters, MinScheduled: c.Characters, MinAwakeDynamic: c.DynamicBodies, MinProjectiles: c.Projectiles, MinQueries: c.Queries, Gates: map[string]bool{}, Missing: []string{"representative-content matrix", "navigation terrain/multilevel/construction/churn/checkpoint gates", "independent platform executions", "query scratch allocation isolation", "joint family and moving-support scenario qualification", "per-substep duration (contract exposes aggregate solve only)", "published module resolution"}}
+	r.PhysicsWorkers, r.QueryWorkers = o.PhysicsWorkers, o.QueryWorkers
 	defer func() {
 		if runErr != nil {
 			r.Failure = runErr.Error()

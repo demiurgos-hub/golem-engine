@@ -85,12 +85,18 @@ type scene struct {
 	projectiles                      []projectile
 	counts                           workload
 	boxCenters                       []p.Vec3
+	queryTasks                       []p.QueryTask
+	queryOutcomes                    []p.QueryOutcome
+	queryHits                        []p.Hit
+	queryWorkers                     int
 	admissionLatency, renewalLatency histogram
 }
 
 func makeScene(o options, c workload, observeNav func(golem.NavigationTickMetrics)) (*scene, error) {
-	s := &scene{counts: c}
-	w, err := box3d.New(p.DefaultConfig())
+	s := &scene{counts: c, queryWorkers: max(1, o.QueryWorkers)}
+	config := p.DefaultConfig()
+	config.Workers = uint32(max(1, o.PhysicsWorkers))
+	w, err := box3d.New(config)
 	if err != nil {
 		return nil, err
 	}

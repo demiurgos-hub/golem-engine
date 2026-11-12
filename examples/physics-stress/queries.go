@@ -38,7 +38,11 @@ func (s *scene) sweepProjectiles(dt, half float32) (int, int, error) {
 }
 
 func (s *scene) gameplayQueries() (int, error) {
-	var dst [32]p.Hit
+	if len(s.queryTasks) == 0 {
+		s.queryTasks = make([]p.QueryTask, s.counts.Queries)
+		s.queryOutcomes = make([]p.QueryOutcome, s.counts.Queries)
+		s.queryHits = make([]p.Hit, s.counts.Queries*32)
+	}
 	for i := 0; i < s.counts.Queries; i++ {
 		center := s.boxCenters[(i*7919)%len(s.boxCenters)]
 		pose := p.Identity()
@@ -64,12 +68,17 @@ func (s *scene) gameplayQueries() (int, error) {
 			q.Pose.Position.Y = 2
 			q.Translation = p.Vec3{Y: -3}
 		}
-		result, err := s.world.Query(q, dst[:])
-		if err != nil {
-			return i, err
+		s.queryTasks[i] = p.QueryTask{Query: q, Hits: s.queryHits[i*32 : (i+1)*32]}
+	}
+	if err := s.world.QueryBatch(s.queryTasks, s.queryOutcomes, s.queryWorkers); err != nil {
+		return 0, err
+	}
+	for i, outcome := range s.queryOutcomes {
+		if outcome.Err != nil {
+			return i, outcome.Err
 		}
-		if result.Incomplete {
-			return i, fmt.Errorf("gameplay query %d overflow: %d hits, %d slots", i, result.Total, len(dst))
+		if outcome.Result.Incomplete {
+			return i, fmt.Errorf("gameplay query %d overflow: %d hits, %d slots", i, outcome.Result.Total, 32)
 		}
 	}
 	return s.counts.Queries, nil

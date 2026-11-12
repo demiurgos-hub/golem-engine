@@ -15,6 +15,8 @@ const (
 	Enter ContactPhase = iota + 1
 	Stay
 	Exit
+	// RestoredContact rebuilds overlap state without replaying ordinary entry effects.
+	RestoredContact
 )
 
 type CleanupReason uint8
@@ -42,6 +44,8 @@ type ContactEvent struct {
 	Point, Normal, Force Vec3
 	Depth                float32
 	Frame, Revision      uint64
+	// Fraction is the microstep endpoint within the containing frame.
+	Fraction float32
 }
 
 // ContactTracker tracks exact generational collider pairs. Copies are returned;
@@ -67,6 +71,7 @@ func (t *ContactTracker) Update(current []ContactEvent, frame, revision uint64, 
 		}
 		if restoring {
 			v.Reason = Restored
+			v.Phase = RestoredContact
 		}
 		next[v.Pair] = v
 		out = append(out, v)

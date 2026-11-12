@@ -99,24 +99,22 @@ type PenetrationResult struct {
 // SortHits orders by distance, collider generation and exact feature identity.
 func SortHits(h []Hit) {
 	sort.SliceStable(h, func(i, j int) bool {
-		a, b := h[i], h[j]
-		if a.Distance != b.Distance {
-			return a.Distance < b.Distance
-		}
-		if a.Collider.World != b.Collider.World {
-			return a.Collider.World < b.Collider.World
-		}
-		if a.Collider.Index != b.Collider.Index {
-			return a.Collider.Index < b.Collider.Index
-		}
-		if a.Collider.Generation != b.Collider.Generation {
-			return a.Collider.Generation < b.Collider.Generation
-		}
-		if a.Feature.Child != b.Feature.Child {
-			return a.Feature.Child < b.Feature.Child
-		}
-		return a.Feature.Triangle < b.Feature.Triangle
+		return HitLess(h[i], h[j])
 	})
+}
+
+// HitLess compares hits using the distance and identity ordering of SortHits.
+func HitLess(a, b Hit) bool {
+	if a.Distance != b.Distance {
+		return a.Distance < b.Distance
+	}
+	if a.Collider != b.Collider {
+		return lessHandle(a.Collider, b.Collider)
+	}
+	if a.Feature.Child != b.Feature.Child {
+		return a.Feature.Child < b.Feature.Child
+	}
+	return a.Feature.Triangle < b.Feature.Triangle
 }
 
 // AggregateOwners retains the first ordered hit per nonzero owner; unowned

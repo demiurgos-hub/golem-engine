@@ -8,6 +8,8 @@ param(
     [ValidateSet(64,256,768,2304)][int]$Extent = 768,
     [string]$Duration = '2s',
     [string]$Warmup = '2s',
+    [ValidateRange(1,64)][int]$PhysicsWorkers = 6,
+    [ValidateRange(1,64)][int]$QueryWorkers = 6,
     [switch]$Profiles,
     [switch]$BuildOnly
 )
@@ -78,7 +80,7 @@ try {
     } finally { Pop-Location }
     $record.executableSHA256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
     if (-not $BuildOnly) {
-        $arguments = @('-mode',$Mode,'-extent',"$Extent",'-duration',$Duration,'-warmup',$Warmup,'-source-manifest',$sourceManifest,'-out',(Join-Path $runPath 'workload'))
+        $arguments = @('-mode',$Mode,'-extent',"$Extent",'-duration',$Duration,'-warmup',$Warmup,'-physics-workers',"$PhysicsWorkers",'-query-workers',"$QueryWorkers",'-source-manifest',$sourceManifest,'-out',(Join-Path $runPath 'workload'))
         if ($Profiles) { $arguments += '-profiles' }
         $record.arguments = $arguments
         & $executable @arguments 2>&1 | Out-File -LiteralPath (Join-Path $runPath 'workload.log') -Encoding utf8
