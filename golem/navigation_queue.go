@@ -95,7 +95,7 @@ func (p *navigationPool) submit(key string, priority int, work func(context.Cont
 	p.next++
 	ctx, cancel := context.WithCancel(p.ctx)
 	p.pending[key] = &navigationJob{key: key, id: p.next, priority: priority, turn: p.turns,
-		ctx: ctx, cancel: cancel, work: work, complete: complete, discard: discard, queuedAt: time.Now()}
+		ctx: ctx, cancel: cancel, work: work, complete: complete, discard: discard, queuedAt: NavigationNow()}
 	p.accepted++
 	p.signal()
 	return nil
@@ -139,7 +139,7 @@ func (p *navigationPool) take() *navigationJob {
 	if selected != nil {
 		delete(p.pending, selected.key)
 		p.running[selected.id] = selected
-		selected.startedAt = time.Now()
+		selected.startedAt = NavigationNow()
 		recordNavigationLatency(&p.queueLatency, &p.queueWaitMax, selected.startedAt.Sub(selected.queuedAt))
 		p.turns++
 		if len(p.pending) > 0 {
@@ -162,7 +162,7 @@ func (p *navigationPool) run() {
 			}
 		}
 		value, err := runNavigationWork(job)
-		finishedAt := time.Now()
+		finishedAt := NavigationNow()
 		p.mu.Lock()
 		delete(p.running, job.id)
 		p.finished++
@@ -196,7 +196,7 @@ func runNavigationWork(job *navigationJob) (value any, err error) {
 }
 
 func (p *navigationPool) drain(limit int, budget time.Duration) {
-	start := time.Now()
+	start := NavigationNow()
 	n := len(p.completed)
 	if n > limit {
 		n = limit
@@ -205,13 +205,13 @@ func (p *navigationPool) drain(limit int, budget time.Duration) {
 		if p.ctx == nil || p.ctx.Err() != nil {
 			return
 		}
-		if i > 0 && budget > 0 && time.Since(start) >= budget {
+		if i > 0 && budget > 0 && navigationSince(start) >= budget {
 			return
 		}
 		select {
 		case completion := <-p.completed:
 			p.mu.Lock()
-			recordNavigationLatency(&p.completionLatency, &p.completionLagMax, time.Since(completion.finishedAt))
+			recordNavigationLatency(&p.completionLatency, &p.completionLagMax, navigationSince(completion.finishedAt))
 			p.mu.Unlock()
 			completion.job.complete(completion.value, completion.err)
 		default:

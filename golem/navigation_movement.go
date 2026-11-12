@@ -16,7 +16,8 @@ func (n *navigationService) advanceAgent(a *navigationAgent, dt float64) {
 	if !a.state.HasDestination {
 		return
 	}
-	if n.pending(a.config.Profile) {
+	safety := n.agentSafety(a)
+	if safety == nil && n.pending(a.config.Profile) {
 		if a.view != nil || a.requesting {
 			if !n.cancelTraversal(a, "geometry update pending") {
 				return
@@ -28,7 +29,12 @@ func (n *navigationService) advanceAgent(a *navigationAgent, dt float64) {
 		a.needsPath = true
 		return
 	}
-	revision := n.backend.CurrentRevision(a.config.Profile)
+	var revision uint64
+	if safety != nil {
+		revision = safety.CommittedRevision()
+	} else {
+		revision = n.backend.CurrentRevision(a.config.Profile)
+	}
 	if revision == 0 {
 		if a.view != nil {
 			if !n.cancelTraversal(a, "navigation unloaded") {
@@ -41,15 +47,45 @@ func (n *navigationService) advanceAgent(a *navigationAgent, dt float64) {
 		return
 	}
 	if a.state.WorldRevision != 0 && a.state.WorldRevision != revision {
-		if !n.cancelTraversal(a, "navigation changed") {
+		if a.view == nil || !protectsRetiredViews(safety) {
+			if !n.refreshAgentRevision(a, position, safety, revision) {
+				return
+			}
+		}
+		// Protected old views keep moving only outside the full retained-change
+		// quarantine. The separate retirement pass transfers them fairly.
+		safety = n.agentSafety(a)
+	}
+	if safety != nil {
+		if a.quarantined && a.safetyToken == safety.Token() && a.quarantineRevision == a.state.WorldRevision {
 			return
 		}
-		n.invalidate(a)
-		a.keepSupport = a.supportEstablished
-		a.needsPath = true
-		a.state.WorldRevision = revision
-		a.stallReplans = 0
-		a.state.Mode, a.state.Status.Code = NavigationPending, surface.Stale
+		if !n.regionSafe(a, safety, position) {
+			n.quarantineAgent(a, safety)
+			return
+		}
+		if a.quarantined {
+			a.quarantined = false
+			a.state.Quarantined = false
+			if a.route != nil {
+				a.state.Mode = a.resumeMode
+				a.state.Status = a.resumeStatus
+			} else {
+				a.needsPath = a.state.HasDestination
+			}
+		}
+	}
+	if a.admissionPending && !a.quarantined {
+		if navDistance(position, a.lastPosition) > .01 {
+			// External displacement while waiting invalidates the search origin.
+			// Preserve support intent, but never admit a route from an old body pose.
+			n.invalidate(a)
+			a.keepSupport = a.supportEstablished
+			a.needsPath = a.state.HasDestination
+			a.state.Mode, a.state.Status.Code = NavigationPending, surface.Stale
+		} else {
+			n.observePathAdmission(a)
+		}
 	}
 	if a.needsPath && !a.requesting {
 		n.requestPath(a, position)
@@ -63,6 +99,9 @@ func (n *navigationService) advanceAgent(a *navigationAgent, dt float64) {
 	}
 	if a.initialProjection {
 		actual := a.location.Position()
+		if !n.safeSegment(a, position, actual) {
+			return
+		}
 		if a.config.Motor != nil {
 			generation := a.state.Generation
 			var err error
@@ -77,6 +116,9 @@ func (n *navigationService) advanceAgent(a *navigationAgent, dt float64) {
 		}
 		if !fitsNavigationEntity(actual) {
 			n.failAgent(a, surface.InvalidInput, errors.New("golem: projected position exceeds entity coordinates"))
+			return
+		}
+		if !n.safeSegment(a, position, actual) {
 			return
 		}
 		writer.SetPosition3D(float32(actual.X), float32(actual.Y), float32(actual.Z))
@@ -137,12 +179,21 @@ func (n *navigationService) advanceAgent(a *navigationAgent, dt float64) {
 		}
 		step := math.Min(distance, budget)
 		target := surface.Vec3{X: steering.X + (corner.Position.X-steering.X)*step/distance, Y: steering.Y + (corner.Position.Y-steering.Y)*step/distance, Z: steering.Z + (corner.Position.Z-steering.Z)*step/distance}
+		if !n.safeSegment(a, position, target) {
+			return
+		}
 		moved := a.query.Move(n.server.runCtx, a.location, target, a.config.Filter)
 		if moved.Location == nil || moved.Code != surface.Complete && moved.Code != surface.Partial {
 			n.failAgent(a, moved.Code, moved.Err)
 			return
 		}
 		actual := moved.Location.Position()
+		if !sameNavigationHorizontal(actual, target) {
+			a.corridorDeviated = true
+		}
+		if !n.safeSegment(a, position, actual) {
+			return
+		}
 		if a.config.Motor != nil {
 			generation := a.state.Generation
 			var err error
@@ -159,8 +210,16 @@ func (n *navigationService) advanceAgent(a *navigationAgent, dt float64) {
 			n.failAgent(a, surface.InvalidInput, errors.New("golem: navigation motor returned non-finite position"))
 			return
 		}
+		if !n.safeSegment(a, position, actual) {
+			return
+		}
 		writer.SetPosition3D(float32(actual.X), float32(actual.Y), float32(actual.Z))
+		if !sameNavigationHorizontal(actual, moved.Location.Position()) {
+			a.corridorDeviated = true
+		}
+		a.hasReconciledPosition = false
 		a.location = moved.Location
+		a.locationSafetyChecked = false
 		progress := navDistance(position, actual)
 		position = actual
 		budget -= step
@@ -231,35 +290,93 @@ func (n *navigationService) failAgent(a *navigationAgent, code surface.Code, err
 }
 
 func (n *navigationService) reconcile() {
+	if n.config.ObserveTick != nil {
+		started := NavigationNow()
+		defer func() {
+			n.tickMetrics.Reconcile = navigationSince(started)
+			n.config.ObserveTick(n.tickMetrics)
+		}()
+	}
 	for _, id := range n.moved {
 		a := n.agents[id]
-		if a == nil || a.state.Mode != NavigationFollowing || a.view == nil {
+		if a == nil || a.state.Mode != NavigationFollowing && a.state.Mode != NavigationTraversing || a.view == nil {
 			continue
 		}
 		position, _, ok := n.position(id)
 		if ok {
+			generation, accepted := a.state.Generation, a.lastPosition
+			if !n.safeSegment(a, a.lastPosition, position) {
+				// Collision readback may already have written the body. Restore the
+				// last accepted position before exposing a quarantined crossing.
+				if _, writer, exists := n.position(id); exists && n.current(a, generation) {
+					writer.SetPosition3D(float32(accepted.X), float32(accepted.Y), float32(accepted.Z))
+				}
+				continue
+			}
+			if a.state.Mode == NavigationTraversing {
+				if a.traversal.bounded && !traversalBoundsContain(a.traversal.bounds, position) {
+					n.failAgent(a, surface.InvalidInput, errors.New("golem: collision moved traversal outside its declared bounds"))
+					if _, writer, exists := n.position(id); exists && n.current(a, generation) {
+						writer.SetPosition3D(float32(accepted.X), float32(accepted.Y), float32(accepted.Z))
+					}
+				} else {
+					a.lastPosition = position
+				}
+				continue
+			}
 			n.reconcileAgent(a, position)
 		}
 	}
 }
 
 func (n *navigationService) reconcileAgent(a *navigationAgent, position surface.Vec3) bool {
-	projection := a.config.Projection
-	projection.Hint = a.location
-	projection.Horizontal = a.config.SupportTolerance
-	projection.Vertical, projection.Up, projection.Down = a.config.SupportTolerance, a.config.SupportTolerance, a.config.SupportTolerance
-	result := a.query.Project(n.server.runCtx, position, projection, a.config.Filter)
-	if result.Code != surface.Complete || result.Location == nil {
-		n.failAgent(a, result.Code, result.Err)
+	if !position.Finite() {
+		n.failAgent(a, surface.InvalidInput, errors.New("golem: collision returned non-finite body position"))
 		return false
 	}
-	projected := result.Location.Position()
+	if !n.safeSegment(a, a.location.Position(), position) {
+		return false
+	}
+	if a.hasReconciledPosition && position == a.reconciledPosition {
+		return true
+	}
+	if !sameNavigationHorizontal(position, a.lastPosition) {
+		a.corridorDeviated = true
+	}
+	projected := a.location.Position()
+	if !sameNavigationHorizontal(position, projected) {
+		projection := a.config.Projection
+		projection.Hint = a.location
+		projection.Horizontal = a.config.SupportTolerance
+		projection.Vertical, projection.Up, projection.Down = a.config.SupportTolerance, a.config.SupportTolerance, a.config.SupportTolerance
+		result := a.query.Project(n.server.runCtx, position, projection, a.config.Filter)
+		if result.Code != surface.Complete || result.Location == nil {
+			n.failAgent(a, result.Code, result.Err)
+			return false
+		}
+		a.location = result.Location
+		a.locationSafetyChecked = false
+		projected = result.Location.Position()
+	}
+	// Move already returned valid support at these horizontal coordinates. A
+	// rounded body write or accepted vertical motor offset cannot select a new
+	// polygon, so retain that exact support instead of projecting it again.
 	if navDistance(position, projected) > a.config.SupportTolerance {
 		n.failAgent(a, surface.NoSurface, errors.New("golem: body is no longer supported by its navigation surface"))
 		return false
 	}
-	a.location = result.Location
-	if repair, ok := a.query.(surface.CorridorQuery); ok && a.route != nil && navDistance(projected, a.lastRepair) > 0.01 {
+	if safety := n.agentSafety(a); safety != nil && !n.supportSafe(a, safety) {
+		n.quarantineAgent(a, safety)
+		return false
+	}
+	needsRepair := a.route != nil && navDistance(projected, a.lastRepair) > .01
+	if same, ok := a.location.(surface.SupportIdentity); ok && a.route != nil {
+		// Straight progress inside one convex polygon preserves the existing
+		// funnel and corner cursor. Refunnel on polygon changes or lateral body
+		// deviation; opaque backends without identity retain ordinary repair.
+		needsRepair = a.corridorDeviated || !same.SameSupport(a.repairLocation)
+	}
+	if repair, ok := a.query.(surface.CorridorQuery); ok && needsRepair {
 		path := repair.RepairPath(n.server.runCtx, a.route, a.location, a.config.Filter)
 		if path.Code != surface.Complete && path.Code != surface.Partial || path.Route == nil {
 			n.invalidate(a)
@@ -267,7 +384,9 @@ func (n *navigationService) reconcileAgent(a *navigationAgent, position surface.
 			a.state.Mode, a.state.Status = NavigationPending, path.Status
 			return false
 		}
-		a.route, a.corners, a.next, a.lastRepair = path.Route, path.Route.Corners(), 0, projected
+		a.route, a.corners, a.next, a.lastRepair = path.Route, navigationCorners(a.corners, path.Route), 0, projected
+		a.routeSafetyChecked = false
+		a.repairLocation, a.corridorDeviated = a.location, false
 		if path.Code == surface.Partial && !a.config.AllowPartial {
 			a.state.PartialPath = path.Route.Corners()
 			n.failAgent(a, surface.Partial, path.Err)
@@ -276,7 +395,12 @@ func (n *navigationService) reconcileAgent(a *navigationAgent, position surface.
 		}
 		a.state.Status = path.Status
 	}
+	a.reconciledPosition, a.hasReconciledPosition = position, true
 	return true
+}
+
+func sameNavigationHorizontal(a, b surface.Vec3) bool {
+	return float32(a.X) == float32(b.X) && float32(a.Z) == float32(b.Z)
 }
 
 func fitsNavigationEntity(p surface.Vec3) bool {

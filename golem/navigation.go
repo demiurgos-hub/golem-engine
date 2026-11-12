@@ -31,11 +31,47 @@ type NavigationConfig struct {
 	PathDrainBudget, BuildDrainBudget       time.Duration
 	MovementAgentsPerTick                   int
 	MovementBudget                          time.Duration
-	MaxStep                                 time.Duration
+	// RebaseAgentsPerTick and RebaseBudget bound fair snapshot transfers when
+	// the backend protects movement from all still-retained older views.
+	RebaseAgentsPerTick int
+	RebaseBudget        time.Duration
+	MaxStep             time.Duration
 	// PathDeadline bounds active worker time, excluding queue wait (default 250 ms).
 	PathDeadline     time.Duration
 	Limits           surface.Limits
 	RequiredProfiles []surface.ProfileID
+	// ObserveTick receives navigation-only timings after reconciliation. It must
+	// not block, mutate server state, or call navigation lifecycle APIs.
+	ObserveTick func(NavigationTickMetrics)
+	// ObservePathAdmission runs on the tick goroutine immediately after a valid
+	// worker result becomes an owned following route. It must not block or mutate
+	// server state. Observer execution is excluded from ObserveTick and included
+	// in full tick time.
+	ObservePathAdmission func(NavigationPathAdmissionMetrics)
+}
+
+// NavigationPathAdmissionMetrics timestamps successful route admission, after
+// revision, support and regional-safety validation. Failed or superseded work
+// does not emit admission. Callers measure intent latency from their own issue
+// timestamp from NavigationNow; compare timestamps with Time.Sub, not time.Since.
+// Generation identifies the accepted worker generation.
+type NavigationPathAdmissionMetrics struct {
+	EntityID                        int64
+	Tick, Generation, WorldRevision uint64
+	// AdmittedAt uses NavigationNow's process-local high-resolution clock.
+	AdmittedAt time.Time
+	Status     surface.Status
+}
+
+// NavigationTickMetrics measures navigation work on the tick goroutine. Worker
+// work and observer execution are excluded; durations include policy callbacks.
+type NavigationTickMetrics struct {
+	Tick                         uint64
+	Prepare, Movement, Reconcile time.Duration
+	AgentsScheduled              int
+	// Rebase is already included in Movement; do not add it again to tick cost.
+	Rebase                        time.Duration
+	RebaseAttempts, RebasedAgents int
 }
 
 // NavigationQueueStats reports independently sampled bounded pool counters.
@@ -61,9 +97,11 @@ type NavigationStats struct {
 // NavigationReadiness reports restoration and required-profile availability.
 type NavigationReadiness struct {
 	Ready, Restoring bool
-	MissingProfiles  []surface.ProfileID
-	PendingProfiles  []surface.ProfileID
-	Err              error
+	// Degraded means a committed regional world is usable outside quarantine.
+	Degraded        bool
+	MissingProfiles []surface.ProfileID
+	PendingProfiles []surface.ProfileID
+	Err             error
 }
 
 // NavigationMode is the server-controlled agent's current movement state.
@@ -89,6 +127,8 @@ type NavigationState struct {
 	Velocity       surface.Vec3
 	Generation     uint64
 	WorldRevision  uint64
+	// Quarantined means this agent is waiting for a regional safety change.
+	Quarantined bool
 	// PartialPath is a copied diagnostic prefix when partial following was rejected.
 	PartialPath []surface.Corner
 }
@@ -134,49 +174,74 @@ type NavigationAgentConfig struct {
 }
 
 type navigationAgent struct {
-	id                 int64
-	attachment         uint64
-	config             NavigationAgentConfig
-	state              NavigationState
-	view               surface.View
-	query              surface.Query
-	location           surface.Location
-	route              surface.Route
-	corners            []surface.Corner
-	next               int
-	requesting         bool
-	needsPath          bool
-	speed              float64
-	lastTick           uint64
-	lastPosition       surface.Vec3
-	lastRepair         surface.Vec3
-	stallTime          float64
-	stallReplans       int
-	keepSupport        bool
-	initialProjection  bool
-	supportEstablished bool
-	traversal          *navigationTraversal
+	id                    int64
+	attachment            uint64
+	config                NavigationAgentConfig
+	state                 NavigationState
+	view                  surface.View
+	query                 surface.Query
+	location              surface.Location
+	route                 surface.Route
+	corners               []surface.Corner
+	next                  int
+	requesting            bool
+	needsPath             bool
+	admissionPending      bool
+	speed                 float64
+	lastTick              uint64
+	lastPosition          surface.Vec3
+	lastRepair            surface.Vec3
+	stallTime             float64
+	stallReplans          int
+	keepSupport           bool
+	initialProjection     bool
+	supportEstablished    bool
+	traversal             *navigationTraversal
+	quarantined           bool
+	safetyToken           uint64
+	quarantineRevision    uint64
+	resumeMode            NavigationMode
+	resumeStatus          surface.Status
+	routeSafetyChecked    bool
+	routeSafetyToken      uint64
+	locationSafetyChecked bool
+	locationSafetyToken   uint64
+	positionSafetyChecked bool
+	positionSafetyToken   uint64
+	safePosition          surface.Vec3
+	segmentSafetyChecked  bool
+	segmentSafetyToken    uint64
+	safeSegmentFrom       surface.Vec3
+	safeSegmentTo         surface.Vec3
+	repairLocation        surface.Location
+	corridorDeviated      bool
+	reconciledPosition    surface.Vec3
+	hasReconciledPosition bool
 }
 
 type navigationService struct {
-	server          *Server
-	backend         surface.Backend
-	config          NavigationConfig
-	paths, builds   *navigationPool
-	agents          map[int64]*navigationAgent
-	deleting        map[int64]bool
-	order           []int64
-	cursor          int
-	moved           []int64
-	attachment      uint64
-	restoring       bool
-	restoreErr      error
-	buildGeneration map[string]uint64
-	buildSequence   uint64
-	buildStates     map[string]NavigationBuildState
-	buildRequests   map[string]*navigationBuildRequest
-	buildClock      func() time.Time
-	delayedBuilds   atomic.Int64
+	server                 *Server
+	backend                surface.Backend
+	config                 NavigationConfig
+	paths, builds          *navigationPool
+	agents                 map[int64]*navigationAgent
+	deleting               map[int64]bool
+	order                  []int64
+	cursor                 int
+	rebaseCursor           int
+	rebaseRevisions        map[surface.ProfileID]uint64
+	moved                  []int64
+	attachment             uint64
+	restoring              bool
+	restoreErr             error
+	buildGeneration        map[string]uint64
+	buildSequence          uint64
+	buildStates            map[string]NavigationBuildState
+	buildRequests          map[string]*navigationBuildRequest
+	buildClock             func() time.Time
+	delayedBuilds          atomic.Int64
+	tickMetrics            NavigationTickMetrics
+	pathObservationElapsed time.Duration
 }
 
 // SetSurfaceNavigation installs a 3D navigation service before Run. Existing 2D
@@ -201,7 +266,7 @@ func (s *Server) SetSurfaceNavigation(backend surface.Backend, cfg NavigationCon
 		paths:  newNavigationPool(cfg.PathWorkers, cfg.PathQueueCapacity, cfg.CompletionCapacity),
 		builds: newNavigationPool(cfg.BuildWorkers, cfg.BuildQueueCapacity, cfg.CompletionCapacity),
 		agents: make(map[int64]*navigationAgent), deleting: make(map[int64]bool), buildGeneration: make(map[string]uint64),
-		buildStates: make(map[string]NavigationBuildState), buildRequests: make(map[string]*navigationBuildRequest), buildClock: time.Now}
+		buildStates: make(map[string]NavigationBuildState), buildRequests: make(map[string]*navigationBuildRequest), buildClock: NavigationNow}
 	return nil
 }
 
@@ -255,11 +320,17 @@ func (s *Server) DetachNavigation(id int64) {
 			for i, existing := range n.order {
 				if existing == id {
 					n.order = append(n.order[:i], n.order[i+1:]...)
+					if i < n.rebaseCursor {
+						n.rebaseCursor--
+					}
 					break
 				}
 			}
 			if n.cursor >= len(n.order) {
 				n.cursor = 0
+			}
+			if n.rebaseCursor >= len(n.order) {
+				n.rebaseCursor = 0
 			}
 			// Remove the old attachment before user cancellation can attach a replacement.
 			n.cancelTraversal(a, "agent removed")
@@ -360,7 +431,10 @@ func (s *Server) NavigationStats() NavigationStats {
 	return stats
 }
 
-// NavigationReady reports required-profile readiness on the tick or before Run.
+// NavigationReady reports availability on the tick or before Run. Committed
+// regional worlds with pending edits or retiring-view quarantine remain Ready
+// and report Degraded; missing profiles, restoration and profile-wide pending
+// backends close readiness.
 func (s *Server) NavigationReady() NavigationReadiness {
 	n := s.navigation
 	if n == nil {
@@ -381,8 +455,19 @@ func (s *Server) NavigationReady() NavigationReadiness {
 		if n.pending(profile) {
 			r.PendingProfiles = append(r.PendingProfiles, profile)
 		}
+		if retained, ok := n.regionalSafety(profile).(surface.RetainedRegionalSafety); ok && retained.HasQuarantine() {
+			r.Degraded = true
+		}
 	}
-	r.Ready = !r.Restoring && r.Err == nil && len(r.MissingProfiles) == 0 && len(r.PendingProfiles) == 0
+	blockingPending := false
+	for _, profile := range r.PendingProfiles {
+		if n.profileUnavailable(profile) {
+			blockingPending = true
+		} else {
+			r.Degraded = true
+		}
+	}
+	r.Ready = !r.Restoring && r.Err == nil && len(r.MissingProfiles) == 0 && !blockingPending
 	sort.Slice(r.MissingProfiles, func(i, j int) bool { return r.MissingProfiles[i] < r.MissingProfiles[j] })
 	sort.Slice(r.PendingProfiles, func(i, j int) bool { return r.PendingProfiles[i] < r.PendingProfiles[j] })
 	return r
@@ -454,8 +539,14 @@ func (n *navigationService) releaseRoute(a *navigationAgent) {
 		a.view.Release()
 	}
 	a.view, a.query, a.location, a.route, a.corners = nil, nil, nil, nil, nil
+	a.routeSafetyChecked = false
+	a.locationSafetyChecked = false
+	a.positionSafetyChecked, a.segmentSafetyChecked = false, false
+	a.repairLocation = nil
+	a.corridorDeviated, a.hasReconciledPosition = false, false
 	a.next, a.speed = 0, 0
 	a.initialProjection = false
+	a.admissionPending = false
 	a.state.Velocity = surface.Vec3{}
 }
 
@@ -464,22 +555,37 @@ func (n *navigationService) invalidate(a *navigationAgent) {
 	a.state.PartialPath = nil
 	n.paths.cancelKey(strconv.FormatInt(a.id, 10))
 	a.requesting = false
+	a.quarantined = false
+	a.state.Quarantined = false
 	n.releaseRoute(a)
 }
 
 func (n *navigationService) prepare() {
+	n.tickMetrics = NavigationTickMetrics{Tick: n.server.tick}
+	n.pathObservationElapsed = 0
+	if n.config.ObserveTick != nil {
+		started := NavigationNow()
+		defer func() { n.tickMetrics.Prepare = navigationSince(started) - n.pathObservationElapsed }()
+	}
 	if n.server.runCtx == nil || n.server.runCtx.Err() != nil {
 		return
 	}
-	started := time.Now()
+	started := NavigationNow()
 	n.builds.drain(n.config.BuildCommitsPerTick, n.config.BuildDrainBudget)
-	if remaining := n.config.BuildDrainBudget - time.Since(started); remaining > 0 {
+	if remaining := n.config.BuildDrainBudget - navigationSince(started); remaining > 0 {
 		n.dispatchBuilds(remaining)
 	}
 	n.paths.drain(n.config.PathResultsPerTick, n.config.PathDrainBudget)
 }
 
 func (n *navigationService) advance(dt float64) {
+	if n.config.ObserveTick != nil {
+		started := NavigationNow()
+		observationBefore := n.pathObservationElapsed
+		defer func() {
+			n.tickMetrics.Movement = navigationSince(started) - (n.pathObservationElapsed - observationBefore)
+		}()
+	}
 	n.moved = n.moved[:0]
 	if n.server.runCtx == nil || n.server.runCtx.Err() != nil {
 		return
@@ -489,18 +595,27 @@ func (n *navigationService) advance(dt float64) {
 	}
 	barrier := false
 	for _, profile := range n.config.RequiredProfiles {
-		if n.backend.CurrentRevision(profile) == 0 || n.pending(profile) {
+		if n.profileUnavailable(profile) {
 			barrier = true
 			break
 		}
+	}
+	if !barrier {
+		n.rebaseRetired()
+	}
+	if n.restoring || n.restoreErr != nil {
+		return
 	}
 	count := len(n.order)
 	if count > n.config.MovementAgentsPerTick {
 		count = n.config.MovementAgentsPerTick
 	}
-	started := time.Now()
+	started := NavigationNow()
 	for i := 0; i < count && len(n.order) > 0; i++ {
-		if i > 0 && time.Since(started) >= n.config.MovementBudget {
+		if n.restoring || n.restoreErr != nil {
+			break
+		}
+		if i > 0 && navigationSince(started) >= n.config.MovementBudget {
 			break
 		}
 		if n.cursor >= len(n.order) {
@@ -531,6 +646,7 @@ func (n *navigationService) advance(dt float64) {
 			continue
 		}
 		n.moved = append(n.moved, id)
+		n.tickMetrics.AgentsScheduled++
 		if elapsed <= 0 {
 			elapsed = dt
 		}
@@ -545,7 +661,6 @@ type navigationPathResult struct {
 	revision    uint64
 	startFailed bool
 	view        surface.View
-	query       surface.Query
 	start       surface.Location
 	result      surface.PathResult
 	from        surface.Vec3
@@ -609,7 +724,9 @@ func (n *navigationService) requestPath(a *navigationAgent, from surface.Vec3) {
 			return &navigationPathResult{revision: view.Revision(), result: path}, nil
 		}
 		retained = true
-		return &navigationPathResult{revision: view.Revision(), view: view, query: query, start: start.Location, result: path, from: from}, nil
+		// Search scratch belongs to this job. Only immutable owned results and
+		// their retained view cross back to the tick; followers get a fresh query.
+		return &navigationPathResult{revision: view.Revision(), view: view, start: start.Location, result: path, from: from}, nil
 	}, func(value any, err error) {
 		current := n.agents[id]
 		if current == nil || current.attachment != attachment || current.state.Generation != generation {
@@ -631,7 +748,12 @@ func (n *navigationService) requestPath(a *navigationAgent, from surface.Vec3) {
 			current.state.Mode = NavigationFailed
 			return
 		}
-		if n.restoring || n.restoreErr != nil || n.pending(profile) || result.revision != n.backend.CurrentRevision(profile) {
+		if result.view == nil && result.revision != n.backend.CurrentRevision(profile) {
+			current.needsPath = current.state.HasDestination
+			current.state.Mode, current.state.Status.Code = NavigationPending, surface.Stale
+			return
+		}
+		if n.restoring || n.restoreErr != nil || n.profileUnavailable(profile) {
 			discardNavigationPath(value)
 			current.needsPath = current.state.HasDestination
 			current.state.Mode, current.state.Status.Code = NavigationPending, surface.Stale
@@ -655,22 +777,56 @@ func (n *navigationService) requestPath(a *navigationAgent, from surface.Vec3) {
 			return
 		}
 		position, _, ok := n.position(current.id)
-		if !ok || n.restoring || n.restoreErr != nil || n.pending(profile) || result.view.Revision() != n.backend.CurrentRevision(profile) || navDistance(position, result.from) > 0.01 {
+		if !ok || navDistance(position, result.from) > 0.01 {
 			discardNavigationPath(value)
 			current.needsPath = current.state.HasDestination
 			current.state.Mode, current.state.Status.Code = NavigationPending, surface.Stale
 			return
 		}
+		query, admitErr := result.view.NewQuery(n.config.Limits)
+		if admitErr != nil {
+			discardNavigationPath(value)
+			n.failAgent(current, surface.Failed, admitErr)
+			return
+		}
+		if result.revision != n.backend.CurrentRevision(profile) {
+			latest, latestQuery, rebased, _ := n.rebaseHandles(current, result.view, result.start, result.result.Route, position, false)
+			if latest == nil {
+				discardNavigationPath(value)
+				current.needsPath = current.state.HasDestination
+				current.state.Mode, current.state.Status.Code = NavigationPending, surface.Stale
+				return
+			}
+			result.view.Release()
+			result.view, result.start, result.result.Route = latest, rebased.Location, rebased.Route
+			result.result.Status = rebased.Status
+			result.revision, query = latest.Revision(), latestQuery
+			current.state.Status = rebased.Status
+		}
 		n.releaseRoute(current)
-		current.view, current.query, current.location, current.route = result.view, result.query, result.start, result.result.Route
-		current.corners = result.result.Route.Corners()
+		current.view, current.query, current.location, current.route = result.view, query, result.start, result.result.Route
+		current.routeSafetyChecked = false
+		current.locationSafetyChecked = false
+		current.quarantined = false
+		current.state.Quarantined = false
+		current.corners = navigationCorners(current.corners, result.result.Route)
 		current.state.WorldRevision = result.view.Revision()
 		current.state.Mode = NavigationFollowing
 		current.keepSupport = false
 		current.initialProjection = !keepSupport
 		current.lastPosition = position
 		current.lastRepair = position
+		current.repairLocation = result.start
 		current.stallTime = 0
+		current.needsPath = false
+		current.admissionPending = true
+		// Keep an owned result that intersects quarantine. Its corridor is the
+		// evidence needed to wait for safety changes without repeating the search.
+		if safety := n.agentSafety(current); safety != nil && (!n.regionSafe(current, safety, position) || !safety.SafeSegment(position, result.start.Position())) {
+			n.quarantineAgent(current, safety)
+			return
+		}
+		n.observePathAdmission(current)
 	}, discardNavigationPath)
 	if err != nil {
 		a.state.Status = surface.Status{Code: surface.ResourceExhausted, Err: err}
@@ -678,6 +834,18 @@ func (n *navigationService) requestPath(a *navigationAgent, from surface.Vec3) {
 	}
 	a.requesting, a.needsPath = true, false
 	a.state.Mode, a.state.Status = NavigationPending, surface.Status{Code: surface.NotReady}
+}
+
+func (n *navigationService) observePathAdmission(a *navigationAgent) {
+	if !a.admissionPending {
+		return
+	}
+	a.admissionPending = false
+	if observe := n.config.ObservePathAdmission; observe != nil {
+		admittedAt := NavigationNow()
+		observe(NavigationPathAdmissionMetrics{EntityID: a.id, Tick: n.server.tick, Generation: a.state.Generation, WorldRevision: a.state.WorldRevision, AdmittedAt: admittedAt, Status: a.state.Status})
+		n.pathObservationElapsed += navigationSince(admittedAt)
+	}
 }
 
 func (n *navigationService) position(id int64) (surface.Vec3, registry.Position3DWriter, bool) {
@@ -695,6 +863,13 @@ func (n *navigationService) position(id int64) (surface.Vec3, registry.Position3
 	}
 	x, y, z := reader.Position3D()
 	return surface.Vec3{X: float64(x), Y: float64(y), Z: float64(z)}, writer, true
+}
+
+func navigationCorners(dst []surface.Corner, route surface.Route) []surface.Corner {
+	if appendable, ok := route.(surface.CornerAppender); ok {
+		return appendable.AppendCorners(dst[:0])
+	}
+	return route.Corners()
 }
 
 func normalizeNavigationConfig(cfg *NavigationConfig) error {
@@ -719,8 +894,8 @@ func normalizeNavigationConfig(cfg *NavigationConfig) error {
 	if cfg.BuildMaxWait < cfg.BuildDebounce || cfg.BuildRetryMax < cfg.BuildRetryInitial {
 		return errors.New("golem: build scheduling maximum is below its initial delay")
 	}
-	ints := []*int{&cfg.PathWorkers, &cfg.BuildWorkers, &cfg.PathQueueCapacity, &cfg.BuildQueueCapacity, &cfg.CompletionCapacity, &cfg.PathResultsPerTick, &cfg.BuildCommitsPerTick, &cfg.MovementAgentsPerTick, &cfg.Limits.Nodes, &cfg.Limits.PathPolygons, &cfg.Limits.Corners, &cfg.BuildHistoryCapacity}
-	defaults := []int{2, 1, 256, 64, 128, 32, 2, 256, 4096, 512, 512, 256}
+	ints := []*int{&cfg.PathWorkers, &cfg.BuildWorkers, &cfg.PathQueueCapacity, &cfg.BuildQueueCapacity, &cfg.CompletionCapacity, &cfg.PathResultsPerTick, &cfg.BuildCommitsPerTick, &cfg.MovementAgentsPerTick, &cfg.Limits.Nodes, &cfg.Limits.PathPolygons, &cfg.Limits.Corners, &cfg.BuildHistoryCapacity, &cfg.RebaseAgentsPerTick}
+	defaults := []int{2, 1, 256, 64, 128, 32, 2, 256, 4096, 512, 512, 256, 64}
 	for i, value := range ints {
 		if *value < 0 {
 			return errors.New("golem: navigation limits must not be negative")
@@ -729,13 +904,13 @@ func normalizeNavigationConfig(cfg *NavigationConfig) error {
 			*value = defaults[i]
 		}
 	}
-	durations := []*time.Duration{&cfg.PathDrainBudget, &cfg.BuildDrainBudget, &cfg.MovementBudget, &cfg.MaxStep, &cfg.PathDeadline}
+	durations := []*time.Duration{&cfg.PathDrainBudget, &cfg.BuildDrainBudget, &cfg.MovementBudget, &cfg.MaxStep, &cfg.PathDeadline, &cfg.RebaseBudget}
 	for i, value := range durations {
 		if *value < 0 {
 			return errors.New("golem: navigation budgets must not be negative")
 		}
 		if *value == 0 {
-			*value = []time.Duration{time.Millisecond, time.Millisecond, 2 * time.Millisecond, 100 * time.Millisecond, 250 * time.Millisecond}[i]
+			*value = []time.Duration{time.Millisecond, time.Millisecond, 2 * time.Millisecond, 100 * time.Millisecond, 250 * time.Millisecond, time.Millisecond}[i]
 		}
 	}
 	cfg.RequiredProfiles = append([]surface.ProfileID(nil), cfg.RequiredProfiles...)

@@ -1230,6 +1230,16 @@ func TestSessionHandleIncomingDatagramAcksDeepOrderedBurstBeyondLegacyWindow(t *
 		}
 		lastPacketSeq = uint16(i)
 	}
+	sess.protocolMu.Lock()
+	initialPending := len(sess.protocol.pendingOrdered)
+	firstAttempts := true
+	for _, msg := range sess.protocol.pendingOrdered {
+		firstAttempts = firstAttempts && msg.inFlight && msg.attempts == 1
+	}
+	sess.protocolMu.Unlock()
+	if initialPending != 64 || !firstAttempts {
+		t.Fatalf("deep ACK fixture: pending=%d allFirstAttempts=%t", initialPending, firstAttempts)
+	}
 
 	ackPacket, err := encodeDatagramPacket(datagramPacket{
 		Sequence: 90,
@@ -1255,9 +1265,16 @@ func TestSessionHandleIncomingDatagramAcksDeepOrderedBurstBeyondLegacyWindow(t *
 	}
 
 	sess.protocolMu.Lock()
-	defer sess.protocolMu.Unlock()
-	if got := len(sess.protocol.pendingOrdered); got != 0 {
-		t.Fatalf("pendingOrdered len = %d, want 0", got)
+	remaining := len(sess.protocol.pendingOrdered)
+	sess.protocolMu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("pendingOrdered len = %d, want 0", remaining)
+	}
+	// Unlike the live transport test, synthetic time establishes an exact
+	// deep-window ACK boundary before the first retry can become eligible.
+	sent, err := sess.writeOne(context.Background(), now.Add(datagramReliableRetryMaxDelay+time.Millisecond), &budget)
+	if err != nil || sent {
+		t.Fatalf("writeOne after deep ACK and retry deadline: sent=%t err=%v", sent, err)
 	}
 }
 

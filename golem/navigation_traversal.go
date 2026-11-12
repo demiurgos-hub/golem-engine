@@ -32,6 +32,16 @@ type NavigationTraversalAction interface {
 	CancelNavigationTraversal(reason string)
 }
 
+// NavigationTraversalBounds contains every position a traversal may occupy,
+// including its endpoints. Bounds are world-space and fixed for the action.
+type NavigationTraversalBounds struct{ Min, Max surface.Vec3 }
+
+// NavigationBoundedTraversal optionally declares an action's complete swept
+// volume. Without it, any profile safety change cancels the action conservatively.
+type NavigationBoundedTraversal interface {
+	NavigationTraversalBounds() NavigationTraversalBounds
+}
+
 // NavigationTraversalUpdate supplies actual body position and completion intent.
 type NavigationTraversalUpdate struct {
 	Position surface.Vec3
@@ -39,9 +49,12 @@ type NavigationTraversalUpdate struct {
 }
 
 type navigationTraversal struct {
-	link    surface.Link
-	action  NavigationTraversalAction
-	elapsed float64
+	link        surface.Link
+	action      NavigationTraversalAction
+	elapsed     float64
+	bounded     bool
+	bounds      NavigationTraversalBounds
+	safetyToken uint64
 }
 
 func (n *navigationService) beginTraversal(a *navigationAgent, link surface.Link) {
@@ -54,6 +67,9 @@ func (n *navigationService) beginTraversal(a *navigationAgent, link surface.Link
 		return
 	}
 	from := a.location.Position()
+	if !n.safeSegment(a, from, link.To) {
+		return
+	}
 	if navDistance(from, link.From) > 0.1 {
 		n.failAgent(a, surface.NoSurface, errors.New("golem: traversal entry is outside activation tolerance"))
 		return
@@ -85,6 +101,26 @@ func (n *navigationService) beginTraversal(a *navigationAgent, link surface.Link
 		return
 	}
 	a.traversal = &navigationTraversal{link: link, action: action}
+	if safety := n.agentSafety(a); safety != nil {
+		a.traversal.safetyToken = safety.Token()
+	}
+	if bounded, ok := action.(NavigationBoundedTraversal); ok {
+		bounds := bounded.NavigationTraversalBounds()
+		if !n.movementCurrent(a, generation) {
+			return
+		}
+		if !validTraversalBounds(bounds) || !traversalBoundsContain(bounds, link.From) || !traversalBoundsContain(bounds, link.To) {
+			n.failAgent(a, surface.InvalidInput, errors.New("golem: traversal bounds must contain both endpoints"))
+			return
+		}
+		a.traversal.bounded, a.traversal.bounds = true, bounds
+	}
+	if safety := n.agentSafety(a); safety != nil {
+		if !n.regionSafe(a, safety, from) {
+			n.quarantineAgent(a, safety)
+			return
+		}
+	}
 	a.state.Mode = NavigationTraversing
 	a.state.Velocity = surface.Vec3{}
 	a.speed = 0
@@ -104,6 +140,10 @@ func (n *navigationService) advanceTraversal(a *navigationAgent, dt float64, wri
 		return
 	}
 	generation := a.state.Generation
+	from, _, exists := n.position(a.id)
+	if !exists {
+		return
+	}
 	update, err := a.traversal.action.AdvanceNavigationTraversal(dt)
 	if !n.movementCurrent(a, generation) {
 		return
@@ -118,7 +158,15 @@ func (n *navigationService) advanceTraversal(a *navigationAgent, dt float64, wri
 		n.failAgent(a, surface.Failed, err)
 		return
 	}
+	if a.traversal.bounded && !traversalBoundsContain(a.traversal.bounds, update.Position) {
+		n.failAgent(a, surface.InvalidInput, errors.New("golem: traversal left its declared bounds"))
+		return
+	}
+	if !n.safeSegment(a, from, update.Position) {
+		return
+	}
 	writer.SetPosition3D(float32(update.Position.X), float32(update.Position.Y), float32(update.Position.Z))
+	a.lastPosition = update.Position
 	if !update.Complete {
 		return
 	}
@@ -146,6 +194,7 @@ func (n *navigationService) advanceTraversal(a *navigationAgent, dt float64, wri
 		return
 	}
 	a.location = landing.Location
+	a.locationSafetyChecked = false
 	a.traversal = nil
 	a.next++
 	a.state.Mode = NavigationFollowing
@@ -171,6 +220,19 @@ func (n *navigationService) movementCurrent(a *navigationAgent, generation uint6
 	if !n.current(a, generation) || n.server.runCtx.Err() != nil {
 		return false
 	}
+	if safety := n.agentSafety(a); safety != nil {
+		position, _, ok := n.position(a.id)
+		if !ok || !n.regionSafe(a, safety, position) {
+			n.quarantineAgent(a, safety)
+			return false
+		}
+		// Only retirement-aware quarantine can protect a callback's old-view
+		// result after publication. Other backends wait for a view transfer.
+		if a.view != nil && a.view.Revision() != safety.CommittedRevision() && !protectsRetiredViews(safety) {
+			return false
+		}
+		return true
+	}
 	if n.pending(a.config.Profile) || a.view != nil && a.view.Revision() != n.backend.CurrentRevision(a.config.Profile) {
 		if !n.cancelTraversal(a, "navigation changed during movement callback") {
 			return false
@@ -182,4 +244,12 @@ func (n *navigationService) movementCurrent(a *navigationAgent, generation uint6
 		return false
 	}
 	return true
+}
+
+func validTraversalBounds(b NavigationTraversalBounds) bool {
+	return b.Min.Finite() && b.Max.Finite() && b.Min.X <= b.Max.X && b.Min.Y <= b.Max.Y && b.Min.Z <= b.Max.Z
+}
+
+func traversalBoundsContain(b NavigationTraversalBounds, p surface.Vec3) bool {
+	return p.X >= b.Min.X && p.X <= b.Max.X && p.Y >= b.Min.Y && p.Y <= b.Max.Y && p.Z >= b.Min.Z && p.Z <= b.Max.Z
 }

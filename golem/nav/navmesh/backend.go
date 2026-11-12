@@ -17,6 +17,7 @@ import (
 type source struct {
 	snapshot *navigation.Snapshot
 	world    *dynamic.World
+	safety   *regionalSafetyCache
 }
 
 // Backend serves independently baked profiles. Its profile registry is fixed
@@ -66,6 +67,7 @@ func (b *Backend) add(id surface.ProfileID, s source) error {
 	if _, exists := b.sources[id]; exists {
 		return fmt.Errorf("nav/navmesh: duplicate profile %q", id)
 	}
+	s.safety = &regionalSafetyCache{}
 	b.sources[id] = s
 	return nil
 }
@@ -85,8 +87,8 @@ func (b *Backend) CurrentRevision(profile surface.ProfileID) uint64 {
 	return s.snapshot.Revision()
 }
 
-// Pending reports desired geometry that has not been committed. Hosts pause
-// this profile until its atomic replacement is available.
+// Pending reports desired geometry that has not been committed. Regional hosts
+// use Safety to quarantine affected columns while other routes remain usable.
 func (b *Backend) Pending(profile surface.ProfileID) bool {
 	if b == nil {
 		return false
@@ -110,7 +112,7 @@ func (b *Backend) Acquire(ctx context.Context, profile surface.ProfileID) (surfa
 	if !ok {
 		return nil, fmt.Errorf("nav/navmesh: unknown profile %q", profile)
 	}
-	v := &view{snapshot: s.snapshot}
+	v := &view{snapshot: s.snapshot, owner: b}
 	if s.world != nil {
 		v.lease = s.world.Acquire()
 		v.snapshot = v.lease.Snapshot
@@ -119,6 +121,7 @@ func (b *Backend) Acquire(ctx context.Context, profile surface.ProfileID) (surfa
 }
 
 type view struct {
+	owner    *Backend
 	snapshot *navigation.Snapshot
 	lease    *dynamic.Lease
 	released atomic.Bool
@@ -155,26 +158,31 @@ type route struct {
 }
 
 func (r *route) Corners() []surface.Corner {
+	return r.AppendCorners(nil)
+}
+
+// AppendCorners appends independently owned corner and link values to dst.
+func (r *route) AppendCorners(dst []surface.Corner) []surface.Corner {
 	if r == nil || r.view.released.Load() {
-		return nil
+		return dst
 	}
-	raw := r.value.Corners()
-	out := make([]surface.Corner, len(raw))
-	for i, c := range raw {
-		out[i].Position = vector(c.Position)
-		if c.Link != nil {
-			out[i].Link = &surface.Link{ID: surface.LinkID(c.Link.ID), From: vector(c.Link.From), To: vector(c.Link.To), Reverse: c.Link.Reverse}
+	for i := 0; i < r.value.CornerCount(); i++ {
+		position, traversal, linked, _ := r.value.CornerValueAt(i)
+		corner := surface.Corner{Position: vector(position)}
+		if linked {
+			corner.Link = &surface.Link{ID: surface.LinkID(traversal.ID), From: vector(traversal.From), To: vector(traversal.To), Reverse: traversal.Reverse}
 		}
+		dst = append(dst, corner)
 	}
-	return out
+	return dst
 }
 func (r *route) Tiles() []surface.TileRevision {
 	if r == nil || r.view.released.Load() {
 		return nil
 	}
-	raw := r.value.Tiles()
-	out := make([]surface.TileRevision, len(raw))
-	for i, t := range raw {
+	out := make([]surface.TileRevision, r.value.TileCount())
+	for i := range out {
+		t, _ := r.value.TileAt(i)
 		out[i] = surface.TileRevision{ID: fmt.Sprintf("%d/%d/%d", t.Key.X, t.Key.Z, t.Key.Layer), Revision: t.Revision}
 	}
 	return out
@@ -247,7 +255,7 @@ func (q *query) Move(ctx context.Context, a surface.Location, target surface.Vec
 	if err != nil {
 		return surface.MoveResult{Status: invalid(err)}
 	}
-	r := q.query.Move(ctx, start, point(target), filter)
+	r := q.query.MoveWithoutVisited(ctx, start, point(target), filter)
 	out := surface.MoveResult{Status: status(r.Status)}
 	out.Normal = vector(r.Normal)
 	if r.Surface.Valid() {

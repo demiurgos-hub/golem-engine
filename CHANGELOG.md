@@ -8,6 +8,18 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Regional surface safety lets distant agents continue through local world edits. Quarantined agents retain their destination and support; unchanged routes transfer to the latest snapshot without losing velocity or floor identity. `NavigationReady` reports usable pending regional worlds as ready and degraded; backends without regional support keep profile-wide pauses.
+- Retirement-aware backends spread snapshot transfers across a separate fair rebase budget. Safe old views keep their movement cadence; per-view safety protects their changed columns while allowing current views to resume independently. Readiness stays degraded during local retirement. Completed paths crossing quarantine retain their owned results and wait for safety changes instead of repeating searches.
+- Allowed partial routes preserve their limiting status when rebased or resumed after quarantine, so reaching their reachable prefix is still reported as blocked.
+- Optional `CorridorTransferQuery` moves a wholly unchanged corridor to a new view while preserving its corners, limiting status and steering cursor. The server uses it for reconciled progress on the same support polygon; deviations still require corridor repair.
+- Navigation budgets and timing observations use a high-resolution clock on Windows. Use `NavigationNow` for request timestamps paired with admission observations, and subtract those timestamps directly.
+- Traversal actions can declare swept bounds with `NavigationBoundedTraversal`. Movement, motor results and collision reconciliation check complete segments against quarantine. Hosts must quarantine navigation before changing physical geometry.
+- `NavigationConfig.ObserveTick` reports navigation-only work and scheduled-agent counts; `ObservePathAdmission` timestamps accepted routes for request-latency measurement. The separate `examples/navigation-stress` consumer and `qualification` scripts generate reproducible workload evidence and candidate module archives in the validation workspace.
+- Qualification request-failure records retain the observed navigation status, reason and error. The multilevel fixture uses connected exterior ramps and landings while preserving its authored destinations and two clearance profiles.
+- Qualification records actual reconciled displacement, stationary modes and host recovery separately. The opt-in `Capacity` workload uses 1,000 startup intents on a long static corridor at normal speed, verifies route length, and requires every agent to move throughout complete measured ticks. It does not implement agent avoidance.
+- The qualification motor uses the configured circular footprint at box corners and checks horizontal and vertical contact during the same motion interval. Bounded post-admission Blocked records preserve actual status, reason, error and position separately from Failed/Unsupported gates.
+- Following agents use lightweight query storage independently of worker-owned path-search scratch. Optional surface corner appending avoids redundant temporary copies while preserving owned results.
+
 - Experimental server surface navigation with independently bounded path/rebuild queues, explicit 3D agent attachment, immutable snapshot ownership, corridor repair, body-motor and traversal boundaries, readiness barriers, and stable navigation-intent checkpoints. Existing 2D backends remain separate. The `golem/nav/navmesh` module adapts pure-Go navmesh-go and includes explicit geometry baking tools; `examples/navigation-server` demonstrates geometry changes and restart recovery.
 - Navigation rebuild scheduling coalesces bursts with bounded debounce and retries explicitly transient capacity failures with bounded backoff. Delayed work shares queue limits, and cancellation or newer desired geometry prevents obsolete retries from publishing.
 - Surface movement preserves motor-owned body height while steering on the projected corridor. Configurable support tolerance bounds reconciliation, replanning and traversal landing; it must be chosen against bake-height error and distinct-floor separation.
@@ -25,7 +37,18 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 - `golem-bake --remove-integration <name>` safely removes generated outputs for configured shared-only bridges such as Phaser before a renderer migration. It preserves authored files, rejects output paths outside the project and leaves configuration changes to the caller.
 - The JavaScript runtime exports `GolemConnectionLifecycle` and its configuration/status types for persistent connections in any renderer. Phaser retains its existing connection helper as a compatibility re-export.
 
+### Changed
+
+- Navigation qualification's `Suite` and `Full` launchers now run the three mixed scene families at 1,000 agents only; `Full` retains the two-hour 1,000-agent soak. Existing diagnostic agent-count controls remain available.
+
 ### Fixed
+
+- Capacity qualification checks complete route segments against the physical cylinder and source obstacles before timing. Its fixture records separate body and bake dimensions and an explicit conservative bake margin, retaining unchanged body sizes and motor behavior; old unsafe fixtures fail preflight with the offending segment and clearance.
+- Terrain qualification uses a tighter contour simplification setting after physical clearance checks identified two wall-clipping routes. Geometry, destinations and physical body dimensions remain unchanged; narrow-gap presence is not claimed as differentiated profile coverage.
+
+- Navmesh routes preserve the selected ground surface height at their true start and end. Agents on detailed ramps no longer stall against a vertically offset first corner; authored traversal anchors and truncated route endpoints keep their existing meaning.
+
+- Surface navigation quarantines authored-link metadata edits even when attached endpoints lie outside the source height bounds within climb tolerance. Old routes cannot transfer unchanged across those edits.
 
 - `NavAgent.SetDestination` clears the old path and velocity when a replacement cannot be found, including a missing backend or nil server. A failed destination no longer leaves an NPC moving toward its previous goal.
 

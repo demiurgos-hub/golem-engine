@@ -438,7 +438,9 @@ func TestListenerWebTransportExpandedAckWindowStopsDeepOrderedResends(t *testing
 	listener := NewListener(registry.NewRegistry(), Config{Transport: TransportWebTransport})
 
 	onConnectErr := make(chan error, 1)
+	connected := make(chan *Session, 1)
 	listener.OnConnect(func(sess *Session) {
+		connected <- sess
 		for i := 0; i < 64; i++ {
 			if err := listener.SendReliableOrdered(sess.ID, []byte{byte(i)}); err != nil {
 				onConnectErr <- err
@@ -470,24 +472,40 @@ func TestListenerWebTransportExpandedAckWindowStopsDeepOrderedResends(t *testing
 		t.Fatalf("prime reliable stream: %v", err)
 	}
 
-	var lastPacketSeq uint16
-	for i := 0; i < 64; i++ {
+	var sess *Session
+	select {
+	case sess = <-connected:
+	case <-ctx.Done():
+		t.Fatal("session not connected")
+	}
+	var receipts sequenceWindow
+	var messages [64]bool
+	unique := 0
+	receive := func(raw []byte) datagramPacket {
+		t.Helper()
+		packet, err := decodeDatagramPacket(raw)
+		if err != nil {
+			t.Fatalf("decodeDatagramPacket: %v", err)
+		}
+		receipts.Accept(packet.Sequence)
+		if packet.Flags&datagramFlagAckOnly != 0 {
+			return packet
+		}
+		if packet.Lane != datagramLaneReliableOrdered || packet.OrderedSequence >= uint16(len(messages)) || packet.MessageID != packet.OrderedSequence || len(packet.Payload) != 1 || packet.Payload[0] != byte(packet.OrderedSequence) {
+			t.Fatalf("unexpected ordered message: %+v", packet)
+		}
+		if !messages[packet.OrderedSequence] {
+			messages[packet.OrderedSequence] = true
+			unique++
+		}
+		return packet
+	}
+	for unique < len(messages) {
 		rawDatagram, err := wtSession.ReceiveDatagram(ctx)
 		if err != nil {
-			t.Fatalf("ReceiveDatagram %d: %v", i, err)
+			t.Fatalf("ReceiveDatagram after %d unique messages: %v", unique, err)
 		}
-		packet, err := decodeDatagramPacket(rawDatagram)
-		if err != nil {
-			t.Fatalf("decodeDatagramPacket %d: %v", i, err)
-		}
-		if packet.Flags&datagramFlagAckOnly != 0 {
-			i--
-			continue
-		}
-		if packet.Lane != datagramLaneReliableOrdered {
-			t.Fatalf("packet %d lane = %d, want %d", i, packet.Lane, datagramLaneReliableOrdered)
-		}
-		lastPacketSeq = packet.Sequence
+		receive(rawDatagram)
 	}
 
 	select {
@@ -495,43 +513,78 @@ func TestListenerWebTransportExpandedAckWindowStopsDeepOrderedResends(t *testing
 		if err != nil {
 			t.Fatalf("OnConnect SendReliableOrdered: %v", err)
 		}
-	default:
-		t.Fatal("OnConnect was not called")
+	case <-ctx.Done():
+		t.Fatal("OnConnect did not finish")
 	}
 
-	var ackMask ackMask128
-	for bit := 0; bit < 63; bit++ {
-		ackMask.SetBit(bit)
+	initialACK := receipts.Snapshot()
+	if initialACK.Mask[1]|initialACK.Mask[2]|initialACK.Mask[3] == 0 {
+		t.Fatalf("64-message burst did not exercise ACK bits beyond the legacy window: %+v", initialACK)
 	}
-	ackPacket, err := encodeDatagramPacket(datagramPacket{
-		Sequence: 1,
-		Flags:    datagramFlagAckOnly,
-		ACK:      datagramACK{Sequence: lastPacketSeq, Mask: ackMask},
-	})
-	if err != nil {
-		t.Fatalf("encodeDatagramPacket ack: %v", err)
+	var ackSequence uint16
+	acknowledge := func() {
+		t.Helper()
+		ackSequence++
+		ackPacket, err := encodeDatagramPacket(datagramPacket{
+			Sequence: ackSequence,
+			Flags:    datagramFlagAckOnly,
+			ACK:      receipts.Snapshot(),
+		})
+		if err != nil {
+			t.Fatalf("encodeDatagramPacket ack: %v", err)
+		}
+		if err := wtSession.SendDatagram(ackPacket); err != nil {
+			t.Fatalf("SendDatagram ack: %v", err)
+		}
 	}
-	if err := wtSession.SendDatagram(ackPacket); err != nil {
-		t.Fatalf("SendDatagram ack: %v", err)
-	}
+	acknowledge()
 
+	// Sending an ACK is not a server-processing barrier. Retries may already
+	// have newer packet IDs and be queued in QUIC; acknowledge those receipts
+	// too, then observe the actual sender queue becoming empty.
+	var settledNextSequence uint16
+	for {
+		sess.protocolMu.Lock()
+		pending := len(sess.protocol.pendingOrdered)
+		settledNextSequence = sess.protocol.nextPacketSeq
+		sess.protocolMu.Unlock()
+		if pending == 0 {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("ACKs did not settle %d pending messages: %v", pending, err)
+		}
+		pollCtx, pollCancel := context.WithTimeout(ctx, 10*time.Millisecond)
+		rawDatagram, err := wtSession.ReceiveDatagram(pollCtx)
+		pollCancel()
+		if err == nil {
+			receive(rawDatagram)
+		} else if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("ReceiveDatagram while settling ACKs: %v", err)
+		}
+		acknowledge()
+	}
+	// A datagram already selected before settlement can arrive afterward. The
+	// protocol sequence counter distinguishes it from a newly scheduled retry.
 	dctx, dcancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer dcancel()
 	for {
 		rawDatagram, err := wtSession.ReceiveDatagram(dctx)
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-				return
+				break
 			}
 			t.Fatalf("ReceiveDatagram after ack: %v", err)
 		}
-		packet, err := decodeDatagramPacket(rawDatagram)
-		if err != nil {
-			t.Fatalf("decodeDatagramPacket after ack: %v", err)
+		packet := receive(rawDatagram)
+		if packet.Sequence == settledNextSequence || seqGreater(packet.Sequence, settledNextSequence) {
+			t.Fatalf("new datagram scheduled after ACK settlement: lane=%d packetSeq=%d firstUnscheduled=%d", packet.Lane, packet.Sequence, settledNextSequence)
 		}
-		if packet.Flags&datagramFlagAckOnly != 0 {
-			continue
-		}
-		t.Fatalf("unexpected datagram after deep ack: lane=%d packetSeq=%d", packet.Lane, packet.Sequence)
+	}
+	sess.protocolMu.Lock()
+	remaining, nextSequence := len(sess.protocol.pendingOrdered), sess.protocol.nextPacketSeq
+	sess.protocolMu.Unlock()
+	if remaining != 0 || nextSequence != settledNextSequence || sess.IsClosing() {
+		t.Fatalf("sender changed after ACK settlement: pending=%d nextPacket=%d want=%d closing=%t", remaining, nextSequence, settledNextSequence, sess.IsClosing())
 	}
 }

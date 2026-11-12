@@ -27,6 +27,9 @@ type NavigationBuildRetryable interface {
 // NavigationBuildState describes the newest desired generation. QueuedAt and
 // CompletedAt include debounce, worker and retry delay. Pending plus a non-nil
 // Err means a transient failure is waiting for NextAttempt.
+// Timestamps use NavigationNow's process-local clock. Calculate remaining delay
+// with NextAttempt.Sub(NavigationNow()), not time.Until; these values are not
+// persistent civil timestamps or a clock-synchronization protocol.
 type NavigationBuildState struct {
 	Generation                         uint64
 	Pending, Committed                 bool
@@ -100,7 +103,7 @@ func discardNavigationBuild(value any) {
 // Due time plus generation provides deterministic admission; the worker queue
 // applies the existing priority aging once requests have been admitted.
 func (n *navigationService) dispatchBuilds(budget time.Duration) {
-	started := time.Now()
+	started := NavigationNow()
 	now := n.buildClock()
 	due := make([]*navigationBuildRequest, 0, len(n.buildRequests))
 	for _, request := range n.buildRequests {
@@ -115,7 +118,7 @@ func (n *navigationService) dispatchBuilds(budget time.Duration) {
 		return due[i].due.Before(due[j].due)
 	})
 	for i, request := range due {
-		if i >= n.config.BuildDispatchesPerTick || time.Since(started) >= budget {
+		if i >= n.config.BuildDispatchesPerTick || navigationSince(started) >= budget {
 			break
 		}
 		if n.server.runCtx.Err() != nil {
