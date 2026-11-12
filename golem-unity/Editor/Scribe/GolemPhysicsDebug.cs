@@ -53,6 +53,7 @@ namespace GolemEngine.Unity.Editor
         public GoDebugConfig Config;
         public ulong Revision, AcceptedFrame, Frame; public bool Incomplete, FrameAccepted;
         public int CCDCandidatePairs, CCDPairTests, CCDPredictiveContacts;
+        public int TOIContinuationCandidates, TOIContinuationPairTests, TOIContinuationEvents, TOIContinuationIslandBodies, TOIContinuationContactRows;
         public GoDebugOmissions Omitted; public GoDebugBody[] Bodies; public GoDebugCollider[] Colliders;
         public GoDebugGeometry[] Geometry; public GoDebugPath[] Paths; public GoDebugContact[] Contacts;
         public GoDebugQuery[] Queries; public GoDebugTarget[] Targets;
@@ -63,7 +64,7 @@ namespace GolemEngine.Unity.Editor
     {
         internal const int Version = 2;
         internal const int MaxBytes = 32 * 1024 * 1024;
-        private static readonly HashSet<string> RootFields = new HashSet<string>(StringComparer.Ordinal) { "Version", "Config", "Backend", "SourceSnapshot", "Status", "Fault", "Revision", "AcceptedFrame", "Incomplete", "Omitted", "Bodies", "Colliders", "Geometry", "Frame", "FrameAccepted", "CCDCandidatePairs", "CCDPairTests", "CCDPredictiveContacts", "Paths", "Contacts", "Queries", "Targets" };
+        private static readonly HashSet<string> RootFields = new HashSet<string>(StringComparer.Ordinal) { "Version", "Config", "Backend", "SourceSnapshot", "Status", "Fault", "Revision", "AcceptedFrame", "Incomplete", "Omitted", "Bodies", "Colliders", "Geometry", "Frame", "FrameAccepted", "CCDCandidatePairs", "CCDPairTests", "CCDPredictiveContacts", "TOIContinuationCandidates", "TOIContinuationPairTests", "TOIContinuationEvents", "TOIContinuationIslandBodies", "TOIContinuationContactRows", "Paths", "Contacts", "Queries", "Targets" };
         internal static GoPhysicsDebugCapture ReadFile(string path)
         {
             using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
@@ -118,6 +119,7 @@ namespace GolemEngine.Unity.Editor
             if (c.Omitted == null || c.Omitted.Bodies < 0 || c.Omitted.Colliders < 0 || c.Omitted.Geometry < 0 || c.Omitted.Vertices < 0 || c.Omitted.Triangles < 0 || c.Omitted.Records < 0 || c.Incomplete != c.Omitted.Any) throw Invalid("omissions");
             if (c.FrameAccepted && c.Frame != c.AcceptedFrame) throw Invalid("accepted frame identity");
             if (c.CCDCandidatePairs < 0 || c.CCDPairTests < 0 || c.CCDPredictiveContacts < 0) throw Invalid("native CCD work counts");
+            if (c.TOIContinuationCandidates < 0 || c.TOIContinuationPairTests < 0 || c.TOIContinuationEvents < 0 || c.TOIContinuationIslandBodies < 0 || c.TOIContinuationContactRows < 0) throw Invalid("native TOI continuation work counts");
             c.Bodies = c.Bodies ?? Array.Empty<GoDebugBody>(); c.Colliders = c.Colliders ?? Array.Empty<GoDebugCollider>(); c.Geometry = c.Geometry ?? Array.Empty<GoDebugGeometry>();
             c.Paths = c.Paths ?? Array.Empty<GoDebugPath>(); c.Contacts = c.Contacts ?? Array.Empty<GoDebugContact>(); c.Queries = c.Queries ?? Array.Empty<GoDebugQuery>(); c.Targets = c.Targets ?? Array.Empty<GoDebugTarget>();
             if (c.Bodies.Length > 4096 || c.Colliders.Length > 8192 || c.Geometry.Length > 8192) throw Invalid("object limit");

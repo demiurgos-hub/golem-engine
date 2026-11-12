@@ -598,6 +598,11 @@
   "CCDCandidatePairs": 0,
   "CCDPairTests": 0,
   "CCDPredictiveContacts": 0,
+  "TOIContinuationCandidates": 0,
+  "TOIContinuationPairTests": 0,
+  "TOIContinuationEvents": 0,
+  "TOIContinuationIslandBodies": 0,
+  "TOIContinuationContactRows": 0,
   "Paths": [
     {
       "Body": {

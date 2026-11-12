@@ -63,18 +63,20 @@ func main() {
 }
 
 type sample struct {
-	Tick                                                                  uint64
-	Measured                                                              bool
-	FullTickNS, ServerWallNS, CadenceNS, PhysicsNS, SolveNS, NavigationNS int64
-	Scheduled, Following, Moving, AwakeDynamic, Projectiles, Queries      int
-	Accepted                                                              bool
-	Simulated                                                             float32
-	Substeps                                                              int
-	Intervals, Microsteps                                                 int
-	MotionPairTests, MotionPathRefinements                                int
-	CCDCandidatePairs, CCDPairTests, CCDPredictiveContacts                int
-	Bodies, Colliders, Shapes                                             int
-	Error                                                                 string `json:",omitempty"`
+	Tick                                                                       uint64
+	Measured                                                                   bool
+	FullTickNS, ServerWallNS, CadenceNS, PhysicsNS, SolveNS, NavigationNS      int64
+	Scheduled, Following, Moving, AwakeDynamic, Projectiles, Queries           int
+	Accepted                                                                   bool
+	Simulated                                                                  float32
+	Substeps                                                                   int
+	Intervals, Microsteps                                                      int
+	MotionPairTests, MotionPathRefinements                                     int
+	CCDCandidatePairs, CCDPairTests, CCDPredictiveContacts                     int
+	TOIContinuationCandidates, TOIContinuationPairTests, TOIContinuationEvents int
+	TOIContinuationIslandBodies, TOIContinuationContactRows                    int
+	Bodies, Colliders, Shapes                                                  int
+	Error                                                                      string `json:",omitempty"`
 }
 
 type results struct {
@@ -88,20 +90,23 @@ type results struct {
 	MinMoving, MinFollowing, MinScheduled, MinAwakeDynamic, MinProjectiles, MinQueries int
 	MovementDeficitTicks, CadenceMisses, RejectedFrames, QueryOverflows                uint64
 	ProjectileSweeps, ProjectileHits, GameplayQueries                                  uint64
-	// Native CCD totals cover measured attempted frames, including rejected frames.
-	CCDCandidatePairs, CCDPairTests, CCDPredictiveContacts uint64
-	StartupNS, MeasurementWallNS                           int64
-	CheckpointCaptureNS, CheckpointWriteNS                 int64
-	CheckpointID                                           string
-	WorstObservedTickNS, MeasurementOverrunNS              int64
-	Churn                                                  churnEvidence
-	TotalAllocBytes, Mallocs                               uint64
-	PeakHeapBytes, PeakRSSBytes                            uint64
-	StartMemory, EndMemory, AfterCloseGC                   runtime.MemStats
-	MinimumActorTravel                                     float32
-	Gates                                                  map[string]bool
-	Missing                                                []string
-	Failure                                                string `json:",omitempty"`
+	// Native CCD and TOI continuation totals cover measured attempted frames,
+	// including rejected frames. Participant/row totals count work, not peaks.
+	CCDCandidatePairs, CCDPairTests, CCDPredictiveContacts                     uint64
+	TOIContinuationCandidates, TOIContinuationPairTests, TOIContinuationEvents uint64
+	TOIContinuationIslandBodies, TOIContinuationContactRows                    uint64
+	StartupNS, MeasurementWallNS                                               int64
+	CheckpointCaptureNS, CheckpointWriteNS                                     int64
+	CheckpointID                                                               string
+	WorstObservedTickNS, MeasurementOverrunNS                                  int64
+	Churn                                                                      churnEvidence
+	TotalAllocBytes, Mallocs                                                   uint64
+	PeakHeapBytes, PeakRSSBytes                                                uint64
+	StartMemory, EndMemory, AfterCloseGC                                       runtime.MemStats
+	MinimumActorTravel                                                         float32
+	Gates                                                                      map[string]bool
+	Missing                                                                    []string
+	Failure                                                                    string `json:",omitempty"`
 }
 
 func run(o options) (runErr error) {
@@ -292,6 +297,8 @@ func run(o options) (runErr error) {
 		v.Intervals, v.Microsteps, v.MotionPairTests = physics.Intervals, physics.Microsteps, physics.MotionPairTests
 		v.MotionPathRefinements = physics.MotionPathRefinements
 		v.CCDCandidatePairs, v.CCDPairTests, v.CCDPredictiveContacts = physics.CCDCandidatePairs, physics.CCDPairTests, physics.CCDPredictiveContacts
+		v.TOIContinuationCandidates, v.TOIContinuationPairTests, v.TOIContinuationEvents = physics.TOIContinuationCandidates, physics.TOIContinuationPairTests, physics.TOIContinuationEvents
+		v.TOIContinuationIslandBodies, v.TOIContinuationContactRows = physics.TOIContinuationIslandBodies, physics.TOIContinuationContactRows
 		v.Measured = complete
 		for _, a := range s.actors {
 			state, _ := s.server.NavigationAgentState(a.ID)
@@ -329,6 +336,11 @@ func run(o options) (runErr error) {
 			r.CCDCandidatePairs += uint64(v.CCDCandidatePairs)
 			r.CCDPairTests += uint64(v.CCDPairTests)
 			r.CCDPredictiveContacts += uint64(v.CCDPredictiveContacts)
+			r.TOIContinuationCandidates += uint64(v.TOIContinuationCandidates)
+			r.TOIContinuationPairTests += uint64(v.TOIContinuationPairTests)
+			r.TOIContinuationEvents += uint64(v.TOIContinuationEvents)
+			r.TOIContinuationIslandBodies += uint64(v.TOIContinuationIslandBodies)
+			r.TOIContinuationContactRows += uint64(v.TOIContinuationContactRows)
 			r.MeasuredSamples++
 			r.FullTick.add(full)
 			r.Cadence.add(cadence)

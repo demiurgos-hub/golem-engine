@@ -264,12 +264,18 @@ type FrameResult struct {
 	// Targeted native CCD counts sum each attempted step, including steps later
 	// rejected by safety validation: unique overlapping swept moving-pair candidates,
 	// native TOI calls after policy filters, and predictive solver manifolds
-	// (not gameplay events). Built-in static sweep work is separate.
+	// (not gameplay events). Built-in post-solve sweep work is separate.
 	CCDCandidatePairs, CCDPairTests, CCDPredictiveContacts int
-	Intervals                                              int // shared subdivisions; their durations still sum to Elapsed
-	Elapsed                                                float32
-	Paths                                                  []BodyPath
-	RejectedMotions                                        []MotionRejection
+	// TOI continuation counters sum attempted local-impact work once per native
+	// step, including failed frames. IslandBodies counts collected participants
+	// per impact; ContactRows counts prepared rows across local solves. Neither
+	// is a unique count or peak. Events counts impacts, not gameplay callbacks.
+	TOIContinuationCandidates, TOIContinuationPairTests, TOIContinuationEvents int
+	TOIContinuationIslandBodies, TOIContinuationContactRows                    int
+	Intervals                                                                  int // shared subdivisions; their durations still sum to Elapsed
+	Elapsed                                                                    float32
+	Paths                                                                      []BodyPath
+	RejectedMotions                                                            []MotionRejection
 }
 
 // MotionRejection records an intent denied before the interacting frame solved.

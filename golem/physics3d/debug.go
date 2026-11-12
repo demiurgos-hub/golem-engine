@@ -46,22 +46,24 @@ type DebugWorld interface {
 // Geometry is exact included native collider geometry in body-origin local space.
 // Omitted leaves are absent, not replaced with bounding geometry.
 type DebugCapture struct {
-	Version                                                int
-	Config                                                 Config
-	Backend, SourceSnapshot, Status, Fault                 string
-	Revision, AcceptedFrame                                uint64
-	Incomplete                                             bool
-	Omitted                                                DebugOmissions
-	Bodies                                                 []DebugBody
-	Colliders                                              []DebugCollider
-	Geometry                                               []DebugGeometry
-	Frame                                                  uint64
-	FrameAccepted                                          bool
-	CCDCandidatePairs, CCDPairTests, CCDPredictiveContacts int
-	Paths                                                  []BodyPath
-	Contacts                                               []ContactEvent
-	Queries                                                []DebugQuery
-	Targets                                                []DebugTarget
+	Version                                                                    int
+	Config                                                                     Config
+	Backend, SourceSnapshot, Status, Fault                                     string
+	Revision, AcceptedFrame                                                    uint64
+	Incomplete                                                                 bool
+	Omitted                                                                    DebugOmissions
+	Bodies                                                                     []DebugBody
+	Colliders                                                                  []DebugCollider
+	Geometry                                                                   []DebugGeometry
+	Frame                                                                      uint64
+	FrameAccepted                                                              bool
+	CCDCandidatePairs, CCDPairTests, CCDPredictiveContacts                     int
+	TOIContinuationCandidates, TOIContinuationPairTests, TOIContinuationEvents int
+	TOIContinuationIslandBodies, TOIContinuationContactRows                    int
+	Paths                                                                      []BodyPath
+	Contacts                                                                   []ContactEvent
+	Queries                                                                    []DebugQuery
+	Targets                                                                    []DebugTarget
 }
 type DebugOmissions struct{ Bodies, Colliders, Geometry, Vertices, Triangles, Records int }
 type DebugBody struct {
@@ -106,8 +108,9 @@ type DebugTarget struct {
 	Label        string
 }
 
-// CopyAnnotations copies native CCD work counts and bounded frame paths, contacts,
-// queries and targets. Work counts include an unaccepted frame's attempted work.
+// CopyAnnotations copies predictive CCD and TOI continuation work counts, plus
+// bounded frame paths, contacts, queries and targets. Work counts include an
+// unaccepted frame's attempted work.
 // FrameAccepted must only be true after the host accepts that exact result.
 func (c *DebugCapture) CopyAnnotations(o DebugOptions) error {
 	if err := o.Validate(); err != nil {
@@ -116,6 +119,8 @@ func (c *DebugCapture) CopyAnnotations(o DebugOptions) error {
 	c.Paths, c.Contacts, c.Queries, c.Targets = nil, nil, nil, nil
 	c.Frame, c.FrameAccepted, c.Omitted.Records = 0, false, 0
 	c.CCDCandidatePairs, c.CCDPairTests, c.CCDPredictiveContacts = 0, 0, 0
+	c.TOIContinuationCandidates, c.TOIContinuationPairTests, c.TOIContinuationEvents = 0, 0, 0
+	c.TOIContinuationIslandBodies, c.TOIContinuationContactRows = 0, 0
 	remaining := o.MaxRecords
 	vertices, triangles := o.MaxVertices, o.MaxTriangles
 	for _, g := range c.Geometry {
@@ -126,6 +131,8 @@ func (c *DebugCapture) CopyAnnotations(o DebugOptions) error {
 	if o.Frame != nil {
 		c.Frame, c.FrameAccepted = o.Frame.ID, o.FrameAccepted
 		c.CCDCandidatePairs, c.CCDPairTests, c.CCDPredictiveContacts = o.Frame.CCDCandidatePairs, o.Frame.CCDPairTests, o.Frame.CCDPredictiveContacts
+		c.TOIContinuationCandidates, c.TOIContinuationPairTests, c.TOIContinuationEvents = o.Frame.TOIContinuationCandidates, o.Frame.TOIContinuationPairTests, o.Frame.TOIContinuationEvents
+		c.TOIContinuationIslandBodies, c.TOIContinuationContactRows = o.Frame.TOIContinuationIslandBodies, o.Frame.TOIContinuationContactRows
 		for _, path := range o.Frame.Paths {
 			if remaining == 0 {
 				c.Omitted.Records += 1 + len(path.Positions)
@@ -194,6 +201,9 @@ func (c DebugCapture) Validate() error {
 		return bad()
 	}
 	if c.CCDCandidatePairs < 0 || c.CCDPairTests < 0 || c.CCDPredictiveContacts < 0 {
+		return bad()
+	}
+	if c.TOIContinuationCandidates < 0 || c.TOIContinuationPairTests < 0 || c.TOIContinuationEvents < 0 || c.TOIContinuationIslandBodies < 0 || c.TOIContinuationContactRows < 0 {
 		return bad()
 	}
 	o := c.Omitted

@@ -2,6 +2,7 @@ package physics3d
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -66,6 +67,45 @@ func TestDebugCopiesAndResetsNativeCCDWork(t *testing.T) {
 	}
 	if err = c.CopyAnnotations(DefaultDebugOptions()); err != nil || c.CCDCandidatePairs != 0 || c.CCDPairTests != 0 || c.CCDPredictiveContacts != 0 {
 		t.Fatalf("stale frame work survived reset: %+v error=%v", c, err)
+	}
+}
+
+func TestDebugContinuationWorkRetainsFailedAttemptsAndRejectsNegativeCounts(t *testing.T) {
+	c := DebugCapture{Version: DebugVersion, Config: DefaultConfig(), Status: "faulted"}
+	o := DefaultDebugOptions()
+	o.Frame = &FrameResult{ID: 7, TOIContinuationCandidates: 31, TOIContinuationPairTests: 23,
+		TOIContinuationEvents: 3, TOIContinuationIslandBodies: 8, TOIContinuationContactRows: 19}
+	counts := func(c DebugCapture) [5]int {
+		return [5]int{c.TOIContinuationCandidates, c.TOIContinuationPairTests, c.TOIContinuationEvents, c.TOIContinuationIslandBodies, c.TOIContinuationContactRows}
+	}
+	if err := c.CopyAnnotations(o); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := WriteDebug(&buf, c); err != nil {
+		t.Fatal(err)
+	}
+	read, err := ReadDebug(bytes.NewReader(buf.Bytes()))
+	if err != nil || counts(read) != [5]int{31, 23, 3, 8, 19} || read.FrameAccepted || read.Frame != 7 || len(read.Contacts) != 0 {
+		t.Fatalf("attempted work was lost or treated as accepted contacts: %+v error=%v", read, err)
+	}
+	for i := range 5 {
+		bad := c
+		fields := []*int{&bad.TOIContinuationCandidates, &bad.TOIContinuationPairTests, &bad.TOIContinuationEvents, &bad.TOIContinuationIslandBodies, &bad.TOIContinuationContactRows}
+		*fields[i] = -1
+		if err := bad.Validate(); err == nil {
+			t.Fatalf("negative continuation count %d accepted", i)
+		}
+		data, err := json.Marshal(bad)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadDebug(bytes.NewReader(data)); err == nil {
+			t.Fatalf("negative serialized continuation count %d accepted", i)
+		}
+	}
+	if err := c.CopyAnnotations(DefaultDebugOptions()); err != nil || counts(c) != [5]int{} {
+		t.Fatalf("continuation work survived annotation reset: %+v error=%v", c, err)
 	}
 }
 

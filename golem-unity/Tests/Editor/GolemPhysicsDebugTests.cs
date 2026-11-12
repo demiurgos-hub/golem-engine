@@ -74,6 +74,25 @@ namespace GolemEngine.Unity.Editor.Tests
             Assert.Throws<InvalidDataException>(() => GolemPhysicsDebug.Validate(capture));
         }
 
+        [Test]
+        public void TOIContinuationWorkPreservesFailedAttemptsAndRejectsNegativeCounts()
+        {
+            var json = File.ReadAllText(FixturePath());
+            var fields = new[] { "TOIContinuationCandidates", "TOIContinuationPairTests", "TOIContinuationEvents", "TOIContinuationIslandBodies", "TOIContinuationContactRows" };
+            var values = new[] { 31, 23, 3, 8, 19 };
+            for (var i = 0; i < fields.Length; i++)
+                json = System.Text.RegularExpressions.Regex.Replace(json, "\\\"" + fields[i] + "\\\"\\s*:\\s*[0-9]+", "\"" + fields[i] + "\": " + values[i]);
+            json = json.Replace("\"Status\": \"accepted\"", "\"Status\": \"faulted\"").Replace("\"FrameAccepted\": true", "\"FrameAccepted\": false");
+            var capture = GolemPhysicsDebug.Read(json);
+            Assert.That(new[] { capture.TOIContinuationCandidates, capture.TOIContinuationPairTests, capture.TOIContinuationEvents, capture.TOIContinuationIslandBodies, capture.TOIContinuationContactRows }, Is.EqualTo(values));
+            Assert.That(capture.FrameAccepted, Is.False); Assert.That(capture.Contacts.Length, Is.EqualTo(4));
+            foreach (var field in fields)
+            {
+                var negative = System.Text.RegularExpressions.Regex.Replace(json, "\\\"" + field + "\\\"\\s*:\\s*[0-9]+", "\"" + field + "\": -1");
+                Assert.Throws<InvalidDataException>(() => GolemPhysicsDebug.Read(negative), field);
+            }
+        }
+
         private static string FixturePath([CallerFilePath] string sourceFile = "")
         {
             var copied = Path.Combine(TestContext.CurrentContext.TestDirectory, "physics-debug.json");

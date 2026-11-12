@@ -47,18 +47,22 @@ type PhysicsContactFunc func([]p.ContactEvent)
 // accepted simulation time; RequestedDelta remains visible when an attempt fails.
 // Duration includes navigation preparation, readback and callbacks. Solve measures
 // only World.Simulate. The observer itself is excluded from both durations.
-// Native CCD counters include attempted work even when the frame is rejected.
+// Native CCD and TOI continuation counters include attempted work even when the
+// frame is rejected. Continuation participant/row totals are additive, not peaks;
+// see physics3d.FrameResult. Microsteps counts native calls, not path samples.
 type PhysicsFrameMetrics struct {
-	Frame                                                         uint64
-	RequestedDelta                                                float64
-	Elapsed                                                       float32
-	Substeps                                                      int
-	Intervals, Microsteps, MotionPairTests, MotionPathRefinements int
-	CCDCandidatePairs, CCDPairTests, CCDPredictiveContacts        int
-	Duration, Solve                                               time.Duration
-	Accepted                                                      bool
-	World                                                         p.Metrics
-	Err                                                           error
+	Frame                                                                      uint64
+	RequestedDelta                                                             float64
+	Elapsed                                                                    float32
+	Substeps                                                                   int
+	Intervals, Microsteps, MotionPairTests, MotionPathRefinements              int
+	CCDCandidatePairs, CCDPairTests, CCDPredictiveContacts                     int
+	TOIContinuationCandidates, TOIContinuationPairTests, TOIContinuationEvents int
+	TOIContinuationIslandBodies, TOIContinuationContactRows                    int
+	Duration, Solve                                                            time.Duration
+	Accepted                                                                   bool
+	World                                                                      p.Metrics
+	Err                                                                        error
 }
 
 // PhysicsCommand is executed on the tick goroutine before gameplay and simulation.
@@ -533,6 +537,8 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 	metrics.Intervals, metrics.Microsteps, metrics.MotionPairTests = result.Intervals, result.Microsteps, result.MotionPairTests
 	metrics.MotionPathRefinements = result.MotionPathRefinements
 	metrics.CCDCandidatePairs, metrics.CCDPairTests, metrics.CCDPredictiveContacts = result.CCDCandidatePairs, result.CCDPairTests, result.CCDPredictiveContacts
+	metrics.TOIContinuationCandidates, metrics.TOIContinuationPairTests, metrics.TOIContinuationEvents = result.TOIContinuationCandidates, result.TOIContinuationPairTests, result.TOIContinuationEvents
+	metrics.TOIContinuationIslandBodies, metrics.TOIContinuationContactRows = result.TOIContinuationIslandBodies, result.TOIContinuationContactRows
 	if err != nil {
 		ps.fault = err
 		return err
