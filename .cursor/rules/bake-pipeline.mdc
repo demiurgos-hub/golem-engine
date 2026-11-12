@@ -1,5 +1,5 @@
 ---
-description: bake pipeline — schema/code generation, portable navigation/physics source ownership, versioned physics diagnostic/recovery boundaries, qualification separation and codec compatibility.
+description: bake pipeline — schema/code generation, portable navigation/physics source ownership, physics diagnostic/recovery boundaries, frozen Unity query/simulation qualification and codec compatibility.
 globs:
   - schema/**/*.go
   - codegen/**/*.go
@@ -8,14 +8,18 @@ globs:
   - golem/nav/navmesh/cmd/golem-nav-bake/**/*.go
   - golem/physics3d/content/**/*.go
   - golem/physics3d/box3d/cook*.go
+  - golem/physics3d/box3d/dynamics_reference_test.go
   - examples/navigation-stress/**/*.go
   - examples/physics-stress/**/*.go
   - qualification/**/*
   - golem-unity/Editor/Scribe/GolemPhysics*.cs
+  - golem-unity/Tests/Editor/GolemPhysicsDynamicsFixture.cs
 alwaysApply: false
 ---
 
 # `bake` pipeline
+
+Unity dynamics qualification captures the initial saved portable source before applying recorded commands, hashes its exact bytes, and writes actual native simulation observations separately. The Go comparator consumes that source through the ordinary content loader and records its own frozen-source manifest identity. Source export, backend cooking, query precision and simulation comparisons remain distinct gates; do not tune source geometry or query tolerances to match solver contact behavior.
 
 The physics stress consumer owns its synthetic door-change recipe and host checkpoint payload (route direction and projectile generations). It uses public coordinated geometry and paired recovery APIs; these qualification fixtures do not become game-world assembly policy. Preserve complete terminal measurement frames, even those crossing the requested duration. Checkpoint manifests remain the runtime's existing manifest-last format and are saved only after a coherent tick-side capture.
 

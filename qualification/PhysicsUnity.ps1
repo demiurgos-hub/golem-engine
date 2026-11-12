@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Prepare','Test','Generate','All')][string]$Mode = 'All',
+    [ValidateSet('Prepare','Test','Generate','Dynamics','All')][string]$Mode = 'All',
     [string]$ValidationRoot = 'D:\Demiurgos\tests\physics-validation',
     [string]$EditorVersion = '6000.3.13f1',
     [string]$WebTransportPackage = 'C:\Demiurgos\webtransport-csharp\artifacts\upm\io.demiurgos.webtransport',
@@ -9,6 +9,7 @@ param(
 $ErrorActionPreference = 'Stop'
 if ($RunID -notmatch '^[A-Za-z0-9_.-]+$') { throw 'RunID must be one path component.' }
 if ($EditorVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+[abfp][0-9]+$') { throw 'Specify an exact installed Editor version.' }
+if ($Mode -in @('Dynamics','All') -and [int]$EditorVersion.Split('.')[0] -lt 6000) { throw 'Physics dynamics qualification requires the installed Unity 6 Editor.' }
 $engineRoot = Split-Path -Parent $PSScriptRoot
 $validationPath = [IO.Path]::GetFullPath($ValidationRoot).TrimEnd('\','/')
 $allowed = [IO.Path]::GetFullPath('D:\Demiurgos\tests\physics-validation')
@@ -83,6 +84,14 @@ try {
         if ($code -ne 0) { throw "Unity generation failed; see $run" }
         foreach ($name in @('unity-physics.source.json','unity-physics.reference.json')) {
             if (!(Test-Path -LiteralPath (Join-Path $env:GOLEM_PHYSICS_FIXTURE_OUTPUT $name) -PathType Leaf)) { throw "Missing fixture output $name" }
+        }
+    }
+    if ($Mode -in @('Dynamics','All')) {
+        & unity run $project --editor-version $EditorVersion --timeout 600 --log-file (Join-Path $run 'dynamics.log') --no-tail --json -- -nographics -executeMethod GolemEngine.Unity.Editor.Tests.GolemPhysicsDynamicsFixture.Generate 2>&1 | Out-File -LiteralPath (Join-Path $run 'dynamics-cli.json') -Encoding utf8
+        $code=$LASTEXITCODE; $evidence.checks += [ordered]@{name='Export source and Unity simulation observations';exitCode=$code}
+        if ($code -ne 0) { throw "Unity dynamics capture failed; see $run" }
+        foreach ($name in @('dynamics.source.json','dynamics.reference.json')) {
+            if (!(Test-Path -LiteralPath (Join-Path $env:GOLEM_PHYSICS_FIXTURE_OUTPUT $name) -PathType Leaf)) { throw "Missing dynamics output $name" }
         }
     }
     $evidence.requestedChecksPassed=$true
