@@ -77,6 +77,11 @@ func runControllerServer(t *testing.T, mode p.MotionMode, at p.Vec3, ticks int, 
 		}
 	})
 	if err = s.ObservePhysicsFrames(func(metrics golem.PhysicsFrameMetrics) {
+		// Cancellation and a ready ticker may be selected together under load.
+		// Assert only the requested accepted frames, never a shutdown race frame.
+		if ctx.Err() != nil {
+			return
+		}
 		if metrics.Err != nil {
 			t.Errorf("frame failed: %v", metrics.Err)
 			cancel()
