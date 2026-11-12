@@ -6,6 +6,8 @@ globs:
   - codegen/**/*.tmpl
   - golem/nav/navmesh/navbuild/**/*.go
   - golem/nav/navmesh/cmd/golem-nav-bake/**/*.go
+  - golem/physics3d/content/**/*.go
+  - golem/physics3d/box3d/cook*.go
   - examples/navigation-stress/**/*.go
   - qualification/**/*
   - golem-unity/Editor/Scribe/GolemPhysics*.cs
@@ -17,6 +19,8 @@ alwaysApply: false
 Optional entity-var `physics:` metadata binds ordinary explicit scalar fields to accepted server physics state. Trace these tags through schema resolution, Go writer generation and Scribe attributes; retain identical protobuf/JS/C# codecs and snapshot fingerprints with or without binding metadata. All build outputs and consumer caches for this workstream stay under the physics validation workspace. `qualification/PhysicsUnity.ps1` owns repeatable staged Unity fixture setup and reference capture; it never edits a game repository or installs an Editor implicitly.
 
 Portable physics source is a separate versioned JSON authoring contract, not entity/world YAML or native backend cooking. Unity captures resolved body-local geometry and metadata; the Go physics content layer validates/cooks it separately. Keep the Scribe exact ownership signature and manifest-last source transaction intact. Canonical small cross-language JSON fixtures are committed; generated Unity projects, observations and caches remain under `D:/Demiurgos/tests/physics-validation`.
+
+Physics `content.Prepared` owns bounded immutable source/policy captures and transactional world construction. Backend-specific `box3d.CookShape` owns private hull/BVH acceleration and versioned native-image artifacts. These APIs are independent of `golem-bake` and footprint v1. Hash portable source, explicit conversion/cooking settings and backend snapshot separately; no local workspace override or dirty-source test qualifies published dependency resolution.
 
 `golem-bake` remains the schema/code-generation CLI. Explicit server navigation geometry is processed by the separate navmesh adapter module's `navbuild` package and `golem-nav-bake` command, which delegate pure-Go baking to navmesh-go. Its bounded `{Generator?, Scene, Config}` JSON is not entity/world schema YAML and is not inferred from collision footprints. Do not add a native navigation build subprocess to codegen. Optional Scribe export is authoring-only; preserve its managed artifact planning and transaction ownership.
 

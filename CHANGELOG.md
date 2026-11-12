@@ -8,6 +8,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Portable physics content can be validated, captured with explicit solver policies and loaded with stable source identities, owner resolution and rollback. The Box3D adapter cooks reusable private hull/BVH data, retains separate source/native artifact identities, preserves manual mass properties and rejects unsupported authored controls before loading. Actual Unity scene query comparisons are available as an explicit qualification gate; this does not declare the full physics workstream qualified.
 - Entity vars can opt into accepted physics orientation, linear/angular velocity and activation through explicit `physics:` tags. Generated Go server writers update the ordinary replicated fields; tags, owner visibility, snapshots and implicit position encoding are unchanged. Unity Scribe exposes the same metadata through `GolemVar(Physics = "...")`. Bindings require complete component groups and writable `sync: tick` fields; body attachment remains explicit.
 
 - Opt-in server physics attachments bind accepted gameplay anchors, rotation, velocity and activation state to entities. Staged navigation prepares ordered movement once per tick, validates complete physical paths including idle agents, and reconciles support before traversal/contact callbacks. Physics mutations and deletions from accepted-frame callbacks run on a later tick; legacy synchronous motors and collision backends remain available. Full backend and workload qualification remains in progress.
