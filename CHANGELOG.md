@@ -95,6 +95,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Relative-motion queries and continuous contact intervals resolve exact rotational endpoint tangencies without loosening geometric tolerance. Bounded interval certificates preserve separation and reentry when conservative advancement stalls.
+
 - Continuous contact recovery no longer shrinks solver time toward zero near its penetration bound. An exact falling-body grid regression covers the previous multi-second tick; predicted motion remains bounded and actual path/penetration checks remain unchanged.
 
 - Geometric sphere/capsule queries preserve exact touching on flat triangle faces, avoiding spurious rejection by zero-penetration spawn admission. Touching pair results retain their feature identity and witnesses. The correction keeps float32 geometry and does not relax penetration thresholds.

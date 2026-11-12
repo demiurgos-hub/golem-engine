@@ -1,7 +1,6 @@
 package box3d
 
 import (
-	"errors"
 	"testing"
 
 	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
@@ -9,16 +8,14 @@ import (
 )
 
 func TestMotionPolicyContinuousRotationReentryBetweenContactingEndpoints(t *testing.T) {
-	testMotionPolicyRotation(t, .005, false)
+	testMotionPolicyRotation(t, .005)
 }
 
-func TestMotionPolicyExactTangentRotationFailsClosed(t *testing.T) {
-	// This retained failure is a qualification gap, not proof of rotational
-	// tangency support. It must not silently turn into a clear interval result.
-	testMotionPolicyRotation(t, 0, true)
+func TestMotionPolicyExactTangentRotationRetainsReentry(t *testing.T) {
+	testMotionPolicyRotation(t, 0)
 }
 
-func testMotionPolicyRotation(t *testing.T, depth float32, unresolved bool) {
+func testMotionPolicyRotation(t *testing.T, depth float32) {
 	config := p.DefaultConfig()
 	config.Gravity = p.Vec3{}
 	w, err := New(config)
@@ -84,12 +81,6 @@ func testMotionPolicyRotation(t *testing.T, depth float32, unresolved bool) {
 	end.Rotation.Y, end.Rotation.W = 1, 0
 	record := motionContactRecord{start: 0, end: 1, sample: b.MotionStepSample{Delta: .05, Bodies: []b.MotionBodySample{{Body: w.bodies[h].id, Start: b.WorldTransform{P: bp(a.Position), Q: bq(a.Rotation)}, End: b.WorldTransform{P: bp(end.Position), Q: bq(end.Rotation)}}}}}
 	events, err := w.newMotionContactState().replay(w, record, 2, 2)
-	if unresolved {
-		if !errors.Is(err, b.ErrMotionCastConvergence) || len(events) != 0 || len(w.tracker.Current()) != 1 || len(w.pendingTracker.Current()) != 1 {
-			t.Fatalf("tangency failure was hidden or changed history: %v, %+v", err, events)
-		}
-		return
-	}
 	if err != nil {
 		t.Fatal(err)
 	}
