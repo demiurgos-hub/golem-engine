@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Continuous physics exposes bounded internal cadence and constraint-iteration settings, retaining all elapsed time and reporting path refinements. Defaults improve dense rotating-body contacts and sleeping stacks while keeping contact tuning unchanged; contact forces count each final relaxed impulse once. Fresh geometric guards retain explicit whole-frame failure on unresolved or excessive penetration. Workload capacity remains unqualified.
+
 - Closest-point and penetration results expose available backend-local feature details alongside collider/child/triangle identity. Closest points inside solid geometry remain at the supplied point and are classified as penetrating; initial-overlap queries retain the deepest constraint without allocating a complete triangle contact list.
 
 - Opt-in upright capsule controllers retain stair phases and timed navigation corners through shared physics intervals, with moving/rotating support identities, swept passenger transport and relative kinematic obstruction checks. Driven characters retain finite-mass contact response; controller intent and falling state survive checkpoints. Actual-server fixtures cover stairs, platforms, ceilings, support replacement and separate body/anchor/COM transforms; full workload qualification remains pending.

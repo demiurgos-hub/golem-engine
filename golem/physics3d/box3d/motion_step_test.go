@@ -2,6 +2,7 @@ package box3d_test
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 
@@ -177,5 +178,98 @@ func TestMotionStepSpinningBodyOnLargeCoordinateTriangleFloor(t *testing.T) {
 	state, _ := w.Body(body)
 	if state.Pose.Position.Y < .35 {
 		t.Fatalf("body crossed floor: %+v", state)
+	}
+}
+
+func TestMotionStepDenseFloorFallingBoxCluster(t *testing.T) {
+	for _, workers := range []int{1, 8} {
+		t.Run(fmt.Sprint(workers), func(t *testing.T) {
+			config := p.DefaultConfig()
+			config.Workers = uint32(workers)
+			w, err := box.New(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = w.Close() })
+			mesh := p.ShapeDesc{Kind: p.TriangleMesh}
+			const cells = 50
+			for z := 0; z <= cells; z++ {
+				for x := 0; x <= cells; x++ {
+					mesh.Vertices = append(mesh.Vertices, p.Vec3{X: -32 + 64*float32(x)/cells, Z: -32 + 64*float32(z)/cells})
+				}
+			}
+			for z := 0; z < cells; z++ {
+				for x := 0; x < cells; x++ {
+					a := uint32(z*(cells+1) + x)
+					mesh.Indices = append(mesh.Indices, a, a+cells+1, a+1, a+1, a+cells+1, a+cells+2)
+				}
+			}
+			add(t, w, p.Static, p.Vec3{}, mesh)
+			cube := p.ShapeDesc{Kind: p.Box, HalfExtents: p.Vec3{X: .4, Y: .5, Z: .4}}
+			for i := 0; i < 199; i++ {
+				add(t, w, p.Static, p.Vec3{X: 32 * (.65 + .3*float32(i%15)/15), Y: .5, Z: 32 * (-.95 + 1.9*float32(i/15)/15)}, cube)
+			}
+			var motions []p.Motion
+			for i := 0; i < 16; i++ {
+				radius, height := float32(.4), float32(1.8)
+				if i%2 == 1 {
+					radius, height = .8, 2.4
+				}
+				shape, err := w.CreateShape(p.ShapeDesc{Kind: p.Capsule, Radius: radius, PointA: p.Vec3{Y: radius}, PointB: p.Vec3{Y: height - radius}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				d := p.DefaultBody(p.DrivenCharacter)
+				d.Pose.Position = p.Vec3{X: -24 + float32(i%4)*2.8, Z: float32(i/4-2) * 2.8}
+				d.Mass = 80
+				d.AllowSleep = false
+				d.Continuous = true
+				d.Locks = p.MotionLocks{AngularX: true, AngularY: true, AngularZ: true}
+				body, err := w.CreateBody(d)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = w.CreateCollider(p.DefaultCollider(body, shape)); err != nil {
+					t.Fatal(err)
+				}
+				motions = append(motions, p.Motion{Body: body, Velocity: p.Vec3{X: 3}, SurfaceNormal: p.Vec3{Y: 1}, MaxDriveForce: 1000})
+			}
+			var bodies []p.BodyHandle
+			for i := 0; i < 16; i++ {
+				shape, err := w.CreateShape(cube)
+				if err != nil {
+					t.Fatal(err)
+				}
+				d := p.DefaultBody(p.FreeDynamic)
+				d.Pose.Position = p.Vec3{X: -16 + float32(i%4)*2.8, Y: 2 + float32(i%3), Z: 16 + float32(i/4)*1.1}
+				d.Mass = 20
+				d.AllowSleep = false
+				d.Continuous = true
+				body, err := w.CreateBody(d)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = w.CreateCollider(p.DefaultCollider(body, shape)); err != nil {
+					t.Fatal(err)
+				}
+				if err = w.SetVelocity(body, p.Vec3{}, p.Vec3{X: .3, Y: .2, Z: .1}); err != nil {
+					t.Fatal(err)
+				}
+				bodies = append(bodies, body)
+			}
+			for i := 0; i+1 < len(bodies); i += 10 {
+				if _, err = w.CreateJoint(p.JointDesc{Kind: p.Distance, A: bodies[i], B: bodies[i+1], FrameA: p.Identity(), FrameB: p.Identity(), Length: 3, Spring: true, Hertz: 2, Damping: .7}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for frame := uint64(1); frame <= 80; frame++ {
+				if _, err = w.Simulate(p.Frame{ID: frame, Delta: .05, Motions: motions}); err != nil {
+					t.Fatalf("frame %d: %v", frame, err)
+				}
+				if err = w.Accept(frame); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
 	}
 }
