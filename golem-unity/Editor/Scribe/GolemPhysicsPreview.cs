@@ -6,7 +6,7 @@ using UnityEngine;
 
 namespace GolemEngine.Unity.Editor
 {
-    /// <summary>Draws the captured portable collider geometry and explicit Unity reference query hits in Scene view.</summary>
+    /// <summary>Draws authoring/reference geometry and explicitly loaded bounded Go server debug captures.</summary>
     public sealed class GolemPhysicsPreview : EditorWindow
     {
         private PhysicsSource source;
@@ -17,6 +17,8 @@ namespace GolemEngine.Unity.Editor
         private RaycastHit[] hits = Array.Empty<RaycastHit>();
         private bool queried;
         private const int TrianglePreviewLimit = 50000;
+        private GoPhysicsDebugCapture server;
+        private bool serverCandidates, serverLabels = true, showServer = true;
 
         [MenuItem("Tools/Golem/Scribe/Preview Physics World")]
         private static void Open() => GetWindow<GolemPhysicsPreview>("Golem Physics");
@@ -26,6 +28,29 @@ namespace GolemEngine.Unity.Editor
 
         private void OnGUI()
         {
+            EditorGUILayout.LabelField("Go server debug capture", EditorStyles.boldLabel);
+            if (GUILayout.Button("Load Go physics debug JSON"))
+            {
+                var path = EditorUtility.OpenFilePanel("Go physics debug capture", "", "json");
+                if (!string.IsNullOrEmpty(path))
+                {
+                    try { server = GolemPhysicsDebug.ReadFile(path); error = null; SceneView.RepaintAll(); }
+                    catch (Exception ex) { error = ex.Message; }
+                }
+            }
+            if (server != null)
+            {
+                EditorGUILayout.LabelField(server.Status + ": accepted frame " + server.AcceptedFrame + ", annotation frame " + server.Frame);
+                if (server.Config != null) EditorGUILayout.LabelField(server.Config.TickRate + " Hz / " + server.Config.Substeps + " substeps / " + server.Config.Workers + " workers / continuous " + server.Config.Continuous);
+                showServer = EditorGUILayout.Toggle("Show server capture", showServer);
+                serverLabels = EditorGUILayout.Toggle("Show server identities", serverLabels);
+                serverCandidates = EditorGUILayout.Toggle("Show UNCOMMITTED poses", serverCandidates);
+                EditorGUILayout.HelpBox("Green/cyan/yellow: accepted solid/sensor/query geometry. Orange: UNCOMMITTED native poses and attempted paths. Blue: accepted movement / dotted navigation intents. Red: contacts; magenta: query normals. Convex query inputs display their support points. Captures never modify the scene.", MessageType.Info);
+                if (!string.IsNullOrEmpty(server.Fault)) EditorGUILayout.HelpBox(server.Fault, MessageType.Warning);
+                if (server.Incomplete) EditorGUILayout.HelpBox("INCOMPLETE capture: omitted " + server.Omitted.Bodies + " bodies, " + server.Omitted.Colliders + " colliders, " + server.Omitted.Geometry + " geometry leaves, " + server.Omitted.Vertices + " vertices, " + server.Omitted.Triangles + " triangles, " + server.Omitted.Records + " annotation records. Omitted geometry is not represented by boxes.", MessageType.Warning);
+                if (server.Geometry.Sum(g => (long)g.Indices.Length / 3) > TrianglePreviewLimit) EditorGUILayout.HelpBox("Scene view has a separate 50,000-triangle budget and omits whole geometry leaves beyond it. The loaded capture remains unchanged.", MessageType.Warning);
+            }
+            EditorGUILayout.Space();
             EditorGUILayout.LabelField("Portable collider geometry", EditorStyles.boldLabel);
             if (GUILayout.Button("Capture selected saved Physics World"))
             {
@@ -60,6 +85,7 @@ namespace GolemEngine.Unity.Editor
 
         private void Draw(SceneView view)
         {
+            if (server != null && showServer) GolemPhysicsDebugView.Draw(server, serverCandidates, serverLabels, TrianglePreviewLimit);
             if (source != null)
             {
                 var bodies = source.Bodies.ToDictionary(b => b.ID); var assets = source.Assets.ToDictionary(a => a.ID);

@@ -12,6 +12,7 @@ param(
     [ValidateRange(1,64)][int]$QueryWorkers = 6,
     [switch]$SIMD,
     [switch]$Profiles,
+    [switch]$DebugCapture,
     [switch]$BuildOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -87,6 +88,7 @@ try {
     if (-not $BuildOnly) {
         $arguments = @('-mode',$Mode,'-extent',"$Extent",'-duration',$Duration,'-warmup',$Warmup,'-physics-workers',"$PhysicsWorkers",'-query-workers',"$QueryWorkers",'-source-manifest',$sourceManifest,'-out',(Join-Path $runPath 'workload'))
         if ($Profiles) { $arguments += '-profiles' }
+        if ($DebugCapture) { $arguments += '-debug-capture' }
         $record.arguments = $arguments
         & $executable @arguments 2>&1 | Out-File -LiteralPath (Join-Path $runPath 'workload.log') -Encoding utf8
         $record.exitCode = $LASTEXITCODE

@@ -1,0 +1,1049 @@
+{
+  "Version": 1,
+  "Config": {
+    "Gravity": {
+      "X": 0,
+      "Y": -9.81,
+      "Z": 0
+    },
+    "Substeps": 4,
+    "TickRate": 20,
+    "AllowSleep": true,
+    "Continuous": false,
+    "Workers": 1,
+    "CCDContactTolerance": 0.001,
+    "CCDVelocityIterations": 4,
+    "CCDRelaxIterations": 2,
+    "CCDMaxDelta": 0.004166667,
+    "CCDMaxPathRefinements": 8192
+  },
+  "Backend": "box3d-go",
+  "SourceSnapshot": "",
+  "Status": "accepted",
+  "Fault": "",
+  "Revision": 3,
+  "AcceptedFrame": 1,
+  "Incomplete": false,
+  "Omitted": {
+    "Bodies": 0,
+    "Colliders": 0,
+    "Geometry": 0,
+    "Vertices": 0,
+    "Triangles": 0,
+    "Records": 0
+  },
+  "Bodies": [
+    {
+      "State": {
+        "Support": {
+          "Grounded": false,
+          "Collider": {
+            "World": 0,
+            "Index": 0,
+            "Generation": 0
+          },
+          "Body": {
+            "World": 0,
+            "Index": 0,
+            "Generation": 0
+          },
+          "Feature": {
+            "Child": 0,
+            "Triangle": 0,
+            "Valid": false,
+            "LocalID": 0,
+            "Detail": 0
+          },
+          "Point": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          },
+          "LocalPoint": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          },
+          "Normal": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          }
+        },
+        "Handle": {
+          "World": 1,
+          "Index": 5,
+          "Generation": 1
+        },
+        "ID": "ball",
+        "Owner": 0,
+        "Mode": 3,
+        "Pose": {
+          "Position": {
+            "X": 0.019154748,
+            "Y": 0.5047232,
+            "Z": 0
+          },
+          "Rotation": {
+            "X": 0,
+            "Y": 0,
+            "Z": -0.014685544,
+            "W": 0.99989223
+          }
+        },
+        "Anchor": {
+          "Position": {
+            "X": 0.019154748,
+            "Y": 0.5047232,
+            "Z": 0
+          },
+          "Rotation": {
+            "X": 0,
+            "Y": 0,
+            "Z": -0.014685544,
+            "W": 0.99989223
+          }
+        },
+        "LinearVelocity": {
+          "X": 0.35815856,
+          "Y": 0,
+          "Z": 0
+        },
+        "AngularVelocity": {
+          "X": 0,
+          "Y": 0,
+          "Z": -0.71275336
+        },
+        "CenterOfMass": {
+          "X": 0.019154748,
+          "Y": 0.5047232,
+          "Z": 0
+        },
+        "Mass": 1,
+        "Enabled": true,
+        "Awake": true
+      },
+      "HasUncommitted": false,
+      "Uncommitted": null
+    },
+    {
+      "State": {
+        "Support": {
+          "Grounded": false,
+          "Collider": {
+            "World": 0,
+            "Index": 0,
+            "Generation": 0
+          },
+          "Body": {
+            "World": 0,
+            "Index": 0,
+            "Generation": 0
+          },
+          "Feature": {
+            "Child": 0,
+            "Triangle": 0,
+            "Valid": false,
+            "LocalID": 0,
+            "Detail": 0
+          },
+          "Point": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          },
+          "LocalPoint": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          },
+          "Normal": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          }
+        },
+        "Handle": {
+          "World": 1,
+          "Index": 2,
+          "Generation": 1
+        },
+        "ID": "floor",
+        "Owner": 0,
+        "Mode": 0,
+        "Pose": {
+          "Position": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          },
+          "Rotation": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0,
+            "W": 1
+          }
+        },
+        "Anchor": {
+          "Position": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          },
+          "Rotation": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0,
+            "W": 1
+          }
+        },
+        "LinearVelocity": {
+          "X": 0,
+          "Y": 0,
+          "Z": 0
+        },
+        "AngularVelocity": {
+          "X": 0,
+          "Y": 0,
+          "Z": 0
+        },
+        "CenterOfMass": {
+          "X": 0,
+          "Y": 0,
+          "Z": 0
+        },
+        "Mass": 0,
+        "Enabled": true,
+        "Awake": false
+      },
+      "HasUncommitted": false,
+      "Uncommitted": null
+    },
+    {
+      "State": {
+        "Support": {
+          "Grounded": false,
+          "Collider": {
+            "World": 0,
+            "Index": 0,
+            "Generation": 0
+          },
+          "Body": {
+            "World": 0,
+            "Index": 0,
+            "Generation": 0
+          },
+          "Feature": {
+            "Child": 0,
+            "Triangle": 0,
+            "Valid": false,
+            "LocalID": 0,
+            "Detail": 0
+          },
+          "Point": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          },
+          "LocalPoint": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          },
+          "Normal": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          }
+        },
+        "Handle": {
+          "World": 1,
+          "Index": 8,
+          "Generation": 1
+        },
+        "ID": "compound",
+        "Owner": 0,
+        "Mode": 0,
+        "Pose": {
+          "Position": {
+            "X": 2,
+            "Y": 0.5,
+            "Z": 0
+          },
+          "Rotation": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0,
+            "W": 1
+          }
+        },
+        "Anchor": {
+          "Position": {
+            "X": 2,
+            "Y": 0.5,
+            "Z": 0
+          },
+          "Rotation": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0,
+            "W": 1
+          }
+        },
+        "LinearVelocity": {
+          "X": 0,
+          "Y": 0,
+          "Z": 0
+        },
+        "AngularVelocity": {
+          "X": 0,
+          "Y": 0,
+          "Z": 0
+        },
+        "CenterOfMass": {
+          "X": 2,
+          "Y": 0.5,
+          "Z": 0
+        },
+        "Mass": 0,
+        "Enabled": true,
+        "Awake": false
+      },
+      "HasUncommitted": false,
+      "Uncommitted": null
+    }
+  ],
+  "Colliders": [
+    {
+      "Handle": {
+        "World": 1,
+        "Index": 3,
+        "Generation": 1
+      },
+      "Body": {
+        "World": 1,
+        "Index": 2,
+        "Generation": 1
+      },
+      "Shape": {
+        "World": 1,
+        "Index": 1,
+        "Generation": 1
+      },
+      "ShapeID": "floor/shape",
+      "ID": "floor/collider",
+      "Owner": 0,
+      "Enabled": true,
+      "Roles": {
+        "Solid": true,
+        "Sensor": false,
+        "Query": true
+      },
+      "GeometryOmitted": false
+    },
+    {
+      "Handle": {
+        "World": 1,
+        "Index": 6,
+        "Generation": 1
+      },
+      "Body": {
+        "World": 1,
+        "Index": 5,
+        "Generation": 1
+      },
+      "Shape": {
+        "World": 1,
+        "Index": 4,
+        "Generation": 1
+      },
+      "ShapeID": "ball/shape",
+      "ID": "ball/collider",
+      "Owner": 0,
+      "Enabled": true,
+      "Roles": {
+        "Solid": true,
+        "Sensor": false,
+        "Query": true
+      },
+      "GeometryOmitted": false
+    },
+    {
+      "Handle": {
+        "World": 1,
+        "Index": 9,
+        "Generation": 1
+      },
+      "Body": {
+        "World": 1,
+        "Index": 8,
+        "Generation": 1
+      },
+      "Shape": {
+        "World": 1,
+        "Index": 7,
+        "Generation": 1
+      },
+      "ShapeID": "compound/shape",
+      "ID": "compound/collider",
+      "Owner": 0,
+      "Enabled": true,
+      "Roles": {
+        "Solid": true,
+        "Sensor": false,
+        "Query": true
+      },
+      "GeometryOmitted": false
+    }
+  ],
+  "Geometry": [
+    {
+      "Collider": {
+        "World": 1,
+        "Index": 3,
+        "Generation": 1
+      },
+      "Child": 0,
+      "BackendShapeIndex": 0,
+      "Kind": 5,
+      "Radius": 0,
+      "PointA": {
+        "X": 0,
+        "Y": 0,
+        "Z": 0
+      },
+      "PointB": {
+        "X": 0,
+        "Y": 0,
+        "Z": 0
+      },
+      "Vertices": [
+        {
+          "X": -4,
+          "Y": 0,
+          "Z": -4
+        },
+        {
+          "X": 4,
+          "Y": 0,
+          "Z": -4
+        },
+        {
+          "X": -4,
+          "Y": 0,
+          "Z": 4
+        },
+        {
+          "X": 4,
+          "Y": 0,
+          "Z": 4
+        }
+      ],
+      "Indices": [
+        0,
+        2,
+        1,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "Collider": {
+        "World": 1,
+        "Index": 6,
+        "Generation": 1
+      },
+      "Child": 0,
+      "BackendShapeIndex": 1,
+      "Kind": 1,
+      "Radius": 0.5,
+      "PointA": {
+        "X": 0,
+        "Y": 0,
+        "Z": 0
+      },
+      "PointB": {
+        "X": 0,
+        "Y": 0,
+        "Z": 0
+      },
+      "Vertices": null,
+      "Indices": null
+    },
+    {
+      "Collider": {
+        "World": 1,
+        "Index": 9,
+        "Generation": 1
+      },
+      "Child": 0,
+      "BackendShapeIndex": 2,
+      "Kind": 4,
+      "Radius": 0,
+      "PointA": {
+        "X": 0,
+        "Y": 0,
+        "Z": 0
+      },
+      "PointB": {
+        "X": 0,
+        "Y": 0,
+        "Z": 0
+      },
+      "Vertices": [
+        {
+          "X": 0.3,
+          "Y": 0.5,
+          "Z": 0.4
+        },
+        {
+          "X": -0.3,
+          "Y": 0.5,
+          "Z": 0.4
+        },
+        {
+          "X": -0.3,
+          "Y": -0.5,
+          "Z": 0.4
+        },
+        {
+          "X": 0.3,
+          "Y": -0.5,
+          "Z": 0.4
+        },
+        {
+          "X": 0.3,
+          "Y": 0.5,
+          "Z": -0.4
+        },
+        {
+          "X": -0.3,
+          "Y": 0.5,
+          "Z": -0.4
+        },
+        {
+          "X": -0.3,
+          "Y": -0.5,
+          "Z": -0.4
+        },
+        {
+          "X": 0.3,
+          "Y": -0.5,
+          "Z": -0.4
+        }
+      ],
+      "Indices": [
+        2,
+        1,
+        5,
+        2,
+        5,
+        6,
+        0,
+        3,
+        7,
+        0,
+        7,
+        4,
+        3,
+        2,
+        6,
+        3,
+        6,
+        7,
+        1,
+        0,
+        4,
+        1,
+        4,
+        5,
+        7,
+        6,
+        5,
+        7,
+        5,
+        4,
+        0,
+        1,
+        2,
+        0,
+        2,
+        3
+      ]
+    },
+    {
+      "Collider": {
+        "World": 1,
+        "Index": 9,
+        "Generation": 1
+      },
+      "Child": 1,
+      "BackendShapeIndex": 3,
+      "Kind": 2,
+      "Radius": 0.2,
+      "PointA": {
+        "X": 1,
+        "Y": -0.2,
+        "Z": 0
+      },
+      "PointB": {
+        "X": 1,
+        "Y": 0.2,
+        "Z": 0
+      },
+      "Vertices": null,
+      "Indices": null
+    }
+  ],
+  "Frame": 1,
+  "FrameAccepted": true,
+  "Paths": [
+    {
+      "Body": {
+        "World": 1,
+        "Index": 5,
+        "Generation": 1
+      },
+      "Positions": [
+        {
+          "X": 0,
+          "Y": 0.505,
+          "Z": 0
+        },
+        {
+          "X": 0.00625,
+          "Y": 0.50492007,
+          "Z": 0
+        },
+        {
+          "X": 0.010967189,
+          "Y": 0.5048504,
+          "Z": 0
+        },
+        {
+          "X": 0.014917974,
+          "Y": 0.5047878,
+          "Z": 0
+        },
+        {
+          "X": 0.019154748,
+          "Y": 0.5047232,
+          "Z": 0
+        }
+      ],
+      "Poses": [
+        {
+          "Position": {
+            "X": 0,
+            "Y": 0.505,
+            "Z": 0
+          },
+          "Rotation": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0,
+            "W": 1
+          }
+        },
+        {
+          "Position": {
+            "X": 0.00625,
+            "Y": 0.50492007,
+            "Z": 0
+          },
+          "Rotation": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0,
+            "W": 1
+          }
+        },
+        {
+          "Position": {
+            "X": 0.010967189,
+            "Y": 0.5048504,
+            "Z": 0
+          },
+          "Rotation": {
+            "X": 0,
+            "Y": 0,
+            "Z": -0.00385116,
+            "W": 0.9999926
+          }
+        },
+        {
+          "Position": {
+            "X": 0.014917974,
+            "Y": 0.5047878,
+            "Z": 0
+          },
+          "Rotation": {
+            "X": 0,
+            "Y": 0,
+            "Z": -0.009627737,
+            "W": 0.9999537
+          }
+        },
+        {
+          "Position": {
+            "X": 0.019154748,
+            "Y": 0.5047232,
+            "Z": 0
+          },
+          "Rotation": {
+            "X": 0,
+            "Y": 0,
+            "Z": -0.014685544,
+            "W": 0.99989223
+          }
+        }
+      ],
+      "Fractions": [
+        0,
+        0.25,
+        0.5,
+        0.75,
+        1
+      ]
+    }
+  ],
+  "Contacts": [
+    {
+      "Pair": {
+        "A": {
+          "World": 1,
+          "Index": 3,
+          "Generation": 1
+        },
+        "B": {
+          "World": 1,
+          "Index": 6,
+          "Generation": 1
+        },
+        "Kind": 1
+      },
+      "OwnerA": 0,
+      "OwnerB": 0,
+      "Phase": 1,
+      "Reason": 0,
+      "Point": {
+        "X": 0,
+        "Y": 0.0024999976,
+        "Z": 0
+      },
+      "Normal": {
+        "X": 0,
+        "Y": 1,
+        "Z": 0
+      },
+      "Force": {
+        "X": 0,
+        "Y": 9.81,
+        "Z": 0
+      },
+      "Depth": 4.656613e-9,
+      "Frame": 1,
+      "Revision": 3,
+      "Fraction": 0.25
+    },
+    {
+      "Pair": {
+        "A": {
+          "World": 1,
+          "Index": 3,
+          "Generation": 1
+        },
+        "B": {
+          "World": 1,
+          "Index": 6,
+          "Generation": 1
+        },
+        "Kind": 1
+      },
+      "OwnerA": 0,
+      "OwnerB": 0,
+      "Phase": 2,
+      "Reason": 0,
+      "Point": {
+        "X": 0,
+        "Y": 0.0024999976,
+        "Z": 0
+      },
+      "Normal": {
+        "X": 0,
+        "Y": 1,
+        "Z": 0
+      },
+      "Force": {
+        "X": 0,
+        "Y": 9.81,
+        "Z": 0
+      },
+      "Depth": 0.000079934485,
+      "Frame": 1,
+      "Revision": 3,
+      "Fraction": 0.5
+    },
+    {
+      "Pair": {
+        "A": {
+          "World": 1,
+          "Index": 3,
+          "Generation": 1
+        },
+        "B": {
+          "World": 1,
+          "Index": 6,
+          "Generation": 1
+        },
+        "Kind": 1
+      },
+      "OwnerA": 0,
+      "OwnerB": 0,
+      "Phase": 2,
+      "Reason": 0,
+      "Point": {
+        "X": 0,
+        "Y": 0.0024999976,
+        "Z": 0
+      },
+      "Normal": {
+        "X": 0,
+        "Y": 1,
+        "Z": 0
+      },
+      "Force": {
+        "X": 0,
+        "Y": 9.81,
+        "Z": 0
+      },
+      "Depth": 0.00013471115,
+      "Frame": 1,
+      "Revision": 3,
+      "Fraction": 0.75
+    },
+    {
+      "Pair": {
+        "A": {
+          "World": 1,
+          "Index": 3,
+          "Generation": 1
+        },
+        "B": {
+          "World": 1,
+          "Index": 6,
+          "Generation": 1
+        },
+        "Kind": 1
+      },
+      "OwnerA": 0,
+      "OwnerB": 0,
+      "Phase": 2,
+      "Reason": 0,
+      "Point": {
+        "X": 0,
+        "Y": 0.0024999976,
+        "Z": 0
+      },
+      "Normal": {
+        "X": 0,
+        "Y": 1,
+        "Z": 0
+      },
+      "Force": {
+        "X": 0,
+        "Y": 9.81,
+        "Z": 0
+      },
+      "Depth": 0.00011903513,
+      "Frame": 1,
+      "Revision": 3,
+      "Fraction": 1
+    }
+  ],
+  "Queries": [
+    {
+      "Label": "downward sphere sweep",
+      "Query": {
+        "Kind": 2,
+        "Mode": 2,
+        "Shape": {
+          "ID": "",
+          "Kind": 1,
+          "Radius": 0.2,
+          "PointA": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          },
+          "PointB": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          },
+          "HalfExtents": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          },
+          "Vertices": null,
+          "Indices": null,
+          "Children": null
+        },
+        "Pose": {
+          "Position": {
+            "X": 0,
+            "Y": 2,
+            "Z": 0
+          },
+          "Rotation": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0,
+            "W": 1
+          }
+        },
+        "Translation": {
+          "X": 0,
+          "Y": -3,
+          "Z": 0
+        },
+        "Filter": {
+          "Mask": 18446744073709551615,
+          "PhysicalFilter": null,
+          "Sensors": 0,
+          "RequireSolid": false,
+          "IncludeNonQuery": false,
+          "ExcludeBodies": null,
+          "ExcludeColliders": null,
+          "ExcludeOwners": null
+        },
+        "Initial": 0,
+        "Backfaces": 1
+      },
+      "Result": {
+        "Count": 2,
+        "Total": 2,
+        "Incomplete": false,
+        "Blocked": true,
+        "Revision": 3
+      },
+      "Hits": [
+        {
+          "Collider": {
+            "World": 1,
+            "Index": 6,
+            "Generation": 1
+          },
+          "Body": {
+            "World": 1,
+            "Index": 5,
+            "Generation": 1
+          },
+          "Owner": 0,
+          "Content": "ball/collider",
+          "Feature": {
+            "Child": 0,
+            "Triangle": 0,
+            "Valid": true,
+            "LocalID": 0,
+            "Detail": 0
+          },
+          "Point": {
+            "X": 0.0054727886,
+            "Y": 1.0045359,
+            "Z": 0
+          },
+          "Normal": {
+            "X": -0.027363919,
+            "Y": 0.99962556,
+            "Z": 0
+          },
+          "SurfaceNormal": {
+            "X": -0.027363919,
+            "Y": 0.99962556,
+            "Z": 0
+          },
+          "HasSurfaceNormal": false,
+          "Distance": 0.7955389,
+          "Fraction": 0.26517963,
+          "Depth": 0,
+          "Initial": false,
+          "Touching": true,
+          "Penetrating": false,
+          "Sensor": false,
+          "Blocking": true,
+          "Revision": 3
+        },
+        {
+          "Collider": {
+            "World": 1,
+            "Index": 3,
+            "Generation": 1
+          },
+          "Body": {
+            "World": 1,
+            "Index": 2,
+            "Generation": 1
+          },
+          "Owner": 0,
+          "Content": "floor/collider",
+          "Feature": {
+            "Child": 0,
+            "Triangle": 0,
+            "Valid": true,
+            "LocalID": 0,
+            "Detail": 0
+          },
+          "Point": {
+            "X": 0,
+            "Y": 0,
+            "Z": 0
+          },
+          "Normal": {
+            "X": 0,
+            "Y": 1,
+            "Z": 0
+          },
+          "SurfaceNormal": {
+            "X": 0,
+            "Y": 1,
+            "Z": 0
+          },
+          "HasSurfaceNormal": false,
+          "Distance": 1.8,
+          "Fraction": 0.59999996,
+          "Depth": 0,
+          "Initial": false,
+          "Touching": true,
+          "Penetrating": false,
+          "Sensor": false,
+          "Blocking": true,
+          "Revision": 3
+        }
+      ],
+      "Error": ""
+    }
+  ],
+  "Targets": [
+    {
+      "Body": {
+        "World": 1,
+        "Index": 5,
+        "Generation": 1
+      },
+      "From": {
+        "X": 0.019154748,
+        "Y": 0.5047232,
+        "Z": 0
+      },
+      "Target": {
+        "X": 1,
+        "Y": 0.5,
+        "Z": 0
+      },
+      "Label": "sample navigation target (caller annotation)"
+    }
+  ]
+}

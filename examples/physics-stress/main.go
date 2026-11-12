@@ -31,6 +31,7 @@ type options struct {
 	Workers                          int
 	PhysicsWorkers, QueryWorkers     int
 	Profiles                         bool
+	DebugCapture                     bool
 	Warmup, Duration, StartupTimeout time.Duration
 }
 
@@ -44,6 +45,7 @@ func main() {
 	flag.IntVar(&o.PhysicsWorkers, "physics-workers", 6, "rigid-body solver workers")
 	flag.IntVar(&o.QueryWorkers, "query-workers", 6, "bounded gameplay query workers")
 	flag.BoolVar(&o.Profiles, "profiles", false, "record CPU and retained heap profiles; includes warmup, affects timing")
+	flag.BoolVar(&o.DebugCapture, "debug-capture", false, "write bounded accepted/candidate geometry on failure; diagnostic only")
 	flag.DurationVar(&o.Warmup, "warmup", 2*time.Second, "minimum warmup after server starts")
 	flag.DurationVar(&o.Duration, "duration", 2*time.Second, "measurement interval; full soak requires at least 2h")
 	flag.DurationVar(&o.StartupTimeout, "startup-timeout", 2*time.Minute, "maximum wait for all initial routes")

@@ -108,7 +108,7 @@ func makeScene(o options, c workload, observeNav func(golem.NavigationTickMetric
 		}
 	}()
 	s.server = golem.NewServer(golem.ServerConfig{TickRate: 20})
-	if err = s.server.SetPhysicsWorld(observedWorld{World: w, out: o.Out}); err != nil {
+	if err = s.server.SetPhysicsWorld(observedWorld{World: w, out: o.Out, debugCapture: o.DebugCapture, sourceSnapshot: o.SourceManifest}); err != nil {
 		return nil, err
 	}
 	half := float32(o.Extent / 2)

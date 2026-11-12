@@ -17,6 +17,8 @@ alwaysApply: false
 
 # `bake` pipeline
 
+Physics debug captures are a separate bounded visualization format, not authoring exports or backend cooking images. The optional `physics-debug` sample CLI and Unity Scene-view reader do not run `golem-bake`, alter Scribe manifests, or publish scene state.
+
 Runtime physics checkpoint restoration rebinds portable source leases by their exact source/settings fingerprint and stable object identities. This preserves authored ownership separately from live pose/velocity state and native cooking artifacts. Source lease bounds include current physical transforms during replacement; navigation bake clearance remains a host quarantine obligation. These recovery/publication APIs do not change `golem-bake` output or Scribe manifest ownership.
 
 Optional entity-var `physics:` metadata binds ordinary explicit scalar fields to accepted server physics state. Trace these tags through schema resolution, Go writer generation and Scribe attributes; retain identical protobuf/JS/C# codecs and snapshot fingerprints with or without binding metadata. All build outputs and consumer caches for this workstream stay under the physics validation workspace. `qualification/PhysicsUnity.ps1` owns repeatable staged Unity fixture setup and reference capture; it never edits a game repository or installs an Editor implicitly.

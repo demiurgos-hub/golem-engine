@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Physics worlds can explicitly capture bounded diagnostic geometry and identities, accepted state, separately labeled fault poses, and supplied queries, contacts, support and movement annotations. Unity's Physics Preview loads these captures with omission warnings. A runnable Go sample and the stress runner's optional failure capture exercise the versioned format; captures are not checkpoints.
+
 - Physics handles now recycle with advancing generations, rejecting stale pooled-body commands and rebuilding replacement contacts. Query scratch is reused per worker, all-hit retention is bounded by the caller's buffer, and the coordinate envelope includes the query's full oriented geometry.
 
 - Physics stress diagnostics can explicitly select Box3D's pure-Go SIMD build and solver/query worker counts. Evidence records the Go experiment, build tags and target architecture; the SIMD candidate retains its CPU requirements and does not imply workload or platform qualification.
