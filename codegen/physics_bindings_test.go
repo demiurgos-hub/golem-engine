@@ -153,6 +153,14 @@ func TestBindings(t *testing.T){
 	}
 	runConsumer(t, goDir, "go", goArgs...)
 	jsDir := filepath.Join(dir, "js")
+	for _, requirement := range []string{"golem-js/dist/index.js", "golem-js/node_modules/typescript/lib/tsc.js"} {
+		if _, err := os.Stat(filepath.Join(root, requirement)); err != nil {
+			if os.Getenv("GOLEM_REQUIRE_CONSUMERS") == "1" {
+				t.Fatal(err)
+			}
+			t.Skip("install and build golem-js to check generated JavaScript and C# consumers")
+		}
+	}
 	module := filepath.Join(jsDir, "node_modules/golem-engine")
 	if err := os.CopyFS(module, os.DirFS(filepath.Join(root, "golem-js/dist"))); err != nil {
 		t.Fatal(err)

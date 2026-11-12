@@ -101,6 +101,8 @@ def main():
     work.write_text("go 1.27.1\nuse (\n" + "".join("  " + json.dumps(str(path)) + "\n" for _, path in modules.values()) + "".join("  " + json.dumps(str(path)) + "\n" for path in extras) + ")\nreplace (\n" + "".join(f"  {name} {version} => {json.dumps(str(path))}\n" for name, (version, path) in modules.items()) + ")\n", encoding="utf-8")
     env = dict(os.environ)
     env.update(GOTOOLCHAIN="local", GOENV="off", GOWORK=str(work), CGO_ENABLED="0", GOEXPERIMENT="simd" if args.simd else "", GOAMD64="v1", GOFLAGS="-mod=readonly")
+    # Generated Go consumers must use the same explicit toolchain as their parent.
+    env["PATH"] = str(go.parent) + os.pathsep + env.get("PATH", "")
     for key, relative in (("GOCACHE", "linux/cache/go"), ("GOMODCACHE", "linux/cache/mod"), ("GOPATH", "linux/gopath"), ("GOTMPDIR", "linux/tmp")):
         directory = root / relative
         directory.mkdir(parents=True, exist_ok=True)
@@ -109,29 +111,47 @@ def main():
     tags = ["-tags", "box3d_simd"] if args.simd else []
     evidence = {"version": 1, "startedUTC": stamp(), "platform": platform.uname()._asdict(), "sourceManifest": str(source_manifest), "sourceManifestSHA256": sha(source_manifest), "runnerSHA256": sha(Path(__file__)), "options": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}, "environment": {key: env[key] for key in ("GOTOOLCHAIN", "GOWORK", "CGO_ENABLED", "GOEXPERIMENT", "GOAMD64", "GOCACHE", "GOMODCACHE", "GOTMPDIR")}, "checks": [], "publishedResolution": False, "qualified": False}
 
-    def command(name, argv, cwd, settings=None):
-        record = {"name": name, "argv": [str(x) for x in argv], "cwd": str(cwd), "startedUTC": stamp()}
+    def command(name, argv, cwd, settings=None, required=True):
+        record = {"name": name, "argv": [str(x) for x in argv], "cwd": str(cwd), "cgo": (settings or env)["CGO_ENABLED"], "startedUTC": stamp()}
         evidence["checks"].append(record)
         with (run / (name + ".log")).open("w", encoding="utf-8") as output:
             result = subprocess.run(record["argv"], cwd=cwd, env=settings or env, stdout=output, stderr=subprocess.STDOUT)
         record.update(exitCode=result.returncode, finishedUTC=stamp())
         save(run / "manifest.json", evidence)
-        if result.returncode:
+        if "-json" in record["argv"]:
+            record["skippedTests"] = []
+            for line in (run / (name + ".log")).read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("{"):
+                    event = json.loads(line)
+                    if event.get("Action") == "skip" and event.get("Test"):
+                        record["skippedTests"].append({"package": event.get("Package"), "test": event["Test"]})
+        if result.returncode and required:
             raise RuntimeError(f"{name} failed: see {run / (name + '.log')}")
+        return result.returncode == 0
 
     try:
+        save(run / "manifest.json", evidence)
         evidence["sourceBefore"] = verify_sources(workspace, source)
         evidence["toolchain"] = subprocess.check_output([str(go), "version"], env=env, text=True).strip()
         if "go1.27.1 linux/amd64" not in evidence["toolchain"]:
             raise ValueError("expected Go 1.27.1 linux/amd64")
         save(run / "cpu.json", {"cpuinfo": Path("/proc/cpuinfo").read_text(), "memory": Path("/proc/meminfo").read_text()})
         if args.phase in ("tests", "both"):
+            passed = True
             paths = [path for name, (_, path) in modules.items() if name != "github.com/demiurgos-hub/navmesh-go"] + extras
             for index, path in enumerate(paths):
                 settings = dict(env)
                 if path == workspace / "box3d-go":
                     settings["GOWORK"] = "off"
-                command(f"test-{index:02d}-{path.name}", [go, "test", *tags, "-count=1", "-json", "./..."], path, settings)
+                if path == engine:
+                    packages = ["./cmd/...", "./schema/...", "./codegen/...", "./golem/...", "./golem-go-client/...", "./internal/..."]
+                    passed = command("test-root-server", [go, "test", *tags, "-count=1", "-json", *packages], path, settings, required=False) and passed
+                    client_env = dict(settings, CGO_ENABLED="1")
+                    passed = command("test-ebiten-client-cgo", [go, "test", "-count=1", "-json", "./golem-ebiten/..."], path, client_env, required=False) and passed
+                    continue
+                passed = command(f"test-{index:02d}-{path.name}", [go, "test", *tags, "-count=1", "-json", "./..."], path, settings, required=False) and passed
+            if not passed:
+                raise RuntimeError("One or more native module checks failed; see individual logs")
         if args.phase in ("workload", "both"):
             binary = run / "physics-stress"
             command("build", [go, "build", *tags, "-trimpath", "-o", binary, "."], engine / "examples/physics-stress")

@@ -81,6 +81,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Geometric sphere/capsule queries preserve exact touching on flat triangle faces, avoiding spurious rejection by zero-penetration spawn admission. Touching pair results retain their feature identity and witnesses. The correction keeps float32 geometry and does not relax penetration thresholds.
+
 - Physics contact transitions remain private until the whole frame is accepted. Shutdown emits terminal cleanup for accepted pairs only and rejects callback commands. Constraint-force reads reject pending or faulted frames. Upright joints use the authored Y-up axis and consistent warm starting through repeated yaw rotations.
 
 - Physics stress scene manifests record the selected solver configuration, including worker count, instead of displaying defaults alongside a tuned run.
