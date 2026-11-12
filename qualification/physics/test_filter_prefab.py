@@ -1,7 +1,7 @@
 import hashlib
 import unittest
 
-from filter_prefab import exclude_instance
+from filter_prefab import exclude_instance, exclude_instances
 
 
 GUID = "d" * 32
@@ -20,6 +20,18 @@ def spec(data=SOURCE):
 
 
 class FilterPrefabTests(unittest.TestCase):
+    def test_exact_multiple_instances_retain_solid_sibling(self):
+        extra = SOURCE[SOURCE.index(b"--- !u!1001"):].replace(b"&1\n", b"&5\n").replace(b"&2 stripped", b"&6 stripped").replace(b"fileID: 1}", b"fileID: 5}")
+        data = SOURCE.replace(b"  - {fileID: 4}\n", b"  - {fileID: 4}\n  - {fileID: 6}\n") + extra
+        specs = [spec(data), dict(spec(data), prefabInstanceFileID="5", strippedTransformFileID="6")]
+        output, evidence = exclude_instances(data, specs, [])
+        self.assertIn(b"--- !u!4 &4\n", output)
+        self.assertIn(b"m_Children:\n  - {fileID: 4}\n", output)
+        self.assertNotIn(GUID.encode(), output)
+        self.assertEqual(len(evidence["instances"]), 2)
+        with self.assertRaisesRegex(ValueError, "references"):
+            exclude_instances(data, specs[:1], [])
+
     def test_retains_unrelated_geometry_and_variant_removals(self):
         variant = ("m_RemovedComponents:\n- {fileID: 99, guid: " + ASSET + ", type: 3}\n").encode()
         output, evidence = exclude_instance(SOURCE, spec(), [("variant", variant, hashlib.sha256(variant).hexdigest())])

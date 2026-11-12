@@ -29,7 +29,7 @@ def pointer(text, field):
     return value[1], value[2]
 
 
-def exclude_instance(data, spec, variants):
+def exclude_instance(data, spec, variants, *, _remaining_instances=False):
     if digest(data) != spec["sourceSHA256"].lower():
         raise ValueError("source hash mismatch")
     guid, asset_guid = spec["excludedSourceGUID"], spec["sourceAssetGUID"]
@@ -67,7 +67,7 @@ def exclude_instance(data, spec, variants):
     updated_parent = parent_text[:children.start()] + replacement + parent_text[children.end():]
     output = text[:headers[0].start()] + "".join(updated_parent if key == parent else record for key, (_, record) in records.items() if key not in (instance, transform))
     removed = {instance, transform}
-    if guid in output or any(match[1] in removed and match[2] in (None, asset_guid) for match in POINTER.finditer(output)):
+    if (guid in output and not _remaining_instances) or any(match[1] in removed and match[2] in (None, asset_guid) for match in POINTER.finditer(output)):
         raise ValueError("unexpected references to excluded source remain")
     variant_records = []
     for name, variant_data, expected_hash in variants:
@@ -79,6 +79,37 @@ def exclude_instance(data, spec, variants):
         variant_records.append({"path": name, "sha256": digest(variant_data), "unchanged": True, "removedObjectReferences": 0})
     result = output.encode("utf-8")
     return result, {"sourceSHA256": digest(data), "filteredSHA256": digest(result), "removedFileIDs": [instance, transform], "parentTransformFileID": parent, "variants": variant_records}
+
+
+def exclude_instances(data, specs, variants):
+    """Remove an exact authorized set of instances, then reject every dangling reference."""
+    if not specs or len(specs) > 32:
+        raise ValueError("expected one to thirty-two exact exclusions")
+    original_hash = digest(data)
+    if any(spec["sourceSHA256"].lower() != original_hash for spec in specs):
+        raise ValueError("source hash mismatch")
+    if len({spec["sourceAssetGUID"] for spec in specs}) != 1:
+        raise ValueError("exclusions must belong to one source asset")
+    ids = [str(spec[key]) for spec in specs for key in ("prefabInstanceFileID", "strippedTransformFileID")]
+    if len(set(ids)) != len(ids):
+        raise ValueError("duplicate excluded object")
+    result, records = data, []
+    for spec in specs:
+        current = dict(spec, sourceSHA256=digest(result))
+        result, record = exclude_instance(result, current, [], _remaining_instances=True)
+        records.append(record)
+    source_guid = specs[0]["sourceAssetGUID"]
+    excluded_guids = {spec["excludedSourceGUID"] for spec in specs}
+    def check(text, external):
+        return any(guid in text for guid in excluded_guids) or any(m[1] in ids and (m[2] == source_guid or (not external and m[2] is None)) for m in POINTER.finditer(text))
+    if check(result.decode("utf-8"), False):
+        raise ValueError("unexpected references to excluded source remain")
+    checked = []
+    for name, raw, expected in variants:
+        if digest(raw) != expected.lower() or check(raw.decode("utf-8"), True):
+            raise ValueError("variant hash/reference check failed: " + name)
+        checked.append({"path": name, "sha256": digest(raw), "unchanged": True})
+    return result, {"sourceSHA256": original_hash, "filteredSHA256": digest(result), "instances": records, "variants": checked}
 
 
 def main():

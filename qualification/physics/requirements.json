@@ -67,7 +67,15 @@
       "goComparison": "D:/Demiurgos/tests/physics-validation/motion/terrain-sphere-final-report.json",
       "independentAnalyticReference": "D:/Demiurgos/tests/physics-validation/motion/terrain-analytic-report.json",
       "scope": "Two actual 513x513 HeightOnly tiles, 1048576 triangles, zero authored holes. All 42 rays pass; final strict Unity comparison is 81/84 with sphere casts converging. Three offset-2304 witness disagreements remain recorded separately from passing unchanged independent analytic distance/point targets. Repeated 768/2304 metre offsets test coordinates, not additional resident area. Historical earlier failures are preserved.",
-      "remaining": ["WorldStreamer server-prefab/catalog choices, object-state variants and database-driven full world assembly"],
+      "remaining": ["representative backend behavior and unchanged accuracy checks", "full required workload qualification"],
+      "completedCatalogEvidence": {
+        "root": "D:/Demiurgos/tests/physics-validation/catalog/20261112-01",
+        "originalImporterCapture": "capture-04-original",
+        "integrity": "catalog-integrity-01.json",
+        "physicalSignatures": "original-signatures-01.json",
+        "coverage": "193 registered roots, 427 state probes, 411 successful exports and 270 complete physical signatures; 45 exceptional database poses and all 10 registered server terrains also captured. Strict mismatches and unsupported inputs remain preserved, not passed.",
+        "scope": "Historical bounded diagnostic inventory. Exhaustive catalog parity, every collision and complete database-world assembly are not required acceptance gates after the user scope decision below. No full-catalog qualification is claimed."
+      },
       "excludedFortressDependency": {
         "reference": "AssetsByObject/Fortress/Fortress Parts/Wall_LordRoom_Stair_R.prefab:1019",
         "sourceGUID": "d792e15c3c2895d4daa70bfc04ab5509",
@@ -84,6 +92,28 @@
   },
   "qualification": {
     "workspace": "D:/Demiurgos/tests/physics-validation",
+    "representativeContentScopeDecision": {
+      "date": "2026-11-12",
+      "authority": "User clarified that the DeliveryPoint placement collider is obsolete and that every collision does not need testing.",
+      "required": ["representative backend behavior", "unchanged query accuracy", "retained workload counts, cadence and latency gates"],
+      "excluded": ["obsolete DeliveryPoint placement collider", "exhaustive catalog/collision parity", "further missing-asset searches for catalog completion"],
+      "obsoleteCollider": {"catalog": "building-9", "sourceGUID": "8e6893db986fbca4ab45e54fa178fa67", "componentFileID": "6406460348347202773", "missingMeshGUID": "a308754dd72631b49b56290e70ae2de0"},
+      "evidence": "D:/Demiurgos/tests/physics-validation/catalog/20261112-01/scope-decision.json",
+      "policy": "Preserve completed captures and strict mismatches as diagnostics; stop exhaustive reruns and do not fabricate geometry. Investigate a substantive representative mismatch when it may reveal a general backend bug. The obsolete asset is not a qualification blocker."
+    },
+    "deliveryValidationScopeDecision": {
+      "date": "2026-11-12",
+      "authority": "User: Yes keep only the first 4 tests and exclude the last two, as you recommended.",
+      "orderedRequired": [
+        "Focused collision regressions: fast impacts, thin pushed object against a wall, motor movement and physical conservation",
+        "One final relevant engine integration regression run: movement/navigation, contacts, geometry changes, checkpoint/restart and existing collision compatibility",
+        "One short full-size Windows x64 workload with the retained population/query/geometry counts and 50ms full-tick p99 gate",
+        "Linux x64 smoke: build, simulate, save and restore"
+      ],
+      "excluded": ["extended race and geometry/joint/mass/concurrency test matrices", "two-hour churn/restart soak", "duplicate full-size Linux performance run"],
+      "previousSoakSeconds": 7200,
+      "policy": "Preserve completed evidence, reuse captured Unity references, and rerun only checks affected by final code changes. Report this reduced delivery scope explicitly; do not claim excluded long-duration or full-platform performance qualification."
+    },
     "frontendScopeDecision": {
       "date": "2026-11-12",
       "authority": "User: Ebiten is a front-end integration; this work is backend physics qualification.",
@@ -121,7 +151,7 @@
     "staticTriangles": 5000000,
     "additionalGameplayQueriesPerTick": 10000,
     "fullTickP99MillisecondsExclusive": 50,
-    "soakSeconds": 7200,
+    "soakSeconds": 0,
     "hitPointErrorMetres": 0.001,
     "distanceAndPenetrationErrorMetres": 0.0001,
     "missingOrUnsupportedGate": "fail",
