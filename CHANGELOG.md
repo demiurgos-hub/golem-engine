@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Entity vars can opt into accepted physics orientation, linear/angular velocity and activation through explicit `physics:` tags. Generated Go server writers update the ordinary replicated fields; tags, owner visibility, snapshots and implicit position encoding are unchanged. Unity Scribe exposes the same metadata through `GolemVar(Physics = "...")`. Bindings require complete component groups and writable `sync: tick` fields; body attachment remains explicit.
+
 - Opt-in server physics attachments bind accepted gameplay anchors, rotation, velocity and activation state to entities. Staged navigation prepares ordered movement once per tick, validates complete physical paths including idle agents, and reconciles support before traversal/contact callbacks. Physics mutations and deletions from accepted-frame callbacks run on a later tick; legacy synchronous motors and collision backends remain available. Full backend and workload qualification remains in progress.
 - Unity Scribe exports versioned portable physics source from saved scenes, including resolved prefab colliders, body-local scaled geometry, terrain holes, materials, activation, owner metadata, character settings and supported joint declarations. Explicit export/validate actions preserve manifest ownership and rollback; a scene preview compares exported geometry with Unity reference queries. Unsupported authoring settings fail before writing. Backend equivalence and workload qualification remain separate gates.
 

@@ -70,7 +70,8 @@ require github.com/demiurgos-hub/golem-engine v0.0.0
 replace github.com/demiurgos-hub/golem-engine => %q
 replace github.com/demiurgos-hub/golem-engine/golem/collision => %q
 replace github.com/demiurgos-hub/golem-engine/golem/nav => %q
-`, filepath.ToSlash(root), filepath.ToSlash(filepath.Join(root, "golem/collision")), filepath.ToSlash(filepath.Join(root, "golem/nav"))))
+replace github.com/demiurgos-hub/golem-engine/golem/physics3d => %q
+`, filepath.ToSlash(root), filepath.ToSlash(filepath.Join(root, "golem/collision")), filepath.ToSlash(filepath.Join(root, "golem/nav")), filepath.ToSlash(filepath.Join(root, "golem/physics3d"))))
 	for _, target := range []string{"server", "client"} {
 		pd := resolutionFixture(2)
 		types := map[string]schema.CustomTypeData{"Item": pd.CustomTypes[0]}

@@ -15,6 +15,9 @@ namespace GolemEngine.Unity
         /// <summary>Replication cadence written as lowercase <c>tick</c> or <c>once</c>.</summary>
         public GolemSync Sync { get; }
 
+        /// <summary>Optional physics role: orientation_x/y/z/w, velocity_x/y/z, angular_velocity_x/y/z, or active.</summary>
+        public string Physics { get; set; }
+
         /// <summary>Creates a Golem variable attribute with a user-slot tag and sync mode.</summary>
         public GolemVarAttribute(int tag, GolemSync sync = GolemSync.Tick)
         {

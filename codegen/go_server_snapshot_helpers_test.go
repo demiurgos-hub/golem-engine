@@ -59,6 +59,7 @@ replace github.com/demiurgos-hub/golem-engine => REPO
 replace github.com/demiurgos-hub/golem-engine/golem/collision => REPO/golem/collision
 
 replace github.com/demiurgos-hub/golem-engine/golem/nav => REPO/golem/nav
+replace github.com/demiurgos-hub/golem-engine/golem/physics3d => REPO/golem/physics3d
 `, "REPO", repoRootSlash))
 	write("golem_helpers.go", generated.String())
 	write("stubs.go", snapshotHelperStubs)

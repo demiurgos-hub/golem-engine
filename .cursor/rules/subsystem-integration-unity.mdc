@@ -9,10 +9,13 @@ globs:
   - codegen/scalar_encode.go
   - codegen/envelope_codecs.go
   - codegen/codec_metadata.go
+  - qualification/PhysicsUnity.ps1
 alwaysApply: false
 ---
 
 # `integration/unity`
+
+`GolemVarAttribute.Physics` optionally writes explicit scalar physics role tags without renaming fields or adding wire state. Reflection validates 3D dimensions, tick cadence, float/bool type, role uniqueness, complete groups and generated writer-name conflicts before export. `qualification/PhysicsUnity.ps1` stages exact package sources and a supplied built WebTransport dependency into the physics validation workspace, guards an already-open fixture Editor, creates the engine-owned fixture project, and runs EditMode/export-reference gates with retained manifests. Unity 6 evidence is not proof of the declared 2021.3 floor.
 
 **Server physics authoring:** `GolemPhysicsWorld` and `GolemPhysicsMetadata` are data-only authoring components. Explicit Export/Validate menus capture saved scene instances and prefab overrides before writing, include inactive hierarchy and disabled collider state separately, and stop at nested worlds. `GolemPhysicsDocument` emits bounded deterministic version-1 JSON with exact leading `Golem Scribe physics source v1` ownership signature; use `ReconcileSource` and manifest-last rollback, preserving other worlds. General validation checks recorded ownership/hash without orphaning unloaded worlds. No auto-export, codegen bake trigger, or native cooking is implicit.
 
