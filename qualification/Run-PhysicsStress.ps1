@@ -11,6 +11,7 @@ param(
     [ValidateRange(1,64)][int]$PhysicsWorkers = 6,
     [ValidateRange(1,64)][int]$QueryWorkers = 6,
     [switch]$SIMD,
+    [switch]$NativeRelease,
     [switch]$Profiles,
     [switch]$DebugCapture,
     [switch]$Checkpoint,
@@ -38,9 +39,10 @@ $env:TMP = $env:GOTMPDIR
 $env:GOTOOLCHAIN = 'go1.27.1'
 $env:CGO_ENABLED = '0'
 $env:GOEXPERIMENT = if ($SIMD) { 'simd' } else { '' }
-$buildTags = if ($SIMD) { @('-tags','box3d_simd') } else { @() }
 $tagNames = @()
-if ($SIMD) { $tagNames = @('box3d_simd') }
+if ($SIMD) { $tagNames += 'box3d_simd' }
+if ($NativeRelease) { $tagNames += 'box3d_noassert' }
+$buildTags = if ($tagNames.Count) { @('-tags',($tagNames -join ',')) } else { @() }
 $snapshots = @()
 foreach ($source in @(@{Name='engine';Root=$engineRoot},@{Name='box3d-go';Root=$ForkRoot},@{Name='navmesh-go';Root=$NavigationRoot})) {
     $destination = Join-Path $workspacePath $source.Name
@@ -93,7 +95,7 @@ $workText += (($modulePaths | ForEach-Object { '  ' + $_.Module + ' ' + $_.Versi
 $sourceManifest = Join-Path $runPath 'source-manifest.json'
 [ordered]@{version=1;source=$snapshots;workspaceSHA256=(Get-FileHash -LiteralPath $env:GOWORK -Algorithm SHA256).Hash.ToLowerInvariant();publishedResolution=$false} | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $sourceManifest -Encoding utf8
 $executable = Join-Path $runPath 'physics-stress.exe'
-$record = [ordered]@{runID=$RunID;startedUTC=[DateTime]::UtcNow.ToString('o');mode=$Mode;extent=$Extent;duration=$Duration;warmup=$Warmup;buildOnly=[bool]$BuildOnly;toolchain=(& go version);cgo=$env:CGO_ENABLED;goexperiment=$env:GOEXPERIMENT;buildTags=$tagNames;goamd64=(& go env GOAMD64);simdRequested=[bool]$SIMD;nativeHost=[Runtime.InteropServices.RuntimeInformation]::OSDescription;hostArchitecture=[Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString();processArchitecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString();sourceManifest=$sourceManifest;qualified=$false}
+$record = [ordered]@{runID=$RunID;startedUTC=[DateTime]::UtcNow.ToString('o');mode=$Mode;extent=$Extent;duration=$Duration;warmup=$Warmup;buildOnly=[bool]$BuildOnly;toolchain=(& go version);cgo=$env:CGO_ENABLED;goexperiment=$env:GOEXPERIMENT;buildTags=$tagNames;goamd64=(& go env GOAMD64);simdRequested=[bool]$SIMD;nativeReleaseRequested=[bool]$NativeRelease;nativeHost=[Runtime.InteropServices.RuntimeInformation]::OSDescription;hostArchitecture=[Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString();processArchitecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString();sourceManifest=$sourceManifest;qualified=$false}
 try {
     Push-Location $stressModule
     try {
