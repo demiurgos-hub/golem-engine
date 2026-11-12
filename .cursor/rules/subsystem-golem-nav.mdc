@@ -4,6 +4,7 @@ globs:
   - golem/nav/**/*
   - golem/navigation*.go
   - examples/navigation-stress/**/*
+  - examples/physics-stress/**/*
   - qualification/**/*
 alwaysApply: false
 ---
