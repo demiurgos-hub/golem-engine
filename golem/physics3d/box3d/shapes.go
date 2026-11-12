@@ -64,7 +64,7 @@ func (w *World) CreateCollider(d p.ColliderDesc) (p.ColliderHandle, error) {
 	s.refs++
 	v.colliders = append(v.colliders, h)
 	for _, id := range c.shapes {
-		w.shapeOwners[id] = h
+		w.bindNativeShape(id, h, c, v)
 	}
 	w.adjustMass(v)
 	w.changed()
@@ -141,7 +141,7 @@ func (w *World) DestroyCollider(h p.ColliderHandle, reason p.CleanupReason) erro
 		return fmt.Errorf("%w: rebuild joints before changing body mass", p.ErrBusy)
 	}
 	for _, id := range c.shapes {
-		delete(w.shapeOwners, id)
+		w.unbindNativeShape(id)
 		id.Destroy(true)
 	}
 	for i, x := range v.colliders {

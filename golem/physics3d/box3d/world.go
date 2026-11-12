@@ -53,6 +53,7 @@ type World struct {
 	colliders       map[p.ColliderHandle]*collider
 	sensorColliders map[p.ColliderHandle]*collider
 	shapeOwners     map[b.ShapeID]p.ColliderHandle
+	shapeBindings   []nativeShapeBinding
 	queryContexts   []*queryScratch
 	joints          map[p.JointHandle]*joint
 	revision        uint64
@@ -432,6 +433,7 @@ func (w *World) CloseWithEvents() ([]p.ContactEvent, error) {
 	w.shapes = nil
 	w.joints = nil
 	w.shapeOwners = nil
+	w.shapeBindings = nil
 	w.activeBodies = nil
 	w.queryContexts = nil
 	w.generations, w.freeHandles = nil, nil

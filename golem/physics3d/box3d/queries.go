@@ -17,12 +17,11 @@ func (w *World) queryReady() error {
 	return nil
 }
 func (w *World) eligible(id b.ShapeID, f p.QueryFilter) (p.ColliderHandle, *collider, bool) {
-	h, ok := w.shapeOwners[id]
+	binding, ok := w.lookupShapeBinding(id)
 	if !ok {
-		return h, nil, false
+		return p.ColliderHandle{}, nil, false
 	}
-	c := w.colliders[h]
-	v := w.bodies[c.desc.Body]
+	h, c, v := binding.handle, binding.collider, binding.body
 	if !c.desc.Enabled || !v.id.IsEnabled() || !c.desc.Roles.Query && !f.IncludeNonQuery || f.RequireSolid && !c.desc.Roles.Solid || c.desc.Filter.Category&f.Mask == 0 || slices.Contains(f.ExcludeColliders, h) || slices.Contains(f.ExcludeBodies, c.desc.Body) || c.desc.Owner != 0 && slices.Contains(f.ExcludeOwners, c.desc.Owner) {
 		return h, c, false
 	}
@@ -35,9 +34,12 @@ func (w *World) eligible(id b.ShapeID, f p.QueryFilter) (p.ColliderHandle, *coll
 	return h, c, true
 }
 func (w *World) hit(id b.ShapeID) p.Hit {
-	h := w.shapeOwners[id]
-	c := w.colliders[h]
-	return p.Hit{Collider: h, Body: c.desc.Body, Owner: c.desc.Owner, Content: c.desc.ID, Feature: p.Feature{Child: c.children[id], Valid: true}, Sensor: c.desc.Roles.Sensor, Blocking: c.desc.Roles.Solid, Revision: w.revision}
+	binding, ok := w.lookupShapeBinding(id)
+	if !ok {
+		panic("physics3d: native query shape has no current binding")
+	}
+	c := binding.collider
+	return p.Hit{Collider: binding.handle, Body: c.desc.Body, Owner: c.desc.Owner, Content: c.desc.ID, Feature: p.Feature{Child: binding.child, Valid: true}, Sensor: c.desc.Roles.Sensor, Blocking: c.desc.Roles.Solid, Revision: w.revision}
 }
 
 // Query executes exact spatial traversal and writes a stable, bounded result list.
