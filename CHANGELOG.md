@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Precise sphere sweeps solve terrain triangle features directly, preventing numerical stalls on long casts. Exact captured float32 geometry is checked against an independent analytic reference; production normals remain geometric when Unity's rounded world witnesses differ.
+
 - Physics export refuses missing prefab sources before capturing a potentially incomplete collider hierarchy.
 
 - Authored Unity character capsules now require an explicit `content.GolemKinematicCharacters` conversion policy. It maps step, slope and skin settings onto the server controller, retains separate support/work budgets and defaults controller gravity off. Unsupported deadband, disabled collision/recovery and incompatible geometry are diagnosed before loading. Preparation policy fingerprints use version 2; re-prepare existing captures.
