@@ -13,6 +13,7 @@ param(
     [switch]$SIMD,
     [switch]$Profiles,
     [switch]$DebugCapture,
+    [switch]$CommittedSources,
     [switch]$BuildOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -40,18 +41,32 @@ if ($SIMD) { $tagNames = @('box3d_simd') }
 $snapshots = @()
 foreach ($source in @(@{Name='engine';Root=$engineRoot},@{Name='box3d-go';Root=$ForkRoot},@{Name='navmesh-go';Root=$NavigationRoot})) {
     $destination = Join-Path $workspacePath $source.Name
-    $files = @(& git -C $source.Root -c core.quotepath=false ls-files --cached --others --exclude-standard)
+    $commit = (& git -C $source.Root rev-parse HEAD)
+    if ($LASTEXITCODE -ne 0) { throw "Cannot resolve source $($source.Root)" }
+    if ($CommittedSources) {
+        $archive = Join-Path $workspacePath ($source.Name + '.tar')
+        & git -C $source.Root archive --format=tar --output=$archive $commit
+        if ($LASTEXITCODE -ne 0) { throw "Cannot archive source $($source.Root)" }
+        New-Item -ItemType Directory -Path $destination -Force | Out-Null
+        & tar -xf $archive -C $destination
+        if ($LASTEXITCODE -ne 0) { throw "Cannot extract source $($source.Root)" }
+        $files = @(& git -C $source.Root -c core.quotepath=false ls-tree -r --name-only $commit)
+    } else {
+        $files = @(& git -C $source.Root -c core.quotepath=false ls-files --cached --others --exclude-standard)
+    }
     if ($LASTEXITCODE -ne 0) { throw "Cannot enumerate source $($source.Root)" }
     $hashes = @()
     foreach ($relative in $files) {
-        $from = Join-Path $source.Root $relative
+        $from = Join-Path $(if ($CommittedSources) { $destination } else { $source.Root }) $relative
         if (-not (Test-Path -LiteralPath $from -PathType Leaf)) { continue }
         $to = Join-Path $destination $relative
-        New-Item -ItemType Directory -Path (Split-Path -Parent $to) -Force | Out-Null
-        Copy-Item -LiteralPath $from -Destination $to
+        if (-not $CommittedSources) {
+            New-Item -ItemType Directory -Path (Split-Path -Parent $to) -Force | Out-Null
+            Copy-Item -LiteralPath $from -Destination $to
+        }
         $hashes += [ordered]@{path=$relative;sha256=(Get-FileHash -LiteralPath $to -Algorithm SHA256).Hash.ToLowerInvariant()}
     }
-    $snapshots += [ordered]@{name=$source.Name;origin=$source.Root;commit=(& git -C $source.Root rev-parse HEAD);status=@(& git -C $source.Root status --porcelain);files=$hashes}
+    $snapshots += [ordered]@{name=$source.Name;origin=$source.Root;commit=$commit;committedSources=[bool]$CommittedSources;status=@(& git -C $source.Root status --porcelain);files=$hashes}
 }
 $engineSnapshot = Join-Path $workspacePath 'engine'
 $forkSnapshot = Join-Path $workspacePath 'box3d-go'
