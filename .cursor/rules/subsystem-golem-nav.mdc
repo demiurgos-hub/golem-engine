@@ -5,6 +5,7 @@ globs:
   - golem/navigation*.go
   - golem/physics_checkpoint*.go
   - golem/physics_geometry*.go
+  - golem/physics_recovery*.go
   - examples/navigation-stress/**/*
   - examples/physics-stress/**/*
   - qualification/**/*
@@ -12,6 +13,8 @@ alwaysApply: false
 ---
 
 # Navigation
+
+Activation-first physical edits retain full regional quarantine between tick-side geometry activation and asynchronous navigation publication. Failed builds leave the actual physical state explicit and pending. Restart captures accepted navigation separately from desired navigation; a pending checkpoint requires private matching physics/navigation reconstruction before either becomes ready. Invalidate all worker generations prepared against the replaced world, even completed results waiting to drain.
 
 Paired physical restoration and prepared geometry publication live in root `golem/physics_checkpoint.go` and `golem/physics_geometry.go`, using the existing navigation restoration barrier and bounded stable-key build queue. Keep immutable physics/navigation identity captures paired. Establish full regional quarantine before physical changes, preserve unaffected agents, and open restoration readiness only after entity/body/support intent publication. Source lease handles are rebuilt from stable IDs; routes and query handles are never restored. Before a staged frame seals, discard superseded plans and recapture all safety after callbacks without rerunning the scheduler.
 
@@ -64,3 +67,5 @@ Navigation release order is shared nav v0.4.0 and navmesh-go v0.1.0, adapter nav
 After each dependency is actually published, run `GOWORK=off go mod tidy` in its consumer modules, record real proxy checksums, and repeat ordinary test/vet checks. Candidate file-proxy archive checksums belong only in temporary test copies and must not be committed as release sums. The navigation CI lane intentionally depends on this release preparation.
 
 The pure-Go and server CI matrices include native Linux ARM64 (`ubuntu-24.04-arm`) execution. An ARM64 cross-build alone is not execution qualification; keep the hosted runner gate explicit until that lane has actually passed.
+
+For the physics workstream, the user's 2026-11-12 scope decision selects Windows AMD64 and native Linux AMD64 only after the retained navigation manifests confirmed ARM64 compilation but no native ARM64 execution. Historical navigation evidence and CI configuration stay unchanged; an unexecuted CI entry does not establish a reusable native host.

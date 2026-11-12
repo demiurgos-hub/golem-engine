@@ -28,7 +28,18 @@
   ],
   "qualification": {
     "workspace": "D:/Demiurgos/tests/physics-validation",
-    "platforms": ["windows/amd64", "linux/amd64", "linux/arm64-native"],
+    "platforms": ["windows/amd64", "linux/amd64"],
+    "platformScopeDecision": {
+      "date": "2026-11-12",
+      "authority": "User: reuse the native Linux ARM64 host used for navmesh if one was used; otherwise skip ARM64 and test only x64.",
+      "navigationAudit": "Saved navmesh final evidence records Linux AMD64 execution via WSL, ARM64 compilation only, and configured-but-unexecuted native ARM64 CI.",
+      "excluded": ["linux/arm64-native"],
+      "evidence": [
+        "D:/Demiurgos/tests/navmesh-validation/final-library-results.json:877",
+        "D:/Demiurgos/tests/navmesh-validation/windows/golem-engine/manifest.json:951",
+        "C:/Demiurgos/navmesh-validation/world-test/runs/final-qualification-181226-20261111T233727Z/manifest.json:8"
+      ]
+    },
     "tickRate": 20,
     "substeps": 4,
     "movingCharacters": 1000,
