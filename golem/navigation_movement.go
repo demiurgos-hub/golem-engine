@@ -90,6 +90,12 @@ func (n *navigationService) advanceAgent(a *navigationAgent, dt float64) {
 	if a.needsPath && !a.requesting {
 		n.requestPath(a, position)
 	}
+	if a.config.StagedPhysics {
+		if n.frame != nil {
+			n.frame.stage(a, position, dt)
+		}
+		return
+	}
 	if a.state.Mode == NavigationTraversing {
 		n.advanceTraversal(a, dt, writer)
 		return
@@ -299,7 +305,7 @@ func (n *navigationService) reconcile() {
 	}
 	for _, id := range n.moved {
 		a := n.agents[id]
-		if a == nil || a.state.Mode != NavigationFollowing && a.state.Mode != NavigationTraversing || a.view == nil {
+		if a == nil || a.config.StagedPhysics || a.state.Mode != NavigationFollowing && a.state.Mode != NavigationTraversing || a.view == nil {
 			continue
 		}
 		position, _, ok := n.position(id)

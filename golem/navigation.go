@@ -171,6 +171,9 @@ type NavigationAgentConfig struct {
 	MaxStallReplans int
 	Motor           NavigationMotor
 	Traversal       NavigationTraversal
+	// StagedPhysics defers movement to PrepareNavigationFrame and its matching
+	// CommitNavigationFrame. It cannot be combined with a synchronous Motor.
+	StagedPhysics bool
 }
 
 type navigationAgent struct {
@@ -242,6 +245,10 @@ type navigationService struct {
 	delayedBuilds          atomic.Int64
 	tickMetrics            NavigationTickMetrics
 	pathObservationElapsed time.Duration
+	frame                  *NavigationFrame
+	framePreparedTick      uint64
+	framePrepared          bool
+	frameCallbacks         []func()
 }
 
 // SetSurfaceNavigation installs a 3D navigation service before Run. Existing 2D
@@ -302,6 +309,9 @@ func (s *Server) AttachNavigation(id int64, cfg NavigationAgentConfig) error {
 	}
 	if err := validateNavigationAgent(&cfg); err != nil {
 		return err
+	}
+	if s.physics != nil && s.physics.agents[id] != nil && !cfg.StagedPhysics {
+		return errors.New("golem: a physics attachment requires staged navigation")
 	}
 	n.attachment++
 	n.agents[id] = &navigationAgent{id: id, attachment: n.attachment, config: cfg,
@@ -480,6 +490,9 @@ func (s *Server) BeginNavigationRestore() error {
 		return errors.New("golem: navigation is not configured")
 	}
 	n := s.navigation
+	if n.frame != nil {
+		_ = s.AbortNavigationFrame(n.frame)
+	}
 	n.restoring, n.restoreErr = true, nil
 	for _, a := range n.agents {
 		if !n.cancelTraversal(a, "world restoration") {
@@ -525,6 +538,9 @@ func (s *Server) navigationAgent(id int64) (*navigationService, *navigationAgent
 func (n *navigationService) start(ctx context.Context) { n.paths.start(ctx); n.builds.start(ctx) }
 
 func (n *navigationService) stop() {
+	if n.frame != nil {
+		_ = n.server.AbortNavigationFrame(n.frame)
+	}
 	n.stopBuildRequests()
 	n.paths.stop()
 	n.builds.stop()
@@ -918,6 +934,9 @@ func normalizeNavigationConfig(cfg *NavigationConfig) error {
 }
 
 func validateNavigationAgent(cfg *NavigationAgentConfig) error {
+	if cfg.StagedPhysics && cfg.Motor != nil {
+		return errors.New("golem: staged navigation cannot use a synchronous motor")
+	}
 	if cfg.TraversalTimeout < 0 || cfg.TraversalTimeout > 24*time.Hour {
 		return errors.New("golem: traversal timeout must be between zero and 24 hours")
 	}

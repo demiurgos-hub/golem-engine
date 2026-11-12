@@ -8,6 +8,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Opt-in server physics attachments bind accepted gameplay anchors, rotation, velocity and activation state to entities. Staged navigation prepares ordered movement once per tick, validates complete physical paths including idle agents, and reconciles support before traversal/contact callbacks. Physics mutations and deletions from accepted-frame callbacks run on a later tick; legacy synchronous motors and collision backends remain available. Full backend and workload qualification remains in progress.
 - Unity Scribe exports versioned portable physics source from saved scenes, including resolved prefab colliders, body-local scaled geometry, terrain holes, materials, activation, owner metadata, character settings and supported joint declarations. Explicit export/validate actions preserve manifest ownership and rollback; a scene preview compares exported geometry with Unity reference queries. Unsupported authoring settings fail before writing. Backend equivalence and workload qualification remain separate gates.
 
 - Independent `golem/physics3d` contracts define float32 body and anchor poses, world-qualified geometry identities, explicit simulation frames, bounded query results, and contact cleanup/restore classifications. These opt-in foundations leave existing collision and footprint APIs unchanged; the full physics workstream is still undergoing implementation and qualification.

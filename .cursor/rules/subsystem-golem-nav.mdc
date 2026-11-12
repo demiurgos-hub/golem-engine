@@ -1,7 +1,8 @@
 ---
-description: nav — 2D backends, independent 3D surface/regional safety and corridor-transfer contracts, navmesh-go adapter, geometry baking, 1,000-agent mixed-workload qualification and static capacity tools.
+description: nav — 2D backends, independent 3D surface/regional safety and corridor-transfer contracts, staged runtime physics navigation, navmesh-go adapter, geometry baking and qualification.
 globs:
   - golem/nav/**/*
+  - golem/navigation*.go
   - examples/navigation-stress/**/*
   - qualification/**/*
 alwaysApply: false
@@ -10,6 +11,8 @@ alwaysApply: false
 # Navigation
 
 `golem/nav`, `nav/pathing`, and `nav/kelindar` are separate Go modules developed through the ignored local `go.work`. The shared nav module does not depend on the root runtime, map loaders, or either pathfinding library.
+
+Root `golem/navigation_frame.go` coordinates optional staged motion using the existing surface contracts; no physics dependency enters shared nav. Prepare scheduling happens once per tick, with ordered segments apportioned to the physical frame duration. Generation, snapshot, source position and regional safety stay captured until full-path validation. Every physically affected attachment, including idle agents, reconciles actual float32 anchor positions; unsupported physical results are not snapped to another surface. Quarantine requires a solver-side hold before movement, while unexpected post-solve violations reject the entire interacting frame. Transactional traversal actions commit after all navigation state is reconciled. The synchronous navigation/motor API remains separate and compatible.
 
 `nav/surface` belongs to the shared nav module and defines Y-up, float64 world-space contracts with opaque snapshot-qualified locations and immutable route views. Query scratch is exclusively owned. `View.Release` is idempotent; handles cannot outlive their view. `CorridorQuery` repairs paths; optional `RegionalBackend` supplies coherent immutable safety captures with committed/desired revisions and change tokens. Backend-owned location, corridor, segment and bounds checks hide tile identities from the runtime. `RebaseQuery` transfers unchanged polygon support and corridors to a retained latest view; it must not choose another floor. `CornerAppender` uses caller-owned capacity without borrowing query scratch. Optional `SupportIdentity` identifies the same live convex support polygon within one retained view; it is not a proximity or reachability test.
 
