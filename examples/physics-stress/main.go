@@ -53,7 +53,7 @@ func main() {
 	flag.BoolVar(&o.Profiles, "profiles", false, "record CPU and retained heap profiles; includes warmup, affects timing")
 	flag.BoolVar(&o.DebugCapture, "debug-capture", false, "write bounded accepted/candidate geometry on failure; diagnostic only")
 	flag.DurationVar(&o.Warmup, "warmup", 2*time.Second, "minimum warmup after server starts")
-	flag.DurationVar(&o.Duration, "duration", 2*time.Second, "measurement interval; full soak requires at least 2h")
+	flag.DurationVar(&o.Duration, "duration", 2*time.Second, "measurement interval; selected delivery uses a short full-size Windows run")
 	flag.DurationVar(&o.StartupTimeout, "startup-timeout", 2*time.Minute, "maximum wait for all initial routes")
 	flag.Parse()
 	if err := run(o); err != nil {
@@ -105,6 +105,8 @@ type results struct {
 	StartMemory, EndMemory, AfterCloseGC                                       runtime.MemStats
 	MinimumActorTravel                                                         float32
 	Gates                                                                      map[string]bool
+	RequiredGates                                                              []string
+	ExcludedChecks                                                             []string
 	Missing                                                                    []string
 	Failure                                                                    string `json:",omitempty"`
 }
@@ -136,7 +138,19 @@ func run(o options) (runErr error) {
 	if err = os.MkdirAll(o.Out, 0755); err != nil {
 		return err
 	}
-	r := results{Mode: o.Mode, Workload: c, MinMoving: c.Characters, MinFollowing: c.Characters, MinScheduled: c.Characters, MinAwakeDynamic: c.DynamicBodies, MinProjectiles: c.Projectiles, MinQueries: c.Queries, Gates: map[string]bool{}, Missing: []string{"representative-content matrix", "navigation terrain/multilevel/construction/churn/checkpoint gates", "independent platform executions", "query scratch allocation isolation", "joint family and moving-support scenario qualification", "per-substep duration (contract exposes aggregate solve only)", "published module resolution"}}
+	required := []string{"all-moving-every-complete-tick", "awake-dynamic-count", "query-projectile-counts", "accepted-frames"}
+	if o.Mode == "full" {
+		required = append(required, "full-counts", "full-tick-p99-below-50ms")
+	}
+	if o.Checkpoint {
+		required = append(required, "checkpoint-written")
+	}
+	if o.Resume != "" {
+		required = append(required, "checkpoint-restored")
+	}
+	r := results{Mode: o.Mode, Workload: c, MinMoving: c.Characters, MinFollowing: c.Characters, MinScheduled: c.Characters, MinAwakeDynamic: c.DynamicBodies, MinProjectiles: c.Projectiles, MinQueries: c.Queries, Gates: map[string]bool{}, RequiredGates: required,
+		ExcludedChecks: []string{"two-hour-duration", "two-hour-churn-restart-soak", "extended race/geometry/joint/mass/concurrency matrices", "duplicate full-size Linux performance run", "exhaustive content/collision parity"},
+		Missing:        []string{"aggregate same-source four-gate delivery evidence", "published module resolution (separate release prerequisite)"}}
 	r.PhysicsWorkers, r.QueryWorkers = o.PhysicsWorkers, o.QueryWorkers
 	defer func() {
 		if runErr != nil {
@@ -146,7 +160,7 @@ func run(o options) (runErr error) {
 			runErr = e
 		}
 	}()
-	manifest := map[string]any{"version": 1, "startedUTC": time.Now().UTC(), "options": o, "workload": c, "goVersion": runtime.Version(), "goos": runtime.GOOS, "goarch": runtime.GOARCH, "cpus": runtime.NumCPU(), "gomaxprocs": runtime.GOMAXPROCS(0), "precision": "float32 physics/actor state; navigation existing double API only at boundary", "clock": "golem.NavigationNow; same-domain Sub", "tickRate": 20, "substeps": 4, "qualified": false, "scope": "synthetic combined load; existing navigation and representative-content gates remain required", "measurement": "full tick from first OnTickStart to first OnTickEnd; retain every frame starting in the requested measurement window, including its complete overrun; sample output excluded, start-to-start cadence includes observer cost", "geometry": "unique physical triangles; coarser analytically identical navigation plane; static field excluded from navigation", "queryMix": "25% ray, 25% sphere overlap, 25% box sweep, 25% capsule sweep, plus separate projectile sweeps", "sleep": "all requested dynamic and driven bodies explicitly disable sleep", "nativeExecution": "GOOS/GOARCH identify executable target; runner must attest native host, not emulation"}
+	manifest := map[string]any{"version": 1, "startedUTC": time.Now().UTC(), "options": o, "workload": c, "goVersion": runtime.Version(), "goos": runtime.GOOS, "goarch": runtime.GOARCH, "cpus": runtime.NumCPU(), "gomaxprocs": runtime.GOMAXPROCS(0), "precision": "float32 physics/actor state; navigation existing double API only at boundary", "clock": "golem.NavigationNow; same-domain Sub", "tickRate": 20, "substeps": 4, "qualified": false, "scope": "single workload component of the selected four-gate delivery: focused collision regressions, same-source engine integration, short full-size Windows capacity and native Linux build/simulation/save/restore smoke", "requiredGates": r.RequiredGates, "excludedChecks": r.ExcludedChecks, "measurement": "full tick from first OnTickStart to first OnTickEnd; retain every frame starting in the requested measurement window, including its complete overrun; sample output excluded, start-to-start cadence includes observer cost", "geometry": "unique physical triangles; coarser analytically identical navigation plane; static field excluded from navigation", "queryMix": "25% ray, 25% sphere overlap, 25% box sweep, 25% capsule sweep, plus separate projectile sweeps", "sleep": "all requested dynamic and driven bodies explicitly disable sleep", "nativeExecution": "GOOS/GOARCH identify executable target; runner must attest native host, not emulation"}
 	if info, ok := debug.ReadBuildInfo(); ok {
 		manifest["buildInfo"] = info
 	}
@@ -449,7 +463,8 @@ func run(o options) (runErr error) {
 	r.Gates["query-projectile-counts"] = r.MeasuredSamples > 0 && r.MinQueries == c.Queries && r.MinProjectiles == c.Projectiles
 	r.Gates["full-tick-p99-below-50ms"] = r.MeasuredSamples > 0 && r.FullTick.percentile(.99) < 50*time.Millisecond
 	r.Gates["two-hour-duration"] = o.Duration >= 2*time.Hour && time.Duration(r.MeasurementWallNS) >= 2*time.Hour
-	// Wall time alone does not establish churn, process restart or continuity.
+	// Preserve these observations, but neither soak gate is required by the
+	// selected delivery scope. Wall time alone cannot establish restart continuity.
 	r.Gates["two-hour-churn-restart-soak"] = false
 	r.Gates["checkpoint-written"] = r.CheckpointID != ""
 	r.Gates["checkpoint-restored"] = o.Resume != ""
