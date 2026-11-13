@@ -13,6 +13,7 @@ Golem Engine is a Go module for building multiplayer game backends. It includes 
 | `codegen/` | `Bake`, embedded templates, and integration targets such as `go-server`, `go-client`, and `js-client`. |
 | `golem/` | Runtime loop: `Server`, tick/delta hooks, world data, networking entrypoints, and re-exports for generated code. |
 | `golem/registry/` | Thread-safe entity registry and `Entity` interface. |
+| `golem/content/` | Immutable portable gameplay definitions, typed references, validation and content identity, independent of replication. |
 | `golem/world/` | Thread-safe store for static world data. |
 | `golem/visibility/` | Named visibility group policy manager (non-thread-safe; `Server` provides concurrency). |
 | `golem/footprint/` | Collision-only footprint YAML loader and 2D/3D placers (`collision.Backend` / `collision3d.Backend`). |
@@ -35,6 +36,7 @@ Golem Engine is a Go module for building multiplayer game backends. It includes 
 
 - Tooling is `cmd/`, `schema/`, and `codegen/`. Runtime library code is `golem/`, `golem/registry/`, `golem/world/`, `golem/visibility/`, `golem/footprint/`, and `golem/auth/`.
 - `golem/registry`, `golem/world`, `golem/visibility`, `golem/footprint`, and `golem/auth` do not import `golem`. Prefer depending on `golem/registry` for storage/entity-only work, `golem/world` for world-data-only work, `golem/visibility` for group-policy-only work, `golem/footprint` for collision footprint load/place work, and `golem/auth` for token-query `OnUpgrade` helpers.
+- `golem/content` owns portable definition validation and immutable catalogs without importing the root runtime, Unity or physics/navigation backends. Content schemas and hashes are separate from entity/world schemas and wire fingerprints.
 - Consumer repos hold `golem.yaml` and schema YAML at their root. This engine repo may omit them.
 
 ## Shared Cursor and Codex Rules

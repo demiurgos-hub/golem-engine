@@ -1,10 +1,12 @@
 ---
-description: golem runtime — tick loop, staged native physics safety/metrics, attachments and timed trajectories, paired versioned recovery, geometry publication, replication, lifecycle and networking.
+description: golem runtime — tick loop, provisional entity setup, strict entity restoration, staged native physics safety/metrics, attachments and timed trajectories, paired versioned recovery, geometry publication, replication and networking.
 globs: golem/*.go
 alwaysApply: false
 ---
 
 # `golem` (runtime)
+
+`CreateEntityWithSetup(e, setup, owner...)` is startup/tick-owned and rejects physics callbacks, active frames, restoration and shutdown. It assigns an ID, binds the server and registers schema colliders, then calls `EntitySetup` while `Get`/`Owner` can resolve the provisional entity. Enumeration, ticking, snapshots and replication exclude it until atomic publication followed by ordinary `OnSpawn`. Setup errors detach successful physics/navigation attachments, unregister colliders and discard the provisional entry without `OnSpawn`, `OnRemove` or lifecycle output. A returned rollback function releases caller-owned resources on failure; errors are joined. Setup panics release server-owned resources and continue unwinding. Setup cannot change identity, advance simulation or mutate unrelated state; callback-owned resources acquired before a panic require callback-local cleanup. Consumed IDs are not recycled. `CreateEntity` retains its existing behavior. `LoadSnapshotStrict` supplies separate startup-only entity restoration without ordinary spawn hooks; physics-configured hosts use paired recovery.
 
 `SetPhysicsMotionPolicy` uses optional backend atomic policy mutation without detaching entities or replacing handles. Require explicit retain/clear velocity, complete compatible controller config and navigation mode compatibility; pending frames/callbacks/restoration cannot mutate. Success synchronizes bound state and invalidates old trajectory tokens without rewinding the world. `QueuePhysicsMotionPolicy` defers contact-callback requests to the next tick and rejects stale attachment/policy generations as no-ops. Rejected backend admission leaves the old intent and bindings intact. Policy/controller intent lives in physical checkpoints; transient queue/token generations do not.
 

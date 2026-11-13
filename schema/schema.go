@@ -238,6 +238,7 @@ type SharedData struct {
 	Dimensions              int
 	Is3D                    bool
 	Collision               *CollisionData // nil when golem.yaml has no collision: section
+	Content                 *ContentData   // nil unless portable definition generation is enabled
 	Entities                []EntityData
 	Commands                []CommandData
 	WorldTypes              []WorldTypeData

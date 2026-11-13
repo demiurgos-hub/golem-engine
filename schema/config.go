@@ -16,6 +16,7 @@ type Config struct {
 	TypesSchema       string           `yaml:"types_schema"`
 	EventSchemas      string           `yaml:"event_schema"`
 	ProtocolConstants string           `yaml:"protocol_constants"`
+	Content           *ContentConfig   `yaml:"content,omitempty"`
 	Simulation        SimulationConfig `yaml:"simulation"`
 	Collision         *CollisionConfig `yaml:"collision,omitempty"`
 	// ResolvedCollision is the validated collision matrix from Collision.

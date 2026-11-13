@@ -33,6 +33,9 @@ func (r *Registry) ReplaceWithoutHooks(entries []RestoreEntry) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if len(r.provisional) != 0 {
+		return fmt.Errorf("registry: cannot replace entities during provisional setup")
+	}
 	var removed []int64
 	var revisions []uint64
 	for id, e := range r.entities {

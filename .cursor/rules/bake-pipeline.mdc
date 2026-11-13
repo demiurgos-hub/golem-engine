@@ -1,5 +1,5 @@
 ---
-description: bake pipeline — schema/code generation, portable navigation/physics source ownership, physics diagnostic/recovery boundaries, frozen Unity query/simulation qualification and codec compatibility.
+description: bake pipeline — schema/code generation, explicit Scribe content definition bundles, portable navigation/physics source ownership and codec compatibility.
 globs:
   - schema/**/*.go
   - codegen/**/*.go
@@ -13,11 +13,15 @@ globs:
   - examples/physics-stress/**/*.go
   - qualification/**/*
   - golem-unity/Editor/Scribe/GolemPhysics*.cs
+  - golem-unity/Editor/Scribe/GolemContent*.cs
+  - golem/content/**/*.go
   - golem-unity/Tests/Editor/GolemPhysicsDynamicsFixture.cs
 alwaysApply: false
 ---
 
 # `bake` pipeline
+
+Scribe content exports are selected-set authoring operations with explicit roots/adapters and declared imports. They share the existing ownership/transaction infrastructure but never write replication entity schemas or expand asset dependencies. `golem-bake` consumes optional content schema/bundle configuration, validates all references and entity-type bindings before any output, then emits immutable Go access and finalized content JSON only for `go-server`. Authoring sources may omit schema_hash; finalized loaders require it. Preserve existing catalogs, protocol output and legacy fingerprints. Content setup/restore and Unity presentation have independent focused tests; no consumer-wide export or completed physics/navigation qualification is implied.
 
 Unity dynamics qualification captures the initial saved portable source before applying recorded commands, hashes its exact bytes, and writes actual native simulation observations separately. The Go comparator consumes that source through the ordinary content loader and records its own frozen-source manifest identity. Source export, backend cooking, query precision and simulation comparisons remain distinct gates; do not tune source geometry or query tolerances to match solver contact behavior.
 

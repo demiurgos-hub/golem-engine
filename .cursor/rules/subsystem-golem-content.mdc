@@ -1,0 +1,21 @@
+---
+description: content — independent immutable gameplay definitions, strict versioned schemas, typed references, pinned imports and semantic content identity.
+globs:
+  - golem/content/**/*.go
+  - golem/content_snapshot*.go
+  - schema/content*.go
+  - codegen/*content*.go
+alwaysApply: false
+---
+
+# Gameplay content
+
+`golem/content` is an independent root-module package using only the standard library. It must not import the server, registry, Unity, physics or navigation packages. Tooling may consume its portable schema contract. Content definitions are distinct from replicated entity schemas, mutable instances and Unity presentation. Existing world catalogs and wire fingerprints retain their contracts.
+
+Version-1 schemas support exact-width scalar values, named records, enums/flags, single-level lists, optional fields/defaults and `ref:DefinitionKind`. Definition kinds must be referenced, not embedded inline. Reject maps, unions, inheritance, recursive inline records, duplicate JSON properties, unknown fields, invalid values and unsupported versions. Ordinary ID reference cycles resolve through an immutable index. Missing optional values differ from explicit null; supplied broken references remain errors. IDs are case-sensitive namespace/kind/key; Unity GUID/local file ID/path are provenance only.
+
+Load validates the complete selected import closure before publication and owns all storage. Imports are explicitly supplied, selected by declared semantic hashes and must share the schema. Extra supplied catalogs cannot resolve undeclared references. Accessors return copies; generated private typed views must preserve transitive immutability. Enforce input, nesting, collection, definition and expanded-default budgets. Hash canonical schema/data and pinned imports separately from source provenance. Source exports may omit schema_hash; generated runtime loaders require finalized bundles. No automatic client publication, factory execution, asset discovery or hot reload.
+
+`SaveContentSnapshot` captures entity bytes on the tick owner before asynchronous immutable-data/manifest-last writing. `LoadContentSnapshot` verifies the exact content/schema/data identity, reads the snapshot once and uses strict startup-only, hook-free restoration. Consumer callbacks validate every saved definition/factory binding without initializing defaults. Physics hosts retain paired recovery and pin content in their outer host manifest; never substitute this entity-only path. Old data files remain preserved.
+
+The acceptance fixture is bounded: two archetypes, one entity schema, one nested record and one shared typed reference, independent instances and Unity views. Canonical small cross-language fixtures live in Unity Tests/Fixtures. Fractured is a source reference, not a bulk validation target. Changes here do not reopen navigation or physics qualification.

@@ -1,5 +1,5 @@
 ---
-description: integration/unity - Unity/C# runtime and codegen, Scribe portable source export, native-physics debug reading, actual Unity dynamics capture, transactional writes and editor/portable tests.
+description: integration/unity - Unity/C# runtime, definition-based presentation, explicit Scribe content export sets and portable sources, transactional writes and focused tests.
 globs:
   - golem-unity/**/*
   - codegen/templates/csharp/**/*.tmpl
@@ -16,6 +16,10 @@ alwaysApply: false
 ---
 
 # `integration/unity`
+
+**Gameplay content:** `GolemContentExportSet` selects explicit saved roots and external adapter keys. Adapters capture data with `GolemContentBuilder`; they do not execute gameplay, discover dependencies or port executable code. Merge and validate all schemas/definitions before one source-scoped `content_source` transaction. Existing entity YAML is referenced through explicit entity bindings, never rewritten by content export. The exact JSON ownership prefix is `{"generator":"Golem Scribe content v1",`. Exported schema_hash is optional only for authoring; bake finalizes and runtime requires it. General Scribe validation checks recorded ownership/hash without recapturing unloaded sets. No ExportAll/scheduler discovery, automatic bake or client gameplay-data projection is implied. Definition IDs are namespace/type/key; provenance uses GUID plus 64-bit local file ID. Missing selected references fail without expanding the root set. Pure JSON preparation bounds input, lists and schema dependencies; memoize shared inline dependency walks.
+
+`GolemEntitySpawner.UseDefinitions<T>` takes an explicit typed definition-ID selector and a validated `GolemDefinitionPrefabRegistry`. It selects exact entity-type/definition-ID mappings after full initial state, preserving synchronous transform/view binding. Missing mappings log and create no view; do not use the legacy default as a content fallback. Other entity types retain the existing registry path. Definition selection is fixed for a live instance. Validate the registry before connection; asynchronous loading is out of scope. Tests use two synthetic prefab archetypes and one shared asset, not a consumer-wide catalog.
 
 The version-2 Go debug reader accepts the five nonnegative `TOIContinuation*` work counters alongside predictive CCD counts. These describe attempted native local-impact work and remain visible on unaccepted/faulted captures; they never create contact records or imply gameplay acceptance. Keep the root-field whitelist, DTO and actual Go-produced fixture aligned, and reject negative values in both typed and JSON validation.
 

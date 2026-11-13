@@ -73,7 +73,10 @@ func Bake(projectRoot string) error {
 	if err != nil {
 		return err
 	}
-
+	contentData, err := schema.LoadContent(projectRoot, cfg.Content, entities)
+	if err != nil {
+		return err
+	}
 	var protocolConstantSets []schema.ProtocolConstantSetData
 	if cfg.ProtocolConstants != "" {
 		constantsPath := cfg.ProtocolConstants
@@ -83,6 +86,21 @@ func Bake(projectRoot string) error {
 		protocolConstantSets, err = schema.LoadProtocolConstants(constantsPath)
 		if err != nil {
 			return err
+		}
+	}
+	var contentCode []byte
+	if contentData != nil {
+		if integration, ok := cfg.Integrations["go-server"]; ok {
+			contentPackage := integration.Package
+			if contentPackage == "" {
+				contentPackage = integrationSpecs["go-server"].defaultPackage
+			}
+			contentProto := protoData
+			contentProto.ProtocolConstantSets = protocolConstantSets
+			contentCode, err = renderGoContent(contentData, contentPackage, contentProto)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -148,6 +166,7 @@ func Bake(projectRoot string) error {
 			Dimensions:              cfg.Simulation.Dimensions,
 			Is3D:                    cfg.Simulation.Dimensions == 3,
 			Collision:               cfg.ResolvedCollision,
+			Content:                 contentData,
 			Entities:                entities,
 			Commands:                commands,
 			WorldTypes:              worldTypes,
@@ -166,6 +185,18 @@ func Bake(projectRoot string) error {
 			case sharedOutput:
 				if err := generateShared(projectRoot, integCfg, integ, sd, SharedTemplateEntry{Template: output.template, File: output.file}); err != nil {
 					return err
+				}
+			case contentCodeOutput, contentBundleOutput:
+				data := contentCode
+				if output.role == contentBundleOutput {
+					data = contentData.BundleJSON
+				}
+				path := filepath.Join(projectRoot, integCfg.Out, output.file)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					return err
+				}
+				if err := os.WriteFile(path, data, 0o644); err != nil {
+					return fmt.Errorf("writing %s: %w", output.file, err)
 				}
 			}
 		}

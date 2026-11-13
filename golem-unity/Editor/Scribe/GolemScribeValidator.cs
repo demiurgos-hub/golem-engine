@@ -22,12 +22,13 @@ namespace GolemEngine.Unity.Editor
             GolemScribeConstants.ArtifactKindCatalogData,
             GolemScribeConstants.ArtifactKindFootprint,
             GolemScribeConstants.ArtifactKindNavigationSource,
-            GolemScribeConstants.ArtifactKindPhysicsSource
+            GolemScribeConstants.ArtifactKindPhysicsSource,
+            GolemScribeConstants.ArtifactKindContentSource
         };
 
         // Scene navigation is explicitly exported/validated from a saved selected world; this prefab scan
         // must not classify sources from unloaded scenes as orphaned.
-        private static readonly string[] AllKinds = KnownKinds.Where(k => k != GolemScribeConstants.ArtifactKindNavigationSource && k != GolemScribeConstants.ArtifactKindPhysicsSource).ToArray();
+        private static readonly string[] AllKinds = KnownKinds.Where(k => k != GolemScribeConstants.ArtifactKindNavigationSource && k != GolemScribeConstants.ArtifactKindPhysicsSource && k != GolemScribeConstants.ArtifactKindContentSource).ToArray();
 
         /// <summary>Outcome of a dry-run Scribe validation.</summary>
         public sealed class ValidationResult
@@ -276,13 +277,13 @@ namespace GolemEngine.Unity.Editor
                 {
                     result.Errors.Add($"Manifest lists duplicate path '{normalized}'.");
                 }
-                if (record.Kind == GolemScribeConstants.ArtifactKindNavigationSource || record.Kind == GolemScribeConstants.ArtifactKindPhysicsSource)
+                if (record.Kind == GolemScribeConstants.ArtifactKindNavigationSource || record.Kind == GolemScribeConstants.ArtifactKindPhysicsSource || record.Kind == GolemScribeConstants.ArtifactKindContentSource)
                 {
                     var snapshot = GolemScribeArtifactReader.Read(projectRoot, normalized);
                     if (snapshot.Status == ScribeArtifactStatus.Missing) result.Missing.Add(normalized);
                     else if (snapshot.Status == ScribeArtifactStatus.ReadFailure || snapshot.Status == ScribeArtifactStatus.InvalidPath)
                         result.Errors.Add(snapshot.Error);
-                    else if (!(record.Kind == GolemScribeConstants.ArtifactKindNavigationSource ? GolemNavigationDocument.IsOwned(snapshot.Content) : GolemPhysicsDocument.IsOwned(snapshot.Content)) || !string.Equals(snapshot.Hash, record.Hash, StringComparison.Ordinal))
+                    else if (!(record.Kind == GolemScribeConstants.ArtifactKindNavigationSource ? GolemNavigationDocument.IsOwned(snapshot.Content) : record.Kind == GolemScribeConstants.ArtifactKindPhysicsSource ? GolemPhysicsDocument.IsOwned(snapshot.Content) : GolemContentDocument.IsOwned(snapshot.Content)) || !string.Equals(snapshot.Hash, record.Hash, StringComparison.Ordinal))
                         result.ManuallyModified.Add(normalized);
                 }
             }

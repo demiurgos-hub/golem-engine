@@ -24,6 +24,7 @@ type FlushResult struct {
 type Registry struct {
 	mu                sync.RWMutex
 	entities          map[int64]Entity
+	provisional       map[int64]Entity
 	owners            map[int64]int64 // entityID → ownerSessionID
 	spawned           []Entity
 	despawned         []int64
@@ -33,8 +34,9 @@ type Registry struct {
 // NewRegistry creates an empty entity registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		entities: make(map[int64]Entity),
-		owners:   make(map[int64]int64),
+		entities:    make(map[int64]Entity),
+		provisional: make(map[int64]Entity),
+		owners:      make(map[int64]int64),
 	}
 }
 
@@ -80,6 +82,9 @@ func (r *Registry) insert(e Entity, ownerSessionID int64, hasOwner bool) error {
 	if _, exists := r.entities[id]; exists {
 		return fmt.Errorf("entity %d already registered", id)
 	}
+	if _, exists := r.provisional[id]; exists {
+		return fmt.Errorf("entity %d is being prepared", id)
+	}
 	r.entities[id] = e
 	if hasOwner {
 		r.owners[id] = ownerSessionID
@@ -111,7 +116,7 @@ func (r *Registry) Owner(entityID int64) (sessionID int64, owned bool) {
 func (r *Registry) SetOwner(entityID, sessionID int64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.entities[entityID]; !exists {
+	if r.entities[entityID] == nil && r.provisional[entityID] == nil {
 		return false
 	}
 	if sessionID == 0 {
@@ -127,6 +132,12 @@ func (r *Registry) SetOwner(entityID, sessionID int64) bool {
 // OnRemove is called after deletion. No-op if the ID doesn't exist.
 func (r *Registry) DeleteEntity(id int64) {
 	r.mu.Lock()
+	if _, pending := r.provisional[id]; pending {
+		delete(r.provisional, id)
+		delete(r.owners, id)
+		r.mu.Unlock()
+		return
+	}
 	e, exists := r.entities[id]
 	if exists {
 		delete(r.entities, id)
@@ -143,22 +154,25 @@ func (r *Registry) DeleteEntity(id int64) {
 	}
 }
 
-// Get returns the entity with the given ID, or (nil, false) if not found.
+// Get returns a published or provisional entity by ID, or (nil, false).
 func (r *Registry) Get(id int64) (Entity, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	e, ok := r.entities[id]
+	if !ok {
+		e, ok = r.provisional[id]
+	}
 	return e, ok
 }
 
-// Len returns the number of registered entities.
+// Len returns the number of published entities, excluding provisional entries.
 func (r *Registry) Len() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.entities)
 }
 
-// All returns a snapshot slice of every registered entity.
+// All returns a snapshot slice of published entities, excluding provisional entries.
 // Safe to call from the tick goroutine for interest-management grid updates.
 func (r *Registry) All() []Entity {
 	r.mu.RLock()

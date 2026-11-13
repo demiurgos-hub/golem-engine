@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -51,6 +52,25 @@ func Save(entities []registry.Entity, fingerprint, path string) <-chan error {
 }
 
 func save(entities []registry.Entity, fingerprint, path string) error {
+	encoded, err := Capture(entities, fingerprint)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, encoded, 0o644); err != nil {
+		return fmt.Errorf("snapshot: writing temp file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("snapshot: renaming snapshot file: %w", err)
+	}
+	return nil
+}
+
+// Capture synchronously captures persistent entity state into owned snapshot
+// bytes. Call on the simulation owner for a coherent tick, then write off-thread.
+// It preserves the existing version-1 snapshot format and persistence filtering.
+func Capture(entities []registry.Entity, fingerprint string) ([]byte, error) {
 	// Collect persistent entity records. FullUpdate is called outside the
 	// registry lock; each entity's own mutex ensures a consistent read.
 	var records []Record
@@ -60,7 +80,7 @@ func save(entities []registry.Entity, fingerprint, path string) error {
 		}
 		data, err := e.FullUpdate()
 		if err != nil {
-			return fmt.Errorf("snapshot: serializing entity %d (%s): %w", e.EntityID(), e.TypeName(), err)
+			return nil, fmt.Errorf("snapshot: serializing entity %d (%s): %w", e.EntityID(), e.TypeName(), err)
 		}
 		if data == nil {
 			continue
@@ -84,17 +104,7 @@ func save(entities []registry.Entity, fingerprint, path string) error {
 		w.String(rec.TypeName)
 		w.Bytes(rec.StateData)
 	}
-	encoded := w.Finish()
-
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, encoded, 0o644); err != nil {
-		return fmt.Errorf("snapshot: writing temp file: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("snapshot: renaming snapshot file: %w", err)
-	}
-	return nil
+	return w.Finish(), nil
 }
 
 // Load reads a snapshot file, validates its magic bytes and schema fingerprint,
@@ -105,7 +115,12 @@ func Load(path, expectedFingerprint string) ([]Record, error) {
 	if err != nil {
 		return nil, fmt.Errorf("snapshot: reading file: %w", err)
 	}
+	return Decode(data, expectedFingerprint)
+}
 
+// Decode validates already-owned snapshot bytes without opening a file. Returned
+// records may borrow data; retain the bytes unchanged until restoration completes.
+func Decode(data []byte, expectedFingerprint string) ([]Record, error) {
 	if len(data) < 4 {
 		return nil, fmt.Errorf("snapshot: file too short")
 	}
@@ -113,32 +128,78 @@ func Load(path, expectedFingerprint string) ([]Record, error) {
 		return nil, fmt.Errorf("snapshot: invalid magic bytes — not a Golem snapshot file")
 	}
 
-	r := pb.NewReader(data[4:])
-
-	version := r.Uint32()
-	if version != fileFormatVersion {
+	r := &snapshotReader{data: data[4:]}
+	version := r.number()
+	if r.err != nil {
+		return nil, r.err
+	}
+	if version != uint64(fileFormatVersion) {
 		return nil, fmt.Errorf("snapshot: unsupported format version %d (expected %d)", version, fileFormatVersion)
 	}
 
-	_ = r.Int64() // timestamp (informational; not validated)
+	_ = r.number() // timestamp (informational; not validated)
 
-	storedFingerprint := r.String()
+	storedFingerprint := string(r.bytes())
+	if r.err != nil {
+		return nil, r.err
+	}
 	if storedFingerprint != expectedFingerprint {
 		return nil, ErrFingerprintMismatch
 	}
 
-	count := r.Uint32()
+	count := r.number()
+	if r.err != nil {
+		return nil, r.err
+	}
+	// Every record needs at least three varints, even with empty payloads.
+	if count > uint64(len(r.data)/3) || count > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("snapshot: record count exceeds remaining data")
+	}
 	records := make([]Record, 0, count)
-	for i := uint32(0); i < count; i++ {
-		if r.Done() {
-			return nil, fmt.Errorf("snapshot: unexpected end of file at record %d/%d", i, count)
-		}
+	for i := uint64(0); i < count; i++ {
 		rec := Record{
-			EntityID:  r.Int64(),
-			TypeName:  r.String(),
-			StateData: r.Bytes(),
+			EntityID:  int64(r.number()),
+			TypeName:  string(r.bytes()),
+			StateData: r.bytes(),
+		}
+		if r.err != nil {
+			return nil, fmt.Errorf("snapshot: record %d: %w", i, r.err)
 		}
 		records = append(records, rec)
 	}
+	if len(r.data) != 0 {
+		return nil, fmt.Errorf("snapshot: trailing data")
+	}
 	return records, nil
+}
+
+type snapshotReader struct {
+	data []byte
+	err  error
+}
+
+func (r *snapshotReader) number() uint64 {
+	if r.err != nil {
+		return 0
+	}
+	v, n := binary.Uvarint(r.data)
+	if n <= 0 {
+		r.err = fmt.Errorf("snapshot: truncated or overflowing integer")
+		return 0
+	}
+	r.data = r.data[n:]
+	return v
+}
+func (r *snapshotReader) bytes() []byte {
+	n := r.number()
+	if r.err != nil {
+		return nil
+	}
+	if n > uint64(len(r.data)) {
+		r.err = fmt.Errorf("snapshot: truncated length-delimited value")
+		return nil
+	}
+	value := r.data[:int(n)]
+	r.data = r.data[int(n):]
+	return value
 }

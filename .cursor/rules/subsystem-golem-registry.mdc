@@ -1,10 +1,12 @@
 ---
-description: golem/registry — Entity interface, thread-safe Registry and hook-free atomic recovery replacement.
+description: golem/registry — Entity interface, provisional setup publication, thread-safe Registry and hook-free atomic recovery replacement.
 globs: golem/registry/**/*.go
 alwaysApply: false
 ---
 
 # `golem/registry`
+
+`AddProvisional` reserves a positive ID and optional owner for startup/tick-owned setup. `Get` and `Owner` expose it to attachment APIs; `All`, `Len`, `TickAll`, `SnapshotAll` and `FlushAll` exclude it. Ordinary insertion rejects reserved IDs. `CommitProvisional` validates the complete batch before publishing it under one mutex and queuing full spawn states, without calling hooks. `DiscardProvisional` and deletion of a provisional entity remove identity/ownership without spawn/remove callbacks or replication output. Entity IDs must remain unchanged during setup. `ReplaceWithoutHooks` rejects replacement while provisional setup is pending.
 
 `ReplaceWithoutHooks` validates all replacement identities before swapping registry/owner maps under one mutex. It queues complete new spawns and removed old IDs without invoking ordinary lifecycle hooks. The host must quiesce gameplay and connections and restore dependent systems before dispatching explicit recovery hooks. Invalid entries preserve the accepted registry and lifecycle queues; no root runtime import belongs here.
 

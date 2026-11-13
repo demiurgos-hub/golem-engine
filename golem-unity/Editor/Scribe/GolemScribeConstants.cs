@@ -12,6 +12,7 @@ namespace GolemEngine.Unity.Editor
         public const string ArtifactKindFootprint = "footprint";
         public const string ArtifactKindNavigationSource = "navigation_source";
         public const string ArtifactKindPhysicsSource = "physics_source";
+        public const string ArtifactKindContentSource = "content_source";
         public const string CatalogDataDirectory = "catalogs";
         public const string DefaultFootprintsPath = "footprints.golem.yaml";
         /// <summary>Synthetic manifest source_guid for the aggregate footprints artifact.</summary>

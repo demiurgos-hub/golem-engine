@@ -8,6 +8,13 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Scribe content export sets capture explicitly selected prefab and ScriptableObject definitions through consumer adapters, including resolved variants, nested records, enums/flags, defaults, stable IDs and checked references. Export and validation reuse Scribe ownership and rollback; existing entity and catalog exports remain compatible.
+- Optional `content` configuration generates immutable typed Go definition access and a finalized versioned bundle. Content stays separate from world replication, with strict validation, explicit pinned imports and independent schema/content hashes.
+- Definition-aware Unity presentation selects different prefabs for one generated entity type using an explicit definition-ID selector and validated registry.
+- `CreateEntityWithSetup` delays entity publication until setup succeeds and rolls back failed attachments without spawn/remove effects. `LoadSnapshotStrict` adds startup-only checked, hook-free entity restoration; content-pinned snapshot helpers preserve saved mutable state and reject mismatched content before restoration.
+
+- Snapshot decoding rejects truncated, overflowing and trailing data before restoration while preserving the existing binary format.
+
 - Continuous physics resolves coupled fast impacts through bounded native contact and joint continuation, including thin objects pushed against walls and motor-driven collisions. It retains the original force/gravity duration and drive budgets, reports owned intermediate poses, and faults the interacting frame if required work cannot complete.
 
 - Physics qualification provides source-matched focused, engine integration, Windows capacity and Linux save/restore evidence, with a combined report that preserves failed and missing gates. The runner can select upstream's native release build while retaining explicit Golem validation. Extended matrices and the soak are excluded from the selected delivery; full-size Windows counts and the 50 ms p99 threshold remain required.

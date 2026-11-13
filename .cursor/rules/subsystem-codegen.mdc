@@ -1,5 +1,5 @@
 ---
-description: codegen — language-specific payload/envelope/collection emitters, explicit physics writer bindings, resolved-schema consumers, templates, integration output ownership and containment.
+description: codegen — wire emitters, separate immutable Go content views and finalized bundles, physics writer bindings, templates, integration output ownership and containment.
 globs:
   - codegen/**/*.go
   - codegen/**/*.tmpl
@@ -7,6 +7,8 @@ alwaysApply: false
 ---
 
 # `codegen`
+
+Opt-in portable content produces only Go-server `Definitions.go` and `ContentDefinitions.json`, selected by `integration_outputs.go`. `go_content.go` emits eagerly decoded private `Content<Type>` records, typed reference lookups and copied collection accessors; no backing maps/slices escape. It imports the canonical independent `golem/content` package even when `golem_import` selects a consumer runtime facade. `LoadDefinitions` always requires the finalized schema hash and validates explicit imports before publication. Content generation validates names before any bake output and preserves protocol/world descriptors, existing catalog behavior and the legacy snapshot fingerprint. Optional fields return presence separately from zero values; references resolve by stable content identity, including declared imported catalogs, without recursive materialization. Keep consumer factories, lifecycle creation and behavior outside this generator.
 
 Opt-in `EntityData.Physics` emits only Go-server `SetPhysicsRotation(physics3d.Quat)`, `SetPhysicsVelocity(linear, angular physics3d.Vec3)` and `SetPhysicsActive(bool)` interfaces. Rotation/velocity groups update ordinary fields under one entity lock, mark only changed tick bits and increment revision once per changed group; activation delegates to its ordinary setter. Keep fields ordinary in Go/JS/C# codecs, models and snapshots, with unchanged owner redaction and no automatic body attachment. Bindings are resolved by schema, never inferred from field names. Generated-consumer tests share encoded state bytes across Go/JS/C# and preserve the proto/fingerprint baseline. Temporary Go consumers explicitly replace all required local nested modules, including physics3d, without adding tracked replacements.
 

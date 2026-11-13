@@ -1,8 +1,9 @@
 ---
-description: golem/snapshot — entity snapshot compatibility, versioned portable/paired physics checkpoints, stable reconstruction and timed-intent recovery boundaries.
+description: golem/snapshot — entity snapshot compatibility, strict startup entity restoration, versioned portable/paired physics checkpoints, stable reconstruction and timed-intent recovery boundaries.
 globs:
   - golem/snapshot/**/*.go
-  - golem/snapshot_api.go
+  - golem/snapshot*.go
+  - golem/content_snapshot*.go
   - golem/physics_checkpoint*.go
   - golem/physics_recovery*.go
   - golem/physics_trajectory_checkpoint*.go
@@ -12,6 +13,10 @@ alwaysApply: false
 ---
 
 # `golem/snapshot`
+
+`snapshot.Capture` captures existing version-1 bytes synchronously for worker-owned writes; `Decode` validates already-read bytes with checked varints/lengths, bounded record allocation and no trailing data. Ordinary valid snapshots keep the same format. Content-pinned entity saves are separate host manifests in `golem/content_snapshot.go`: capture on the tick, write immutable hashed data before replacing the manifest, preserve prior data, verify the exact schema/content/data identity before strict restoration. Consumer restore callbacks must also validate every definition ID/factory; never use defaults to replace restored mutable state. Physics-configured worlds retain paired recovery instead of entity-only content saves.
+
+`Server.LoadSnapshotStrict` in `golem/snapshot_strict.go` is an additive startup-only entity snapshot path. It reads records once, rejects invalid/duplicate/existing identities, propagates every restore error (including unknown types and missing definitions), and validates non-nil entity ID/type matches before server mutation. Successful candidates are bound, receive schema colliders and are published as one provisional registry batch without `OnSpawn`/`OnRemove`. Existing distinct entities remain intact and the ID counter advances without moving backward. Restore callbacks decode mutable state without applying creation defaults or changing live server state. Hosts rebuild transient dependencies after success and before accepting clients/Run. Any configured physics service rejects this path; paired physics recovery remains independent. Legacy `LoadSnapshot` keeps its skip-on-restore-error and ordinary creation behavior.
 
 Portable physics payloads use `CheckpointVersion = 2`, retaining fixed native solver configuration (`Substeps`, `SolverVelocityIterations`, `SolverRelaxIterations`; defaults 4, 1, 1 at 20 Hz). The paired root `PhysicsCheckpoint` envelope remains version 1. Check embedded physical versions before strict full decoding so old refinement fields produce an explicit unsupported-version/state-migration error, not silent default substitution. Captured controller/body policy and pending forces remain part of stable-ID reconstruction. This migration does not change entity-only binary snapshot version 1, schema fingerprints, portable authoring source v1 or the independently versioned debug format.
 

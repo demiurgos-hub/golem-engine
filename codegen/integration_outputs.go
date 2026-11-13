@@ -15,6 +15,8 @@ const (
 	entityCodecOutput
 	worldCodecOutput
 	eventCodecOutput
+	contentCodeOutput
+	contentBundleOutput
 )
 
 type outputCondition uint8
@@ -23,6 +25,7 @@ const (
 	alwaysOutput outputCondition = iota
 	withWorld
 	withEvents
+	withContent
 )
 
 type outputRule struct {
@@ -66,7 +69,7 @@ func (s integrationSpec) integration(name string) Integration {
 func selectIntegrationOutputs(target string, data schema.SharedData) []integrationOutput {
 	var outputs []integrationOutput
 	for _, rule := range integrationSpecs[target].outputs {
-		if rule.condition == withWorld && len(data.WorldTypes) == 0 || rule.condition == withEvents && len(data.Events) == 0 {
+		if rule.condition == withWorld && len(data.WorldTypes) == 0 || rule.condition == withEvents && len(data.Events) == 0 || rule.condition == withContent && data.Content == nil {
 			continue
 		}
 		if rule.role == entityOutput {
@@ -126,6 +129,8 @@ func init() {
 				{role: entityCodecOutput, file: "entities_pb.go", condition: alwaysOutput},
 				{role: worldCodecOutput, file: "world_pb.go", condition: withWorld},
 				{role: eventCodecOutput, file: "events_pb.go", condition: withEvents},
+				{role: contentCodeOutput, file: "Definitions.go", condition: withContent},
+				{role: contentBundleOutput, file: "ContentDefinitions.json", condition: withContent},
 			}},
 		"go-client": {defaultImport: "github.com/demiurgos-hub/golem-engine/golem-go-client", defaultPackage: "synced",
 			hooks: Integration{PostProcess: gofmtFile, GenerateExtra: generateGoProto},
