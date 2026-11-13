@@ -34,6 +34,36 @@ namespace GolemEngine.Unity.Editor.Tests
         }
 
         [Test]
+        public void CompactExportSharesUnbakedMeshAndAcceptsAuthoredIdentityResolvers()
+        {
+            var mesh = new Mesh { vertices = new[] { Vector3.zero, Vector3.forward, Vector3.right }, triangles = new[] { 0, 1, 2 } };
+            AssetDatabase.CreateAsset(mesh, folder + "/shared.asset");
+            var world = new GameObject("Physics").AddComponent<GolemPhysicsWorld>();
+            for (var i = 0; i < 2; i++)
+            {
+                var child = new GameObject("Placement" + i); child.transform.SetParent(world.transform);
+                child.transform.localScale = new Vector3(i == 0 ? 2 : -3, 1, 4);
+                child.AddComponent<MeshCollider>().sharedMesh = mesh;
+            }
+            Save();
+            var options = new GolemScribeExportOptions {
+                StableObjectIdentity = o => "authored/" + o.name + "/" + o.GetType().Name,
+                StableAssetIdentity = o => o == mesh ? "authored/shared-mesh" : "authored/material/" + o.name
+            };
+            Assert.That(GolemPhysicsExporter.TryCollectArtifacts(world, options, out var records, out var error), Is.True, error);
+            Assert.That(records.Length, Is.EqualTo(2));
+            Assert.That(records[0].PendingContent, Does.Contain("\"Assets\": []"));
+            Assert.That(records[0].PendingContent, Does.Contain("\"AssetID\":\"authored/shared-mesh\""));
+            Assert.That(records[0].PendingContent, Does.Contain("\"GeometryTransform\":[-3,0,0,0,0,1,0,0,0,0,4,0,0,0,0,1]"));
+            Assert.That(BitConverter.ToUInt32(records[1].PendingBytes, 8), Is.EqualTo(1));
+            Assert.That(records[1].Hash, Is.EqualTo(GolemScribeManifest.ComputeBytesHash(records[1].PendingBytes)));
+            Assert.That(records[0].SourceGuid, Is.EqualTo("authored/Physics/GolemPhysicsWorld"));
+            options.StableAssetIdentity = _ => null;
+            Assert.That(GolemPhysicsExporter.TryCollectArtifacts(world, options, out _, out error), Is.False);
+            Assert.That(error, Does.Contain("returned no identity"));
+        }
+
+        [Test]
         public void ImportedNonReadableMeshExportsWithoutChangingImporter()
         {
             var path = folder + "/read-only.obj";

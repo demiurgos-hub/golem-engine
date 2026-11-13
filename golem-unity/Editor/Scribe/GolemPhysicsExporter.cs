@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.IO;
 using Unity.Collections;
 using UnityEditor;
 using UnityEngine;
@@ -23,32 +24,38 @@ namespace GolemEngine.Unity.Editor
             public readonly List<string> Warnings = new List<string>();
             public bool BytesChanged;
             public string OutputPath;
+            /// <summary>Committed source and binary dependency paths/hashes; empty on failure.</summary>
+            public IReadOnlyList<GolemScribeArtifactRecord> Artifacts { get; internal set; } = Array.Empty<GolemScribeArtifactRecord>();
         }
 
         /// <summary>Validates and exports one saved world using Scribe's manifest-last rollback transaction.</summary>
-        public static ExportResult Export(GolemPhysicsWorld world)
+        public static ExportResult Export(GolemPhysicsWorld world, GolemScribeExportOptions options = null)
         {
             var result = new ExportResult();
             if (!GolemScribeContext.TryLoad(GolemUnityEditorSettings.instance.ProjectRoot, out var context, out var error))
             { result.Errors.Add(error); return result; }
-            if (!TryCollect(world, out var record, out error)) { result.Errors.Add(error); return result; }
+            if (!TryCollectArtifacts(world, options, out var records, out error)) { result.Errors.Add(error); return result; }
+            var record = records[0];
             var committed = GolemScribeArtifacts.ReconcileSource(context.ProjectRoot, GolemScribeConstants.ArtifactKindPhysicsSource,
-                record.SourceGuid, context.Previous, new[] { record });
+                record.SourceGuid, context.Previous, records);
             result.Errors.AddRange(committed.Errors); result.Warnings.AddRange(committed.Warnings);
             result.BytesChanged = committed.AnyBytesChanged;
             result.OutputPath = result.Errors.Count == 0 ? record.Path : null;
+            if (result.Errors.Count == 0) result.Artifacts = records.Select(r => new GolemScribeArtifactRecord
+            { Kind = r.Kind, SourceGuid = r.SourceGuid, Entity = r.Entity, Path = r.Path, Hash = r.Hash }).ToArray();
             return result;
         }
 
         /// <summary>Checks the selected world and recorded source without writing files.</summary>
-        public static GolemScribeValidator.ValidationResult Validate(GolemPhysicsWorld world)
+        public static GolemScribeValidator.ValidationResult Validate(GolemPhysicsWorld world, GolemScribeExportOptions options = null)
         {
             var result = new GolemScribeValidator.ValidationResult();
             if (!GolemScribeContext.TryLoad(GolemUnityEditorSettings.instance.ProjectRoot, out var context, out var error))
             { result.Errors.Add(error); return result; }
-            if (!TryCollect(world, out var record, out error)) { result.Errors.Add(error); return result; }
+            if (!TryCollectArtifacts(world, options, out var records, out error)) { result.Errors.Add(error); return result; }
+            var record = records[0];
             GolemScribeValidator.ValidateManifestRecords(context.ProjectRoot, context.Previous, result);
-            GolemScribeValidator.CompareDesiredToDisk(context.ProjectRoot, context.Previous, new[] { record },
+            GolemScribeValidator.CompareDesiredToDisk(context.ProjectRoot, context.Previous, records,
                 new[] { GolemScribeConstants.ArtifactKindPhysicsSource }, result, record.SourceGuid);
             return result;
         }
@@ -72,23 +79,41 @@ namespace GolemEngine.Unity.Editor
 
         internal static bool TryCollect(GolemPhysicsWorld world, out GolemScribeArtifactRecord record, out string error)
         {
-            record = null; error = null;
+            var success = TryCollectArtifacts(world, null, out var records, out error);
+            record = success ? records[0] : null; return success;
+        }
+
+        internal static bool TryCollectArtifacts(GolemPhysicsWorld world, GolemScribeExportOptions options,
+            out GolemScribeArtifactRecord[] records, out string error)
+        {
+            records = null; error = null;
             try
             {
-                var source = Capture(world);
+                var identity = new GolemScribeIdentityContext(options);
+                var source = Capture(world, identity, true);
+                var bytes = GolemGeometryDocument.BuildPhysics(source.Assets);
+                var binaryPath = Path.ChangeExtension(world.OutputPath, ".golemgeo").Replace('\\', '/');
+                var hash = GolemScribeManifest.ComputeBytesHash(bytes);
+                source.Geometry = new PhysicsGeometryReference { Path = Path.GetFileName(binaryPath), SHA256 = hash };
                 var content = GolemPhysicsDocument.Build(source);
-                record = new GolemScribeArtifactRecord
+                var sourceID = identity.Object(world, () => Identity(world));
+                records = new[]
                 {
-                    Kind = GolemScribeConstants.ArtifactKindPhysicsSource, SourceGuid = Identity(world), Entity = world.WorldID,
-                    Path = world.OutputPath, PendingContent = content, Hash = GolemScribeManifest.ComputeContentHash(content)
+                    new GolemScribeArtifactRecord { Kind = GolemScribeConstants.ArtifactKindPhysicsSource, SourceGuid = sourceID,
+                        Entity = world.WorldID, Path = world.OutputPath, PendingContent = content, Hash = GolemScribeManifest.ComputeContentHash(content) },
+                    new GolemScribeArtifactRecord { Kind = GolemScribeConstants.ArtifactKindPhysicsSource, SourceGuid = sourceID,
+                        Entity = world.WorldID, Path = binaryPath, PendingBytes = bytes, Hash = hash }
                 };
                 return true;
             }
             catch (Exception ex) { error = ex.Message; return false; }
         }
 
-        internal static PhysicsSource Capture(GolemPhysicsWorld world)
+        internal static PhysicsSource Capture(GolemPhysicsWorld world) => Capture(world, new GolemScribeIdentityContext(null), false);
+
+        private static PhysicsSource Capture(GolemPhysicsWorld world, GolemScribeIdentityContext identity, bool compact)
         {
+            string ObjectID(Component value) => identity.Object(value, () => Identity(value));
             if (!world) throw new InvalidOperationException("Select a Physics World marker.");
             if (!world.gameObject.scene.IsValid() || string.IsNullOrEmpty(world.gameObject.scene.path) || world.gameObject.scene.isDirty)
                 throw new InvalidOperationException("Save the scene before physics export; stable identities and resolved prefab overrides require a saved scene.");
@@ -102,7 +127,7 @@ namespace GolemEngine.Unity.Editor
             foreach (var articulation in world.GetComponentsInChildren<ArticulationBody>(true))
                 if (articulation.GetComponentInParent<GolemPhysicsWorld>(true) == world)
                     throw new InvalidOperationException(articulation.name + ": ArticulationBody simulation is unsupported; export cannot reinterpret it as static geometry.");
-            var source = new PhysicsSource { WorldID = world.WorldID, Revision = (ulong)world.Revision };
+            var source = new PhysicsSource { Version = compact ? 2 : 1, WorldID = world.WorldID, Revision = (ulong)world.Revision };
             for (var a = 0; a < 32; a++)
             {
                 source.LayerCollisionMasks[a] = 0;
@@ -111,9 +136,11 @@ namespace GolemEngine.Unity.Editor
             var bodies = new Dictionary<string, PhysicsBody>(StringComparer.Ordinal);
             var materials = new Dictionary<string, PhysicsMaterial>(StringComparer.Ordinal);
             var colliders = new List<PhysicsCollider>(); var assets = new List<PhysicsAsset>();
+            var sharedAssets = new Dictionary<string, PhysicsAsset>(StringComparer.Ordinal);
+            var defaultMaterial = DefaultMaterial();
             foreach (var rigidbody in world.GetComponentsInChildren<Rigidbody>(true))
                 if (rigidbody.GetComponentInParent<GolemPhysicsWorld>(true) == world)
-                    bodies.Add(Identity(rigidbody), CaptureBody(Identity(rigidbody), rigidbody.transform, rigidbody, world));
+                    bodies.Add(ObjectID(rigidbody), CaptureBody(ObjectID(rigidbody), rigidbody.transform, rigidbody, world));
             foreach (var collider in world.GetComponentsInChildren<Collider>(true))
             {
                 if (collider.GetComponentInParent<GolemPhysicsWorld>(true) != world) continue;
@@ -124,12 +151,12 @@ namespace GolemEngine.Unity.Editor
                     var bodyTransform = rigidbody ? rigidbody.transform : collider.transform;
                     if (bodyTransform.GetComponentInParent<GolemPhysicsWorld>(true) != world)
                         throw new InvalidOperationException("Attached body is outside the selected physics world.");
-                    var bodyID = rigidbody ? Identity(rigidbody) : Identity(bodyTransform) + (collider is CharacterController ? "/character" : "/static");
+                    var bodyID = rigidbody ? ObjectID(rigidbody) : ObjectID(bodyTransform) + (collider is CharacterController ? "/character" : "/static");
                     if (!bodies.ContainsKey(bodyID)) bodies.Add(bodyID, CaptureBody(bodyID, bodyTransform, rigidbody, world));
                     if (collider is CharacterController) bodies[bodyID].Kind = "kinematic";
-                    var item = CaptureCollider(collider, bodyID, bodyTransform, world, assets);
-                    var material = collider.sharedMaterial ? collider.sharedMaterial : DefaultMaterial();
-                    item.MaterialID = material ? AssetIdentity(material) : "unity-default-material";
+                    var item = CaptureCollider(collider, bodyID, bodyTransform, world, assets, sharedAssets, identity, compact);
+                    var material = collider.sharedMaterial ? collider.sharedMaterial : defaultMaterial;
+                    item.MaterialID = material ? identity.Asset(material, () => AssetIdentity(material)) : "unity-default-material";
                     if (!materials.ContainsKey(item.MaterialID)) materials.Add(item.MaterialID, CaptureMaterial(item.MaterialID, material));
                     colliders.Add(item);
                 }
@@ -137,8 +164,8 @@ namespace GolemEngine.Unity.Editor
             }
             source.Bodies = bodies.Values.ToArray(); source.Materials = materials.Values.ToArray(); source.Colliders = colliders.ToArray(); source.Assets = assets.ToArray();
             source.Joints = world.GetComponentsInChildren<Joint>(true).Where(j => j.GetComponentInParent<GolemPhysicsWorld>(true) == world)
-                .Select(j => GolemPhysicsJointCapture.Capture(j, world)).ToArray();
-            return GolemPhysicsDocument.Normalize(source);
+                .Select(j => GolemPhysicsJointCapture.Capture(j, world, ObjectID)).ToArray();
+            return compact ? source : GolemPhysicsDocument.Normalize(source);
         }
 
         private static PhysicsBody CaptureBody(string id, Transform transform, Rigidbody body, GolemPhysicsWorld world)
@@ -166,13 +193,15 @@ namespace GolemEngine.Unity.Editor
             return result;
         }
 
-        private static PhysicsCollider CaptureCollider(Collider collider, string bodyID, Transform body, GolemPhysicsWorld world, List<PhysicsAsset> assets)
+        private static PhysicsCollider CaptureCollider(Collider collider, string bodyID, Transform body, GolemPhysicsWorld world, List<PhysicsAsset> assets,
+            Dictionary<string, PhysicsAsset> sharedAssets, GolemScribeIdentityContext identity, bool compact)
         {
+            string ObjectID(Component value) => identity.Object(value, () => Identity(value));
             var metadata = collider.GetComponent<GolemPhysicsMetadata>();
             RejectLayerOverrides(collider);
             var result = new PhysicsCollider
             {
-                ID = Identity(collider), BodyID = bodyID, SourceID = Identity(collider), ParentID = collider.transform.parent ? Identity(collider.transform.parent) : "",
+                ID = ObjectID(collider), BodyID = bodyID, SourceID = ObjectID(collider), ParentID = collider.transform.parent ? ObjectID(collider.transform.parent) : "",
                 OwnerID = Owner(collider.transform, world), Enabled = collider.enabled, Active = collider.gameObject.activeInHierarchy,
                 Layer = collider.gameObject.layer, LayerName = LayerMask.LayerToName(collider.gameObject.layer),
                 Solid = !collider.isTrigger, Sensor = collider.isTrigger, ContactOffset = collider.contactOffset
@@ -187,7 +216,20 @@ namespace GolemEngine.Unity.Editor
             if (collider is MeshCollider mesh)
             {
                 result.Shape = mesh.convex ? "convex" : "mesh";
-                var assetSource = AssetIdentity(mesh.sharedMesh);
+                var assetSource = identity.Asset(mesh.sharedMesh, () => AssetIdentity(mesh.sharedMesh));
+                if (compact)
+                {
+                    result.AssetID = assetSource; result.GeometryTransform = Matrix(local);
+                    if (!sharedAssets.ContainsKey(assetSource))
+                    {
+                        var canonical = CaptureMesh(mesh.sharedMesh, assetSource);
+                        var asset = new PhysicsAsset { ID = assetSource, SourceID = assetSource,
+                            Vertices = canonical.Vertices.Select(v => new PhysicsVector((float)v.X, (float)v.Y, (float)v.Z)).ToArray(),
+                            Indices = canonical.Triangles.SelectMany(t => t.Indices).ToArray() };
+                        sharedAssets.Add(assetSource, asset); assets.Add(asset);
+                    }
+                    return result;
+                }
                 var captured = CaptureMesh(mesh.sharedMesh, assetSource);
                 result.AssetID = result.ID + "/geometry";
                 assets.Add(TransformAsset(captured, result.AssetID, assetSource, local));
@@ -198,7 +240,18 @@ namespace GolemEngine.Unity.Editor
                 GolemNavigationExporter.ValidateTerrainTransform(terrain.transform);
                 RejectGeneratedTreeColliders(terrain);
                 result.Shape = "terrain"; result.AssetID = result.ID + "/geometry";
-                var assetSource = AssetIdentity(terrain.terrainData);
+                var assetSource = identity.Asset(terrain.terrainData, () => AssetIdentity(terrain.terrainData));
+                if (compact)
+                {
+                    result.AssetID = assetSource; result.GeometryTransform = Matrix(local);
+                    if (!sharedAssets.ContainsKey(assetSource))
+                    {
+                        var asset = new PhysicsAsset { ID = assetSource, SourceID = assetSource,
+                            Heightfield = GolemNavigationExporter.CaptureHeightfield(terrain.terrainData, 0) };
+                        sharedAssets.Add(assetSource, asset); assets.Add(asset);
+                    }
+                    return result;
+                }
                 assets.Add(TransformAsset(CaptureTerrain(terrain.terrainData, assetSource), result.AssetID, assetSource, local));
                 return result;
             }
@@ -383,6 +436,8 @@ namespace GolemEngine.Unity.Editor
             return "unity-object:" + id;
         }
         private static string Hierarchy(Transform transform) => transform.parent ? Hierarchy(transform.parent) + "/" + transform.name : transform.name;
+        private static float[] Matrix(Matrix4x4 m) => new[]
+        { m.m00, m.m01, m.m02, m.m03, m.m10, m.m11, m.m12, m.m13, m.m20, m.m21, m.m22, m.m23, m.m30, m.m31, m.m32, m.m33 };
         internal static PhysicsVector Vector(Vector3 v) => new PhysicsVector(v.x, v.y, v.z);
         internal static PhysicsRotation Rotation(Quaternion q) => new PhysicsRotation { X = q.x, Y = q.y, Z = q.z, W = q.w };
 

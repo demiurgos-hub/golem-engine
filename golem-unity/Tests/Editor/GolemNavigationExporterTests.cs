@@ -55,7 +55,10 @@ namespace GolemEngine.Unity.Editor.Tests
             Assert.That(EditorSceneManager.SaveScene(scene, folder + "/world.unity"), Is.True);
             Assert.That(GolemNavigationExporter.TryCollect(world, out var record, out var error), Is.True, error);
             Assert.That(Regex.Matches(record.PendingContent, "\"AssetID\"").Count, Is.EqualTo(2));
-            Assert.That(Regex.Matches(record.PendingContent, "\"Triangles\"").Count, Is.EqualTo(1));
+            Assert.That(Regex.Matches(record.PendingContent, "\"Triangles\"").Count, Is.Zero);
+            Assert.That(GolemNavigationExporter.TryCollectArtifacts(world, null, out var compact, out error), Is.True, error);
+            Assert.That(compact.Length, Is.EqualTo(2));
+            Assert.That(BitConverter.ToUInt32(compact[1].PendingBytes, 8), Is.EqualTo(1));
             Assert.That(record.PendingContent, Does.Contain("\"Transform\":[-1,0,0,-8,0,2,0,2,0,0,3,0,0,0,0,1]"));
             var original = record.PendingContent; var source = record.SourceGuid;
             Assert.That(AssetDatabase.RenameAsset(folder + "/ground.asset", "renamed-ground"), Is.Empty);
@@ -78,6 +81,10 @@ namespace GolemEngine.Unity.Editor.Tests
                 for (var z = 0; z < 32; z++) for (var x = 0; x < 32; x++) holes[z, x] = true;
                 holes[4, 5] = false; data.SetHoles(0, 0, holes);
                 var asset = GolemNavigationExporter.CaptureTerrain(data, "terrain", 3);
+                var compact = GolemNavigationExporter.CaptureHeightfield(data, 3);
+                Assert.That(compact.Samples.Length, Is.EqualTo(33 * 33));
+                Assert.That(compact.Surface[(4 * 32 + 5) / 8] & (1 << ((4 * 32 + 5) % 8)), Is.Zero);
+                Assert.That(compact.Area, Is.EqualTo(3));
                 Assert.That(asset.Vertices.Length, Is.EqualTo(33 * 33));
                 Assert.That(asset.Triangles.Length, Is.EqualTo(32 * 32 * 2 - 2));
                 Assert.That(asset.Triangles.All(t => t.Area == 3), Is.True);

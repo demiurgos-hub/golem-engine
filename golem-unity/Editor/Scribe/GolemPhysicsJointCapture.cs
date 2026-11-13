@@ -6,8 +6,9 @@ namespace GolemEngine.Unity.Editor
 {
     internal static class GolemPhysicsJointCapture
     {
-        internal static PhysicsJoint Capture(Joint joint, GolemPhysicsWorld world)
+        internal static PhysicsJoint Capture(Joint joint, GolemPhysicsWorld world, Func<Component, string> identity = null)
         {
+            identity = identity ?? GolemPhysicsExporter.Identity;
             var body = joint.GetComponent<Rigidbody>();
             if (!body) throw new InvalidOperationException(joint.name + ": joint requires a Rigidbody.");
             if (joint.connectedArticulationBody) throw new InvalidOperationException(joint.name + ": articulation bodies are unsupported.");
@@ -19,8 +20,8 @@ namespace GolemEngine.Unity.Editor
             var connectedWorld = connected ? connected.transform.TransformPoint(joint.connectedAnchor) : joint.connectedAnchor;
             var result = new PhysicsJoint
             {
-                ID = GolemPhysicsExporter.Identity(joint), SourceKind = joint.GetType().Name, BodyID = GolemPhysicsExporter.Identity(body),
-                ConnectedBodyID = connected ? GolemPhysicsExporter.Identity(connected) : "",
+                ID = identity(joint), SourceKind = joint.GetType().Name, BodyID = identity(body),
+                ConnectedBodyID = connected ? identity(connected) : "",
                 Anchor = GolemPhysicsExporter.Vector(local.MultiplyPoint3x4(joint.anchor)),
                 ConnectedAnchor = GolemPhysicsExporter.Vector(connected ? Quaternion.Inverse(connected.rotation) * (connectedWorld - connected.position) : connectedWorld),
                 Axis = GolemPhysicsExporter.Vector(local.MultiplyVector(joint.axis).normalized),

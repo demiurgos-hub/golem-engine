@@ -15,6 +15,7 @@ namespace GolemEngine.Unity.Editor
             internal string Path { get; }
             internal string Hash { get; }
             internal string Content { get; }
+            internal byte[] Bytes { get; }
 
             internal Artifact(GolemScribeArtifactRecord record, string path, bool desired)
             {
@@ -23,7 +24,8 @@ namespace GolemEngine.Unity.Editor
                 Entity = record.Entity;
                 Path = path;
                 Content = desired ? record.PendingContent : null;
-                Hash = desired ? GolemScribeManifest.ComputeContentHash(Content) : record.Hash;
+                Bytes = desired ? record.PendingBytes?.ToArray() : null;
+                Hash = desired ? Bytes == null ? GolemScribeManifest.ComputeContentHash(Content) : GolemScribeManifest.ComputeBytesHash(Bytes) : record.Hash;
             }
 
             internal GolemScribeArtifactRecord ToManifestRecord() => new GolemScribeArtifactRecord
@@ -73,7 +75,7 @@ namespace GolemEngine.Unity.Editor
             internal ScribeArtifactSnapshot Disk { get; }
             internal string Path => Desired?.Path ?? Previous.Path;
             internal string Kind => Desired?.Kind ?? Previous.Kind;
-            internal bool ContentMatches => Desired != null && string.Equals(Disk.Content, Desired.Content, StringComparison.Ordinal);
+            internal bool ContentMatches => Desired != null && string.Equals(Disk.Hash, Desired.Hash, StringComparison.Ordinal);
             internal bool PriorHashMatches => Previous != null && string.Equals(Previous.Hash, Disk.Hash, StringComparison.Ordinal);
             internal bool HasReadError => Disk.Status == ScribeArtifactStatus.ReadFailure || Disk.Status == ScribeArtifactStatus.InvalidPath;
             internal bool Missing => Disk.Status == ScribeArtifactStatus.Missing;
@@ -140,10 +142,15 @@ namespace GolemEngine.Unity.Editor
                 {
                     issues.Add(new Issue("Desired artifact is outside the selected Scribe source.", "Desired artifact is outside the selected Scribe source."));
                 }
-                else if (record.PendingContent == null)
+                else if (record.PendingContent == null && record.PendingBytes == null)
                 {
                     issues.Add(new Issue($"Scribe artifact '{record.Path}' is missing generated content.",
                         $"Desired Scribe artifact '{record.Path}' is missing generated content."));
+                }
+                else if (record.PendingBytes != null && (record.PendingContent != null || !GolemGeometryDocument.IsOwned(record.PendingBytes)))
+                {
+                    issues.Add(new Issue("Binary Scribe artifacts require the geometry ownership signature and no text content.",
+                        "Invalid binary Scribe artifact: " + record.Path));
                 }
                 else if (!GolemScribePaths.TryResolveRelative(rootFull, record.Path, out _, out var normalized, out var error))
                 {

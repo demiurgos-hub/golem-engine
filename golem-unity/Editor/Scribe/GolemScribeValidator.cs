@@ -283,7 +283,10 @@ namespace GolemEngine.Unity.Editor
                     if (snapshot.Status == ScribeArtifactStatus.Missing) result.Missing.Add(normalized);
                     else if (snapshot.Status == ScribeArtifactStatus.ReadFailure || snapshot.Status == ScribeArtifactStatus.InvalidPath)
                         result.Errors.Add(snapshot.Error);
-                    else if (!(record.Kind == GolemScribeConstants.ArtifactKindNavigationSource ? GolemNavigationDocument.IsOwned(snapshot.Content) : record.Kind == GolemScribeConstants.ArtifactKindPhysicsSource ? GolemPhysicsDocument.IsOwned(snapshot.Content) : GolemContentDocument.IsOwned(snapshot.Content)) || !string.Equals(snapshot.Hash, record.Hash, StringComparison.Ordinal))
+                    else if (!(record.Kind == GolemScribeConstants.ArtifactKindContentSource ? GolemContentDocument.IsOwned(snapshot.Content)
+                        : snapshot.Bytes != null ? GolemGeometryDocument.IsOwned(snapshot.Bytes)
+                        : record.Kind == GolemScribeConstants.ArtifactKindNavigationSource ? GolemNavigationDocument.IsOwned(snapshot.Content)
+                        : GolemPhysicsDocument.IsOwned(snapshot.Content)) || !string.Equals(snapshot.Hash, record.Hash, StringComparison.Ordinal))
                         result.ManuallyModified.Add(normalized);
                 }
             }

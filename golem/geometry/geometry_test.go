@@ -88,3 +88,29 @@ func TestSidecarHashAndContainment(t *testing.T) {
 		t.Fatal("stale sidecar accepted")
 	}
 }
+
+func TestActualScribeBinaryFixtures(t *testing.T) {
+	for _, name := range []string{"geometry-physics.golemgeo", "geometry-navigation.golemgeo"} {
+		data, err := os.ReadFile(filepath.Join("../../golem-unity/Tests/Fixtures", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		assets, err := Decode(bytes.NewReader(data), DefaultLimits())
+		if err != nil {
+			t.Fatal(name, err)
+		}
+		var encoded bytes.Buffer
+		if err = Encode(&encoded, assets, DefaultLimits()); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(data, encoded.Bytes()) {
+			t.Fatal("C#/Go binary encoding differs", name)
+		}
+		if len(assets) != 2 || assets[1].Heightfield == nil || assets[1].Heightfield.Surface[0] != 13 {
+			t.Fatal("C# terrain samples/holes changed")
+		}
+		if name == "geometry-navigation.golemgeo" && assets[0].Vertices[0].X != 1.0000000000000002 {
+			t.Fatal("C# navigation float64 precision lost")
+		}
+	}
+}

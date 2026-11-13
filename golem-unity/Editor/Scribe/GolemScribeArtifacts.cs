@@ -110,7 +110,9 @@ namespace GolemEngine.Unity.Editor
                 foreach (var entry in plan.Writes)
                 {
                     // Recheck even planned no-ops: the snapshot is an observation, not authorization.
-                    if (transaction.WriteManaged(entry.Disk.AbsolutePath, entry.Desired.Content))
+                    if (entry.Desired.Bytes != null
+                        ? transaction.WriteManagedBytes(entry.Disk.AbsolutePath, entry.Desired.Bytes)
+                        : transaction.WriteManaged(entry.Disk.AbsolutePath, entry.Desired.Content))
                     {
                         AfterWriteHookForTests?.Invoke(entry.Disk.AbsolutePath);
                         result.AnyBytesChanged = true;

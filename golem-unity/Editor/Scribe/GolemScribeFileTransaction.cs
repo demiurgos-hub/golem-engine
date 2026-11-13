@@ -25,10 +25,15 @@ namespace GolemEngine.Unity.Editor
 
         internal bool WriteManaged(string path, string content)
         {
+            return WriteManagedBytes(path, Utf8NoBom.GetBytes(content ?? string.Empty));
+        }
+
+        internal bool WriteManagedBytes(string path, byte[] bytes)
+        {
             MutationHookForTests?.Invoke(ScribeMutationStage.BeforeWrite, path);
             var existing = ReadManaged(path);
-            if (existing != null && string.Equals(Decode(existing), content, StringComparison.Ordinal)) return false;
-            var bytes = Utf8NoBom.GetBytes(content ?? string.Empty);
+            if (existing != null && (existing.SequenceEqual(bytes) || (!GolemGeometryDocument.IsOwned(existing)
+                && !GolemGeometryDocument.IsOwned(bytes) && string.Equals(Decode(existing), Decode(bytes), StringComparison.Ordinal)))) return false;
             try
             {
                 WriteAtomic(path, bytes, () =>
@@ -79,7 +84,7 @@ namespace GolemEngine.Unity.Editor
                 {
                     MutationHookForTests?.Invoke(ScribeMutationStage.BeforeRollback, mutation.Path);
                     var current = ReadBytes(mutation.Path);
-                    if (current != null && !GolemYamlWriter.IsScribeOwned(Decode(current)) &&
+                    if (current != null && !IsManaged(current) &&
                         (mutation.After == null || !current.SequenceEqual(mutation.After)))
                     {
                         throw new IOException("Refusing to overwrite a handwritten file introduced during the transaction.");
@@ -107,10 +112,12 @@ namespace GolemEngine.Unity.Editor
         private static byte[] ReadManaged(string path)
         {
             var bytes = ReadBytes(path);
-            if (bytes != null && !GolemYamlWriter.IsScribeOwned(Decode(bytes)))
+            if (bytes != null && !IsManaged(bytes))
                 throw new IOException($"Refusing to overwrite or delete handwritten file '{path}'.");
             return bytes;
         }
+
+        private static bool IsManaged(byte[] bytes) => GolemGeometryDocument.IsOwned(bytes) || GolemYamlWriter.IsScribeOwned(Decode(bytes));
 
         private static byte[] ReadBytes(string path)
         {

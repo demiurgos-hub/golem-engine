@@ -44,7 +44,7 @@ namespace GolemEngine.Unity.Editor.Tests
                 Assert.That(text, Does.Contain("\"Transform\":[1,0,0,-4,0,1,0,0,0,0,1,-4,0,0,0,1]"));
                 Assert.That(GolemYamlWriter.IsScribeOwned(text), Is.True);
                 Assert.That(GolemYamlWriter.IsScribeOwned("{\"note\":\"" + GolemNavigationDocument.Generator + "\"}"), Is.False);
-                Assert.That(GolemYamlWriter.IsScribeOwned(text.Replace("source v1", "source v2")), Is.False);
+                Assert.That(GolemYamlWriter.IsScribeOwned(text.Replace("source v1", "source v3")), Is.False);
                 CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
                 Assert.That(GolemNavigationDocument.Build(Scene(), Config()), Is.EqualTo(text));
                 // Optional cross-language harness input; no ordinary test requires Go or Unity.

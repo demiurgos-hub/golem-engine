@@ -16,7 +16,8 @@ namespace GolemEngine.Unity.Editor
     }
     internal sealed class NavigationBounds { public NavigationVector Min = new NavigationVector(), Max = new NavigationVector(); }
     internal sealed class NavigationTriangle { public uint[] Indices; public int Area; }
-    internal sealed class NavigationAsset { public string ID; public NavigationVector[] Vertices; public NavigationTriangle[] Triangles; }
+    internal sealed class NavigationAsset { public string ID; public NavigationVector[] Vertices = Array.Empty<NavigationVector>(); public NavigationTriangle[] Triangles = Array.Empty<NavigationTriangle>(); internal GolemHeightfield Heightfield; }
+    internal sealed class NavigationGeometryReference { public string Path, SHA256; }
     internal sealed class NavigationInstance { public string ID, AssetID; public ulong Revision; public double[] Transform; public bool Disabled; }
     internal sealed class NavigationVolume
     {
@@ -70,17 +71,21 @@ namespace GolemEngine.Unity.Editor
     internal static class GolemNavigationDocument
     {
         internal const string Generator = "Golem Scribe navigation source v1";
+        internal const string CompactGenerator = "Golem Scribe navigation source v2";
+        internal const string CompactOwnershipPrefix = "{\n  \"Generator\": \"" + CompactGenerator + "\",\n";
         internal const string OwnershipPrefix = "{\n  \"Generator\": \"" + Generator + "\",\n";
 
-        internal static bool IsOwned(string content) => content != null && content.StartsWith(OwnershipPrefix, StringComparison.Ordinal);
+        internal static bool IsOwned(string content) => content != null && (content.StartsWith(OwnershipPrefix, StringComparison.Ordinal) || content.StartsWith(CompactOwnershipPrefix, StringComparison.Ordinal));
 
-        internal static string Build(NavigationScene scene, NavigationConfig config)
+        internal static string Build(NavigationScene scene, NavigationConfig config, NavigationGeometryReference geometry = null)
         {
             Validate(scene, config);
+            Require(geometry != null || !scene.Assets.Any(a => a.Heightfield != null), "Compact heightfields require a geometry sidecar.");
+            if (geometry != null) Require(!string.IsNullOrWhiteSpace(geometry.Path) && geometry.SHA256?.Length == 64, "Invalid geometry reference.");
             // Sort copies, retaining authoring order for each asset's vertices/triangles and convex points.
             var ordered = new NavigationScene
             {
-                Assets = scene.Assets.OrderBy(x => x.ID, StringComparer.Ordinal).ToArray(),
+                Assets = geometry == null ? scene.Assets.OrderBy(x => x.ID, StringComparer.Ordinal).ToArray() : Array.Empty<NavigationAsset>(),
                 Instances = scene.Instances.OrderBy(x => x.ID, StringComparer.Ordinal).ToArray(),
                 Volumes = scene.Volumes.OrderBy(x => x.ID, StringComparer.Ordinal).ToArray(),
                 Links = scene.Links.OrderBy(x => x.ID, StringComparer.Ordinal).Select(x => new NavigationLink
@@ -90,7 +95,8 @@ namespace GolemEngine.Unity.Editor
                     Flags = x.Flags, Profiles = x.Profiles.OrderBy(p => p, StringComparer.Ordinal).ToArray()
                 }).ToArray()
             };
-            var json = new StringBuilder(OwnershipPrefix);
+            var json = new StringBuilder(geometry == null ? OwnershipPrefix : CompactOwnershipPrefix);
+            if (geometry != null) { json.Append("  \"Geometry\": "); Write(json, geometry); json.Append(",\n"); }
             json.Append("  \"Scene\": "); Write(json, ordered);
             json.Append(",\n  \"Config\": "); Write(json, config);
             json.Append("\n}\n");
@@ -126,6 +132,7 @@ namespace GolemEngine.Unity.Editor
             {
                 Require(a != null && !string.IsNullOrWhiteSpace(a.ID) && assets.Add(a.ID), "Duplicate or missing asset identity.");
                 Require(a.Vertices != null && a.Triangles != null && a.Vertices.Length <= 8 * 1024 * 1024 && a.Triangles.Length <= 8 * 1024 * 1024, "Invalid asset arrays or source element limit exceeded.");
+                if (a.Heightfield != null) { a.Heightfield.Validate(); Require(a.Vertices.Length == 0 && a.Triangles.Length == 0, "Heightfield cannot also contain mesh arrays."); }
                 foreach (var v in a.Vertices) Vector(v);
                 foreach (var t in a.Triangles)
                     Require(t != null && t.Indices != null && t.Indices.Length == 3 && t.Indices.All(i => i < a.Vertices.Length) && t.Area >= 0 && t.Area <= 63, "Invalid triangle indices or area.");
@@ -143,6 +150,16 @@ namespace GolemEngine.Unity.Editor
                 if (!i.Disabled && config.Strict)
                 {
                     var asset = assetByID[i.AssetID];
+                    if (asset.Heightfield != null)
+                    {
+                        var h = asset.Heightfield;
+                        for (var z = 0; z < h.Resolution; z++) for (var x = 0; x < h.Resolution; x++)
+                        {
+                            var point = Resolve(new NavigationVector((double)x * h.SizeX / (h.Resolution - 1),
+                                (double)h.Samples[z * h.Resolution + x] * h.SizeY, (double)z * h.SizeZ / (h.Resolution - 1)), t, s.Origin);
+                            Require(Finite(point.X) && Finite(point.Y) && Finite(point.Z), "Overflowing transformed terrain vertex.");
+                        }
+                    }
                     foreach (var triangle in asset.Triangles)
                     {
                         var a = Resolve(asset.Vertices[triangle.Indices[0]], t, s.Origin);

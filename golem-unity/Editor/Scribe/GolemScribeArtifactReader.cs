@@ -13,17 +13,19 @@ namespace GolemEngine.Unity.Editor
         internal string AbsolutePath { get; }
         internal ScribeArtifactStatus Status { get; }
         internal string Content { get; }
+        internal byte[] Bytes { get; }
         internal string Hash { get; }
         internal string Error { get; }
 
         internal ScribeArtifactSnapshot(string path, string absolutePath, ScribeArtifactStatus status,
-            string content = null, string error = null)
+            string content = null, string error = null, byte[] bytes = null)
         {
             Path = path;
             AbsolutePath = absolutePath;
             Status = status;
             Content = content;
-            Hash = content == null ? null : GolemScribeManifest.ComputeContentHash(content);
+            Bytes = bytes;
+            Hash = bytes != null ? GolemScribeManifest.ComputeBytesHash(bytes) : content == null ? null : GolemScribeManifest.ComputeContentHash(content);
             Error = error;
         }
     }
@@ -45,7 +47,11 @@ namespace GolemEngine.Unity.Editor
             try
             {
                 // File.Exists also returns false for access/IO errors; only absence is a missing artifact.
-                var content = File.ReadAllText(absolutePath);
+                var bytes = File.ReadAllBytes(absolutePath);
+                if (GolemGeometryDocument.IsOwned(bytes))
+                    return new ScribeArtifactSnapshot(relativePath, absolutePath, ScribeArtifactStatus.Owned, bytes: bytes);
+                string content;
+                using (var reader = new StreamReader(new MemoryStream(bytes))) content = reader.ReadToEnd();
                 return new ScribeArtifactSnapshot(relativePath, absolutePath,
                     GolemYamlWriter.IsScribeOwned(content) ? ScribeArtifactStatus.Owned : ScribeArtifactStatus.Handwritten,
                     content);

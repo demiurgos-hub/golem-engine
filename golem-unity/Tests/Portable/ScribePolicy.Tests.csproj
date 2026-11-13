@@ -21,9 +21,11 @@
     <Compile Include="../../Editor/Scribe/GolemYamlWriter.cs" />
     <Compile Include="../../Editor/Scribe/GolemNavigationDocument.cs" />
     <Compile Include="../../Editor/Scribe/GolemPhysicsDocument.cs" />
+    <Compile Include="../../Editor/Scribe/GolemGeometryDocument.cs" />
     <Compile Include="../../Editor/Scribe/GolemContentDocument.cs" />
     <Compile Include="../Editor/GolemContentDocumentTests.cs" />
     <Compile Include="../Editor/GolemPhysicsDocumentTests.cs" />
+    <Compile Include="../Editor/GolemGeometryDocumentTests.cs" />
     <Compile Include="../Editor/GolemNavigationDocumentTests.cs" />
     <Compile Include="../Editor/GolemScribeManifestTests.cs" />
     <Compile Include="../Editor/GolemYamlWriterTests.cs" />
@@ -31,6 +33,9 @@
     <Compile Include="../Editor/GolemBakeCommandTests.cs" />
     <None Include="../../../golem/nav/navmesh/navbuild/testdata/scribe-source.json" Link="scribe-source.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../Fixtures/physics-source.json" Link="physics-source.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../Fixtures/geometry-physics.golemgeo" Link="geometry-physics.golemgeo" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../Fixtures/geometry-navigation.golemgeo" Link="geometry-navigation.golemgeo" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../Fixtures/*-source-v2.*" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../Fixtures/content-schema.json" Link="ContentFixtures/content-schema.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../Fixtures/content-source.json" Link="ContentFixtures/content-source.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

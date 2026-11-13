@@ -44,6 +44,7 @@ namespace GolemEngine.Unity.Editor
         public float Radius, Height, ContactOffset;
         public PhysicsCharacter Character;
         public PhysicsProperty[] Metadata = Array.Empty<PhysicsProperty>();
+        public float[] GeometryTransform;
     }
     internal sealed class PhysicsCharacter
     {
@@ -72,6 +73,7 @@ namespace GolemEngine.Unity.Editor
         public string ID, SourceID;
         public PhysicsVector[] Vertices = Array.Empty<PhysicsVector>();
         public uint[] Indices = Array.Empty<uint>();
+        internal GolemHeightfield Heightfield;
     }
     internal sealed class PhysicsMaterial
     {
@@ -90,14 +92,18 @@ namespace GolemEngine.Unity.Editor
         public PhysicsAsset[] Assets = Array.Empty<PhysicsAsset>();
         public PhysicsMaterial[] Materials = Array.Empty<PhysicsMaterial>();
         public PhysicsJoint[] Joints = Array.Empty<PhysicsJoint>();
+        public PhysicsGeometryReference Geometry;
     }
 
     /// <summary>Validates and deterministically serializes portable physics source without Unity or filesystem access.</summary>
     internal static class GolemPhysicsDocument
     {
         internal const string Generator = "Golem Scribe physics source v1";
+        internal const string CompactGenerator = "Golem Scribe physics source v2";
         internal const string OwnershipPrefix = "{\n  \"Generator\": \"" + Generator + "\",\n";
-        internal static bool IsOwned(string text) => text != null && text.StartsWith(OwnershipPrefix, StringComparison.Ordinal);
+        internal const string CompactOwnershipPrefix = "{\n  \"Generator\": \"" + CompactGenerator + "\",\n";
+        internal static bool IsOwned(string text) => text != null && (text.StartsWith(OwnershipPrefix, StringComparison.Ordinal)
+            || text.StartsWith(CompactOwnershipPrefix, StringComparison.Ordinal));
 
         internal static string Build(PhysicsSource source)
         {
@@ -105,14 +111,16 @@ namespace GolemEngine.Unity.Editor
             var ordered = new PhysicsSource
             {
                 Version = source.Version, WorldID = source.WorldID, Revision = source.Revision, CoordinateLimit = source.CoordinateLimit,
-                LayerCollisionMasks = source.LayerCollisionMasks,
+                LayerCollisionMasks = source.LayerCollisionMasks, Geometry = source.Geometry,
                 Bodies = source.Bodies.OrderBy(x => x.ID, StringComparer.Ordinal).ToArray(),
                 Colliders = source.Colliders.OrderBy(x => x.ID, StringComparer.Ordinal).Select(CopyCollider).ToArray(),
-                Assets = source.Assets.OrderBy(x => x.ID, StringComparer.Ordinal).ToArray(),
+                Assets = source.Version == 2 ? Array.Empty<PhysicsAsset>() : source.Assets.OrderBy(x => x.ID, StringComparer.Ordinal).ToArray(),
                 Materials = source.Materials.OrderBy(x => x.ID, StringComparer.Ordinal).ToArray(), Joints = source.Joints.OrderBy(x => x.ID, StringComparer.Ordinal).ToArray()
             };
-            var json = new StringBuilder(OwnershipPrefix);
-            var fields = ordered.GetType().GetFields().OrderBy(x => x.Name, StringComparer.Ordinal).ToArray();
+            Require(source.Version != 2 || source.Geometry != null && !string.IsNullOrWhiteSpace(source.Geometry.Path)
+                && source.Geometry.SHA256?.Length == 64, "Compact physics source requires a binary geometry reference.");
+            var json = new StringBuilder(source.Version == 2 ? CompactOwnershipPrefix : OwnershipPrefix);
+            var fields = ordered.GetType().GetFields().Where(field => field.Name != "Geometry" || source.Version == 2).OrderBy(x => x.Name, StringComparer.Ordinal).ToArray();
             for (var i = 0; i < fields.Length; i++)
             {
                 json.Append("  "); Quote(json, fields[i].Name); json.Append(": "); Write(json, fields[i].GetValue(ordered));
@@ -129,7 +137,7 @@ namespace GolemEngine.Unity.Editor
             Layer = x.Layer, LayerName = x.LayerName, Shape = x.Shape, AssetID = x.AssetID, MaterialID = x.MaterialID,
             Enabled = x.Enabled, Active = x.Active, Solid = x.Solid, Sensor = x.Sensor, Query = x.Query,
             Center = x.Center, Rotation = x.Rotation, Size = x.Size, Radius = x.Radius, Height = x.Height,
-            Axis = x.Axis, ContactOffset = x.ContactOffset, Character = x.Character, Metadata = x.Metadata.OrderBy(p => p.Key, StringComparer.Ordinal).ToArray()
+            Axis = x.Axis, ContactOffset = x.ContactOffset, Character = x.Character, Metadata = x.Metadata.OrderBy(p => p.Key, StringComparer.Ordinal).ToArray(), GeometryTransform = x.GeometryTransform
         };
 
         internal const string NormalizationPrefix = "golem.physics.zeroAreaNormalization.v1.";
@@ -139,6 +147,7 @@ namespace GolemEngine.Unity.Editor
         // vertex welding, and retain the original ordinal map and geometry hash.
         internal static PhysicsSource Normalize(PhysicsSource source)
         {
+            if (source != null && source.Version == 2) return NormalizeCompact(source);
             ValidateCore(source, true);
             var replacements = new Dictionary<string, PhysicsAsset>(StringComparer.Ordinal);
             var records = new Dictionary<string, PhysicsProperty[]>(StringComparer.Ordinal);
@@ -178,6 +187,44 @@ namespace GolemEngine.Unity.Editor
             return result;
         }
 
+        private static PhysicsSource NormalizeCompact(PhysicsSource source)
+        {
+            ValidateCore(source, true);
+            var assets = source.Assets.ToDictionary(asset => asset.ID, StringComparer.Ordinal);
+            var colliders = new List<PhysicsCollider>(source.Colliders.Length);
+            foreach (var collider in source.Colliders)
+            {
+                if (!assets.TryGetValue(collider.AssetID, out var asset) || asset.Heightfield != null)
+                { colliders.Add(collider); continue; }
+                var vertices = asset.Vertices.Select(vertex => TransformPoint(collider.GeometryTransform, vertex)).ToArray();
+                var indices = (uint[])asset.Indices.Clone();
+                if (Determinant(collider.GeometryTransform) < 0)
+                    for (var index = 0; index < indices.Length; index += 3)
+                    { var swap = indices[index + 1]; indices[index + 1] = indices[index + 2]; indices[index + 2] = swap; }
+                var removed = new List<int>();
+                for (var index = 0; index < indices.Length; index += 3)
+                    if (ExactZeroArea(vertices[indices[index]], vertices[indices[index + 1]], vertices[indices[index + 2]])) removed.Add(index / 3);
+                Require(removed.Count < indices.Length / 3, "Geometry contains only zero-area triangles: " + collider.ID);
+                if (removed.Count == 0) { colliders.Add(collider); continue; }
+                var copy = CopyCollider(collider);
+                var records = new[] {
+                    new PhysicsProperty { Key = NormalizationPrefix + "originalGeometrySHA256", Value = OriginalGeometryHash(new PhysicsAsset { Vertices = vertices, Indices = indices }) },
+                    new PhysicsProperty { Key = NormalizationPrefix + "originalTriangleCount", Value = (indices.Length / 3).ToString(CultureInfo.InvariantCulture) },
+                    new PhysicsProperty { Key = NormalizationPrefix + "removedTriangleOrdinals", Value = string.Join(",", removed.Select(index => index.ToString(CultureInfo.InvariantCulture))) }
+                };
+                var existing = copy.Metadata.Where(item => item.Key.StartsWith(NormalizationPrefix, StringComparison.Ordinal)).ToArray();
+                Require(existing.Length == 0 || existing.Length == records.Length && records.All(record => existing.Any(item => item.Key == record.Key && item.Value == record.Value)),
+                    "Conflicting geometry normalization provenance: " + collider.ID);
+                copy.Metadata = copy.Metadata.Where(item => !item.Key.StartsWith(NormalizationPrefix, StringComparison.Ordinal)).Concat(records).ToArray();
+                colliders.Add(copy);
+            }
+            return new PhysicsSource {
+                Version = source.Version, WorldID = source.WorldID, Revision = source.Revision, CoordinateLimit = source.CoordinateLimit,
+                LayerCollisionMasks = source.LayerCollisionMasks, Bodies = source.Bodies, Materials = source.Materials,
+                Joints = source.Joints, Assets = source.Assets, Colliders = colliders.ToArray(), Geometry = source.Geometry
+            };
+        }
+
         [StructLayout(LayoutKind.Explicit)]
         private struct FloatBits { [FieldOffset(0)] internal float Value; [FieldOffset(0)] internal uint Bits; }
 
@@ -195,10 +242,22 @@ namespace GolemEngine.Unity.Editor
 
         private static bool ExactZeroArea(PhysicsVector a, PhysicsVector b, PhysicsVector c)
         {
+            // A conservative floating-point error bound certifies ordinary nonzero
+            // determinants; cancellation and tiny results retain the exact fallback.
+            if (CertifiedNonzero(a.X, a.Y, b.X, b.Y, c.X, c.Y)
+                || CertifiedNonzero(a.X, a.Z, b.X, b.Z, c.X, c.Z)
+                || CertifiedNonzero(a.Y, a.Z, b.Y, b.Z, c.Y, c.Z)) return false;
             var ax = ExactCoordinate(a.X); var ay = ExactCoordinate(a.Y); var az = ExactCoordinate(a.Z);
             var ux = ExactCoordinate(b.X) - ax; var uy = ExactCoordinate(b.Y) - ay; var uz = ExactCoordinate(b.Z) - az;
             var vx = ExactCoordinate(c.X) - ax; var vy = ExactCoordinate(c.Y) - ay; var vz = ExactCoordinate(c.Z) - az;
             return uy * vz == uz * vy && uz * vx == ux * vz && ux * vy == uy * vx;
+        }
+
+        private static bool CertifiedNonzero(double ax, double ay, double bx, double by, double cx, double cy)
+        {
+            var left = (bx - ax) * (cy - ay);
+            var right = (by - ay) * (cx - ax);
+            return Math.Abs(left - right) > (Math.Abs(left) + Math.Abs(right)) * 3.552713678800501e-15;
         }
 
         // Hash format: little-endian Int32 vertex count, original XYZ float32
@@ -223,7 +282,7 @@ namespace GolemEngine.Unity.Editor
 
         private static void ValidateCore(PhysicsSource source, bool allowZeroArea)
         {
-            Require(source != null && source.Version == 1 && !string.IsNullOrWhiteSpace(source.WorldID) && source.Revision > 0, "Invalid physics source identity/version.");
+            Require(source != null && (source.Version == 1 || source.Version == 2) && !string.IsNullOrWhiteSpace(source.WorldID) && source.Revision > 0, "Invalid physics source identity/version.");
             Require(source.CoordinateLimit == 4096, "Physics v1 requires a 4096-meter absolute coordinate envelope.");
             Require(source.Bodies != null && source.Colliders != null && source.Assets != null && source.Materials != null && source.Joints != null, "Null physics source collection.");
             Require(source.LayerCollisionMasks != null && source.LayerCollisionMasks.Length == 32, "Exactly 32 layer masks are required.");
@@ -246,13 +305,19 @@ namespace GolemEngine.Unity.Editor
             {
                 Require(asset != null && !string.IsNullOrWhiteSpace(asset.ID) && !assets.ContainsKey(asset.ID), "Duplicate/missing geometry identity.");
                 assets.Add(asset.ID, asset);
+                if (asset.Heightfield != null)
+                {
+                    Require(source.Version == 2 && asset.Vertices.Length == 0 && asset.Indices.Length == 0, "Heightfields require compact source with no explicit mesh arrays.");
+                    asset.Heightfield.Validate();
+                    continue;
+                }
                 Require(asset.Vertices != null && asset.Indices != null && asset.Vertices.Length <= 8 * 1024 * 1024 && asset.Indices.Length <= 24 * 1024 * 1024 && asset.Indices.Length % 3 == 0, "Invalid/oversized geometry: " + asset.ID);
                 foreach (var v in asset.Vertices) Vector(v);
                 foreach (var index in asset.Indices) Require(index < asset.Vertices.Length, "Geometry index out of range: " + asset.ID);
                 for (var i = 0; i < asset.Indices.Length; i += 3)
                 {
                     var a = asset.Vertices[asset.Indices[i]]; var b = asset.Vertices[asset.Indices[i + 1]]; var c = asset.Vertices[asset.Indices[i + 2]];
-                    Require(allowZeroArea || !ExactZeroArea(a, b, c), "Degenerate triangle: " + asset.ID);
+                    Require(allowZeroArea || source.Version == 2 || !ExactZeroArea(a, b, c), "Degenerate triangle: " + asset.ID);
                 }
             }
             var materials = new HashSet<string>(StringComparer.Ordinal);
@@ -287,10 +352,23 @@ namespace GolemEngine.Unity.Editor
                     Require(assets.ContainsKey(collider.AssetID ?? ""), "Missing collider geometry: " + collider.ID);
                     Require(body.Kind != "dynamic" || collider.Shape == "convex", "Dynamic non-convex geometry is unsupported: " + collider.ID);
                     Require(collider.Center.X == 0 && collider.Center.Y == 0 && collider.Center.Z == 0 && collider.Rotation.X == 0 && collider.Rotation.Y == 0 && collider.Rotation.Z == 0 && collider.Rotation.W == 1, "Mesh geometry must already be body-local: " + collider.ID);
-                    foreach (var v in assets[collider.AssetID].Vertices) Envelope(WorldPoint(body, v), source.CoordinateLimit);
+                    var asset = assets[collider.AssetID];
+                    if (source.Version == 2) ValidateTransform(collider.GeometryTransform);
+                    else Require(collider.GeometryTransform == null, "Affine geometry requires source version 2.");
+                    if (asset.Heightfield != null)
+                    {
+                        Require(collider.Shape == "terrain", "Heightfield assets require terrain colliders.");
+                        var field = asset.Heightfield;
+                        for (var z = 0; z < field.Resolution; z++) for (var x = 0; x < field.Resolution; x++)
+                            Envelope(WorldPoint(body, TransformPoint(collider.GeometryTransform, new PhysicsVector(
+                                (float)((double)x * field.SizeX / (field.Resolution - 1)), (float)((double)field.Samples[z * field.Resolution + x] * field.SizeY),
+                                (float)((double)z * field.SizeZ / (field.Resolution - 1))))), source.CoordinateLimit);
+                    }
+                    else foreach (var v in asset.Vertices) Envelope(WorldPoint(body, source.Version == 2 ? TransformPoint(collider.GeometryTransform, v) : v), source.CoordinateLimit);
                     continue;
                 }
                 var center = WorldPoint(body, collider.Center);
+                Require(collider.GeometryTransform == null, "Primitive colliders cannot carry a mesh geometry transform.");
                 var radius = collider.Shape == "sphere" ? collider.Radius : collider.Shape == "capsule" ? collider.Height / 2 : (float)Math.Sqrt(collider.Size.X * collider.Size.X + collider.Size.Y * collider.Size.Y + collider.Size.Z * collider.Size.Z) / 2;
                 // Conservative containment is intentional: every accepted primitive lies inside the qualified envelope.
                 Envelope(new PhysicsVector(Math.Abs(center.X) + radius, Math.Abs(center.Y) + radius, Math.Abs(center.Z) + radius), source.CoordinateLimit);
@@ -311,6 +389,23 @@ namespace GolemEngine.Unity.Editor
                 Require(spring != null && Nonnegative(spring.Spring) && Nonnegative(spring.Damper) && Finite(spring.TargetPosition) && Nonnegative(spring.MinDistance) && Nonnegative(spring.MaxDistance) && spring.MaxDistance >= spring.MinDistance && Nonnegative(spring.Tolerance) && Nonnegative(spring.RestDistance), "Invalid joint spring: " + joint.ID);
             }
         }
+
+        private static void ValidateTransform(float[] matrix)
+        {
+            Require(matrix != null && matrix.Length == 16 && matrix.All(Finite) && matrix[12] == 0 && matrix[13] == 0 && matrix[14] == 0 && matrix[15] == 1,
+                "Geometry transform must be a finite row-major affine matrix.");
+            Require(Math.Abs(Determinant(matrix)) > 1e-12, "Singular geometry transform.");
+        }
+
+        internal static PhysicsVector TransformPoint(float[] m, PhysicsVector v) => new PhysicsVector(
+            m[0] * v.X + m[1] * v.Y + m[2] * v.Z + m[3],
+            m[4] * v.X + m[5] * v.Y + m[6] * v.Z + m[7],
+            m[8] * v.X + m[9] * v.Y + m[10] * v.Z + m[11]);
+
+        private static double Determinant(float[] m) => m == null ? 1 :
+            (double)m[0] * (m[5] * (double)m[10] - m[6] * (double)m[9])
+            - (double)m[1] * (m[4] * (double)m[10] - m[6] * (double)m[8])
+            + (double)m[2] * (m[4] * (double)m[9] - m[5] * (double)m[8]);
 
         private static PhysicsVector WorldPoint(PhysicsBody body, PhysicsVector v)
         {
@@ -341,7 +436,10 @@ namespace GolemEngine.Unity.Editor
             Require(value.GetType().Namespace == typeof(PhysicsSource).Namespace && value.GetType().Name.StartsWith("Physics", StringComparison.Ordinal), "Unsupported physics JSON type.");
             output.Append('{'); var comma = "";
             foreach (var field in value.GetType().GetFields(BindingFlags.Public | BindingFlags.Instance).OrderBy(x => x.Name, StringComparer.Ordinal))
-            { output.Append(comma); Quote(output, field.Name); output.Append(':'); Write(output, field.GetValue(value)); comma = ","; }
+            {
+                if (field.Name == "GeometryTransform" && field.GetValue(value) == null) continue;
+                output.Append(comma); Quote(output, field.Name); output.Append(':'); Write(output, field.GetValue(value)); comma = ",";
+            }
             output.Append('}');
         }
         private static void Quote(StringBuilder output, string value)

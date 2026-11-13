@@ -86,3 +86,37 @@ func TestCanonicalExactZeroAreaProvenance(t *testing.T) {
 		t.Fatal("small nonzero triangle removed")
 	}
 }
+
+func TestActualScribeVersion2Fixture(t *testing.T) {
+	source, _, err := DecodeFile("../../../golem-unity/Tests/Fixtures/physics-source-v2.json", DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(source.Assets) != 2 || len(source.Colliders) != 3 {
+		t.Fatal("C# shared geometry lost or duplicated")
+	}
+	assets := map[string]Asset{}
+	for _, asset := range source.Assets {
+		assets[asset.ID] = asset
+	}
+	for _, collider := range source.Colliders {
+		shape, err := collider.Geometry(assets)
+		if err != nil {
+			t.Fatal(collider.ID, err)
+		}
+		if collider.Shape == "terrain" {
+			if len(shape.Vertices) != 9 || len(shape.Indices) != 18 || !reflect.DeepEqual(shape.Indices[:3], []uint32{0, 3, 4}) {
+				t.Fatal("C# terrain holes/physical diagonal changed")
+			}
+		} else if len(shape.Indices) != 3 {
+			t.Fatal("C# exact zero-area provenance mismatch")
+		}
+		if collider.ID == "reflected" && (shape.Vertices[1].X != -2 || !reflect.DeepEqual(shape.Indices, []uint32{0, 1, 2})) {
+			t.Fatal("C# reflected placement changed")
+		}
+	}
+	prepared, err := Prepare(source, DefaultSettings())
+	if err != nil || len(prepared.Diagnostics()) != 0 {
+		t.Fatal("C# source cannot prepare", err)
+	}
+}

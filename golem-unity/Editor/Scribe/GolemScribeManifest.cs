@@ -20,6 +20,9 @@ namespace GolemEngine.Unity.Editor
 
         /// <summary>Generated file text awaiting a safe write. Not persisted in the manifest.</summary>
         public string PendingContent;
+
+        /// <summary>Generated binary payload awaiting the same managed transaction. Mutually exclusive with PendingContent.</summary>
+        public byte[] PendingBytes;
     }
 
     /// <summary>Load/save helpers for <c>scribe.golem.yaml</c>.</summary>
@@ -38,6 +41,13 @@ namespace GolemEngine.Unity.Editor
         public static string ComputeContentHash(string content)
         {
             var bytes = Encoding.UTF8.GetBytes(content ?? string.Empty);
+            return ComputeBytesHash(bytes);
+        }
+
+        /// <summary>Computes a lowercase SHA-256 hash of exact binary artifact bytes.</summary>
+        public static string ComputeBytesHash(byte[] bytes)
+        {
+            if (bytes == null) throw new ArgumentNullException(nameof(bytes));
             using (var sha = SHA256.Create())
             {
                 var hash = sha.ComputeHash(bytes);

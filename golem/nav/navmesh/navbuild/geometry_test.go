@@ -54,3 +54,20 @@ func TestCompactTerrainSourceBakesWithoutExpandedJSON(t *testing.T) {
 		t.Fatal("corrupt sidecar accepted")
 	}
 }
+
+func TestActualScribeVersion2TerrainFixture(t *testing.T) {
+	source, err := DecodeFile("../../../../golem-unity/Tests/Fixtures/navigation-source-v2.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(source.Scene.Assets) != 1 || len(source.Scene.Assets[0].Vertices) != 9 || len(source.Scene.Assets[0].Triangles) != 6 || source.Scene.Assets[0].Triangles[0].Indices != [3]uint32{0, 3, 1} {
+		t.Fatal("C# terrain geometry differs")
+	}
+	result, err := source.Build(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = result.Bundle.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}

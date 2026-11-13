@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.IO;
 using UnityEditor;
 using UnityEngine;
 
@@ -17,34 +18,40 @@ namespace GolemEngine.Unity.Editor
             public readonly List<string> Warnings = new List<string>();
             public bool BytesChanged;
             public string OutputPath;
+            /// <summary>Committed source and binary dependency paths/hashes; empty on failure.</summary>
+            public IReadOnlyList<GolemScribeArtifactRecord> Artifacts { get; internal set; } = Array.Empty<GolemScribeArtifactRecord>();
         }
 
         /// <summary>Exports one world/profile; other worlds, including unloaded scenes, retain their manifest entries.</summary>
-        public static ExportResult Export(GolemNavigationWorld world)
+        public static ExportResult Export(GolemNavigationWorld world, GolemScribeExportOptions options = null)
         {
             var result = new ExportResult();
             if (!GolemScribeContext.TryLoad(GolemUnityEditorSettings.instance.ProjectRoot, out var context, out var error))
             { result.Errors.Add(error); return result; }
-            if (!TryCollect(world, out var record, out error)) { result.Errors.Add(error); return result; }
+            if (!TryCollectArtifacts(world, options, out var records, out error)) { result.Errors.Add(error); return result; }
+            var record = records[0];
             if (!GolemScribeArtifacts.TryResolveContainedPath(context.ProjectRoot, record.Path, out _, out _, out error))
             { result.Errors.Add(error); return result; }
             var reconcile = GolemScribeArtifacts.ReconcileSource(context.ProjectRoot,
-                GolemScribeConstants.ArtifactKindNavigationSource, record.SourceGuid, context.Previous, new[] { record });
+                GolemScribeConstants.ArtifactKindNavigationSource, record.SourceGuid, context.Previous, records);
             result.Errors.AddRange(reconcile.Errors); result.Warnings.AddRange(reconcile.Warnings);
             result.BytesChanged = reconcile.AnyBytesChanged;
             result.OutputPath = result.Errors.Count == 0 ? record.Path : null;
+            if (result.Errors.Count == 0) result.Artifacts = records.Select(r => new GolemScribeArtifactRecord
+            { Kind = r.Kind, SourceGuid = r.SourceGuid, Entity = r.Entity, Path = r.Path, Hash = r.Hash }).ToArray();
             return result;
         }
 
         /// <summary>Checks source validity and artifact drift for one saved world, without writing or baking.</summary>
-        public static GolemScribeValidator.ValidationResult Validate(GolemNavigationWorld world)
+        public static GolemScribeValidator.ValidationResult Validate(GolemNavigationWorld world, GolemScribeExportOptions options = null)
         {
             var result = new GolemScribeValidator.ValidationResult();
             if (!GolemScribeContext.TryLoad(GolemUnityEditorSettings.instance.ProjectRoot, out var context, out var error))
             { result.Errors.Add(error); return result; }
-            if (!TryCollect(world, out var record, out error)) { result.Errors.Add(error); return result; }
+            if (!TryCollectArtifacts(world, options, out var records, out error)) { result.Errors.Add(error); return result; }
+            var record = records[0];
             GolemScribeValidator.ValidateManifestRecords(context.ProjectRoot, context.Previous, result);
-            GolemScribeValidator.CompareDesiredToDisk(context.ProjectRoot, context.Previous, new[] { record },
+            GolemScribeValidator.CompareDesiredToDisk(context.ProjectRoot, context.Previous, records,
                 new[] { GolemScribeConstants.ArtifactKindNavigationSource }, result, record.SourceGuid);
             return result;
         }
@@ -70,9 +77,18 @@ namespace GolemEngine.Unity.Editor
         // the whole selected world, rather than writing an apparently valid but incomplete source file.
         internal static bool TryCollect(GolemNavigationWorld world, out GolemScribeArtifactRecord record, out string error)
         {
-            record = null; error = null;
+            var success = TryCollectArtifacts(world, null, out var records, out error);
+            record = success ? records[0] : null; return success;
+        }
+
+        internal static bool TryCollectArtifacts(GolemNavigationWorld world, GolemScribeExportOptions options,
+            out GolemScribeArtifactRecord[] records, out string error)
+        {
+            records = null; error = null;
             try
             {
+                var identity = new GolemScribeIdentityContext(options);
+                string ObjectID(Component value, string explicitID) => identity.Object(value, () => ObjectIdentity(value, explicitID));
                 if (world == null) throw new InvalidOperationException("Select an object under a Navigation World marker.");
                 if (!world.gameObject.scene.IsValid() || string.IsNullOrEmpty(world.gameObject.scene.path) || world.gameObject.scene.isDirty)
                     throw new InvalidOperationException("Save the scene before export so object identities and source data can be restored reliably.");
@@ -90,12 +106,12 @@ namespace GolemEngine.Unity.Editor
                     if (terrain != null) ValidateTerrainTransform(marker.transform);
                     if (marker.Area < 0 || marker.Area > 63) throw new InvalidOperationException(marker.name + ": area must be 0..63.");
                     var assetObject = mesh != null ? (UnityEngine.Object)mesh.sharedMesh : terrain.terrainData;
-                    var assetID = AssetIdentity(assetObject) + "/area/" + marker.Area.ToString(CultureInfo.InvariantCulture);
+                    var assetID = identity.Asset(assetObject, () => AssetIdentity(assetObject)) + "/area/" + marker.Area.ToString(CultureInfo.InvariantCulture);
                     if (!assets.ContainsKey(assetID)) assets.Add(assetID, mesh != null
-                        ? CaptureMesh(mesh.sharedMesh, assetID, marker.Area) : CaptureTerrain(terrain.terrainData, assetID, marker.Area));
+                        ? CaptureMesh(mesh.sharedMesh, assetID, marker.Area) : new NavigationAsset { ID = assetID, Heightfield = CaptureHeightfield(terrain.terrainData, marker.Area) });
                     instances.Add(new NavigationInstance
                     {
-                        ID = ObjectIdentity(marker, marker.StableID), AssetID = assetID, Revision = Revision(marker.Revision),
+                        ID = ObjectID(marker, marker.StableID), AssetID = assetID, Revision = Revision(marker.Revision),
                         Transform = Matrix(marker.transform.localToWorldMatrix), Disabled = !marker.ExportEnabled || !marker.enabled
                     });
                 }
@@ -103,16 +119,23 @@ namespace GolemEngine.Unity.Editor
                 {
                     Assets = assets.Values.ToArray(), Instances = instances.ToArray(),
                     Volumes = world.GetComponentsInChildren<GolemNavigationVolume>(true)
-                        .Where(m => m.GetComponentInParent<GolemNavigationWorld>(true) == world).Select(CaptureVolume).ToArray(),
+                        .Where(m => m.GetComponentInParent<GolemNavigationWorld>(true) == world).Select(m => CaptureVolume(m, ObjectID)).ToArray(),
                     Links = world.GetComponentsInChildren<GolemNavigationLink>(true)
-                        .Where(m => m.GetComponentInParent<GolemNavigationWorld>(true) == world).Select(CaptureLink).ToArray()
+                        .Where(m => m.GetComponentInParent<GolemNavigationWorld>(true) == world).Select(m => CaptureLink(m, ObjectID)).ToArray()
                 };
-                var content = GolemNavigationDocument.Build(scene, CaptureConfig(world));
-                record = new GolemScribeArtifactRecord
+                var bytes = GolemGeometryDocument.BuildNavigation(scene.Assets);
+                var binaryPath = Path.ChangeExtension(world.OutputPath, ".golemgeo").Replace('\\', '/');
+                var hash = GolemScribeManifest.ComputeBytesHash(bytes);
+                var content = GolemNavigationDocument.Build(scene, CaptureConfig(world),
+                    new NavigationGeometryReference { Path = Path.GetFileName(binaryPath), SHA256 = hash });
+                var sourceID = ObjectID(world, null);
+                records = new[]
                 {
-                    Kind = GolemScribeConstants.ArtifactKindNavigationSource, SourceGuid = ObjectIdentity(world, null),
-                    Entity = world.WorldID + "/" + world.ProfileID, Path = world.OutputPath,
-                    Hash = GolemScribeManifest.ComputeContentHash(content), PendingContent = content
+                    new GolemScribeArtifactRecord { Kind = GolemScribeConstants.ArtifactKindNavigationSource, SourceGuid = sourceID,
+                        Entity = world.WorldID + "/" + world.ProfileID, Path = world.OutputPath,
+                        Hash = GolemScribeManifest.ComputeContentHash(content), PendingContent = content },
+                    new GolemScribeArtifactRecord { Kind = GolemScribeConstants.ArtifactKindNavigationSource, SourceGuid = sourceID,
+                        Entity = world.WorldID + "/" + world.ProfileID, Path = binaryPath, Hash = hash, PendingBytes = bytes }
                 };
                 return true;
             }
@@ -171,6 +194,24 @@ namespace GolemEngine.Unity.Editor
             return new NavigationAsset { ID = id, Vertices = vertices, Triangles = triangles.ToArray() };
         }
 
+        internal static GolemHeightfield CaptureHeightfield(TerrainData data, int area)
+        {
+            if (!data) throw new InvalidOperationException("Terrain has no TerrainData asset.");
+            var resolution = data.heightmapResolution;
+            if (resolution < 2 || (long)resolution * resolution > 8 * 1024 * 1024 || 2L * (resolution - 1) * (resolution - 1) > 8 * 1024 * 1024)
+                throw new InvalidOperationException("Terrain exceeds source element limits.");
+            if (data.holesResolution != resolution - 1) throw new InvalidOperationException("Terrain holes and heightfield resolutions do not match.");
+            var heights = data.GetHeights(0, 0, resolution, resolution);
+            var holes = data.GetHoles(0, 0, resolution - 1, resolution - 1);
+            var cells = checked((resolution - 1) * (resolution - 1));
+            var result = new GolemHeightfield { Resolution = resolution, SizeX = data.size.x, SizeY = data.size.y, SizeZ = data.size.z,
+                Samples = new float[checked(resolution * resolution)], Surface = new byte[(cells + 7) / 8], Area = checked((byte)area) };
+            for (var z = 0; z < resolution; z++) for (var x = 0; x < resolution; x++) result.Samples[z * resolution + x] = heights[z, x];
+            for (var z = 0; z < resolution - 1; z++) for (var x = 0; x < resolution - 1; x++)
+                if (holes[z, x]) { var cell = z * (resolution - 1) + x; result.Surface[cell >> 3] |= (byte)(1 << (cell & 7)); }
+            result.Validate(); return result;
+        }
+
         internal static void ValidateTerrainTransform(Transform transform)
         {
             // Matches Unity's TerrainInspectorUtility.IsValidTransform contract. Terrain does not
@@ -181,8 +222,9 @@ namespace GolemEngine.Unity.Editor
                     throw new InvalidOperationException(transform.name + ": Terrain and its parents must have identity rotation and scale. Set TerrainData size, or author a MeshFilter for transformed geometry.");
         }
 
-        internal static NavigationVolume CaptureVolume(GolemNavigationVolume marker)
+        internal static NavigationVolume CaptureVolume(GolemNavigationVolume marker, Func<Component, string, string> identity = null)
         {
+            identity = identity ?? ObjectIdentity;
             var m = marker.transform.localToWorldMatrix;
             // A horizontal prism cannot represent tilt or horizontal/vertical shear faithfully.
             if (Math.Abs(m.m01) > 1e-6 || Math.Abs(m.m21) > 1e-6 || Math.Abs(m.m10) > 1e-6 || Math.Abs(m.m12) > 1e-6 || Math.Abs(m.determinant) < 1e-12)
@@ -190,7 +232,7 @@ namespace GolemEngine.Unity.Editor
             if (marker.Size.x <= 0 || marker.Size.y <= 0 || marker.Size.z <= 0) throw new InvalidOperationException(marker.name + ": volume size must be positive.");
             var volume = new NavigationVolume
             {
-                ID = ObjectIdentity(marker, marker.StableID), Revision = Revision(marker.Revision), Area = marker.Area, Exclude = marker.Exclude,
+                ID = identity(marker, marker.StableID), Revision = Revision(marker.Revision), Area = marker.Area, Exclude = marker.Exclude,
                 Priority = marker.Priority, Disabled = !marker.ExportEnabled || !marker.enabled
             };
             if (marker.Shape == NavigationVolumeShape.Cylinder)
@@ -225,9 +267,9 @@ namespace GolemEngine.Unity.Editor
             return volume;
         }
 
-        private static NavigationLink CaptureLink(GolemNavigationLink marker) => new NavigationLink
+        private static NavigationLink CaptureLink(GolemNavigationLink marker, Func<Component, string, string> identity) => new NavigationLink
         {
-            ID = ObjectIdentity(marker, marker.StableID), Revision = Revision(marker.Revision),
+            ID = identity(marker, marker.StableID), Revision = Revision(marker.Revision),
             Start = Vector(marker.transform.TransformPoint(marker.LocalStart)), End = Vector(marker.transform.TransformPoint(marker.LocalEnd)),
             Radius = marker.Radius, Area = marker.Area, Flags = marker.Flags, Bidirectional = marker.Bidirectional,
             Disabled = !marker.ExportEnabled || !marker.enabled, Profiles = marker.Profiles == null ? Array.Empty<string>() : (string[])marker.Profiles.Clone(), Action = marker.Action ?? ""

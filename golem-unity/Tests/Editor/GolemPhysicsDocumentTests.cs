@@ -23,7 +23,7 @@ namespace GolemEngine.Unity.Editor.Tests
             var content = GolemPhysicsDocument.Build(source);
             Assert.That(content, Is.EqualTo(File.ReadAllText(FixturePath()).Replace("\r\n", "\n")));
             Assert.That(GolemYamlWriter.IsScribeOwned(content), Is.True);
-            Assert.That(GolemPhysicsDocument.IsOwned(content.Replace("physics source v1", "physics source v2")), Is.False);
+            Assert.That(GolemPhysicsDocument.IsOwned(content.Replace("physics source v1", "physics source v3")), Is.False);
         }
 
         [Test]
