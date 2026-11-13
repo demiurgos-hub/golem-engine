@@ -68,6 +68,12 @@ namespace {{.GoPackage}}
         {
             client.SendOrdered(CommandBuilders.Build{{.Name}}Command({{if eq .Target "entity"}}entityId{{if .Fields}}, {{end}}{{end}}{{range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.FieldName}}{{end}}));
         }
+
+        /// <summary>Sends this command explicitly through the reliable ClientPacket stream.</summary>
+        public static void Send{{.Name}}Stream(GameClient client{{if or (eq .Target "entity") .Fields}}, {{end}}{{if eq .Target "entity"}}long entityId{{if .Fields}}, {{end}}{{end}}{{range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.CSType}} {{$f.FieldName}}{{end}})
+        {
+            client.SendStream(CommandBuilders.Build{{.Name}}Command({{if eq .Target "entity"}}entityId{{if .Fields}}, {{end}}{{end}}{{range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.FieldName}}{{end}}));
+        }
 {{end}}
 {{end}}
     }

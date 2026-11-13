@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Unity clients can explicitly send typed commands through the bounded reliable stream with `GameClient.SendStream` and generated `Send{Name}Stream` helpers, including when WebTransport datagrams are available. Existing default/ordered datagram semantics and size errors remain unchanged.
+
 - The independent `golem/geometry` module reads and writes bounded, hash-verified binary source sidecars. Canonical meshes retain float32/float64 precision; compact terrain keeps normalized float32 heights and surface bits, with explicit physical/navigation triangulation during cooking.
 - Physics and navigation source loaders accept compact Scribe v2 sidecars through `DecodeFile` or `DecodeWithGeometry`, while keeping v1 inline inputs readable. Physics applies per-placement affine transforms and reflection before exact zero-area normalization; prepared sources retain self-contained canonical geometry and deterministic fingerprints.
 - Scribe selected-world exports now write small v2 descriptors plus transactional binary sidecars: one canonical mesh per authored asset, affine placement matrices, and compact terrain samples/holes. Optional stable identity resolvers support consumer-assembled saved worlds; export results expose all committed dependency paths/hashes. Existing source ownership, no-op export and rollback protections cover binary artifacts too.

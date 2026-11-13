@@ -63,6 +63,7 @@ const csFactoryContract = `using System;using System.Collections.Generic;using S
 namespace GolemEngine.Unity {
  // Record overload selection and arguments, without reimplementing GameClient.
  public class GameClient {
+  public int StreamCalls;
   public bool Legacy; public IEntityManager Entities; public IWorldManager World; public IEventManager Events;
   public Delegate Factory; public Func<GolemConnectOptions,bool> Supported;
   public Func<byte[],object> DecodeEntity, DecodeWorld; public Func<object,byte[]> Encode; public Func<IReadOnlyList<byte[]>,byte[]> Packet;
@@ -73,7 +74,7 @@ namespace GolemEngine.Unity {
    Record(entities,decode,encode,packet,factory,world,decodeWorld,events,supported);
   }
   void Record(IEntityManager e,Func<byte[],object> d,Func<object,byte[]> c,Func<IReadOnlyList<byte[]>,byte[]> p,Delegate f,IWorldManager w,Func<byte[],object> wd,IEventManager v,Func<GolemConnectOptions,bool> s){Entities=e;DecodeEntity=d;Encode=c;Packet=p;Factory=f;World=w;DecodeWorld=wd;Events=v;Supported=s;}
-  public void Send(object command){} public void SendOrdered(object command){}
+  public void Send(object command){} public void SendOrdered(object command){} public void SendStream(object command){if(command==null)throw new Exception("stream command missing");StreamCalls++;}
  }
  public class GolemWebSocketTransport : IGolemTransport {
   public bool Connected=>false; public int MaxMessageBytes=>0; public int MaxDatagramBytes=>0;
@@ -99,6 +100,13 @@ class Program {
    Check(!builtIn.Legacy&&builtIn.Supported.Method==((Func<GolemConnectOptions,bool>)GolemTransportCapabilities.BuiltInTransportSupported).Method,"built-in capability");
    Check(builtIn.Factory.DynamicInvoke(new GolemConnectOptions("ws://localhost","websocket")) is GolemWebSocketTransport,"built-in websocket");
    Check(builtIn.Factory.DynamicInvoke(new GolemConnectOptions("https://localhost","webtransport")) is GolemWebTransportTransport,"built-in webtransport");
+   foreach(var method in type.GetMethods()) {
+    if(!method.Name.StartsWith("Send")||!method.Name.EndsWith("Stream"))continue;
+    var parameters=method.GetParameters(); var args=new object[parameters.Length];args[0]=builtIn;
+    for(int i=1;i<args.Length;i++)args[i]=parameters[i].ParameterType.IsValueType?Activator.CreateInstance(parameters[i].ParameterType):null;
+    method.Invoke(null,args);
+   }
+   Check((builtIn.StreamCalls>0)==((flags&1)!=0),"typed explicit stream helpers");
    foreach(var client in new[]{a,b,c,builtIn}){
     Check(client.Entities!=null&&client.DecodeEntity(Array.Empty<byte>()).GetType().FullName==ns+".EntityUpdate","entity setup/codec");
     Check((client.World!=null)==((flags&2)!=0)&&(client.DecodeWorld!=null)==((flags&2)!=0),"optional world");

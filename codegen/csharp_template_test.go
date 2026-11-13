@@ -90,6 +90,8 @@ func TestGenerateCSharpCreateClientTemplateWiresGeneratedCodecs(t *testing.T) {
 		"client.Send(CommandBuilders.BuildMoveCommand(entityId, dx, dy));",
 		"public static void SendMoveOrdered(GameClient client, long entityId, float dx, float dy)",
 		"client.SendOrdered(CommandBuilders.BuildMoveCommand(entityId, dx, dy));",
+		"public static void SendMoveStream(GameClient client, long entityId, float dx, float dy)",
+		"client.SendStream(CommandBuilders.BuildMoveCommand(entityId, dx, dy));",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("generated Client.cs missing %q\n%s", want, content)

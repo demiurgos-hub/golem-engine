@@ -12,6 +12,8 @@ Opt-in portable content produces only Go-server `Definitions.go` and `ContentDef
 
 Opt-in `EntityData.Physics` emits only Go-server `SetPhysicsRotation(physics3d.Quat)`, `SetPhysicsVelocity(linear, angular physics3d.Vec3)` and `SetPhysicsActive(bool)` interfaces. Rotation/velocity groups update ordinary fields under one entity lock, mark only changed tick bits and increment revision once per changed group; activation delegates to its ordinary setter. Keep fields ordinary in Go/JS/C# codecs, models and snapshots, with unchanged owner redaction and no automatic body attachment. Bindings are resolved by schema, never inferred from field names. Generated-consumer tests share encoded state bytes across Go/JS/C# and preserve the proto/fingerprint baseline. Temporary Go consumers explicitly replace all required local nested modules, including physics3d, without adding tracked replacements.
 
+Generated C# command helpers expose explicit `Send{Name}Stream` alongside the existing default and ordered sends. It forwards the same typed command builder to `GameClient.SendStream`; do not duplicate codecs or silently move oversized datagrams onto the stream. Stream/datagram ordering remains independent.
+
 `Bake` orchestrates proto output plus per-integration generation from `schema` DTOs.
 
 Consume schema's resolved envelope variants, entity wire fields, scalar/collection metadata and catalog item/key metadata; do not allocate tags or repeat type/key lookup. Legacy DTO adaptation belongs at generation boundaries. `codec_metadata.go` contains backend input adapters, not YAML policy or a universal message IR. Language-specific reader/writer mappings, omit-zero guards, public shapes and operation availability stay in codegen.

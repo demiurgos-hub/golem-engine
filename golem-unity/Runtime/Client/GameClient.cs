@@ -291,6 +291,15 @@ namespace GolemEngine.Unity
             SendCommand(command, ordered: true);
         }
 
+        /// <summary>Sends a command explicitly on the bounded reliable stream on either transport.</summary>
+        /// <remarks>Commands share stream call order and ClientPacket framing. Ordering against datagram lanes is independent.</remarks>
+        public void SendStream(object command)
+        {
+            var transport = _transport;
+            if (transport == null || !transport.Connected) return;
+            QueueReliableStreamCommand(_encodeCommand(command));
+        }
+
         private async Task<CandidateResult> ConnectCandidateAsync(
             int generation,
             string planKey,

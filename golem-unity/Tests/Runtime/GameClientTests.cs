@@ -90,6 +90,7 @@ namespace GolemEngine.Unity.Tests
         {
             Assert.That(typeof(GameClient).GetMethod("Send", new[] { typeof(object) }), Is.Not.Null);
             Assert.That(typeof(GameClient).GetMethod("SendOrdered", new[] { typeof(object) }), Is.Not.Null);
+            Assert.That(typeof(GameClient).GetMethod("SendStream", new[] { typeof(object) }), Is.Not.Null);
             Assert.That(typeof(GameClient).GetMethod("SendUnreliable"), Is.Null);
             Assert.That(typeof(GameClient).GetMethod("SendReliableUnordered"), Is.Null);
             Assert.That(typeof(GameClient).GetMethod("SendReliableOrdered"), Is.Null);
@@ -109,13 +110,15 @@ namespace GolemEngine.Unity.Tests
             client.Connect("ws://example.invalid/ws");
             var first = new byte[] { 1 };
             var second = new byte[] { 2 };
+            var third = new byte[] { 3 };
 
             client.Send(first);
-            client.SendOrdered(second);
+            client.SendStream(second);
+            client.SendOrdered(third);
             Flush(client);
 
             Assert.That(transport.Sent, Has.Count.EqualTo(1));
-            Assert.That(transport.Sent[0], Is.EqualTo(ClientPacket(new[] { first, second })));
+            Assert.That(transport.Sent[0], Is.EqualTo(ClientPacket(new[] { first, second, third })));
             Assert.That(transport.ReliableUnorderedSent, Is.Empty);
             Assert.That(transport.ReliableOrderedSent, Is.Empty);
         }
@@ -179,8 +182,55 @@ namespace GolemEngine.Unity.Tests
 
             client.Send(new byte[] { 1 });
             client.SendOrdered(new byte[] { 2 });
+            client.SendStream(new byte[] { 3 });
 
             Assert.That(encodeCalls, Is.Zero);
+        }
+
+        [Test]
+        public void ExplicitStreamCommandsPreserveFramingAndOrderWithDatagramsAvailable()
+        {
+            var transport = new RecordingTransport(GolemDatagramProtocol.MaxWebTransportDatagramBytes);
+            var client = new GameClient(new RecordingEntityManager(), bytes => bytes, command => (byte[])command, ClientPacket, _ => transport);
+            client.Connect("https://example.invalid/wt");
+            var first = new byte[4096]; first[0] = 7;
+            var second = new byte[] { 2, 3 };
+            client.SendStream(first);
+            client.SendStream(second);
+            client.SendOrdered(new byte[] { 9 });
+            Assert.That(transport.ReliableOrderedSent, Has.Count.EqualTo(1));
+            Flush(client);
+            Assert.That(transport.Sent, Has.Count.EqualTo(1));
+            Assert.That(transport.Sent[0], Is.EqualTo(ClientPacket(new[] { first, second })));
+            Assert.That(transport.ReliableUnorderedSent, Is.Empty);
+        }
+
+        [Test]
+        public void ExplicitStreamRejectsOversizeAndSplitsAtFramedLimit()
+        {
+            var transport = new RecordingTransport(GolemDatagramProtocol.MaxWebTransportDatagramBytes);
+            var client = new GameClient(new RecordingEntityManager(), bytes => bytes, command => (byte[])command, ClientPacket, _ => transport);
+            client.Connect("https://example.invalid/wt");
+            Assert.Throws<InvalidOperationException>(() => client.SendStream(new byte[GameClient.MaxReliableMessageBytes - 3]));
+            client.SendStream(new byte[GameClient.MaxReliableMessageBytes - 4]);
+            client.SendStream(new byte[] { 1 });
+            Flush(client);
+            Assert.That(transport.Sent, Has.Count.EqualTo(2));
+            Assert.That(transport.Sent[0].Length, Is.EqualTo(GameClient.MaxReliableMessageBytes));
+            Assert.That(transport.Sent[1], Is.EqualTo(ClientPacket(new[] { new byte[] { 1 } })));
+            Assert.That(transport.ReliableOrderedSent, Is.Empty);
+        }
+
+        [Test]
+        public void DisconnectClearsPendingExplicitStreamCommands()
+        {
+            var transport = new RecordingTransport(GolemDatagramProtocol.MaxWebTransportDatagramBytes);
+            var client = new GameClient(new RecordingEntityManager(), bytes => bytes, command => (byte[])command, ClientPacket, _ => transport);
+            client.Connect("https://example.invalid/wt");
+            client.SendStream(new byte[] { 7 });
+            client.Disconnect();
+            Flush(client);
+            Assert.That(transport.Sent, Is.Empty);
         }
 
         [Test]
