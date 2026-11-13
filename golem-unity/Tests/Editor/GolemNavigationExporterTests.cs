@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using NUnit.Framework;
@@ -69,6 +70,108 @@ namespace GolemEngine.Unity.Editor.Tests
             EditorSceneManager.SaveScene(scene);
             Assert.That(GolemNavigationExporter.TryCollect(world, out record, out error), Is.False);
             Assert.That(record, Is.Null); Assert.That(error, Does.Contain("exactly one MeshFilter or Terrain"));
+        }
+
+        [Test]
+        public void ImportedNonReadableNavigationMeshPreservesBytesWithoutChangingImporter()
+        {
+            var path = folder + "/navigation.obj";
+            File.WriteAllText(path, "o Navigation\nv 0 0 0\nv 0 0 2\nv 3 0 0\nf 1 2 3\n");
+            AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport);
+            var importer = (ModelImporter)AssetImporter.GetAtPath(path);
+            importer.isReadable = true; importer.SaveAndReimport();
+            var world = new GameObject("World").AddComponent<GolemNavigationWorld>();
+            var filter = world.gameObject.AddComponent<MeshFilter>();
+            filter.sharedMesh = AssetDatabase.LoadAllAssetsAtPath(path).OfType<Mesh>().Single();
+            world.gameObject.AddComponent<GolemNavigationSource>().Area = 3;
+            Assert.That(EditorSceneManager.SaveScene(scene, folder + "/world.unity"), Is.True);
+            Assert.That(GolemNavigationExporter.TryCollectArtifacts(world, null, out var readable, out var error), Is.True, error);
+            importer.isReadable = false; importer.SaveAndReimport();
+            filter.sharedMesh = AssetDatabase.LoadAllAssetsAtPath(path).OfType<Mesh>().Single();
+            EditorSceneManager.SaveScene(scene);
+            var metadata = File.ReadAllBytes(path + ".meta");
+            Assert.That(GolemNavigationExporter.TryCollectArtifacts(world, null, out var readOnly, out error), Is.True, error);
+            Assert.That(readOnly[0].PendingContent, Is.EqualTo(readable[0].PendingContent));
+            Assert.That(readOnly[1].PendingBytes, Is.EqualTo(readable[1].PendingBytes));
+            Assert.That(filter.sharedMesh.isReadable, Is.False);
+            Assert.That(((ModelImporter)AssetImporter.GetAtPath(path)).isReadable, Is.False);
+            Assert.That(File.ReadAllBytes(path + ".meta"), Is.EqualTo(metadata));
+        }
+
+        [Test]
+        public void MeshSnapshotPreservesSubmeshOrderBaseVerticesAndArea()
+        {
+            var mesh = new Mesh { vertices = new[] { Vector3.zero, Vector3.forward, Vector3.right, Vector3.up, Vector3.up + Vector3.forward, Vector3.up + Vector3.right } };
+            try
+            {
+                mesh.subMeshCount = 2;
+                mesh.SetIndices(new[] { 0, 1, 2 }, MeshTopology.Triangles, 0, false, 3);
+                mesh.SetIndices(new[] { 0, 2, 1 }, MeshTopology.Triangles, 1, false, 0);
+                var captured = GolemNavigationExporter.CaptureMesh(mesh, "mesh", 7);
+                Assert.That(captured.Triangles[0].Indices, Is.EqualTo(new uint[] { 3, 4, 5 }));
+                Assert.That(captured.Triangles[1].Indices, Is.EqualTo(new uint[] { 0, 2, 1 }));
+                Assert.That(captured.Triangles.All(face => face.Area == 7), Is.True);
+                Assert.That(captured.Vertices.Select(point => new Vector3((float)point.X, (float)point.Y, (float)point.Z)), Is.EqualTo(mesh.vertices));
+                mesh.SetIndices(new[] { 0, 1 }, MeshTopology.Lines, 1);
+                Assert.Throws<InvalidOperationException>(() => GolemNavigationExporter.CaptureMesh(mesh, "mesh", 7));
+            }
+            finally { UnityEngine.Object.DestroyImmediate(mesh); }
+        }
+
+        [Test]
+        public void ExplicitColliderSourcesShareCanonicalBuffersAndKeepMarkerState()
+        {
+            var world = new GameObject("World").AddComponent<GolemNavigationWorld>();
+            for (var index = 0; index < 2; index++)
+            {
+                var owner = new GameObject("Collider" + index); owner.transform.SetParent(world.transform, false);
+                owner.transform.localPosition = new Vector3(index * 5, 2, 1);
+                owner.transform.localScale = new Vector3(index == 0 ? 1 : -2, 3, 4);
+                var box = owner.AddComponent<BoxCollider>(); box.center = new Vector3(1, 2, 3); box.size = new Vector3(2, 4, 6);
+                box.isTrigger = true; box.enabled = false;
+                var marker = owner.AddComponent<GolemNavigationSource>(); marker.SourceCollider = box; marker.Area = 4; marker.ExportEnabled = index == 0;
+            }
+            EditorSceneManager.SaveScene(scene, folder + "/world.unity");
+            Assert.That(GolemNavigationExporter.TryCollectArtifacts(world, null, out var records, out var error), Is.True, error);
+            Assert.That(BitConverter.ToUInt32(records[1].PendingBytes, 8), Is.EqualTo(1));
+            Assert.That(Regex.Matches(records[0].PendingContent, "\"AssetID\"").Count, Is.EqualTo(2));
+            Assert.That(records[0].PendingContent, Does.Contain("\"Disabled\":false").And.Contain("\"Disabled\":true"));
+            Assert.That(records[0].PendingContent, Does.Contain("\"Transform\":[-4,0,0,3,0,12,0,8,0,0,24,13,0,0,0,1]"));
+            var nested = new GameObject("Nested world").AddComponent<GolemNavigationWorld>(); nested.transform.SetParent(world.transform);
+            world.GetComponentInChildren<GolemNavigationSource>().SourceCollider = nested.gameObject.AddComponent<BoxCollider>();
+            EditorSceneManager.SaveScene(scene);
+            Assert.That(GolemNavigationExporter.TryCollectArtifacts(world, null, out _, out error), Is.False);
+            Assert.That(error, Does.Contain("same navigation world"));
+        }
+
+        [TestCase("box", 1)]
+        [TestCase("sphere", 1)]
+        [TestCase("capsule", 0)]
+        [TestCase("capsule", 1)]
+        [TestCase("capsule", 2)]
+        public void PrimitiveSurfacesPreserveAnalyticBoundsAreaAndOutwardWinding(string shape, int axis)
+        {
+            var owner = new GameObject("Primitive");
+            Collider collider;
+            Vector3 expectedSize;
+            if (shape == "box") { var box = owner.AddComponent<BoxCollider>(); box.size = new Vector3(2, 4, 6); collider = box; expectedSize = box.size; }
+            else if (shape == "sphere") { var sphere = owner.AddComponent<SphereCollider>(); sphere.radius = 2; collider = sphere; expectedSize = Vector3.one * 4; }
+            else { var capsule = owner.AddComponent<CapsuleCollider>(); capsule.radius = 1; capsule.height = 6; capsule.direction = axis; collider = capsule; expectedSize = Vector3.one * 2; expectedSize[axis] = 6; }
+            var id = GolemNavigationPrimitiveGeometry.Identity(collider, 5);
+            var asset = GolemNavigationPrimitiveGeometry.Capture(collider, id, 5);
+            var transform = GolemNavigationPrimitiveGeometry.Transform(collider);
+            var points = asset.Vertices.Select(point => transform.MultiplyPoint3x4(new Vector3((float)point.X, (float)point.Y, (float)point.Z))).ToArray();
+            for (var dimension = 0; dimension < 3; dimension++)
+                Assert.That(points.Max(point => point[dimension]) - points.Min(point => point[dimension]), Is.EqualTo(expectedSize[dimension]).Within(.00001));
+            foreach (var face in asset.Triangles)
+            {
+                var a = points[face.Indices[0]]; var b = points[face.Indices[1]]; var c = points[face.Indices[2]];
+                Assert.That(Vector3.Dot(Vector3.Cross(b - a, c - a), (a + b + c) / 3), Is.GreaterThan(0), "Degenerate or inward primitive triangle");
+                Assert.That(face.Area, Is.EqualTo(5));
+            }
+            var source = GolemNavigationDocumentTests.Scene(); source.Assets = new[] { asset };
+            source.Instances = new[] { new NavigationInstance { ID = "primitive", AssetID = id, Revision = 1, Transform = GolemNavigationExporter.Matrix(transform) } };
+            Assert.DoesNotThrow(() => GolemNavigationDocument.Build(source, GolemNavigationDocumentTests.Config()));
         }
 
         [Test]

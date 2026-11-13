@@ -124,6 +124,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Navigation authoring reads imported meshes without requiring runtime Read/Write or modifying importers. Explicit `SourceCollider` selection supports shared box, sphere, capsule and mesh sources, removing the need for consumer-created mesh copies and primitive conversion assets.
+
 - Published root and Box3D modules now pin compatible published portable physics/navigation dependencies instead of development placeholders. The Box3D fork mapping remains explicit because the fork still declares the upstream module path; Go consumers must retain that one replacement.
 
 - Precise sweeps clip subsequent searches after a nearer hit while preserving equal-distance identities and unchanged geometric accuracy. Rounded mesh contacts use bounded scratch sized to their actual maximum output without dropping triangles or contact points.

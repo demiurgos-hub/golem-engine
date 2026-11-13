@@ -3,8 +3,10 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.IO;
+using Unity.Collections;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace GolemEngine.Unity.Editor
 {
@@ -101,18 +103,42 @@ namespace GolemEngine.Unity.Editor
                 foreach (var marker in world.GetComponentsInChildren<GolemNavigationSource>(true))
                 {
                     if (marker.GetComponentInParent<GolemNavigationWorld>(true) != world) continue;
-                    var mesh = marker.GetComponent<MeshFilter>(); var terrain = marker.GetComponent<Terrain>();
-                    if ((mesh == null) == (terrain == null)) throw new InvalidOperationException(marker.name + ": source requires exactly one MeshFilter or Terrain on the same object.");
-                    if (terrain != null) ValidateTerrainTransform(marker.transform);
                     if (marker.Area < 0 || marker.Area > 63) throw new InvalidOperationException(marker.name + ": area must be 0..63.");
-                    var assetObject = mesh != null ? (UnityEngine.Object)mesh.sharedMesh : terrain.terrainData;
-                    var assetID = identity.Asset(assetObject, () => AssetIdentity(assetObject)) + "/area/" + marker.Area.ToString(CultureInfo.InvariantCulture);
-                    if (!assets.ContainsKey(assetID)) assets.Add(assetID, mesh != null
-                        ? CaptureMesh(mesh.sharedMesh, assetID, marker.Area) : new NavigationAsset { ID = assetID, Heightfield = CaptureHeightfield(terrain.terrainData, marker.Area) });
+                    var transform = marker.transform.localToWorldMatrix;
+                    string assetID;
+                    if (marker.SourceCollider)
+                    {
+                        var collider = marker.SourceCollider;
+                        if (collider.GetComponentInParent<GolemNavigationWorld>(true) != world)
+                            throw new InvalidOperationException(marker.name + ": explicit collider must belong to the same navigation world.");
+                        if (collider is MeshCollider meshCollider)
+                        {
+                            var meshAsset = meshCollider.sharedMesh;
+                            assetID = identity.Asset(meshAsset, () => AssetIdentity(meshAsset)) + "/area/" + marker.Area.ToString(CultureInfo.InvariantCulture);
+                            if (!assets.ContainsKey(assetID)) assets.Add(assetID, CaptureMesh(meshAsset, assetID, marker.Area));
+                            transform = collider.transform.localToWorldMatrix;
+                        }
+                        else
+                        {
+                            assetID = GolemNavigationPrimitiveGeometry.Identity(collider, marker.Area);
+                            if (!assets.ContainsKey(assetID)) assets.Add(assetID, GolemNavigationPrimitiveGeometry.Capture(collider, assetID, marker.Area));
+                            transform = GolemNavigationPrimitiveGeometry.Transform(collider);
+                        }
+                    }
+                    else
+                    {
+                        var mesh = marker.GetComponent<MeshFilter>(); var terrain = marker.GetComponent<Terrain>();
+                        if ((mesh == null) == (terrain == null)) throw new InvalidOperationException(marker.name + ": source requires exactly one MeshFilter or Terrain on the same object, or an explicit SourceCollider.");
+                        if (terrain != null) ValidateTerrainTransform(marker.transform);
+                        var assetObject = mesh != null ? (UnityEngine.Object)mesh.sharedMesh : terrain.terrainData;
+                        assetID = identity.Asset(assetObject, () => AssetIdentity(assetObject)) + "/area/" + marker.Area.ToString(CultureInfo.InvariantCulture);
+                        if (!assets.ContainsKey(assetID)) assets.Add(assetID, mesh != null
+                            ? CaptureMesh(mesh.sharedMesh, assetID, marker.Area) : new NavigationAsset { ID = assetID, Heightfield = CaptureHeightfield(terrain.terrainData, marker.Area) });
+                    }
                     instances.Add(new NavigationInstance
                     {
                         ID = ObjectID(marker, marker.StableID), AssetID = assetID, Revision = Revision(marker.Revision),
-                        Transform = Matrix(marker.transform.localToWorldMatrix), Disabled = !marker.ExportEnabled || !marker.enabled
+                        Transform = Matrix(transform), Disabled = !marker.ExportEnabled || !marker.enabled
                     });
                 }
                 var scene = new NavigationScene
@@ -158,16 +184,49 @@ namespace GolemEngine.Unity.Editor
 
         internal static NavigationAsset CaptureMesh(Mesh mesh, string id, int area)
         {
-            if (mesh == null || !mesh.isReadable) throw new InvalidOperationException("Navigation meshes must exist and have Read/Write enabled; no asset import settings are changed automatically.");
-            for (var i = 0; i < mesh.subMeshCount; i++)
-                if (mesh.GetTopology(i) != MeshTopology.Triangles) throw new InvalidOperationException(mesh.name + ": non-triangle submesh is unsupported.");
-            if (mesh.vertexCount > 8 * 1024 * 1024) throw new InvalidOperationException(mesh.name + ": mesh vertex limit exceeded.");
-            var indices = mesh.triangles;
-            if (indices.Length % 3 != 0 || indices.Length / 3 > 8 * 1024 * 1024) throw new InvalidOperationException(mesh.name + ": invalid or oversized triangle array.");
-            var triangles = new NavigationTriangle[indices.Length / 3];
-            for (var i = 0; i < triangles.Length; i++) triangles[i] = new NavigationTriangle
-            { Indices = new[] { checked((uint)indices[i * 3]), checked((uint)indices[i * 3 + 1]), checked((uint)indices[i * 3 + 2]) }, Area = area };
-            return new NavigationAsset { ID = id, Vertices = mesh.vertices.Select(Vector).ToArray(), Triangles = triangles };
+            if (!mesh) throw new InvalidOperationException("Navigation mesh is missing.");
+            // Editor snapshots do not require a runtime CPU copy or importer mutation.
+            using (var snapshot = MeshUtility.AcquireReadOnlyMeshData(mesh))
+            {
+                var data = snapshot[0];
+                if (data.vertexCount > 8 * 1024 * 1024) throw new InvalidOperationException(mesh.name + ": mesh vertex limit exceeded.");
+                long count = 0;
+                for (var submesh = 0; submesh < data.subMeshCount; submesh++)
+                {
+                    var section = data.GetSubMesh(submesh);
+                    if (section.topology != MeshTopology.Triangles) throw new InvalidOperationException(mesh.name + ": non-triangle submesh is unsupported.");
+                    if (section.indexCount % 3 != 0) throw new InvalidOperationException(mesh.name + ": invalid triangle array.");
+                    count += section.indexCount;
+                    if (count / 3 > 8 * 1024 * 1024) throw new InvalidOperationException(mesh.name + ": mesh triangle limit exceeded.");
+                }
+                var vertices = new NavigationVector[data.vertexCount];
+                using (var positions = new NativeArray<Vector3>(data.vertexCount, Allocator.TempJob, NativeArrayOptions.UninitializedMemory))
+                {
+                    data.GetVertices(positions);
+                    for (var index = 0; index < vertices.Length; index++) vertices[index] = Vector(positions[index]);
+                }
+                var triangles = new NavigationTriangle[checked((int)(count / 3))];
+                var next = 0;
+                for (var submesh = 0; submesh < data.subMeshCount; submesh++)
+                {
+                    using (var indices = new NativeArray<int>(data.GetSubMesh(submesh).indexCount, Allocator.TempJob, NativeArrayOptions.UninitializedMemory))
+                    {
+                        data.GetIndices(indices, submesh, true);
+                        for (var index = 0; index < indices.Length; index += 3)
+                        {
+                            var face = new uint[3];
+                            for (var corner = 0; corner < 3; corner++)
+                            {
+                                var vertex = indices[index + corner];
+                                if (vertex < 0 || vertex >= vertices.Length) throw new InvalidOperationException(mesh.name + ": triangle vertex index is outside the mesh.");
+                                face[corner] = (uint)vertex;
+                            }
+                            triangles[next++] = new NavigationTriangle { Indices = face, Area = area };
+                        }
+                    }
+                }
+                return new NavigationAsset { ID = id, Vertices = vertices, Triangles = triangles };
+            }
         }
 
         internal static NavigationAsset CaptureTerrain(TerrainData data, string id, int area)
