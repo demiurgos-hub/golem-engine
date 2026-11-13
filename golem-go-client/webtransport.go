@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sync"
@@ -17,6 +18,7 @@ import (
 )
 
 const (
+	webTransportCloseWriteTimeout     = 100 * time.Millisecond
 	datagramAckCoalesceDelay          = 1 * time.Millisecond
 	datagramSchedulerInterval         = 2 * time.Millisecond
 	datagramReliableRetryBaseDelay    = 75 * time.Millisecond
@@ -262,10 +264,19 @@ func (p *datagramProtocol) wrapStreamPayload(payload []byte) []byte {
 	return netwire.AppendACKControl(nil, ack, payload)
 }
 
+// webTransportStream keeps shutdown deadlines on the same stream as framed writes.
+type webTransportStream interface {
+	io.ReadWriteCloser
+	CancelRead(webtransport.StreamErrorCode)
+	CancelWrite(webtransport.StreamErrorCode)
+	SetReadDeadline(time.Time) error
+	SetWriteDeadline(time.Time) error
+}
+
 // WebTransportChannel implements ReliableMessageChannel over WebTransport.
 type WebTransportChannel struct {
 	session   *webtransport.Session
-	stream    *webtransport.Stream
+	stream    webTransportStream
 	protocol  *datagramProtocol
 	callbacks channelCallbacks
 	writeMu   sync.Mutex
@@ -354,6 +365,9 @@ func (c *WebTransportChannel) Send(data []byte) error {
 	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if !c.Connected() {
+		return nil
+	}
 	return sanitizeURLError(writeReliableFrame(c.stream, c.protocol.wrapStreamPayload(data)))
 }
 
@@ -372,18 +386,41 @@ func (c *WebTransportChannel) SendReliableOrdered(data []byte) error {
 	return sanitizeURLError(c.protocol.send(datagramLaneReliableOrdered, data))
 }
 
-// Close closes the WebTransport session.
+// Close closes the WebTransport session. The best-effort close-control write is
+// bounded; pending stream I/O is interrupted even when the peer already closed.
 func (c *WebTransportChannel) Close() error {
-	c.closeOnce.Do(func() {
-		c.connected.Store(false)
-		c.doneOnce.Do(func() { close(c.done) })
-		_ = writeReliableFrame(c.stream, netwire.AppendCloseControl(nil))
-		c.stream.CancelRead(0)
-		c.stream.CancelWrite(0)
-		_ = c.stream.Close()
-		_ = c.session.CloseWithError(0, "client disconnect")
-	})
+	graceful := c.connected.Swap(false)
+	c.shutdown(graceful)
 	return nil
+}
+
+func (c *WebTransportChannel) shutdown(graceful bool) {
+	c.closeOnce.Do(func() {
+		c.doneOnce.Do(func() { close(c.done) })
+		if c.stream != nil {
+			deadline := time.Now()
+			_ = c.stream.SetReadDeadline(deadline)
+			if graceful {
+				deadline = deadline.Add(webTransportCloseWriteTimeout)
+			}
+			// Set deadlines before waiting for an active Send. CancelRead/Write
+			// alone cannot release webtransport-go's session-gone metadata wait
+			// after both stream halves have left its session registry.
+			_ = c.stream.SetWriteDeadline(deadline)
+			c.writeMu.Lock()
+			if graceful && (c.session == nil || c.session.Context().Err() == nil) {
+				_ = writeReliableFrame(c.stream, netwire.AppendCloseControl(nil))
+			}
+			_ = c.stream.SetWriteDeadline(time.Now())
+			c.stream.CancelRead(0)
+			c.stream.CancelWrite(0)
+			_ = c.stream.Close()
+			c.writeMu.Unlock()
+		}
+		if c.session != nil {
+			_ = c.session.CloseWithError(0, "client disconnect")
+		}
+	})
 }
 
 // OnOpen registers an open callback and fires immediately for an already-open connection.
@@ -507,7 +544,7 @@ func (c *WebTransportChannel) closeWithError(err error) {
 	}
 	err = sanitizeURLError(err)
 	log.Printf("golem-go-client: webtransport channel closed error=%v", err)
-	c.doneOnce.Do(func() { close(c.done) })
+	c.shutdown(false)
 	if c.callbacks.onClose != nil {
 		c.callbacks.onClose(DisconnectInfo{WasClean: false, Err: err})
 	}

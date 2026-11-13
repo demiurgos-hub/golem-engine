@@ -132,6 +132,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Native Go WebTransport shutdown no longer hangs after peer logout or blocked stream I/O. The close-control write is serialized and bounded, terminal failures release the physical session before notifying the client, and queued sends cannot write after shutdown begins.
+
 - Navigation triangulation preserves obstacle holes at duplicated contour bridge endpoints by validating each diagonal inside both endpoint cones. Authored geometry and strict polygon validation remain unchanged.
 
 - Navigation baking preserves narrow walkable contour topology when simplified wall chords intersect. It retains original boundary samples without changing geometry, clearance, resolution or shared portals; invalid tile errors now identify the offending polygon and edge.
