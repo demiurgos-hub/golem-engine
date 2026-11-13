@@ -1,0 +1,6 @@
+{
+  "name": "Golem.Integration.Fixture",
+  "rootNamespace": "Golem.Integration.Fixture",
+  "references": ["GolemEngine.Unity"],
+  "autoReferenced": false
+}

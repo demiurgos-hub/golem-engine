@@ -1,5 +1,5 @@
 ---
-description: integration/unity - Unity/C# runtime, definition-based presentation, explicit Scribe content export sets and portable sources, transactional writes and focused tests.
+description: integration/unity - Unity/C# runtime, definition-based presentation, explicit Scribe content export sets and portable sources, transactional writes and bounded live integration tests.
 globs:
   - golem-unity/**/*
   - codegen/templates/csharp/**/*.tmpl
@@ -12,10 +12,14 @@ globs:
   - qualification/PhysicsUnity.ps1
   - qualification/PhysicsCatalog.ps1
   - qualification/physics/*catalog*.py
+  - qualification/unity-integration/**/*.cs
+  - qualification/Run-UnityIntegration.py
 alwaysApply: false
 ---
 
 # `integration/unity`
+
+The live Unity/Go fixture under `qualification/unity-integration` consumes the generated protocol from `examples/unity-integration`. Keep those test assemblies outside the package: the Unity package must not depend on an example's generated types. Its selected prefab visuals and real socket tests validate existing definition selection, transform binding and paired recovery; no scene-instance exporter or connection framework is introduced. Follow `subsystem-unity-integration-fixture.mdc` for retained project/assets, exact package staging and evidence boundaries.
 
 **Gameplay content:** `GolemContentExportSet` selects explicit saved roots and external adapter keys. Adapters capture data with `GolemContentBuilder`; they do not execute gameplay, discover dependencies or port executable code. Merge and validate all schemas/definitions before one source-scoped `content_source` transaction. Existing entity YAML is referenced through explicit entity bindings, never rewritten by content export. The exact JSON ownership prefix is `{"generator":"Golem Scribe content v1",`. Exported schema_hash is optional only for authoring; bake finalizes and runtime requires it. General Scribe validation checks recorded ownership/hash without recapturing unloaded sets. No ExportAll/scheduler discovery, automatic bake or client gameplay-data projection is implied. Definition IDs are namespace/type/key; provenance uses GUID plus 64-bit local file ID. Missing selected references fail without expanding the root set. Pure JSON preparation bounds input, lists and schema dependencies; memoize shared inline dependency walks.
 

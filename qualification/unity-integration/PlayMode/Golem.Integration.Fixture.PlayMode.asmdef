@@ -1,0 +1,11 @@
+{
+  "name": "Golem.Integration.Fixture.PlayMode",
+  "rootNamespace": "Golem.Integration.Fixture.Tests",
+  "references": [
+    "GolemEngine.Unity",
+    "Golem.Integration.Generated",
+    "Golem.Integration.Fixture"
+  ],
+  "autoReferenced": false,
+  "optionalUnityReferences": ["TestAssemblies"]
+}

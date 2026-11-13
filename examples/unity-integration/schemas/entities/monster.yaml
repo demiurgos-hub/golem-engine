@@ -1,0 +1,5 @@
+entity: Monster
+persistent: true
+vars:
+  definition_id: {tag: 1, type: string, sync: once}
+  health: {tag: 2, type: int32, sync: tick}

@@ -22,6 +22,7 @@ Golem Engine is a Go module for building multiplayer game backends. It includes 
 | `golem/navigation*.go` | Server-owned navigation scheduling, movement/motor/traversal policy, lifecycle and checkpoint intents. |
 | `examples/navigation-stress/` | Separate module exercising the actual server against seeded worlds, churn and checkpoint/restart. |
 | `examples/physics-stress/` | Separate actual-server physics/navigation workload with fixed full counts, explicit reduced diagnostics and validation-workspace evidence. |
+| `examples/unity-integration/` | Small generated Go consumer for live Unity definition presentation, physical navigation and paired restart; fixture sources and runner live under `qualification/`. |
 | `qualification/` | Isolated candidate archives and workload/platform qualification tooling; generated evidence belongs in the validation workspace. |
 | `golem/auth/` | Token-in-query-param `OnUpgrade` handshake helper (not an account/JWT framework). |
 | `golem-go-client/` | Native Go client runtime. |
@@ -61,6 +62,7 @@ The instructions in this subsection are for Codex only. Cursor already loads `.c
 - Nested Go modules under `golem/collision/` and `golem/nav/` are developed with a local `go.work`. Do not commit `go.work` or `go.work.sum`.
 - Test `golem/nav/navmesh` and `examples/navigation-server` explicitly; root `./...` excludes them. Standalone release checks use `GOWORK=off` and published dependency versions. External temporary modfiles may qualify unpublished local source, but are not evidence that release dependencies resolve.
 - Test `examples/navigation-stress` separately. Navigation qualification builds, execution, generated worlds, temporary files and caches belong under `C:/Demiurgos/navmesh-validation/world-test`; preserve completed run directories. Timing workloads must not overlap fuzzing or unrelated benchmarks. Report cadence and missing measurements alongside latency.
+- Test `examples/unity-integration` separately. Its live Unity runner reuses the existing content-validation project, stages exact package/generated sources, and preserves each run under `D:/Demiurgos/tests/physics-validation`. This bounded integration is not performance or published-dependency qualification.
 - JS runtime: run `npm test` in `golem-js/`.
 - Phaser package: run `npm test` in `golem-phaser/`.
 - Threlte package: build `golem-js/` first, then run `npm test` in `golem-threlte/`; browser tests use Playwright Chromium. Run the example's `npm run check` and `npm run build` from `examples/threlte/`.

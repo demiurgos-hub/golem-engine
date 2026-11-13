@@ -1,0 +1,18 @@
+---
+description: bounded live Unity/Go integration fixture — existing content export, generated client, physical navigation and paired process restart; no new world or lifecycle framework.
+globs:
+  - examples/unity-integration/**/*
+  - qualification/Run-UnityIntegration.py
+  - qualification/unity-integration/**/*
+alwaysApply: false
+---
+
+# Live Unity integration fixture
+
+The nested Go consumer explicitly creates two scouts and one guard from the existing content definitions. It uses ordinary generated entities, consumer factories, physics attachments, runtime-generated navigation and paired checkpoint APIs. Its loopback HTTP controls exist only to drive bounded test phases. Never move these controls into the runtime, add a scene/placement format, or replace the engine's startup and connection contracts.
+
+The committed Unity fixture sources are staged into the existing content-validation project. Package tests must not acquire a dependency on this example's generated protocol. Runtime prefab observation, explicit Editor content export and generated-client PlayMode tests use separate assemblies. Initial views must be created by real socket-delivered generated entities, not by a probe manager. Restore validates pinned content and saved state and skips fresh construction; deleted entities stay absent.
+
+`Run-UnityIntegration.py` is test automation only. It stages a fresh package, external workspace and consumer; records exact source/generated/package identities; runs finite state-based checks; and stops only its own server processes. Refuse an already-open target Editor and preserve unrelated Editors. Refuse edited/unowned fixture source collisions. Preserve previous run directories, reports, packages and retained fixture assets. All new binaries, logs, caches and temporary files belong under `D:/Demiurgos/tests/physics-validation`; local workspace replacements are never release-install evidence.
+
+Acceptance covers content export, three initial views, physical blocking plus an unobstructed route, changed health/deletion, paired checkpoint, fresh-process restoration and continued intent. Add focused checks for concrete defects only. No physics/navigation requalification, timed workload, broad asset scan, Fractured mutation, platform matrix, publication or remote changes are implied.

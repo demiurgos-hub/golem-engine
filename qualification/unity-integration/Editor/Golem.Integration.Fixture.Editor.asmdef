@@ -1,0 +1,13 @@
+{
+  "name": "Golem.Integration.Fixture.Editor",
+  "rootNamespace": "Golem.Integration.Fixture.Editor",
+  "references": [
+    "GolemEngine.Unity",
+    "GolemEngine.Unity.Editor",
+    "GolemEngine.Unity.ScribeFixtures",
+    "Golem.Integration.Fixture"
+  ],
+  "includePlatforms": ["Editor"],
+  "autoReferenced": false,
+  "optionalUnityReferences": ["TestAssemblies"]
+}

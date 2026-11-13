@@ -1,0 +1,19 @@
+entity_schema: schemas/entities
+simulation:
+  dimensions: 3
+content:
+  schema: content/demo.schema.json
+  bundle: content/demo.bundle.json
+proto:
+  package: integration
+  out: entities.proto
+integrations:
+  go-server:
+    out: generated
+    package: generated
+  csharp-client:
+    out: csharp
+    package: Golem.Integration
+  unity:
+    out: csharp
+    package: Golem.Integration

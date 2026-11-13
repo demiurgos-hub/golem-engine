@@ -1,5 +1,5 @@
 ---
-description: bake pipeline — schema/code generation, explicit Scribe content definition bundles, portable navigation/physics source ownership and codec compatibility.
+description: bake pipeline — schema/code generation, explicit Scribe content definition bundles, bounded generated Unity integration, portable navigation/physics source ownership and codec compatibility.
 globs:
   - schema/**/*.go
   - codegen/**/*.go
@@ -11,6 +11,7 @@ globs:
   - golem/physics3d/box3d/dynamics_reference_test.go
   - examples/navigation-stress/**/*.go
   - examples/physics-stress/**/*.go
+  - examples/unity-integration/**/*
   - qualification/**/*
   - golem-unity/Editor/Scribe/GolemPhysics*.cs
   - golem-unity/Editor/Scribe/GolemContent*.cs
@@ -20,6 +21,8 @@ alwaysApply: false
 ---
 
 # `bake` pipeline
+
+`examples/unity-integration` is a small generated consumer, not a world assembly or build coordinator. Its test runner explicitly exports the existing bounded content set through Scribe, runs ordinary codegen in a staged consumer, and exercises a real Unity client with runtime navigation and paired physics recovery. Keep handwritten consumer inputs separate from generated Go/C# output, and never hand-edit generated files. New evidence belongs under the physics validation workspace; retain the source/package hashes and distinguish local replacements from published resolution. Scene/gameplay-instance export remains deferred.
 
 Scribe content exports are selected-set authoring operations with explicit roots/adapters and declared imports. They share the existing ownership/transaction infrastructure but never write replication entity schemas or expand asset dependencies. `golem-bake` consumes optional content schema/bundle configuration, validates all references and entity-type bindings before any output, then emits immutable Go access and finalized content JSON only for `go-server`. Authoring sources may omit schema_hash; finalized loaders require it. Preserve existing catalogs, protocol output and legacy fingerprints. Content setup/restore and Unity presentation have independent focused tests; no consumer-wide export or completed physics/navigation qualification is implied.
 
