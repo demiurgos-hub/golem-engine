@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Navigation source decoding validates transformed geometry without retaining every placed triangle or computing discarded fingerprints. Strict and non-strict source admission remain consistent with baking.
+
 - Unity clients can explicitly send typed commands through the bounded reliable stream with `GameClient.SendStream` and generated `Send{Name}Stream` helpers, including when WebTransport datagrams are available. Existing default/ordered datagram semantics and size errors remain unchanged.
 
 - The independent `golem/geometry` module reads and writes bounded, hash-verified binary source sidecars. Canonical meshes retain float32/float64 precision; compact terrain keeps normalized float32 heights and surface bits, with explicit physical/navigation triangulation during cooking.

@@ -44,7 +44,8 @@ func DecodeFile(path string) (Source, error) {
 }
 
 // DecodeWithGeometry resolves compact mesh/heightfield assets before ordinary
-// navigation validation. Existing inline sources do not need a resolver.
+// navigation validation without retaining expanded placements or discarded
+// geometry hashes. Existing inline sources do not need a resolver.
 func DecodeWithGeometry(reader io.Reader, resolve geometry.Resolver) (Source, error) {
 	var source Source
 	if reader == nil {
@@ -88,7 +89,7 @@ func DecodeWithGeometry(reader io.Reader, resolve geometry.Resolver) (Source, er
 	if err := source.Config.Validate(); err != nil {
 		return Source{}, err
 	}
-	if _, err := source.Scene.Resolve(source.Config.Settings.Origin, source.Config.Strict); err != nil {
+	if err := source.Scene.Validate(source.Config.Settings.Origin, source.Config.Strict); err != nil {
 		return Source{}, err
 	}
 	return source, nil

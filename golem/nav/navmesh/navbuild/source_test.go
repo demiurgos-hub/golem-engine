@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	navigation "github.com/demiurgos-hub/navmesh-go"
@@ -13,6 +15,77 @@ import (
 	"github.com/demiurgos-hub/navmesh-go/bake"
 	"github.com/demiurgos-hub/navmesh-go/geom"
 )
+
+func TestDecodePreservesGeometryAdmission(t *testing.T) {
+	for _, mode := range []string{"valid", "degenerate", "invalid index", "missing asset", "transform overflow", "volume overflow", "link overflow"} {
+		t.Run(mode, func(t *testing.T) {
+			for _, strict := range []bool{false, true} {
+				source := Source{Config: bake.DefaultConfig("admission", geom.Bounds{Min: geom.Vec3{X: -4, Y: -1, Z: -4}, Max: geom.Vec3{X: 4, Y: 3, Z: 4}}), Scene: geom.Scene{Assets: []geom.Asset{{ID: "floor", Vertices: []geom.Vec3{{}, {Z: 2}, {X: 2}}, Triangles: []geom.Triangle{{Indices: [3]uint32{0, 1, 2}, Area: 1}}}}, Instances: []geom.Instance{{ID: "floor", AssetID: "floor", Transform: geom.Identity()}}}}
+				source.Config.Strict = strict
+				switch mode {
+				case "degenerate":
+					source.Scene.Assets[0].Triangles[0].Indices = [3]uint32{}
+				case "invalid index":
+					source.Scene.Assets[0].Triangles[0].Indices[1] = 42
+				case "missing asset":
+					source.Scene.Instances[0].AssetID = "missing"
+				case "transform overflow":
+					source.Scene.Assets[0].Vertices[0].X = 1e308
+					source.Scene.Instances[0].Transform[3] = 1e308
+				case "volume overflow":
+					source.Scene.Instances = nil
+					source.Config.Settings.Origin.X = -1e308
+					source.Scene.Volumes = []geom.Volume{{ID: "paint", Shape: "box", Bounds: geom.Bounds{Min: geom.Vec3{X: 1e308}, Max: geom.Vec3{X: 1e308, Y: 2, Z: 2}}, Area: 1}}
+				case "link overflow":
+					source.Scene.Instances = nil
+					source.Config.Settings.Origin.X = -1e308
+					source.Scene.Links = []geom.Link{{ID: "door", Start: geom.Vec3{X: 1e308}, End: geom.Vec3{}, Radius: .2, Flags: 1}}
+				}
+				data, err := json.Marshal(source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, resolvedErr := source.Scene.Resolve(source.Config.Settings.Origin, strict)
+				_, decodedErr := Decode(bytes.NewReader(data))
+				if (decodedErr == nil) != (resolvedErr == nil) {
+					t.Fatalf("strict=%v Decode=%v Resolve=%v", strict, decodedErr, resolvedErr)
+				}
+			}
+		})
+	}
+}
+
+func TestDecodeDoesNotAllocateEveryPlacedTriangle(t *testing.T) {
+	asset := geom.Asset{ID: "shared", Vertices: []geom.Vec3{{}, {Z: 2}, {X: 2}}, Triangles: make([]geom.Triangle, 1000)}
+	for i := range asset.Triangles {
+		asset.Triangles[i] = geom.Triangle{Indices: [3]uint32{0, 1, 2}, Area: 1}
+	}
+	source := Source{Config: bake.DefaultConfig("shared", geom.Bounds{Min: geom.Vec3{X: -4, Y: -1, Z: -4}, Max: geom.Vec3{X: 4, Y: 3, Z: 4}}), Scene: geom.Scene{Assets: []geom.Asset{asset}}}
+	for i := 0; i < 100; i++ {
+		source.Scene.Instances = append(source.Scene.Instances, geom.Instance{ID: fmt.Sprintf("placement-%03d", i), AssetID: asset.ID, Transform: geom.Identity()})
+	}
+	data, err := json.Marshal(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Decode(bytes.NewReader(data)); err != nil {
+		t.Fatal(err)
+	}
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	decoded, err := Decode(bytes.NewReader(data))
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Scene.Assets) != 1 || len(decoded.Scene.Instances) != 100 {
+		t.Fatal("decoder lost shared source or placements")
+	}
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 3<<20 {
+		t.Fatalf("decoding shared source allocated %d bytes for discarded placement geometry", allocated)
+	}
+}
 
 func TestSourceArtifactAndFailureAtomicity(t *testing.T) {
 	source := Source{Config: bake.DefaultConfig("empty", geom.Bounds{Min: geom.Vec3{X: -2, Y: -1, Z: -2}, Max: geom.Vec3{X: 2, Y: 3, Z: 2}})}
