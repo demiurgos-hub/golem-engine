@@ -124,6 +124,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Published root and Box3D modules now pin compatible published portable physics/navigation dependencies instead of development placeholders. The Box3D fork mapping remains explicit because the fork still declares the upstream module path; Go consumers must retain that one replacement.
+
 - Precise sweeps clip subsequent searches after a nearer hit while preserving equal-distance identities and unchanged geometric accuracy. Rounded mesh contacts use bounded scratch sized to their actual maximum output without dropping triangles or contact points.
 
 - Small physics edits synchronize active and changed static bodies without refreshing every untouched static collider. Portable handle lookups retain world, generation and type validation while avoiding repeated hash-table searches during simulation.

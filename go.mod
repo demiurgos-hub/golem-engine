@@ -5,11 +5,9 @@ go 1.25.4
 require (
 	github.com/alitto/pond/v2 v2.7.1
 	github.com/coder/websocket v1.8.14
-	// collision/nav backends are nested modules resolved by go.work during development.
-	// Consumers building outside a workspace need published versions of these.
-	github.com/demiurgos-hub/golem-engine/golem/collision v0.3.1-0.20261013153120-49b2e72c189a
-	github.com/demiurgos-hub/golem-engine/golem/nav v0.4.0
-	github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0
+	github.com/demiurgos-hub/golem-engine/golem/collision v0.3.1-0.20261113161118-0c6a59582abb
+	github.com/demiurgos-hub/golem-engine/golem/nav v0.3.1-0.20261113161118-0c6a59582abb
+	github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261113161118-0c6a59582abb
 	github.com/hajimehoshi/ebiten/v2 v2.9.9
 	github.com/quic-go/quic-go v0.59.0
 	github.com/quic-go/webtransport-go v0.10.0
@@ -17,6 +15,7 @@ require (
 )
 
 require (
+	github.com/demiurgos-hub/golem-engine/golem/geometry v0.0.0-20261113160310-d88e90435bea // indirect
 	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/ebitengine/gomobile v0.0.0-20250923094054-ea854a63cce1 // indirect
 	github.com/ebitengine/hideconsole v1.0.0 // indirect
