@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/demiurgos-hub/golem-engine/golem/registry"
+	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
 )
@@ -586,5 +587,60 @@ func TestListenerWebTransportExpandedAckWindowStopsDeepOrderedResends(t *testing
 	sess.protocolMu.Unlock()
 	if remaining != 0 || nextSequence != settledNextSequence || sess.IsClosing() {
 		t.Fatalf("sender changed after ACK settlement: pending=%d nextPacket=%d want=%d closing=%t", remaining, nextSequence, settledNextSequence, sess.IsClosing())
+	}
+}
+
+func TestListenerWebTransportKeepsQuietSessionAlive(t *testing.T) {
+	listener := NewListener(registry.NewRegistry(), Config{Transport: TransportWebTransport})
+	connected := make(chan struct{}, 1)
+	messages := make(chan []byte, 1)
+	listener.OnConnect(func(*Session) { connected <- struct{}{} })
+	listener.OnMessage(func(_ *Session, payload []byte) { messages <- append([]byte(nil), payload...) })
+	transportURL := startTestWebTransportListener(t, listener)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	dialer := &webtransport.Dialer{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		QUICConfig:      &quic.Config{EnableDatagrams: true, EnableStreamResetPartialDelivery: true, MaxIdleTimeout: 5 * time.Second},
+	}
+	_, session, err := dialer.Dial(ctx, transportURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.CloseWithError(0, "")
+	stream, err := session.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = stream.Write(nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-connected:
+	case <-ctx.Done():
+		t.Fatal("server did not admit stream")
+	}
+	// No application frames, datagrams or client keepalives are sent during
+	// more than two negotiated idle periods. QUIC advertises at least five
+	// seconds of idle timeout, and clamps the server's default keepalive period
+	// to the peer's shorter idle timeout.
+	select {
+	case <-session.Context().Done():
+		t.Fatalf("quiet session expired: %v", context.Cause(session.Context()))
+	case <-time.After(11 * time.Second):
+	}
+	if err = stream.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err = writeReliableFrame(stream, []byte("after idle")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-messages:
+		if string(got) != "after idle" {
+			t.Fatalf("message=%q", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("quiet session did not deliver subsequent application traffic")
 	}
 }

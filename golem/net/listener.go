@@ -17,6 +17,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/demiurgos-hub/golem-engine/golem/registry"
+	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
 )
@@ -969,9 +970,15 @@ func (l *Listener) serveAcceptedSession(ctx context.Context, sess *Session, r *h
 }
 
 // ConfigureWebTransportHTTP3Server applies the HTTP/3 settings required by golem WebTransport handlers.
+// Without a caller-owned QUICConfig, it enables ten-second transport keepalives
+// so unchanged game state does not expire an otherwise healthy session.
+// An explicit QUICConfig is preserved, including a zero KeepAlivePeriod.
 func ConfigureWebTransportHTTP3Server(h3 *http3.Server) *http3.Server {
 	if h3 == nil {
 		h3 = &http3.Server{}
+	}
+	if h3.QUICConfig == nil {
+		h3.QUICConfig = &quic.Config{KeepAlivePeriod: 10 * time.Second}
 	}
 	h3.EnableDatagrams = true
 	webtransport.ConfigureHTTP3Server(h3)

@@ -14,6 +14,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/demiurgos-hub/golem-engine/golem/registry"
+	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 )
 
@@ -137,6 +138,22 @@ func TestListenerWebTransportServerConfiguresProvidedHTTP3Server(t *testing.T) {
 	}
 	if len(h3.AdditionalSettings) == 0 {
 		t.Fatal("WebTransportServer did not configure HTTP/3 settings")
+	}
+}
+
+func TestConfigureWebTransportHTTP3ServerKeepAlivePolicy(t *testing.T) {
+	defaults := ConfigureWebTransportHTTP3Server(nil)
+	if defaults.QUICConfig == nil || defaults.QUICConfig.KeepAlivePeriod != 10*time.Second {
+		t.Fatal("default server must keep quiet realtime sessions alive")
+	}
+	for _, period := range []time.Duration{0, 3 * time.Second} {
+		config := &quic.Config{KeepAlivePeriod: period, MaxIdleTimeout: 11 * time.Second}
+		server := &http3.Server{QUICConfig: config}
+		ConfigureWebTransportHTTP3Server(server)
+		ConfigureWebTransportHTTP3Server(server)
+		if server.QUICConfig != config || config.KeepAlivePeriod != period || config.MaxIdleTimeout != 11*time.Second {
+			t.Fatal("explicit caller QUIC policy was changed")
+		}
 	}
 }
 

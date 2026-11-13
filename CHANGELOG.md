@@ -132,6 +132,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Default WebTransport servers send QUIC keepalives so quiet connected players do not hit the transport idle timeout when replicated state is unchanged. Caller-supplied HTTP/3 `QUICConfig` policies remain intact, including explicitly disabled keepalives. Unity uses WebTransport SDK 0.3.1, which reports negotiated idle expiry explicitly and preserves the original native failure through cleanup.
+
 - Native Go WebTransport shutdown no longer hangs after peer logout or blocked stream I/O. The close-control write is serialized and bounded, terminal failures release the physical session before notifying the client, and queued sends cannot write after shutdown begins.
 
 - Navigation triangulation preserves obstacle holes at duplicated contour bridge endpoints by validating each diagonal inside both endpoint cones. Authored geometry and strict polygon validation remain unchanged.
