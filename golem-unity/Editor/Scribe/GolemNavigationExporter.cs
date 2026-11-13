@@ -175,6 +175,7 @@ namespace GolemEngine.Unity.Editor
             Settings = new NavigationSettings
             {
                 Origin = Vector(world.Origin), Bounds = Bounds(world.WorldBounds), CellSize = world.CellSize, CellHeight = world.CellHeight,
+                ClearancePrecision = GolemNavigationDocument.Binary32Clearance,
                 TileSize = world.TileSize, Partition = world.Partition.ToString().ToLowerInvariant(), BuildLayers = world.BuildHeightfieldLayers,
                 MinRegionArea = world.MinimumRegionArea, MergeRegionArea = world.MergeRegionArea, MaxEdgeLength = world.MaximumEdgeLength,
                 MaxSimplificationError = world.MaximumSimplificationError, DetailSampleDistance = world.DetailSampleDistance, DetailSampleMaxError = world.DetailSampleMaximumError

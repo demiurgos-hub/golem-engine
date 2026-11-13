@@ -130,6 +130,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Unity navigation exports select explicit binary32 clearance arithmetic, so authored float profile/cell ratios retain their intended voxel counts. Baking, tile padding and artifact validation share the same policy; portable artifacts record it as a required feature. Generic Go sources keep existing binary64 behavior and fingerprints unless they opt in. Geometry coordinates, transforms and terrain samples are unchanged.
+
 - Unity Git packages no longer contain orphan metadata for obsolete IDE build directories and DLL outputs, preventing immutable-package import warnings.
 
 - Compact physical-source transforms now explicitly accumulate in float64 before storing float32 vertices in both Scribe and Go. This matches Unity Mono and prevents valid zero-area normalization hashes from failing due to intermediate rounding. Validation identifies the failing collider and distinguishes triangle provenance from geometry-hash mismatches. Preparation fingerprints advance to v3; re-prepare/recook affected content, and re-export compact sources authored with earlier non-Mono emitters if their provenance differs.

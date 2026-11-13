@@ -38,6 +38,17 @@ namespace GolemEngine.Unity.Editor.Tests
         }
 
         [Test]
+        public void CapturedConfigSelectsAuthoredFloat32Clearance()
+        {
+            var world = new GameObject("World").AddComponent<GolemNavigationWorld>();
+            world.MaximumClimb = 0.5f; world.CellHeight = 0.1f;
+            var config = GolemNavigationExporter.CaptureConfig(world);
+            Assert.That(config.Settings.ClearancePrecision, Is.EqualTo(GolemNavigationDocument.Binary32Clearance));
+            Assert.That(config.Settings.CellHeight, Is.EqualTo((double)world.CellHeight));
+            Assert.That(GolemNavigationDocument.QuantizeClearance(config.Profile, config.Settings).Climb, Is.EqualTo(5));
+        }
+
+        [Test]
         public void SavedInstancesShareGeometryButHaveDistinctStableIdentities()
         {
             var world = new GameObject("World").AddComponent<GolemNavigationWorld>();

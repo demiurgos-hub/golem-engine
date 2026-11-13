@@ -32,6 +32,7 @@
     <Compile Include="../Editor/GolemScribeArtifactPlanTests.cs" />
     <Compile Include="../Editor/GolemBakeCommandTests.cs" />
     <None Include="../../../golem/nav/navmesh/navbuild/testdata/scribe-source.json" Link="scribe-source.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../../golem/nav/navmesh/navbuild/testdata/scribe-clearance-source.json" Link="scribe-clearance-source.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../Fixtures/physics-source.json" Link="physics-source.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../Fixtures/geometry-physics.golemgeo" Link="geometry-physics.golemgeo" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../Fixtures/geometry-navigation.golemgeo" Link="geometry-navigation.golemgeo" CopyToOutputDirectory="PreserveNewest" />

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,6 +16,61 @@ import (
 	"github.com/demiurgos-hub/navmesh-go/bake"
 	"github.com/demiurgos-hub/navmesh-go/geom"
 )
+
+func TestActualScribeBinary32ClearancePreservesGeometryAndArtifactPolicy(t *testing.T) {
+	// Actual GolemNavigationDocument output is byte-checked by its C# fixture test.
+	source, err := DecodeFile("testdata/scribe-clearance-source.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.Config.Settings.ClearancePrecision != artifact.ClearanceBinary32 || source.Config.Settings.CellHeight != float64(float32(.1)) {
+		t.Fatal("Scribe precision provenance or exact authored cell height was lost")
+	}
+	if source.Scene.Assets[0].Vertices[1].Y != math.Nextafter(1, 2) {
+		t.Fatal("clearance policy rounded authored geometry")
+	}
+	clearance, err := source.Config.Settings.QuantizeClearance(source.Config.Profile)
+	if err != nil || clearance.Climb != 5 {
+		t.Fatalf("Unity .5f/.1f clearance=%+v error=%v", clearance, err)
+	}
+	nativeHash, err := source.Config.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := source.Config
+	legacy.Settings.ClearancePrecision = artifact.ClearanceBinary64
+	legacyClearance, err := legacy.Settings.QuantizeClearance(legacy.Profile)
+	if err != nil || legacyClearance.Climb != 4 {
+		t.Fatalf("default binary64 contract changed: %+v %v", legacyClearance, err)
+	}
+	legacyHash, err := legacy.Fingerprint()
+	if err != nil || nativeHash == legacyHash {
+		t.Fatal("cache identity omitted clearance precision")
+	}
+	baked, err := source.Build(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := artifact.Encode(baked.Bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := artifact.Decode(encoded, artifact.DefaultLimits())
+	if err != nil || decoded.Settings != source.Config.Settings || decoded.SettingsFingerprint != nativeHash {
+		t.Fatalf("artifact lost validated clearance policy: %v", err)
+	}
+	if _, err = navigation.NewSnapshot(decoded); err != nil {
+		t.Fatal(err)
+	}
+	source.Config.Settings.ClearancePrecision = "unknown"
+	data, err := json.Marshal(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Decode(bytes.NewReader(data)); err == nil {
+		t.Fatal("unknown clearance mode accepted")
+	}
+}
 
 func TestDecodePreservesGeometryAdmission(t *testing.T) {
 	for _, mode := range []string{"valid", "degenerate", "invalid index", "missing asset", "transform overflow", "volume overflow", "link overflow"} {

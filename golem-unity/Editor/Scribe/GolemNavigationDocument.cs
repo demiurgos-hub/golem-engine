@@ -53,7 +53,7 @@ namespace GolemEngine.Unity.Editor
         public NavigationBounds Bounds;
         public double CellSize, CellHeight, MaxSimplificationError, DetailSampleDistance, DetailSampleMaxError;
         public int TileSize, MinRegionArea, MergeRegionArea, MaxEdgeLength;
-        public string Partition;
+        public string Partition, ClearancePrecision;
         public bool BuildLayers;
     }
     internal sealed class NavigationConfig
@@ -70,6 +70,7 @@ namespace GolemEngine.Unity.Editor
     /// <summary>Pure validation and deterministic JSON planning; never reads Unity objects or writes files.</summary>
     internal static class GolemNavigationDocument
     {
+        internal const string Binary32Clearance = "binary32";
         internal const string Generator = "Golem Scribe navigation source v1";
         internal const string CompactGenerator = "Golem Scribe navigation source v2";
         internal const string CompactOwnershipPrefix = "{\n  \"Generator\": \"" + CompactGenerator + "\",\n";
@@ -121,8 +122,8 @@ namespace GolemEngine.Unity.Editor
                 Finite(s.DetailSampleMaxError) && s.DetailSampleMaxError >= 0, "Invalid voxel or mesh settings.");
             Require(s.Partition == "watershed" || s.Partition == "monotone" || s.Partition == "layers", "Unknown partition mode.");
             Require(!s.BuildLayers || s.TileSize <= 255, "Heightfield layers require tiles no larger than 255 cells.");
-            Require(Math.Ceiling((s.Bounds.Max.Y - s.Bounds.Min.Y) / s.CellHeight) <= 8191 && Math.Ceiling(p.Height / s.CellHeight) <= 255 &&
-                Math.Ceiling(p.Radius / s.CellSize) <= 127, "Region/profile exceeds Recast voxel limits.");
+            Require(Math.Ceiling((s.Bounds.Max.Y - s.Bounds.Min.Y) / s.CellHeight) <= 8191, "Region exceeds Recast voxel limits.");
+            QuantizeClearance(p, s);
             Require(config.AreaFlags != null && config.AreaFlags.Length == 64 && config.AreaFlags.All(f => f >= 0 && f <= 65535), "AreaFlags must contain 64 unsigned 16-bit values.");
             Require(config.MaxTiles > 0 && config.MaxTrianglesPerTile > 0, "Resource limits must be positive.");
             Require(scene.Assets != null && scene.Instances != null && scene.Volumes != null && scene.Links != null, "Source arrays cannot be null.");
@@ -190,6 +191,34 @@ namespace GolemEngine.Unity.Editor
             }
         }
 
+        internal static (int Height, int Radius, int Climb) QuantizeClearance(NavigationProfile profile, NavigationSettings settings)
+        {
+            var precision = settings.ClearancePrecision;
+            Require(string.IsNullOrEmpty(precision) || precision == Binary32Clearance, "Unknown clearance precision.");
+            double Ratio(double value, double cell, bool positive)
+            {
+                Require(Finite(value) && value >= 0 && (!positive || value > 0) && Finite(cell) && cell > 0, "Invalid clearance dimension.");
+                var quotient = value / cell;
+                if (precision == Binary32Clearance)
+                {
+                    var numerator = RoundBinary32(value); var denominator = RoundBinary32(cell);
+                    Require(Finite(numerator) && numerator >= 0 && (value == 0 || numerator > 0) && Finite(denominator) && denominator > 0,
+                        "Clearance dimension is not representable in binary32.");
+                    quotient = RoundBinary32(numerator / denominator);
+                }
+                Require(Finite(quotient) && quotient >= 0, "Nonfinite clearance ratio.");
+                return quotient;
+            }
+            var height = Math.Ceiling(Ratio(profile.Height, settings.CellHeight, true));
+            var radius = Math.Ceiling(Ratio(profile.Radius, settings.CellSize, false));
+            var climb = Math.Floor(Ratio(profile.MaxClimb, settings.CellHeight, false));
+            Require(height >= 1 && height <= 255 && radius <= 127 && climb < 8191, "Profile exceeds Recast voxel limits.");
+            return ((int)height, (int)radius, (int)climb);
+        }
+
+        // Force a stored IEEE binary32 value even when Mono retains wider intermediates.
+        private static double RoundBinary32(double value) => BitConverter.ToSingle(BitConverter.GetBytes((float)value), 0);
+
         private static void Identity(HashSet<string> ids, string id, ulong revision) => Require(!string.IsNullOrWhiteSpace(id) && ids.Add(id) && revision > 0, "Duplicate/missing object identity or invalid revision: " + id);
         private readonly struct ResolvedVertex
         {
@@ -233,6 +262,7 @@ namespace GolemEngine.Unity.Editor
             output.Append('{'); var comma = "";
             foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.Instance).OrderBy(f => f.Name, StringComparer.Ordinal))
             {
+                if (value is NavigationSettings settings && field.Name == nameof(NavigationSettings.ClearancePrecision) && string.IsNullOrEmpty(settings.ClearancePrecision)) continue;
                 output.Append(comma); Quote(output, field.Name); output.Append(':'); Write(output, field.GetValue(value)); comma = ",";
             }
             output.Append('}');

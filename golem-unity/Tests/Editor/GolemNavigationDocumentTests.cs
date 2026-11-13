@@ -79,6 +79,62 @@ namespace GolemEngine.Unity.Editor.Tests
 #endif
 
         [Test]
+        public void ClearancePrecisionUsesExplicitStoredBinary32Arithmetic()
+        {
+            var config = Config();
+            config.Settings.CellSize = config.Settings.CellHeight = (double)0.1f;
+            config.Profile.Height = config.Profile.Radius = config.Profile.MaxClimb = 0.5;
+            Assert.That(GolemNavigationDocument.QuantizeClearance(config.Profile, config.Settings).Climb, Is.EqualTo(4));
+            Assert.That(GolemNavigationDocument.Build(Scene(), config), Does.Not.Contain("ClearancePrecision"));
+            config.Settings.ClearancePrecision = GolemNavigationDocument.Binary32Clearance;
+            Assert.That(GolemNavigationDocument.QuantizeClearance(config.Profile, config.Settings), Is.EqualTo((5, 5, 5)));
+            foreach (var bits in new[] { 0x3effffff, 0x3f000000, 0x3f000001 })
+            {
+                var value = (double)BitConverter.ToSingle(BitConverter.GetBytes(bits), 0);
+                config.Profile.Height = config.Profile.Radius = config.Profile.MaxClimb = value;
+                var counts = GolemNavigationDocument.QuantizeClearance(config.Profile, config.Settings);
+                Assert.That(counts.Height, Is.EqualTo(bits > 0x3f000000 ? 6 : 5));
+                Assert.That(counts.Radius, Is.EqualTo(bits > 0x3f000000 ? 6 : 5));
+                Assert.That(counts.Climb, Is.EqualTo(bits < 0x3f000000 ? 4 : 5));
+            }
+        }
+
+        [Test]
+        public void ClearancePrecisionRejectsInvalidModesAndUnrepresentableValues()
+        {
+            foreach (var mode in new[] { "guess", "binary64", "Binary32" })
+            {
+                var config = Config(); config.Settings.ClearancePrecision = mode;
+                Assert.Throws<InvalidOperationException>(() => GolemNavigationDocument.Build(Scene(), config));
+            }
+            foreach (var value in new[] { double.NaN, double.PositiveInfinity, double.Epsilon, double.MaxValue })
+            {
+                var config = Config(); config.Settings.ClearancePrecision = GolemNavigationDocument.Binary32Clearance;
+                config.Profile.Radius = value;
+                Assert.Throws<InvalidOperationException>(() => GolemNavigationDocument.Build(Scene(), config));
+            }
+        }
+
+        [Test]
+        public void Binary32ClearanceSourcePreservesGeometryAndMatchesGoFixture()
+        {
+            var scene = Scene(); var config = Config();
+            scene.Assets[0].Vertices[1].Y = 1.0000000000000002;
+            config.Settings.CellSize = config.Settings.CellHeight = (double)0.1f;
+            config.Profile.MaxClimb = 0.5;
+            var before = GolemNavigationDocument.Build(scene, config);
+            config.Settings.ClearancePrecision = GolemNavigationDocument.Binary32Clearance;
+            var text = GolemNavigationDocument.Build(scene, config);
+            Assert.That(text.Replace("\"ClearancePrecision\":\"binary32\",", ""), Is.EqualTo(before));
+            Assert.That(text, Does.Contain("1.0000000000000002"));
+#if !UNITY_5_3_OR_NEWER
+            var fixture = Environment.GetEnvironmentVariable("GOLEM_NAVIGATION_CLEARANCE_FIXTURE");
+            if (!string.IsNullOrEmpty(fixture)) File.WriteAllText(fixture, text, new System.Text.UTF8Encoding(false));
+            else Assert.That(File.ReadAllText(Path.Combine(TestContext.CurrentContext.TestDirectory, "scribe-clearance-source.json")), Is.EqualTo(text));
+#endif
+        }
+
+        [Test]
         public void OrderingDoesNotMutateTheSnapshot()
         {
             var scene = Scene(); var first = scene.Instances[0]; first.ID = "z";
