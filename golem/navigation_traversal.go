@@ -58,6 +58,12 @@ type navigationTraversal struct {
 }
 
 func (n *navigationService) beginTraversal(a *navigationAgent, link surface.Link) {
+	if a.retargeting {
+		// The retained ordinary route must not start a gameplay action for the
+		// superseded goal while its replacement is still being resolved.
+		n.finishRoute(a)
+		return
+	}
 	if a.config.Traversal == nil {
 		n.failAgent(a, surface.Failed, errors.New("golem: route requires an unconfigured traversal handler"))
 		return

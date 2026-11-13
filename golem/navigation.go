@@ -58,6 +58,9 @@ type NavigationConfig struct {
 type NavigationPathAdmissionMetrics struct {
 	EntityID                        int64
 	Tick, Generation, WorldRevision uint64
+	// Destination is the accepted worker goal, which can be an interim target
+	// when newer retarget calls coalesced during that search.
+	Destination surface.Vec3
 	// AdmittedAt uses NavigationNow's process-local high-resolution clock.
 	AdmittedAt time.Time
 	Status     surface.Status
@@ -124,9 +127,12 @@ type NavigationState struct {
 	Status         surface.Status
 	Destination    surface.Vec3
 	HasDestination bool
-	Velocity       surface.Vec3
-	Generation     uint64
-	WorldRevision  uint64
+	// RetargetPending means the latest retarget destination is awaiting a route.
+	// Mode and Status describe any interim route until latest-goal admission.
+	RetargetPending bool
+	Velocity        surface.Vec3
+	Generation      uint64
+	WorldRevision   uint64
 	// Quarantined means this agent is waiting for a regional safety change.
 	Quarantined bool
 	// PartialPath is a copied diagnostic prefix when partial following was rejected.
@@ -188,8 +194,11 @@ type navigationAgent struct {
 	corners               []surface.Corner
 	next                  int
 	requesting            bool
+	retargeting           bool
 	needsPath             bool
 	admissionPending      bool
+	admissionGeneration   uint64
+	admissionDestination  surface.Vec3
 	speed                 float64
 	lastTick              uint64
 	lastPosition          surface.Vec3
@@ -379,6 +388,52 @@ func (s *Server) SetNavigationDestination(id int64, destination surface.Vec3) er
 	return nil
 }
 
+// RetargetNavigationDestination replaces the destination while continuing an
+// accepted ordinary route until the replacement is admitted from the body's
+// current position. Identical active targets are idempotent. While a search runs,
+// newer goals coalesce into one latest-goal slot; its result may serve as a safe
+// interim route before the latest search completes. A latest-goal failure stops
+// movement with its normal status. Stop/Set/Reproject cancel all pending work.
+// The first route uses ordinary bounded projection. Active traversal/quarantine
+// uses Set's stop-and-replace semantics. Continuous retargeting requires
+// CorridorQuery. Calls are tick-owned, like SetNavigationDestination.
+func (s *Server) RetargetNavigationDestination(id int64, destination surface.Vec3) error {
+	if !destination.Finite() {
+		return errors.New("golem: navigation destination must be finite")
+	}
+	n, a, err := s.navigationAgent(id)
+	if err != nil {
+		return err
+	}
+	if err := s.validatePhysicsNavigation(id, true); err != nil {
+		return err
+	}
+	if a.state.HasDestination && a.state.Destination == destination &&
+		(a.state.Mode == NavigationFollowing || a.state.Mode == NavigationPending || a.state.Mode == NavigationTraversing) {
+		return nil
+	}
+	if a.requesting && !a.quarantined && (a.state.Mode == NavigationFollowing || a.state.Mode == NavigationPending) {
+		// Do not starve every search when a held cursor changes faster than the
+		// bounded worker can finish. Only the latest goal needs a follow-up job.
+		a.state.Destination = destination
+		a.needsPath, a.retargeting = true, true
+		return nil
+	}
+	if a.state.Mode != NavigationFollowing || a.route == nil || a.view == nil || a.initialProjection || a.admissionPending || a.quarantined {
+		return s.SetNavigationDestination(id, destination)
+	}
+	if _, ok := a.query.(surface.CorridorQuery); !ok {
+		return errors.New("golem: continuous navigation retargeting requires corridor repair")
+	}
+	a.state.Generation++
+	n.paths.cancelKey(strconv.FormatInt(id, 10))
+	a.requesting, a.needsPath, a.retargeting = false, true, true
+	a.state.Destination, a.state.HasDestination = destination, true
+	a.state.PartialPath = nil
+	a.stallReplans = 0
+	return nil
+}
+
 // StopNavigation cancels the destination, route and any active traversal.
 func (s *Server) StopNavigation(id int64) error {
 	n, a, err := s.navigationAgent(id)
@@ -423,6 +478,7 @@ func (s *Server) NavigationAgentState(id int64) (NavigationState, bool) {
 	if n := s.navigation; n != nil {
 		if a := n.agents[id]; a != nil {
 			state := a.state
+			state.RetargetPending = a.retargeting
 			state.PartialPath = append([]surface.Corner(nil), state.PartialPath...)
 			for i := range state.PartialPath {
 				if link := state.PartialPath[i].Link; link != nil {
@@ -579,9 +635,19 @@ func (n *navigationService) invalidate(a *navigationAgent) {
 	a.state.PartialPath = nil
 	n.paths.cancelKey(strconv.FormatInt(a.id, 10))
 	a.requesting = false
+	a.retargeting = false
 	a.quarantined = false
 	a.state.Quarantined = false
 	n.releaseRoute(a)
+}
+
+func (n *navigationService) cancelRetarget(a *navigationAgent) {
+	if !a.retargeting {
+		return
+	}
+	a.state.Generation++
+	n.paths.cancelKey(strconv.FormatInt(a.id, 10))
+	a.requesting, a.needsPath, a.retargeting = false, false, false
 }
 
 func (n *navigationService) prepare() {
@@ -758,6 +824,28 @@ func (n *navigationService) requestPath(a *navigationAgent, from surface.Vec3) {
 			return
 		}
 		current.requesting = false
+		retarget := current.retargeting
+		followup := retarget && target != current.state.Destination
+		current.needsPath = followup
+		admitted := false
+		oldMode, oldStatus, oldRevision := current.state.Mode, current.state.Status, current.state.WorldRevision
+		defer func() {
+			if !n.current(current, generation) || !current.retargeting {
+				return
+			}
+			if current.needsPath {
+				if !admitted && current.route != nil {
+					// Retry without discarding the still-safe accepted route.
+					current.state.Mode, current.state.Status, current.state.WorldRevision = oldMode, oldStatus, oldRevision
+				} else if !admitted {
+					current.state.Mode, current.state.Status = NavigationPending, surface.Status{Code: surface.NotReady}
+				}
+				current.state.Generation++
+				return
+			}
+			current.retargeting = false
+			n.releaseRoute(current)
+		}()
 		result, _ := value.(*navigationPathResult)
 		if err != nil {
 			current.state.WorldRevision = requestRevision
@@ -801,7 +889,7 @@ func (n *navigationService) requestPath(a *navigationAgent, from surface.Vec3) {
 			return
 		}
 		position, _, ok := n.position(current.id)
-		if !ok || navDistance(position, result.from) > 0.01 {
+		if !ok || (!retarget || !keepSupport) && navDistance(position, result.from) > 0.01 {
 			discardNavigationPath(value)
 			current.needsPath = current.state.HasDestination
 			current.state.Mode, current.state.Status.Code = NavigationPending, surface.Stale
@@ -812,6 +900,24 @@ func (n *navigationService) requestPath(a *navigationAgent, from surface.Vec3) {
 			discardNavigationPath(value)
 			n.failAgent(current, surface.Failed, admitErr)
 			return
+		}
+		if retarget && keepSupport {
+			status := n.repairRetarget(current, query, result, position)
+			if status.Code != surface.Complete && !(status.Code == surface.Partial && current.config.AllowPartial) {
+				discardNavigationPath(value)
+				current.state.Mode, current.state.Status = NavigationBlocked, status
+				if status.Code == surface.NoSurface || status.Code == surface.Ambiguous {
+					current.state.Mode = NavigationUnsupported
+				} else if status.Code == surface.Failed || status.Code == surface.InvalidInput {
+					current.state.Mode = NavigationFailed
+				}
+				if status.Code == surface.Stale {
+					current.needsPath = current.state.HasDestination
+					current.state.Mode = NavigationPending
+				}
+				return
+			}
+			current.state.Status = result.result.Status
 		}
 		if result.revision != n.backend.CurrentRevision(profile) {
 			latest, latestQuery, rebased, _ := n.rebaseHandles(current, result.view, result.start, result.result.Route, position, false)
@@ -827,7 +933,13 @@ func (n *navigationService) requestPath(a *navigationAgent, from surface.Vec3) {
 			result.revision, query = latest.Revision(), latestQuery
 			current.state.Status = rebased.Status
 		}
+		speed, velocity := current.speed, current.state.Velocity
+		current.retargeting = followup
+		admitted = true
 		n.releaseRoute(current)
+		if retarget {
+			current.speed, current.state.Velocity = speed, velocity
+		}
 		current.view, current.query, current.location, current.route = result.view, query, result.start, result.result.Route
 		current.routeSafetyChecked = false
 		current.locationSafetyChecked = false
@@ -842,8 +954,10 @@ func (n *navigationService) requestPath(a *navigationAgent, from surface.Vec3) {
 		current.lastRepair = position
 		current.repairLocation = result.start
 		current.stallTime = 0
-		current.needsPath = false
+		current.needsPath = followup
 		current.admissionPending = true
+		current.admissionGeneration = generation
+		current.admissionDestination = target
 		// Keep an owned result that intersects quarantine. Its corridor is the
 		// evidence needed to wait for safety changes without repeating the search.
 		if safety := n.agentSafety(current); safety != nil && (!n.regionSafe(current, safety, position) || !safety.SafeSegment(position, result.start.Position())) {
@@ -853,11 +967,47 @@ func (n *navigationService) requestPath(a *navigationAgent, from surface.Vec3) {
 		n.observePathAdmission(current)
 	}, discardNavigationPath)
 	if err != nil {
-		a.state.Status = surface.Status{Code: surface.ResourceExhausted, Err: err}
+		if !a.retargeting || a.route == nil {
+			a.state.Status = surface.Status{Code: surface.ResourceExhausted, Err: err}
+		}
 		return
 	}
 	a.requesting, a.needsPath = true, false
-	a.state.Mode, a.state.Status = NavigationPending, surface.Status{Code: surface.NotReady}
+	if !a.retargeting || a.route == nil {
+		a.state.Mode, a.state.Status = NavigationPending, surface.Status{Code: surface.NotReady}
+	}
+}
+
+func (n *navigationService) repairRetarget(a *navigationAgent, query surface.Query, result *navigationPathResult, position surface.Vec3) surface.Status {
+	repair, ok := query.(surface.CorridorQuery)
+	if !ok {
+		return surface.Status{Code: surface.Failed, Err: errors.New("golem: retarget result does not support corridor repair")}
+	}
+	tolerance := a.config.SupportTolerance
+	projection := query.Project(n.server.runCtx, position, surface.ProjectionOptions{
+		Horizontal: tolerance, Up: tolerance, Down: tolerance, Hint: result.start,
+	}, a.config.Filter)
+	if projection.Code != surface.Complete || projection.Location == nil {
+		if projection.Code == surface.Complete {
+			return surface.Status{Code: surface.Failed, Err: errors.New("golem: retarget projection returned no support")}
+		}
+		return projection.Status
+	}
+	if navDistance(position, projection.Location.Position()) > tolerance {
+		return surface.Status{Code: surface.NoSurface, Err: errors.New("golem: retarget body is outside navigation support tolerance")}
+	}
+	path := repair.RepairPath(n.server.runCtx, result.result.Route, projection.Location, a.config.Filter)
+	if path.Route == nil && (path.Code == surface.Complete || path.Code == surface.Partial) {
+		return surface.Status{Code: surface.Stale}
+	}
+	if path.Code == surface.Partial && !a.config.AllowPartial && path.Route != nil {
+		a.state.PartialPath = path.Route.Corners()
+	}
+	if path.Code == surface.Complete && result.result.Code == surface.Partial {
+		path.Status = result.result.Status
+	}
+	result.start, result.result = projection.Location, path
+	return path.Status
 }
 
 func (n *navigationService) observePathAdmission(a *navigationAgent) {
@@ -867,7 +1017,7 @@ func (n *navigationService) observePathAdmission(a *navigationAgent) {
 	a.admissionPending = false
 	if observe := n.config.ObservePathAdmission; observe != nil {
 		admittedAt := NavigationNow()
-		observe(NavigationPathAdmissionMetrics{EntityID: a.id, Tick: n.server.tick, Generation: a.state.Generation, WorldRevision: a.state.WorldRevision, AdmittedAt: admittedAt, Status: a.state.Status})
+		observe(NavigationPathAdmissionMetrics{EntityID: a.id, Tick: n.server.tick, Generation: a.admissionGeneration, WorldRevision: a.state.WorldRevision, Destination: a.admissionDestination, AdmittedAt: admittedAt, Status: a.state.Status})
 		n.pathObservationElapsed += navigationSince(admittedAt)
 	}
 }

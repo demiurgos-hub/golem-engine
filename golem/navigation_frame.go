@@ -662,6 +662,7 @@ func (f *NavigationFrame) rejectPlan(plan *navigationFramePlan, position surface
 		n.dispatchFrameCallback(plan.action.DiscardNavigationTraversal)
 	}
 	n.cancelTraversal(a, "physical motion admission rejected")
+	n.cancelRetarget(a)
 	// Retain only support that the actual solver position can revalidate. No
 	// proposed corner, initial projection or traversal progress becomes durable.
 	a.route, a.corners, a.next = nil, nil, 0

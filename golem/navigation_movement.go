@@ -276,6 +276,10 @@ func (n *navigationService) remainingDistance(a *navigationAgent, position surfa
 func (n *navigationService) finishRoute(a *navigationAgent) {
 	code := a.state.Status.Code
 	n.releaseRoute(a)
+	if a.retargeting {
+		a.state.Mode, a.state.Status = NavigationPending, surface.Status{Code: surface.NotReady}
+		return
+	}
 	if code == surface.Partial {
 		a.state.Mode = NavigationBlocked
 	} else {
@@ -288,6 +292,7 @@ func (n *navigationService) failAgent(a *navigationAgent, code surface.Code, err
 	if !n.cancelTraversal(a, "navigation failed") {
 		return
 	}
+	n.cancelRetarget(a)
 	n.releaseRoute(a)
 	a.state.Mode, a.state.Status = NavigationBlocked, surface.Status{Code: code, Err: err}
 	if code == surface.NoSurface || code == surface.Ambiguous {

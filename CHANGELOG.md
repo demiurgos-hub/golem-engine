@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- `RetargetNavigationDestination` keeps an accepted route moving while a replacement is computed, then repairs it from the current body position without resetting speed. Evolving goals coalesce behind one in-flight search so frequent input cannot starve turning; safe interim routes never report the latest goal reached. `NavigationState.RetargetPending` exposes this work and admission metrics identify the accepted destination. `SetNavigationDestination` retains its immediate-stop behavior.
+
 - Navigation source decoding validates transformed geometry without retaining every placed triangle or computing discarded fingerprints. Strict and non-strict source admission remain consistent with baking.
 
 - Unity clients can explicitly send typed commands through the bounded reliable stream with `GameClient.SendStream` and generated `Send{Name}Stream` helpers, including when WebTransport datagrams are available. Existing default/ordered datagram semantics and size errors remain unchanged.
