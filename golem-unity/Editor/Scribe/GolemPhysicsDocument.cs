@@ -397,10 +397,12 @@ namespace GolemEngine.Unity.Editor
             Require(Math.Abs(Determinant(matrix)) > 1e-12, "Singular geometry transform.");
         }
 
+        // Mono may retain double intermediates for float expressions. Specify
+        // that arithmetic explicitly so Mono, .NET and Go hash identical bits.
         internal static PhysicsVector TransformPoint(float[] m, PhysicsVector v) => new PhysicsVector(
-            m[0] * v.X + m[1] * v.Y + m[2] * v.Z + m[3],
-            m[4] * v.X + m[5] * v.Y + m[6] * v.Z + m[7],
-            m[8] * v.X + m[9] * v.Y + m[10] * v.Z + m[11]);
+            (float)((double)m[0] * v.X + (double)m[1] * v.Y + (double)m[2] * v.Z + m[3]),
+            (float)((double)m[4] * v.X + (double)m[5] * v.Y + (double)m[6] * v.Z + m[7]),
+            (float)((double)m[8] * v.X + (double)m[9] * v.Y + (double)m[10] * v.Z + m[11]));
 
         private static double Determinant(float[] m) => m == null ? 1 :
             (double)m[0] * (m[5] * (double)m[10] - m[6] * (double)m[9])

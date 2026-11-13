@@ -11,7 +11,7 @@ import (
 )
 
 // PreparationVersion identifies portable source-to-contract conversion rules.
-const PreparationVersion = "golem-physics-content-v2"
+const PreparationVersion = "golem-physics-content-v3"
 
 // Settings makes solver-policy differences from Unity explicit and hashable.
 // Backend contact margins never enlarge source or query geometry. Sweep CCD is

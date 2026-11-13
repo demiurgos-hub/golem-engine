@@ -1,0 +1,14 @@
+{
+  "Generator": "Golem Scribe physics source v2",
+  "Assets": [],
+  "Bodies": [{"Active":true,"AngularDamping":0,"AutomaticCenterOfMass":true,"AutomaticInertiaTensor":true,"CenterOfMass":{"X":0,"Y":0,"Z":0},"CollisionDetection":"discrete","Constraints":0,"Enabled":true,"ID":"actor","InertiaRotation":{"W":1,"X":0,"Y":0,"Z":0},"InertiaTensor":{"X":1,"Y":1,"Z":1},"Kind":"static","LinearDamping":0,"Mass":1,"OwnerID":"actor-owner","Position":{"X":0,"Y":2,"Z":0},"Rotation":{"W":1,"X":0,"Y":0,"Z":0},"UseGravity":true}],
+  "Colliders": [{"Active":true,"AssetID":"rounding","Axis":1,"BodyID":"actor","Center":{"X":0,"Y":0,"Z":0},"Character":null,"ContactOffset":0.01,"Enabled":true,"GeometryTransform":[1,0,-5.5432547E-11,-2.8654754E-06,0,1,0,0,5.0236793E-09,0,1,-3.493546E-06,0,0,0,1],"Height":0,"ID":"actor/sphere","Layer":0,"LayerName":"","MaterialID":"default","Metadata":[{"Key":"golem.physics.zeroAreaNormalization.v1.originalGeometrySHA256","Value":"7b13a1e2dd8345c0cbe6b92145f8cbfae6b2d11d8bf62d0ca8ab880cc33a9a42"},{"Key":"golem.physics.zeroAreaNormalization.v1.originalTriangleCount","Value":"2"},{"Key":"golem.physics.zeroAreaNormalization.v1.removedTriangleOrdinals","Value":"0"}],"OwnerID":"actor-owner","ParentID":"","Query":true,"Radius":0.5,"Rotation":{"W":1,"X":0,"Y":0,"Z":0},"Sensor":false,"Shape":"mesh","Size":{"X":0,"Y":0,"Z":0},"Solid":true,"SourceID":"fixture/sphere"}],
+  "CoordinateLimit": 4096,
+  "Geometry": {"Path":"physics-rounding-source-v2.golemgeo","SHA256":"7d8cc93acf163ff60475f40f37c679e04ff1348f295c5d86cfe02b830b0c62dc"},
+  "Joints": [],
+  "LayerCollisionMasks": [4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295,4294967295],
+  "Materials": [{"BounceCombine":"average","DynamicFriction":0.6,"FrictionCombine":"average","ID":"default","Restitution":0,"StaticFriction":0.6}],
+  "Revision": 1,
+  "Version": 2,
+  "WorldID": "physics-fixture"
+}

@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"math"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/demiurgos-hub/golem-engine/golem/geometry"
@@ -118,5 +120,35 @@ func TestActualScribeVersion2Fixture(t *testing.T) {
 	prepared, err := Prepare(source, DefaultSettings())
 	if err != nil || len(prepared.Diagnostics()) != 0 {
 		t.Fatal("C# source cannot prepare", err)
+	}
+}
+
+func TestScribeAffineNormalizationRoundingFixture(t *testing.T) {
+	source, _, err := DecodeFile("../../../golem-unity/Tests/Fixtures/physics-rounding-source-v2.json", DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	shape, err := source.Colliders[0].Geometry(map[string]Asset{source.Assets[0].ID: source.Assets[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := math.Float32bits(shape.Vertices[0].Z); got != 1062856781 {
+		t.Fatalf("affine coordinate rounded before final float32 storage: bits %d", got)
+	}
+	if !reflect.DeepEqual(shape.Indices, []uint32{0, 1, 2}) {
+		t.Fatal("exact zero-area normalization changed", shape.Indices)
+	}
+	if _, err := Prepare(source, DefaultSettings()); err != nil {
+		t.Fatal(err)
+	}
+	for index := range source.Colliders[0].Metadata {
+		property := &source.Colliders[0].Metadata[index]
+		if strings.HasSuffix(property.Key, "originalGeometrySHA256") {
+			property.Value = strings.Repeat("0", 64)
+		}
+	}
+	err = source.Validate(DefaultLimits())
+	if err == nil || !strings.Contains(err.Error(), "collider actor/sphere:") || !strings.Contains(err.Error(), "normalization hash mismatch") {
+		t.Fatalf("corrupt provenance must retain collider context: %v", err)
 	}
 }

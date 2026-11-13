@@ -57,6 +57,33 @@ namespace GolemEngine.Unity.Editor.Tests
         }
 
         [Test]
+        public void AffineNormalizationRoundsOnceAcrossManagedAndGoRuntimes()
+        {
+            var source = GolemPhysicsDocumentTests.Fixture(); source.Version = 2; source.Bodies[0].Kind = "static";
+            var mesh = new PhysicsAsset { ID = "rounding", SourceID = "rounding-regression",
+                Vertices = new[] { new PhysicsVector(1.7730124f, 5.692442f, .85120434f),
+                    new PhysicsVector(1.5172065f, 5.651523f, .72839475f), new PhysicsVector(1.4783936f, 5.6366806f, .81535506f) },
+                Indices = new uint[] { 0, 0, 1, 0, 1, 2 } };
+            source.Assets = new[] { mesh };
+            var collider = source.Colliders[0]; collider.Shape = "mesh"; collider.AssetID = mesh.ID;
+            collider.GeometryTransform = new[] { 1f, 0, -5.5432547e-11f, -2.8654754e-6f, 0, 1, 0, 0,
+                5.0236793e-9f, 0, 1, -3.493546e-6f, 0, 0, 0, 1 };
+            var transformed = GolemPhysicsDocument.TransformPoint(collider.GeometryTransform, mesh.Vertices[0]);
+            Assert.That(BitConverter.ToUInt32(BitConverter.GetBytes(transformed.Z), 0), Is.EqualTo(1062856781u));
+            var bytes = GolemGeometryDocument.BuildPhysics(source.Assets);
+            source.Geometry = new PhysicsGeometryReference { Path = "physics-rounding-source-v2.golemgeo", SHA256 = GolemScribeManifest.ComputeBytesHash(bytes) };
+            CompareFixture("physics-rounding-source-v2.golemgeo", bytes);
+            var json = GolemPhysicsDocument.Build(source);
+            const string hash = "7b13a1e2dd8345c0cbe6b92145f8cbfae6b2d11d8bf62d0ca8ab880cc33a9a42";
+            Assert.That(json, Does.Contain(hash));
+            // Mono and .NET print different equivalent round-trip decimals;
+            // compare canonical binary/normalized bits, not that JSON spelling.
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GOLEM_GEOMETRY_FIXTURE_OUTPUT")))
+                CompareFixture("physics-rounding-source-v2.json", System.Text.Encoding.UTF8.GetBytes(json));
+            else Assert.That(File.ReadAllText(FixturePath("physics-rounding-source-v2.json")), Does.Contain(hash));
+        }
+
+        [Test]
         public void TerrainSizeDependsOnSamplesRatherThanExpandedTriangles()
         {
             var terrain = Terrain(); terrain.Resolution = 513; terrain.Samples = new float[513 * 513]; terrain.Surface = Enumerable.Repeat((byte)255, 512 * 512 / 8).ToArray();

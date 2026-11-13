@@ -284,7 +284,7 @@ func (s *Source) Validate(l Limits) error {
 		}
 		shape, e := v.Geometry(assets)
 		if e != nil {
-			return e
+			return fmt.Errorf("collider %s: %w", v.ID, e)
 		}
 		if e = shape.Validate(); e != nil {
 			return e

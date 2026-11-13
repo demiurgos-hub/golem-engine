@@ -49,20 +49,16 @@ func transformedGeometry(asset Asset, matrix [16]float32, metadata []Property) (
 	}
 	vertices := make([]p.Vec3, len(asset.Vertices))
 	for index, v := range asset.Vertices {
-		// Explicit float32 intermediates preserve Unity MultiplyPoint3x4 rounding.
-		x := float32(matrix[0] * v.X)
-		x = float32(x + float32(matrix[1]*v.Y))
-		x = float32(x + float32(matrix[2]*v.Z))
-		x = float32(x + matrix[3])
-		y := float32(matrix[4] * v.X)
-		y = float32(y + float32(matrix[5]*v.Y))
-		y = float32(y + float32(matrix[6]*v.Z))
-		y = float32(y + matrix[7])
-		z := float32(matrix[8] * v.X)
-		z = float32(z + float32(matrix[9]*v.Y))
-		z = float32(z + float32(matrix[10]*v.Z))
-		z = float32(z + matrix[11])
-		vertices[index] = p.Vec3{X: x, Y: y, Z: z}
+		// Scribe explicitly accumulates in double and stores float32 once.
+		// Float32 products are exact in float64; explicit sums prevent a Go
+		// implementation from fusing across the specified rounding boundaries.
+		coordinate := func(row int) float32 {
+			value := float64(matrix[row]) * float64(v.X)
+			value = float64(value + float64(matrix[row+1])*float64(v.Y))
+			value = float64(value + float64(matrix[row+2])*float64(v.Z))
+			return float32(float64(value + float64(matrix[row+3])))
+		}
+		vertices[index] = p.Vec3{X: coordinate(0), Y: coordinate(4), Z: coordinate(8)}
 		if !vertices[index].Valid() {
 			return nil, nil, invalid("nonfinite transformed geometry")
 		}
@@ -89,8 +85,11 @@ func transformedGeometry(asset Asset, matrix [16]float32, metadata []Property) (
 		}
 	}
 	if len(removed) > 0 || len(provided) > 0 {
-		if len(provided) != 3 || provided["originalTriangleCount"] != strconv.Itoa(len(original)/3) || provided["removedTriangleOrdinals"] != strings.Join(removed, ",") || provided["originalGeometrySHA256"] != geometryHash(vertices, original) {
-			return nil, nil, invalid("geometry normalization provenance mismatch")
+		if len(provided) != 3 || provided["originalTriangleCount"] != strconv.Itoa(len(original)/3) || provided["removedTriangleOrdinals"] != strings.Join(removed, ",") {
+			return nil, nil, invalid("geometry normalization triangle provenance mismatch")
+		}
+		if actual := geometryHash(vertices, original); provided["originalGeometrySHA256"] != actual {
+			return nil, nil, invalid("geometry normalization hash mismatch: recorded %s, resolved %s", provided["originalGeometrySHA256"], actual)
 		}
 	}
 	if len(indices) == 0 {

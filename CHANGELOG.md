@@ -126,6 +126,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Compact physical-source transforms now explicitly accumulate in float64 before storing float32 vertices in both Scribe and Go. This matches Unity Mono and prevents valid zero-area normalization hashes from failing due to intermediate rounding. Validation identifies the failing collider and distinguishes triangle provenance from geometry-hash mismatches. Preparation fingerprints advance to v3; re-prepare/recook affected content, and re-export compact sources authored with earlier non-Mono emitters if their provenance differs.
+
 - Unity WebTransport preserves peer application close reasons and the complete unsigned code in `GolemDisconnectInfo.WebTransportErrorCode`, including admission denials. Bounded lowercase snake_case application codes such as `ticket_expired` survive client sanitization while free-form credential diagnostics remain redacted. Independent stream/datagram shutdown produces one disconnect; a stream EOF allows up to one second for the CONNECT close capsule, while malformed Golem frames still fail immediately. Connection-owned cleanup cannot cancel a replacement connection. Requires WebTransport SDK 0.3.0 and its matching native ABI 2 library.
 
 - Navigation authoring reads imported meshes without requiring runtime Read/Write or modifying importers. Explicit `SourceCollider` selection supports shared box, sphere, capsule and mesh sources, removing the need for consumer-created mesh copies and primitive conversion assets.
