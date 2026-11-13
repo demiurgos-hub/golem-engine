@@ -34,7 +34,7 @@ func TestUnityRuntimePolicyConsumer(t *testing.T) {
 	}
 	for _, name := range []string{
 		"AssemblyInfo.cs", "Client/ClientContracts.cs", "Client/GameClient.cs",
-		"Client/GolemConnectOptions.cs", "Client/GolemRealtimeBootstrap.cs",
+		"Client/GolemConnectOptions.cs", "Client/GolemRealtimeBootstrap.cs", "Client/GolemDispatchQueue.cs",
 		"Client/GolemBoundedDownloadHandler.cs", "Client/GolemUnityLog.cs",
 		"Codec/PbReader.cs", "Codec/PbWriter.cs", "Transport/GolemDatagramProtocol.cs",
 		"Transport/GolemReliableFrameCodec.cs", "Transport/GolemWebSocketTransport.cs",

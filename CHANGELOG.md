@@ -132,6 +132,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Unity transport callbacks no longer create dispatcher GameObjects from background threads during startup or Play Mode teardown. Main-thread bootstrap owns the dispatcher; disabled/destroyed dispatchers discard queued and late callbacks before a fresh lifetime begins.
+
 - Continuous physics reuses sensor endpoint observations when all body poses and world inputs are unchanged, avoiding repeated mesh overlap work in idle worlds. Contact phases, queries, mutation invalidation and moving-counterpart sweeps retain their existing semantics.
 
 - Default WebTransport servers send QUIC keepalives so quiet connected players do not hit the transport idle timeout when replicated state is unchanged. Caller-supplied HTTP/3 `QUICConfig` policies remain intact, including explicitly disabled keepalives. Unity uses WebTransport SDK 0.3.1, which reports negotiated idle expiry explicitly and preserves the original native failure through cleanup.
