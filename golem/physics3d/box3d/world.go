@@ -67,6 +67,7 @@ type World struct {
 	tracker         p.ContactTracker
 	pendingTracker  *p.ContactTracker
 	policyContacts  map[p.ContactPair]struct{}
+	sensorReplay    stationarySensorReplay
 	cleanup         []p.ContactEvent
 	restoring       bool
 	materials       map[uint64]p.Material
@@ -110,7 +111,11 @@ func (w *World) guard() error {
 	}
 	return nil
 }
-func (w *World) changed()     { w.mutation++; w.dirty = true }
+func (w *World) changed() {
+	w.mutation++
+	w.dirty = true
+	w.sensorReplay.ready = false
+}
 func bv(v p.Vec3) b.Vec3      { return b.Vec3{X: v.X, Y: v.Y, Z: v.Z} }
 func pv(v b.Vec3) p.Vec3      { return p.Vec3{X: v.X, Y: v.Y, Z: v.Z} }
 func bq(q p.Quat) b.Quat      { return b.Quat{V: b.Vec3{X: q.X, Y: q.Y, Z: q.Z}, S: q.W} }
@@ -443,6 +448,7 @@ func (w *World) CloseWithEvents() ([]p.ContactEvent, error) {
 	w.handleBindings = nil
 	w.pending, w.cleanup = nil, nil
 	w.pendingTracker = nil
+	w.sensorReplay = stationarySensorReplay{}
 	w.tracker = p.ContactTracker{}
 	w.materials, w.materialKeys = nil, nil
 	return events, nil

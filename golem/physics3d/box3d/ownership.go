@@ -30,6 +30,7 @@ func (w *World) SetOwner(h p.BodyHandle, owner int64) error {
 		}
 	}
 	v.committed.Owner = owner
+	w.sensorReplay.ready = false
 	w.mutation++
 	w.revision++
 	return nil

@@ -20,11 +20,58 @@ type motionSensorBoundary struct {
 	event    p.ContactEvent
 }
 
+// The contact tracker already owns the exact endpoint observations. Reuse them
+// only when every observed body stayed at that endpoint and no world mutation
+// changed static geometry, participation, or ownership in the meantime.
+type stationarySensorReplay struct {
+	ready bool
+	poses map[b.BodyID]b.WorldTransform
+}
+
+func (s *stationarySensorReplay) unchanged(sample b.MotionStepSample) bool {
+	if !s.ready || len(s.poses) != len(sample.Bodies) {
+		return false
+	}
+	for _, body := range sample.Bodies {
+		previous, ok := s.poses[body.Body]
+		if !ok || previous != body.Start || body.Start != body.End {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *stationarySensorReplay) remember(sample b.MotionStepSample) {
+	if s.poses == nil {
+		s.poses = make(map[b.BodyID]b.WorldTransform, len(sample.Bodies))
+	}
+	clear(s.poses)
+	for _, body := range sample.Bodies {
+		s.poses[body.Body] = body.End
+	}
+	s.ready = true
+}
+
 func (s *motionContactState) replay(w *World, record motionContactRecord, frame, revision uint64) ([]p.ContactEvent, error) {
 	if !w.config.Continuous || len(w.sensorColliders) == 0 && len(w.policyContacts) == 0 {
 		values, err := w.policyEndpoint(record.values)
 		if err != nil {
 			return nil, err
+		}
+		return motionTrackEndpoint(w, values, frame, revision, record.end), nil
+	}
+	if len(w.policyContacts) == 0 && w.sensorReplay.unchanged(record.sample) {
+		values := make([]p.ContactEvent, 0, len(record.values))
+		for _, event := range record.values {
+			if event.Pair.Kind != p.SensorContact {
+				values = append(values, event)
+			}
+		}
+		for _, event := range w.pendingTracker.Current() {
+			if event.Pair.Kind == p.SensorContact {
+				event.Force = p.Vec3{}
+				values = append(values, event)
+			}
 		}
 		return motionTrackEndpoint(w, values, frame, revision, record.end), nil
 	}
@@ -181,6 +228,11 @@ func (s *motionContactState) replay(w *World, record motionContactRecord, frame,
 		}
 	}
 	events = append(events, motionTrackEndpoint(w, values, frame, revision, record.end)...)
+	if len(w.policyContacts) == 0 {
+		w.sensorReplay.remember(record.sample)
+	} else {
+		w.sensorReplay.ready = false
+	}
 	return events, nil
 }
 
