@@ -959,7 +959,8 @@ namespace GolemEngine.Unity
                 string.IsNullOrEmpty(info.Transport) ? options.Transport : info.Transport,
                 RedactUrl(string.IsNullOrEmpty(info.Url) ? options.Url : info.Url),
                 info.Phase,
-                info.Category);
+                info.Category,
+                info.WebTransportErrorCode);
         }
 
         private static string RedactUrl(string url)
@@ -985,6 +986,12 @@ namespace GolemEngine.Unity
             {
                 return reason;
             }
+            // Application reason codes are identifiers, not free-form auth
+            // diagnostics. Do not erase codes such as ticket_expired.
+            if (IsApplicationReasonCode(reason))
+            {
+                return reason;
+            }
             if (reason.IndexOf("ticket", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 reason.IndexOf("token", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 reason.IndexOf('?') >= 0)
@@ -992,6 +999,22 @@ namespace GolemEngine.Unity
                 return "transport_operation_failed";
             }
             return reason;
+        }
+
+        private static bool IsApplicationReasonCode(string reason)
+        {
+            if (reason.Length > 64 || reason[0] < 'a' || reason[0] > 'z' || reason.IndexOf('_') < 0)
+            {
+                return false;
+            }
+            foreach (var character in reason)
+            {
+                if (character != '_' && (character < 'a' || character > 'z') && (character < '0' || character > '9'))
+                {
+                    return false;
+                }
+            }
+            return true;
         }
 
         private static bool IsTerminalHandshakeFailure(GolemDisconnectInfo info)

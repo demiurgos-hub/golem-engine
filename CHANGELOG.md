@@ -126,6 +126,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Unity WebTransport preserves peer application close reasons and the complete unsigned code in `GolemDisconnectInfo.WebTransportErrorCode`, including admission denials. Bounded lowercase snake_case application codes such as `ticket_expired` survive client sanitization while free-form credential diagnostics remain redacted. Independent stream/datagram shutdown produces one disconnect; a stream EOF allows up to one second for the CONNECT close capsule, while malformed Golem frames still fail immediately. Connection-owned cleanup cannot cancel a replacement connection. Requires WebTransport SDK 0.3.0 and its matching native ABI 2 library.
+
 - Navigation authoring reads imported meshes without requiring runtime Read/Write or modifying importers. Explicit `SourceCollider` selection supports shared box, sphere, capsule and mesh sources, removing the need for consumer-created mesh copies and primitive conversion assets.
 
 - Published root and Box3D modules now pin compatible published portable physics/navigation dependencies instead of development placeholders. The Box3D fork mapping remains explicit because the fork still declares the upstream module path; Go consumers must retain that one replacement.

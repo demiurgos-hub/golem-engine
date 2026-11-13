@@ -147,6 +147,10 @@ namespace GolemEngine.Unity
             {
                 parts += $" code={info.Code.Value}";
             }
+            if (info.WebTransportErrorCode.HasValue && !info.Code.HasValue)
+            {
+                parts += $" webtransport_code={info.WebTransportErrorCode.Value}";
+            }
             if (!string.IsNullOrEmpty(info.Reason))
             {
                 parts += $" reason={Quote(info.Reason)}";

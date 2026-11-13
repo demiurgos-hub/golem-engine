@@ -39,7 +39,8 @@ namespace GolemEngine.Unity
             string transport = null,
             string url = null,
             GolemDisconnectPhase phase = GolemDisconnectPhase.Unknown,
-            GolemDisconnectCategory category = GolemDisconnectCategory.Unknown)
+            GolemDisconnectCategory category = GolemDisconnectCategory.Unknown,
+            uint? webTransportErrorCode = null)
         {
             WasClean = wasClean;
             Code = code;
@@ -49,6 +50,7 @@ namespace GolemEngine.Unity
             Url = url;
             Phase = phase;
             Category = category;
+            WebTransportErrorCode = webTransportErrorCode;
         }
 
         public bool WasClean { get; }
@@ -59,6 +61,8 @@ namespace GolemEngine.Unity
         public string Url { get; }
         public GolemDisconnectPhase Phase { get; }
         public GolemDisconnectCategory Category { get; }
+        /// <summary>The complete unsigned application code from a peer WebTransport close capsule.</summary>
+        public uint? WebTransportErrorCode { get; }
     }
 
     /// <summary>Transport abstraction used by GameClient to send reliable Golem packets and optional datagrams.</summary>

@@ -38,6 +38,7 @@ func TestUnityRuntimePolicyConsumer(t *testing.T) {
 		"Client/GolemBoundedDownloadHandler.cs", "Client/GolemUnityLog.cs",
 		"Codec/PbReader.cs", "Codec/PbWriter.cs", "Transport/GolemDatagramProtocol.cs",
 		"Transport/GolemReliableFrameCodec.cs", "Transport/GolemWebSocketTransport.cs",
+		"Transport/GolemWebTransportCloseState.cs",
 	} {
 		copySource(filepath.Join("..", "golem-unity", "Runtime", name), runtimeDir)
 	}
