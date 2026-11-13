@@ -63,7 +63,11 @@ func Prepare(source *Source, settings Settings) (*Prepared, error) {
 	if err := source.Validate(settings.Limits); err != nil {
 		return nil, err
 	}
-	data, err := json.Marshal(source)
+	// Canonical prepared sources are self-contained. The resolved geometry and
+	// instance matrices determine identity; sidecar location is transport detail.
+	resolved := *source
+	resolved.Geometry = nil
+	data, err := json.Marshal(&resolved)
 	if err != nil {
 		return nil, err
 	}

@@ -10,11 +10,15 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
+	"path/filepath"
 
+	"github.com/demiurgos-hub/golem-engine/golem/geometry"
 	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
 )
 
 const Generator = "Golem Scribe physics source v1"
+const GeneratorV2 = "Golem Scribe physics source v2"
 
 type Limits struct {
 	Bytes                                                  int64
@@ -38,6 +42,7 @@ type Source struct {
 	Assets              []Asset
 	Materials           []Material
 	Joints              []Joint
+	Geometry            *geometry.Reference `json:",omitempty"`
 }
 type Body struct {
 	ID, OwnerID, Kind, CollisionDetection         string
@@ -59,6 +64,7 @@ type Collider struct {
 	Radius, Height, ContactOffset                                                  float32
 	Character                                                                      *Character
 	Metadata                                                                       []Property
+	GeometryTransform                                                              *[16]float32 `json:",omitempty"`
 }
 type Character struct {
 	StepOffset, SlopeLimit, SkinWidth, MinimumMoveDistance float32
@@ -95,6 +101,22 @@ type Joint struct {
 // Decode reads one strict JSON source document. Unknown fields and trailing data
 // fail before any live physics world is modified. The hash covers exact source bytes.
 func Decode(r io.Reader, limits Limits) (*Source, string, error) {
+	return DecodeWithGeometry(r, limits, nil)
+}
+
+// DecodeFile reads a source and verifies binary sidecars contained in its folder.
+func DecodeFile(path string, limits Limits) (*Source, string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, "", err
+	}
+	defer file.Close()
+	return DecodeWithGeometry(file, limits, geometry.FileResolver(filepath.Dir(path)))
+}
+
+// DecodeWithGeometry resolves version-2 binary geometry before complete source
+// validation. Version-1 inline sources retain their existing decoding contract.
+func DecodeWithGeometry(r io.Reader, limits Limits, resolve geometry.Resolver) (*Source, string, error) {
 	if r == nil || limits.Bytes < 1 {
 		return nil, "", p.ErrInvalid
 	}
@@ -115,6 +137,29 @@ func Decode(r io.Reader, limits Limits) (*Source, string, error) {
 	if e = d.Decode(&extra); e != io.EOF {
 		return nil, "", fmt.Errorf("%w: trailing source data", p.ErrInvalid)
 	}
+	if s.Geometry != nil {
+		if s.Version != 2 || len(s.Assets) != 0 {
+			return nil, "", invalid("external geometry requires version 2 without inline assets")
+		}
+		assets, err := geometry.Read(*s.Geometry, resolve, geometry.Limits{Bytes: limits.Bytes, Assets: limits.Assets, Vertices: limits.Vertices, Triangles: limits.Triangles})
+		if err != nil {
+			return nil, "", err
+		}
+		for _, asset := range assets {
+			if asset.Kind == geometry.MeshFloat64 {
+				return nil, "", invalid("physics geometry requires float32 authored samples")
+			}
+			asset = geometry.ExpandHeightfield(asset, true)
+			value := Asset{ID: asset.ID, SourceID: asset.SourceID, Vertices: make([]p.Vec3, len(asset.Vertices)), Indices: make([]uint32, 0, len(asset.Triangles)*3)}
+			for index, vertex := range asset.Vertices {
+				value.Vertices[index] = p.Vec3{X: float32(vertex.X), Y: float32(vertex.Y), Z: float32(vertex.Z)}
+			}
+			for _, triangle := range asset.Triangles {
+				value.Indices = append(value.Indices, triangle.Indices[:]...)
+			}
+			s.Assets = append(s.Assets, value)
+		}
+	}
 	if e = s.Validate(limits); e != nil {
 		return nil, "", e
 	}
@@ -132,8 +177,11 @@ func (s *Source) Validate(l Limits) error {
 	if l.Bytes < 1 || l.Bodies < 0 || l.Colliders < 0 || l.Assets < 0 || l.Vertices < 0 || l.Triangles < 0 || l.Joints < 0 {
 		return invalid("resource limits")
 	}
-	if s == nil || s.Version != 1 || s.Generator != Generator || s.WorldID == "" || s.Revision == 0 || s.CoordinateLimit != p.CoordinateLimit {
+	if s == nil || (s.Version != 1 || s.Generator != Generator) && (s.Version != 2 || s.Generator != GeneratorV2) || s.WorldID == "" || s.Revision == 0 || s.CoordinateLimit != p.CoordinateLimit {
 		return invalid("source identity/version/envelope")
+	}
+	if s.Version == 1 && s.Geometry != nil {
+		return invalid("version 1 cannot reference binary geometry")
 	}
 	if len(s.Bodies) > l.Bodies || len(s.Colliders) > l.Colliders || len(s.Assets) > l.Assets || len(s.Joints) > l.Joints {
 		return invalid("source object limit")
@@ -189,7 +237,7 @@ func (s *Source) Validate(l Limits) error {
 		if vertices > l.Vertices || triangles > l.Triangles {
 			return invalid("geometry limit")
 		}
-		if e := (p.ShapeDesc{Kind: p.TriangleMesh, Vertices: v.Vertices, Indices: v.Indices}).Validate(); e != nil {
+		if e := validateSourceAsset(v, s.Version == 2); e != nil {
 			return invalid("asset %s: %v", v.ID, e)
 		}
 		assets[v.ID] = v
@@ -216,6 +264,10 @@ func (s *Source) Validate(l Limits) error {
 	}
 	seen := map[string]bool{}
 	for _, v := range s.Colliders {
+		mesh := v.Shape == "mesh" || v.Shape == "convex" || v.Shape == "terrain"
+		if s.Version == 1 && v.GeometryTransform != nil || s.Version == 2 && mesh && v.GeometryTransform == nil || !mesh && v.GeometryTransform != nil {
+			return invalid("collider geometry transform/version")
+		}
 		if v.ID == "" || seen[v.ID] {
 			return invalid("collider identity")
 		}
@@ -353,6 +405,13 @@ func (c Collider) Geometry(assets map[string]Asset) (p.ShapeDesc, error) {
 		}
 		s.Vertices = a.Vertices
 		s.Indices = a.Indices
+		if c.GeometryTransform != nil {
+			var err error
+			s.Vertices, s.Indices, err = transformedGeometry(a, *c.GeometryTransform, c.Metadata)
+			if err != nil {
+				return s, err
+			}
+		}
 	default:
 		return s, invalid("shape %s", c.Shape)
 	}
