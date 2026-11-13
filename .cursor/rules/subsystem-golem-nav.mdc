@@ -14,6 +14,8 @@ alwaysApply: false
 
 # Navigation
 
+`bake.PreparedSource` retains immutable canonical assets and placements, with lazy shared local asset indexes plus a placement index. It must not retain flattened per-placement triangles. Preserve exact flat-resolution fingerprints, rasterization order, transforms/reflections, strictness and omission diagnostics. Tile queries use conservative transformed node bounds and exact final triangle bounds; never cull via an unchecked inverse affine transform. `Scene.Resolve` remains the flat compatibility API; source admission uses `Scene.Validate` without discarded triangle storage or hashes.
+
 Portable navigation v2 sources use `golem/geometry` binary sidecars for canonical meshes and compact float32 terrain samples/holes. `navbuild.DecodeFile` and `DecodeWithGeometry` verify contained paths, exact hashes and expansion bounds, then use `Scene.Validate` without retaining expanded placements or computing unused fingerprints; `BakeFile` uses that path. Preserve strict/non-strict geometry admission, legacy inline sources and navigation's b-c terrain diagonal, independently of physics's a-d split. Instance transforms and area semantics remain explicit; this does not change streaming or bake coverage policy.
 
 Idle staged-physics attachments must refresh regional quarantine after geometry changes even without a destination; stopping navigation for a scripted physical trajectory must not freeze that body forever after safety returns. Timed physical actions use captured navigation safety and actual-path reconciliation while their own intent owns motion. Legacy synchronous idle scheduling remains unchanged.

@@ -118,6 +118,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Changed
 
+- Navigation baking retains canonical geometry and placements with shared asset indexes instead of expanding every placed mesh into permanent triangle storage. Selected tile builds preserve exact source/resolved identities, triangle order, transforms and diagnostics while materializing only their required geometry.
+
 - The unreleased Box3D adapter now uses fixed native stepping: four steps per 20 Hz frame by default, with `SolverVelocityIterations` and `SolverRelaxIterations` both defaulting to 1. Retained navigation/controller/support boundaries share the same elapsed time. The experimental global adaptive-refinement settings and penetration ceiling are removed; captured navigation safety still rejects an unsafe interacting frame as a whole, and query/placement precision is unchanged. World `Config.Continuous` controls CCD; per-body `Continuous` selects the native bullet policy separately.
 
 - Breaking change to unreleased physics captures: portable physics checkpoints and Go/Unity debug captures now use version 2 with native solver settings. Version-1 physics checkpoints require explicit state migration; old debug captures must be regenerated. The paired root checkpoint envelope, entity snapshots and portable Scribe source keep their existing versions. Readers reject obsolete physical payloads explicitly instead of ignoring retired configuration fields.
