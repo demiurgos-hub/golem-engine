@@ -132,6 +132,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Navigation baking preserves narrow walkable contour topology when simplified wall chords intersect. It retains original boundary samples without changing geometry, clearance, resolution or shared portals; invalid tile errors now identify the offending polygon and edge.
+
 - Unity navigation exports select explicit binary32 clearance arithmetic, so authored float profile/cell ratios retain their intended voxel counts. Baking, tile padding and artifact validation share the same policy; portable artifacts record it as a required feature. Generic Go sources keep existing binary64 behavior and fingerprints unless they opt in. Geometry coordinates, transforms and terrain samples are unchanged.
 
 - Unity Git packages no longer contain orphan metadata for obsolete IDE build directories and DLL outputs, preventing immutable-package import warnings.
