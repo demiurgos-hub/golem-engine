@@ -55,6 +55,8 @@ Physics bodies carry world rigid poses. Primitive geometry is body-local and `Si
 
 `golem-unity` is the UPM package (`io.demiurgos.golemengine`) for Unity clients: `GameClient`, WebSocket/WebTransport transports, codecs, Unity bridge helpers, and Scribe editor export. It must not import or duplicate the Go `golem.Server` game loop. Nested `Runtime/WebTransport` is a separate asmdef that references `Demiurgos.WebTransport.Client.Unity`.
 
+Keep IDE/compiler outputs outside the imported package under ignored root `artifacts/`. The obsolete `golem-unity/ide/` tree and its folder metadata are ignored; do not commit DLL or build-directory `.meta` files whose generated targets are absent from the package.
+
 The `csharp-client` codegen integration emits generated C# from `codegen/templates/csharp/` (managers, codecs, `ClientFactory`), including optional checked protocol constant sets as static string classes in `EntitiesPb.cs`. The `unity` integration emits thin entity-view bridges from `codegen/templates/unity/` and depends on `csharp-client` output.
 
 C# codecs consume resolved schema layouts and `VarInfo.DeltaPresenceCS`; delta application uses that same classification for nullable values versus strings/bytes/collections. Keep C# emission, null/reference representation and codec method names language-specific. Shared payload/envelope/scalar helpers do not change available encode/decode operations or manager lifecycle.

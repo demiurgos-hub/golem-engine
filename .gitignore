@@ -4,6 +4,9 @@
 /build/
 /out/
 /artifacts/
+# Obsolete Unity IDE build outputs must not enter the UPM package, including .meta files.
+/golem-unity/ide/
+/golem-unity/ide.meta
 *.exe
 *.exe~
 *.dll
