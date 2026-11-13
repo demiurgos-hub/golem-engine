@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- The independent `golem/geometry` module reads and writes bounded, hash-verified binary source sidecars. Canonical meshes retain float32/float64 precision; compact terrain keeps normalized float32 heights and surface bits, with explicit physical/navigation triangulation during cooking.
+
 - A bounded `examples/unity-integration` consumer connects selected Scribe definitions, generated Go/C# state, definition-based Unity prefabs, server physics/navigation and paired checkpoint recovery over a real WebSocket. Its runner reuses the saved content fixture project, stages current sources and records each run separately; scene/placement export and published dependency resolution remain separate work.
 
 - Scribe content export sets capture explicitly selected prefab and ScriptableObject definitions through consumer adapters, including resolved variants, nested records, enums/flags, defaults, stable IDs and checked references. Export and validation reuse Scribe ownership and rollback; existing entity and catalog exports remain compatible.

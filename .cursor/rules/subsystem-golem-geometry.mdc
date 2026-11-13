@@ -1,0 +1,13 @@
+---
+description: geometry — independent versioned binary mesh/heightfield sources, strict bounded decoding, contained sidecars and lossless terrain expansion.
+globs: golem/geometry/**/*
+alwaysApply: false
+---
+
+# `geometry`
+
+This separate Go module owns portable source geometry, not simulation, scene assembly or cooked runtime artifacts. Keep it independent of the root runtime, physics, navigation and Unity.
+
+`GOLEMGE1` uses little-endian values: asset count; per-asset length-prefixed UTF-8 ID/SourceID and kind; float32/float64 XYZ meshes with indexed triangles and area bytes, or normalized float32 terrain samples, dimensions and LSB-first surface bits. True surface bits retain cells. Preserve original sample precision and the distinct physical a-d / navigation b-c diagonals when expanding at cook/load time. Do not quantize geometry or silently choose a different triangulation.
+
+Decode bounds include both serialized bytes and expanded geometry. Reject malformed/trailing bytes, nonfinite values, bad indices, duplicate identities and invalid padding. Sidecar resolution requires a contained relative path, SHA256 match and resolved-symlink containment. Test this nested module explicitly with `GOWORK=off go test ./...`.
