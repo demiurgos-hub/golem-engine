@@ -48,6 +48,34 @@ func TestShapeValidation(t *testing.T) {
 	}
 }
 
+func TestHeightFieldValidation(t *testing.T) {
+	valid := func() ShapeDesc {
+		return ShapeDesc{Kind: HeightField, Height: &HeightFieldDesc{Resolution: 3, SpacingX: 1, SpacingZ: 2, HeightStep: .5, Heights: make([]uint16, 9), Solid: []byte{0b1011}}}
+	}
+	if s := valid(); s.Validate() != nil || !s.InBounds(Identity()) {
+		t.Fatal("valid height field rejected")
+	}
+	for name, mutate := range map[string]func(*ShapeDesc){
+		"samples":    func(s *ShapeDesc) { s.Height.Heights = s.Height.Heights[:8] },
+		"padding":    func(s *ShapeDesc) { s.Height.Solid[0] |= 1 << 4 },
+		"spacing":    func(s *ShapeDesc) { s.Height.SpacingZ = 0 },
+		"resolution": func(s *ShapeDesc) { s.Height.Resolution = 1 },
+		"scale":      func(s *ShapeDesc) { s.Scale = Vec3{X: 1, Y: 1, Z: 1} },
+		"kind":       func(s *ShapeDesc) { s.Kind = TriangleMesh },
+		"extent":     func(s *ShapeDesc) { s.Height.Heights[4] = 65535; s.Height.HeightStep = 1 },
+	} {
+		s := valid()
+		mutate(&s)
+		if s.Validate() == nil {
+			t.Fatalf("%s: invalid height field accepted", name)
+		}
+	}
+	child := ShapeDesc{Kind: Compound, Children: []ShapeChild{{Pose: Identity(), Shape: valid()}}}
+	if child.Validate() == nil {
+		t.Fatal("height field accepted inside a compound")
+	}
+}
+
 func TestQueryEnvelopeIncludesOrientedGeometry(t *testing.T) {
 	q := Query{Kind: Sweep, Pose: Identity(), Shape: ShapeDesc{Kind: Capsule, Radius: .25, PointB: Vec3{Y: 1}}}
 	q.Pose.Position = Vec3{X: CoordinateLimit - .5}

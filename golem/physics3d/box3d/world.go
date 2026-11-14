@@ -137,6 +137,12 @@ func copyShape(s p.ShapeDesc) p.ShapeDesc {
 	for i := range s.Children {
 		s.Children[i].Shape = copyShape(s.Children[i].Shape)
 	}
+	if s.Height != nil {
+		h := *s.Height
+		h.Heights = append([]uint16(nil), h.Heights...)
+		h.Solid = append([]byte(nil), h.Solid...)
+		s.Height = &h
+	}
 	return s
 }
 

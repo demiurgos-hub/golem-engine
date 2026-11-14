@@ -1,6 +1,8 @@
 package box3d
 
 import (
+	"fmt"
+
 	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
 	b "github.com/gataengine/box3d-go"
 )
@@ -17,23 +19,29 @@ func (w *World) attachCookedGeometry(body *body, collider *collider, cooked *Coo
 			id = body.id.CreateCapsuleShape(&d, &b.Capsule{Center1: bv(local.Transform(leaf.desc.PointA)), Center2: bv(local.Transform(leaf.desc.PointB)), Radius: leaf.desc.Radius})
 		case p.Box, p.Convex:
 			hull := leaf.hull
-			if local != p.Identity() {
-				hull = b.CloneAndTransformHull(hull, bt(local), b.Vec3One)
+			if local != p.Identity() || leaf.desc.Scaled() {
+				hull = b.CloneAndTransformHull(hull, bt(local), bv(leaf.desc.ScaleOrUnit()))
 			}
 			id = body.id.CreateHullShape(&d, hull)
 		case p.TriangleMesh:
-			mesh := leaf.mesh
+			mesh, scale := leaf.mesh, bv(leaf.desc.ScaleOrUnit())
 			if local != p.Identity() {
 				// MeshShape has no local rigid pose. A transformed instance must
 				// cook transformed source vertices; sharing the untransformed BVH
 				// would silently lose collider/compound local geometry.
 				var err error
-				mesh, err = cookMesh(leaf.desc, local)
+				mesh, err = cookMesh(leaf.desc.Unscaled(), local)
 				if err != nil {
 					return err
 				}
+				scale = b.Vec3One
 			}
-			id = body.id.CreateMeshShape(&d, mesh, b.Vec3One)
+			id = body.id.CreateMeshShape(&d, mesh, scale)
+		case p.HeightField:
+			if local != p.Identity() {
+				return fmt.Errorf("%w: native height fields have no collider-local pose", p.ErrUnsupported)
+			}
+			id = body.id.CreateHeightFieldShape(&d, leaf.height)
 		default:
 			return p.ErrUnsupported
 		}

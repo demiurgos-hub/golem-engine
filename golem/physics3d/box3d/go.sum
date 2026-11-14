@@ -1,7 +1,7 @@
 github.com/Masterminds/semver/v3 v3.4.0 h1:Zog+i5UMtVoCU8oKka5P7i9q9HgrJeGzI9SA1Xbatp0=
 github.com/Masterminds/semver/v3 v3.4.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
-github.com/demiurgos-hub/box3d-go v0.0.0-20261112194147-89c6286a8d68 h1:xVScSwF57m3pJvWeC3J+IAOYQskzMEJ45g4RZUrwP6s=
-github.com/demiurgos-hub/box3d-go v0.0.0-20261112194147-89c6286a8d68/go.mod h1:qQp06xQPzsTETAMhvpn2zOeppvRXbtB3JFGKDfGeReM=
+github.com/demiurgos-hub/box3d-go v0.0.0-20261114223637-579b93c759ee h1:bYxLL0sfKd5a35Fe3U5+eBDDTU8ZXj9ii926ABTHZiA=
+github.com/demiurgos-hub/box3d-go v0.0.0-20261114223637-579b93c759ee/go.mod h1:qQp06xQPzsTETAMhvpn2zOeppvRXbtB3JFGKDfGeReM=
 github.com/demiurgos-hub/golem-engine/golem/geometry v0.0.0-20261113160310-d88e90435bea h1:vIbujjcicGgJJd+DqbgVMpTLoFlv2qxB+0t6+tXre1k=
 github.com/demiurgos-hub/golem-engine/golem/geometry v0.0.0-20261113160310-d88e90435bea/go.mod h1:r5JEDgAvE/+trShzySM2ksuKPetPvk006VIUcM53yZI=
 github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261113161118-0c6a59582abb h1:CPbfPBfHVOsUp42LVYrH2vlGaiNOKvr0aWPaheolde4=

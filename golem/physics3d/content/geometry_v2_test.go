@@ -72,6 +72,39 @@ func TestCompactSourceSharedMeshPlacementAndPreparation(t *testing.T) {
 	}
 }
 
+func TestTerrainHeightFieldPlacementConditions(t *testing.T) {
+	field := geometry.Heightfield{Resolution: 2, Size: [3]float32{4, 2, 6}, Samples: []float32{0, 1. / 32766, 2. / 32766, 1}, Surface: []byte{1}}
+	identity := [16]float32{0: 1, 5: 1, 10: 1, 15: 1}
+	placement := func(field geometry.Heightfield, collider Collider, body Body) p.ShapeDesc {
+		t.Helper()
+		shape, _, _, err := collider.Placement(map[string]Asset{"terrain": {ID: "terrain", Heightfield: &field}}, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return shape
+	}
+	terrain := Collider{ID: "terrain", Shape: "terrain", AssetID: "terrain", Rotation: p.Quat{W: 1}, GeometryTransform: &identity}
+	static := Body{Kind: "static"}
+	shape := placement(field, terrain, static)
+	if shape.Kind != p.HeightField || !reflect.DeepEqual(shape.Height.Heights, []uint16{0, 1, 2, 32766}) || shape.Height.SpacingX != 4 || shape.Height.SpacingZ != 6 || shape.Height.HeightStep != float32(2./32766) {
+		t.Fatalf("grid-aligned static terrain not native: %+v", shape.Height)
+	}
+	translated := identity
+	translated[3] = 1
+	offGrid := field
+	offGrid.Samples = []float32{0, .3, 0, 1}
+	for name, shape := range map[string]p.ShapeDesc{
+		"kinematic body":   placement(field, terrain, Body{Kind: "kinematic"}),
+		"geometry offset":  placement(field, Collider{ID: "terrain", Shape: "terrain", AssetID: "terrain", Rotation: p.Quat{W: 1}, GeometryTransform: &translated}, static),
+		"collider center":  placement(field, Collider{ID: "terrain", Shape: "terrain", AssetID: "terrain", Center: p.Vec3{Y: 1}, Rotation: p.Quat{W: 1}, GeometryTransform: &identity}, static),
+		"off-grid samples": placement(offGrid, terrain, static),
+	} {
+		if shape.Kind != p.TriangleMesh || len(shape.Vertices) != 4 || len(shape.Indices) != 6 {
+			t.Fatalf("%s: expected expanded terrain mesh, got %+v", name, shape)
+		}
+	}
+}
+
 func TestCanonicalExactZeroAreaProvenance(t *testing.T) {
 	asset := Asset{ID: "raw", Vertices: []p.Vec3{{}, {X: 1}, {X: 2}, {Z: 1}}, Indices: []uint32{0, 1, 2, 0, 3, 1}}
 	matrix := [16]float32{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}

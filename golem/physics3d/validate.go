@@ -13,6 +13,14 @@ func validateShape(s ShapeDesc, depth int, remaining *int) error {
 	if !Finite(s.Radius) || s.Radius < 0 {
 		return fmt.Errorf("%w: radius", ErrInvalid)
 	}
+	if (s.Height != nil) != (s.Kind == HeightField) {
+		return fmt.Errorf("%w: height field description", ErrInvalid)
+	}
+	if s.Scale != (Vec3{}) {
+		if depth > 0 || s.Kind != Convex && s.Kind != TriangleMesh || !s.Scale.Valid() || abs(s.Scale.X) < MinShapeScale || abs(s.Scale.Y) < MinShapeScale || abs(s.Scale.Z) < MinShapeScale {
+			return fmt.Errorf("%w: shape scale", ErrInvalid)
+		}
+	}
 	switch s.Kind {
 	case Sphere:
 		if s.Radius <= 0 {
@@ -31,8 +39,8 @@ func validateShape(s ShapeDesc, depth int, remaining *int) error {
 			return fmt.Errorf("%w: vertex count", ErrInvalid)
 		}
 		*remaining -= len(s.Vertices)
-		for _, v := range s.Vertices {
-			if !v.InBounds() {
+		for i := range s.Vertices {
+			if !s.Vertices[i].InBounds() || !s.ScaledVertex(i).InBounds() {
 				return fmt.Errorf("%w: vertex", ErrInvalid)
 			}
 		}
@@ -52,6 +60,19 @@ func validateShape(s ShapeDesc, depth int, remaining *int) error {
 					return fmt.Errorf("%w: degenerate triangle", ErrInvalid)
 				}
 			}
+		}
+	case HeightField:
+		h := s.Height
+		if depth > 0 || h.Resolution < 2 || h.Resolution > MaxHeightFieldResolution || !Finite(h.SpacingX) || !Finite(h.SpacingZ) || !Finite(h.HeightStep) || h.SpacingX <= 0 || h.SpacingZ <= 0 || h.HeightStep <= 0 {
+			return fmt.Errorf("%w: height field grid", ErrInvalid)
+		}
+		cells := (h.Resolution - 1) * (h.Resolution - 1)
+		if len(h.Heights) != h.Resolution*h.Resolution || len(h.Solid) != (cells+7)/8 || cells%8 != 0 && h.Solid[len(h.Solid)-1]>>uint(cells%8) != 0 {
+			return fmt.Errorf("%w: height field samples", ErrInvalid)
+		}
+		_, high := h.HeightRange()
+		if !(Vec3{X: float32(h.Resolution-1) * h.SpacingX, Y: high, Z: float32(h.Resolution-1) * h.SpacingZ}).InBounds() {
+			return fmt.Errorf("%w: height field extent", ErrInvalid)
 		}
 	case Compound:
 		if len(s.Children) == 0 {

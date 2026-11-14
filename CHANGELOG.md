@@ -130,6 +130,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 - Navigation qualification's `Suite` and `Full` launchers now run the three mixed scene families at 1,000 agents only; `Full` retains the two-hour 1,000-agent soak. Existing diagnostic agent-count controls remain available.
 
+- Physics source loading is faster for large Scribe worlds. `content.DecodePrepared` decodes and prepares in one validation pass, and `Prepared.CookShapes` cooks a source's shapes in parallel without touching a world; `Prepared.LoadCooked` then only registers them, so independent sources can cook concurrently. Copies of one asset that differ by rotation, translation and per-axis scale share cooked hulls and BVHs through the new `ShapeDesc.Scale`. Static terrain on Unity's 16-bit height grid loads as the new native `HeightField` shape (`HeightFieldDesc`) instead of an expanded mesh, keeping the physical cell diagonal and holes. `Collider.Placement` reports which geometry a collider loads as; query results agree with the previous transformed geometry within float32 rounding. Breaking change to unreleased APIs: heightfield `content.Asset` values keep `Heightfield` instead of expanded vertices (`Collider.Geometry` still expands them), and preparation version 4 and cook version 3 change fingerprints, so re-prepare existing captures.
+
 ### Fixed
 
 - Unity transport callbacks no longer create dispatcher GameObjects from background threads during startup or Play Mode teardown. Main-thread bootstrap owns the dispatcher; disabled/destroyed dispatchers discard queued and late callbacks before a fresh lifetime begins.

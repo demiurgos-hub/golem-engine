@@ -71,10 +71,14 @@ type Character struct {
 	DetectCollisions, EnableOverlapRecovery                bool
 }
 type Property struct{ Key, Value string }
+
+// Asset is collider geometry. Version-2 heightfields keep their compact grid in
+// Heightfield, without Vertices or Indices; mesh consumers expand it on demand.
 type Asset struct {
 	ID, SourceID string
 	Vertices     []p.Vec3
 	Indices      []uint32
+	Heightfield  *geometry.Heightfield `json:",omitempty"`
 }
 type Material struct {
 	ID, FrictionCombine, BounceCombine           string
@@ -149,7 +153,10 @@ func DecodeWithGeometry(r io.Reader, limits Limits, resolve geometry.Resolver) (
 			if asset.Kind == geometry.MeshFloat64 {
 				return nil, "", invalid("physics geometry requires float32 authored samples")
 			}
-			asset = geometry.ExpandHeightfield(asset, true)
+			if asset.Kind == geometry.HeightfieldFloat32 {
+				s.Assets = append(s.Assets, Asset{ID: asset.ID, SourceID: asset.SourceID, Heightfield: asset.Heightfield})
+				continue
+			}
 			value := Asset{ID: asset.ID, SourceID: asset.SourceID, Vertices: make([]p.Vec3, len(asset.Vertices)), Indices: make([]uint32, 0, len(asset.Triangles)*3)}
 			for index, vertex := range asset.Vertices {
 				value.Vertices[index] = p.Vec3{X: float32(vertex.X), Y: float32(vertex.Y), Z: float32(vertex.Z)}
@@ -234,6 +241,10 @@ func (s *Source) Validate(l Limits) error {
 		}
 		vertices += len(v.Vertices)
 		triangles += len(v.Indices) / 3
+		if h := v.Heightfield; h != nil && h.Resolution >= 2 && h.Resolution <= p.MaxHeightFieldResolution {
+			vertices += int(h.Resolution * h.Resolution)
+			triangles += 2 * int((h.Resolution-1)*(h.Resolution-1))
+		}
 		if vertices > l.Vertices || triangles > l.Triangles {
 			return invalid("geometry limit")
 		}
@@ -282,14 +293,14 @@ func (s *Source) Validate(l Limits) error {
 		if v.Layer < 0 || v.Layer > 31 || !nonnegative(v.ContactOffset) || !v.Center.InBounds() || !v.Rotation.Valid() {
 			return invalid("collider transform/layer")
 		}
-		shape, e := v.Geometry(assets)
+		shape, local, _, e := v.Placement(assets, body)
 		if e != nil {
 			return fmt.Errorf("collider %s: %w", v.ID, e)
 		}
 		if e = shape.Validate(); e != nil {
 			return e
 		}
-		if body.Kind == "dynamic" && shape.Kind == p.TriangleMesh {
+		if body.Kind == "dynamic" && (shape.Kind == p.TriangleMesh || shape.Kind == p.HeightField) {
 			return invalid("dynamic nonconvex collider")
 		}
 		metadata := map[string]bool{}
@@ -305,12 +316,10 @@ func (s *Source) Validate(l Limits) error {
 				return invalid("character settings")
 			}
 		}
-		pose := (p.Pose{Position: body.Position, Rotation: body.Rotation}).Compose(p.Pose{Position: v.Center, Rotation: v.Rotation})
-		if shape.Kind == p.TriangleMesh || shape.Kind == p.Convex {
-			for _, point := range shape.Vertices {
-				if !pose.Transform(point).InBounds() {
-					return invalid("world vertex envelope")
-				}
+		pose := (p.Pose{Position: body.Position, Rotation: body.Rotation}).Compose(local)
+		if shape.Kind == p.TriangleMesh || shape.Kind == p.Convex || shape.Kind == p.HeightField {
+			if !shape.InBounds(pose) {
+				return invalid("world vertex envelope")
 			}
 		} else {
 			radius := shape.Radius
@@ -368,6 +377,37 @@ func (s *Source) Validate(l Limits) error {
 	return nil
 }
 
+// Placement returns the geometry and collider-local pose that Load constructs
+// for the collider on body. Version-2 convex and mesh geometry whose matrix is a
+// rotation, translation and per-axis scale, without zero-area normalization,
+// references the shared asset vertices with ShapeDesc.Scale and folds the rigid
+// part into the pose; shared reports that case. Static terrain with identity
+// placement whose samples lie on the Unity 16-bit grid becomes a HeightField.
+// Other geometry matches Geometry under the authored pose.
+func (c Collider) Placement(assets map[string]Asset, body Body) (shape p.ShapeDesc, local p.Pose, shared bool, err error) {
+	local = p.Pose{Position: c.Center, Rotation: c.Rotation}
+	if c.Shape == "terrain" && body.Kind == "static" && local == p.Identity() && c.GeometryTransform != nil && *c.GeometryTransform == identityMatrix && !hasNormalization(c.Metadata) {
+		if a, ok := assets[c.AssetID]; ok && a.Heightfield != nil {
+			if height, ok := nativeHeightField(a.Heightfield); ok {
+				return p.ShapeDesc{ID: p.ContentID(c.ID + "/geometry"), Kind: p.HeightField, Height: height}, local, false, nil
+			}
+		}
+	}
+	if (c.Shape == "convex" || c.Shape == "mesh") && c.GeometryTransform != nil && !hasNormalization(c.Metadata) {
+		if a, ok := assets[c.AssetID]; ok && a.Heightfield == nil {
+			if rigid, scale, ok := decomposeGeometryTransform(*c.GeometryTransform); ok && (c.Shape == "convex" || shareableMesh(a)) {
+				shape = p.ShapeDesc{ID: p.ContentID(c.ID + "/geometry"), Kind: p.Convex, Vertices: a.Vertices, Indices: a.Indices, Scale: scale}
+				if c.Shape == "mesh" {
+					shape.Kind = p.TriangleMesh
+				}
+				return shape, local.Compose(rigid), true, nil
+			}
+		}
+	}
+	shape, err = c.Geometry(assets)
+	return shape, local, false, err
+}
+
 // Geometry converts supported authored dimensions to the portable shape contract.
 func (c Collider) Geometry(assets map[string]Asset) (p.ShapeDesc, error) {
 	s := p.ShapeDesc{ID: p.ContentID(c.ID + "/geometry")}
@@ -403,6 +443,7 @@ func (c Collider) Geometry(assets map[string]Asset) (p.ShapeDesc, error) {
 		if c.Shape == "convex" {
 			s.Kind = p.Convex
 		}
+		a = a.expanded()
 		s.Vertices = a.Vertices
 		s.Indices = a.Indices
 		if c.GeometryTransform != nil {

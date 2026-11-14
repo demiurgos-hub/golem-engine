@@ -120,6 +120,15 @@ func debugGeometrySize(id b.ShapeID) (vertices, triangles int) {
 	case b.MeshShape:
 		m := id.GetMesh()
 		return int(m.Data.VertexCount), int(m.Data.TriangleCount)
+	case b.HeightShape:
+		h := id.GetHeightField()
+		solid := 0
+		for _, material := range b.GetHeightFieldMaterialIndices(h) {
+			if material != b.HeightFieldHole {
+				solid++
+			}
+		}
+		return int(h.ColumnCount * h.RowCount), 2 * solid
 	default:
 		return -1, -1
 	}
@@ -168,6 +177,15 @@ func debugGeometry(id b.ShapeID) p.DebugGeometry {
 				a, z = z, a
 			}
 			g.Indices = append(g.Indices, uint32(t.Index1), uint32(a), uint32(z))
+		}
+	case b.HeightShape:
+		g.Kind = p.TriangleMesh
+		points, indices := b.GetHeightFieldTriangles(id.GetHeightField())
+		for _, v := range points {
+			g.Vertices = append(g.Vertices, pv(v))
+		}
+		for _, index := range indices {
+			g.Indices = append(g.Indices, uint32(index))
 		}
 	}
 	return g

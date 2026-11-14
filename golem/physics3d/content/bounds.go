@@ -37,6 +37,10 @@ func (prepared *Prepared) bounds(poses map[string]p.Pose) (minimum, maximum p.Ve
 	for _, asset := range prepared.source.Assets {
 		assets[asset.ID] = asset
 	}
+	bodies := map[string]Body{}
+	for _, body := range prepared.source.Bodies {
+		bodies[body.ID] = body
+	}
 	include := func(point p.Vec3) {
 		if !point.InBounds() {
 			err = p.ErrInvalid
@@ -76,15 +80,25 @@ func (prepared *Prepared) bounds(poses map[string]p.Pose) (minimum, maximum p.Ve
 				}
 			}
 		case p.Convex, p.TriangleMesh:
-			for _, point := range shape.Vertices {
-				include(pose.Transform(point))
+			for i := range shape.Vertices {
+				include(pose.Transform(shape.ScaledVertex(i)))
+			}
+		case p.HeightField:
+			low, high := shape.Height.HeightRange()
+			far := shape.Height.Point(shape.Height.Resolution-1, shape.Height.Resolution-1)
+			for _, x := range []float32{0, far.X} {
+				for _, y := range []float32{low, high} {
+					for _, z := range []float32{0, far.Z} {
+						include(pose.Transform(p.Vec3{X: x, Y: y, Z: z}))
+					}
+				}
 			}
 		default:
 			err = p.ErrUnsupported
 		}
 	}
 	for _, collider := range prepared.source.Colliders {
-		shape, e := collider.Geometry(assets)
+		shape, local, _, e := collider.Placement(assets, bodies[collider.BodyID])
 		if e != nil {
 			return minimum, maximum, present, e
 		}
@@ -92,7 +106,7 @@ func (prepared *Prepared) bounds(poses map[string]p.Pose) (minimum, maximum p.Ve
 		if !ok {
 			return minimum, maximum, present, p.ErrStale
 		}
-		visit(shape, pose.Compose(p.Pose{Position: collider.Center, Rotation: collider.Rotation}))
+		visit(shape, pose.Compose(local))
 		if err != nil {
 			return
 		}

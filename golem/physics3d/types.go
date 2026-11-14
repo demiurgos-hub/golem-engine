@@ -31,20 +31,106 @@ const (
 	Convex
 	TriangleMesh
 	Compound
+	HeightField
 )
+
+// HeightFieldDesc is a square grid in the shape's local XZ plane. Point (x, z)
+// lies at (x*SpacingX, Heights[z*Resolution+x]*HeightStep, z*SpacingZ). Solid
+// holds one bit per cell in row-major order; clear bits are holes. Each solid
+// cell is split along its (x, z)-(x+1, z+1) diagonal into two upward triangles.
+type HeightFieldDesc struct {
+	Resolution                     int
+	SpacingX, SpacingZ, HeightStep float32
+	Heights                        []uint16
+	Solid                          []byte
+}
+
+// MaxHeightFieldResolution bounds HeightFieldDesc.Resolution.
+const MaxHeightFieldResolution = 4097
+
+// CellSolid reports whether the cell whose minimum corner is (x, z) is solid.
+func (h *HeightFieldDesc) CellSolid(x, z int) bool {
+	cell := z*(h.Resolution-1) + x
+	return h.Solid[cell/8]&(1<<uint(cell%8)) != 0
+}
+
+// Point returns grid point (x, z) in shape-local space.
+func (h *HeightFieldDesc) Point(x, z int) Vec3 {
+	return Vec3{X: float32(x) * h.SpacingX, Y: float32(h.Heights[z*h.Resolution+x]) * h.HeightStep, Z: float32(z) * h.SpacingZ}
+}
+
+// HeightRange returns the lowest and highest local grid heights.
+func (h *HeightFieldDesc) HeightRange() (float32, float32) {
+	low, high := h.Heights[0], h.Heights[0]
+	for _, value := range h.Heights {
+		low, high = min(low, value), max(high, value)
+	}
+	return float32(low) * h.HeightStep, float32(high) * h.HeightStep
+}
 
 // ShapeDesc is portable geometry. Box uses half extents; capsule endpoints are
 // sphere centres. Mesh indices describe triangles with counter-clockwise winding.
 // Compound children own their local transforms. Implementations copy all slices.
+// Scale multiplies top-level convex or mesh vertices per axis before the
+// collider pose; zero means unit scale and negative components mirror.
+// HeightField shapes are top-level and described by Height.
 type ShapeDesc struct {
 	ID                          ContentID
 	Kind                        ShapeKind
 	Radius                      float32
 	PointA, PointB, HalfExtents Vec3
+	Scale                       Vec3 `json:",omitzero"`
 	Vertices                    []Vec3
 	Indices                     []uint32
 	Children                    []ShapeChild
+	Height                      *HeightFieldDesc `json:",omitempty"`
 }
+
+// MinShapeScale is the smallest supported magnitude of a ShapeDesc.Scale component.
+const MinShapeScale float32 = 0.01
+
+// Scaled reports whether the shape carries a non-unit Scale.
+func (s ShapeDesc) Scaled() bool { return s.Scale != (Vec3{}) && s.Scale != (Vec3{X: 1, Y: 1, Z: 1}) }
+
+// ScaleOrUnit returns Scale, or unit scale when Scale is zero.
+func (s ShapeDesc) ScaleOrUnit() Vec3 {
+	if s.Scale == (Vec3{}) {
+		return Vec3{X: 1, Y: 1, Z: 1}
+	}
+	return s.Scale
+}
+
+// ScaledVertex returns vertex i after Scale.
+func (s ShapeDesc) ScaledVertex(i int) Vec3 {
+	v := s.Vertices[i]
+	if s.Scale == (Vec3{}) {
+		return v
+	}
+	return Vec3{X: v.X * s.Scale.X, Y: v.Y * s.Scale.Y, Z: v.Z * s.Scale.Z}
+}
+
+// Unscaled returns an equivalent description with Scale applied to copied
+// vertices; mirrored meshes swap winding to keep outward triangle faces.
+func (s ShapeDesc) Unscaled() ShapeDesc {
+	if !s.Scaled() {
+		s.Scale = Vec3{}
+		return s
+	}
+	vertices := make([]Vec3, len(s.Vertices))
+	for i := range vertices {
+		vertices[i] = s.ScaledVertex(i)
+	}
+	if s.Scale.X*s.Scale.Y*s.Scale.Z < 0 && len(s.Indices) > 0 {
+		indices := append([]uint32(nil), s.Indices...)
+		for i := 0; i+2 < len(indices); i += 3 {
+			indices[i+1], indices[i+2] = indices[i+2], indices[i+1]
+		}
+		s.Indices = indices
+	}
+	s.Vertices, s.Scale = vertices, Vec3{}
+	return s
+}
+
 type ShapeChild struct {
 	ID    ContentID
 	Pose  Pose
@@ -210,6 +296,29 @@ type World interface {
 	Reject(uint64, error) error
 	Metrics() Metrics
 	Close() error
+}
+
+// ScaledShapeWorld is an optional World capability that shares one shape's
+// backend geometry with a new shape that differs only by ID and Scale.
+type ScaledShapeWorld interface {
+	CreateScaledShape(source ShapeHandle, id ContentID, scale Vec3) (ShapeHandle, error)
+}
+
+// PreparedShape is backend geometry produced by a ShapePreparer outside a world.
+// It is immutable and may be registered in several worlds of that backend.
+type PreparedShape interface{ PreparedShapeID() ContentID }
+
+// ShapePreparer cooks shape descriptions without a world. It must be safe for
+// concurrent use so callers can prepare independent shapes in parallel.
+type ShapePreparer interface {
+	PrepareShape(ShapeDesc) (PreparedShape, error)
+}
+
+// PreparedShapeWorld is an optional World capability that registers shapes
+// produced by its backend's ShapePreparer without cooking them again.
+type PreparedShapeWorld interface {
+	ShapePreparer() ShapePreparer
+	CreatePreparedShape(PreparedShape) (ShapeHandle, error)
 }
 type Motion struct {
 	Body          BodyHandle

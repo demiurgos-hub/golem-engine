@@ -61,8 +61,8 @@ func (s *queryScratch) prepare(w *World, q p.Query, capacity int) error {
 			if len(q.Shape.Vertices) > b.MaxShapeCastPoints {
 				return p.ErrUnsupported
 			}
-			for _, v := range q.Shape.Vertices {
-				point(v)
+			for i := range q.Shape.Vertices {
+				point(q.Shape.ScaledVertex(i))
 			}
 		default:
 			return p.ErrUnsupported

@@ -1,11 +1,13 @@
 package content
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 
 	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
 )
@@ -40,6 +42,109 @@ func Load(world p.World, source *Source, resolve OwnerResolver) (*Instance, erro
 	return prepared.Load(world, resolve)
 }
 
+// shapePlan is one collider's shape construction. Shared plans after the first
+// of their asset reuse that shape's backend geometry with their own Scale.
+type shapePlan struct {
+	collider Collider
+	geometry p.ShapeDesc
+	pose     p.Pose
+	share    int
+}
+
+func (prepared *Prepared) shapePlans() ([]shapePlan, error) {
+	source := &prepared.source
+	assets := make(map[string]Asset, len(source.Assets))
+	for _, asset := range source.Assets {
+		assets[asset.ID] = asset
+	}
+	bodies := make(map[string]Body, len(source.Bodies))
+	for _, body := range source.Bodies {
+		bodies[body.ID] = body
+	}
+	colliders := append([]Collider(nil), source.Colliders...)
+	sort.Slice(colliders, func(i, j int) bool { return colliders[i].ID < colliders[j].ID })
+	plans := make([]shapePlan, len(colliders))
+	first := map[[2]string]int{}
+	for i, collider := range colliders {
+		geometry, pose, shared, err := collider.Placement(assets, bodies[collider.BodyID])
+		if err != nil {
+			return nil, err
+		}
+		plans[i] = shapePlan{collider: collider, geometry: geometry, pose: pose, share: -1}
+		if shared {
+			key := [2]string{collider.AssetID, collider.Shape}
+			if index, ok := first[key]; ok {
+				plans[i].share = index
+			} else {
+				first[key] = i
+			}
+		}
+	}
+	return plans, nil
+}
+
+// CookedShapes holds one source's collider geometry cooked outside a world by a
+// backend ShapePreparer. Shapes that share an asset are cooked once.
+type CookedShapes struct {
+	prepared *Prepared
+	plans    []shapePlan
+	shapes   []p.PreparedShape
+}
+
+// CookShapes cooks every shape Load would create with up to workers concurrent
+// calls to preparer. It touches no world, so independent sources may be cooked
+// concurrently; LoadCooked then registers the results without recooking.
+func (prepared *Prepared) CookShapes(ctx context.Context, preparer p.ShapePreparer, workers int) (*CookedShapes, error) {
+	if prepared == nil || preparer == nil {
+		return nil, p.ErrInvalid
+	}
+	plans, err := prepared.shapePlans()
+	if err != nil {
+		return nil, err
+	}
+	cooked := &CookedShapes{prepared: prepared, plans: plans, shapes: make([]p.PreparedShape, len(plans))}
+	next := make(chan int)
+	errs := make(chan error, max(1, workers))
+	var wait sync.WaitGroup
+	for range max(1, workers) {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for i := range next {
+				shape, err := preparer.PrepareShape(plans[i].geometry)
+				if err != nil {
+					select {
+					case errs <- fmt.Errorf("geometry %s: %w", plans[i].collider.ID, err):
+					default:
+					}
+					continue
+				}
+				cooked.shapes[i] = shape
+			}
+		}()
+	}
+	for i := range plans {
+		if plans[i].share >= 0 {
+			continue
+		}
+		if len(errs) > 0 || ctx.Err() != nil {
+			break
+		}
+		next <- i
+	}
+	close(next)
+	wait.Wait()
+	select {
+	case err = <-errs:
+		return nil, err
+	default:
+	}
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+	return cooked, nil
+}
+
 // Load resolves owners and rejects unsupported semantics before mutation. Failed
 // construction removes newly created joints, bodies and shapes in reverse order;
 // rollback errors are joined with the original error. Existing objects are untouched.
@@ -47,6 +152,26 @@ func (prepared *Prepared) Load(world p.World, resolve OwnerResolver) (*Instance,
 	if prepared == nil || world == nil {
 		return nil, p.ErrInvalid
 	}
+	plans, err := prepared.shapePlans()
+	if err != nil {
+		return nil, err
+	}
+	return prepared.load(world, resolve, plans, nil)
+}
+
+// LoadCooked is Load using shapes from CookShapes on this Prepared. The world
+// must implement PreparedShapeWorld for the backend that cooked them.
+func (prepared *Prepared) LoadCooked(world p.World, resolve OwnerResolver, cooked *CookedShapes) (*Instance, error) {
+	if prepared == nil || world == nil || cooked == nil || cooked.prepared != prepared {
+		return nil, p.ErrInvalid
+	}
+	if _, ok := world.(p.PreparedShapeWorld); !ok {
+		return nil, fmt.Errorf("%w: world cannot register prepared shapes", p.ErrUnsupported)
+	}
+	return prepared.load(world, resolve, cooked.plans, cooked.shapes)
+}
+
+func (prepared *Prepared) load(world p.World, resolve OwnerResolver, plans []shapePlan, cooked []p.PreparedShape) (*Instance, error) {
 	if len(prepared.diagnostics) != 0 {
 		return nil, fmt.Errorf("%w: %+v", p.ErrUnsupported, prepared.diagnostics)
 	}
@@ -55,10 +180,8 @@ func (prepared *Prepared) Load(world p.World, resolve OwnerResolver) (*Instance,
 	if err != nil {
 		return nil, err
 	}
-	assets := make(map[string]Asset, len(source.Assets))
-	for _, asset := range source.Assets {
-		assets[asset.ID] = asset
-	}
+	scaled, _ := world.(p.ScaledShapeWorld)
+	registered, _ := world.(p.PreparedShapeWorld)
 	materials := make(map[string]p.Material, len(source.Materials))
 	for _, material := range source.Materials {
 		desc, err := materialDescription(source.WorldID, material)
@@ -90,21 +213,26 @@ func (prepared *Prepared) Load(world p.World, resolve OwnerResolver) (*Instance,
 		instance.bodies[body.ID] = handle
 		instance.bodyOrder = append(instance.bodyOrder, handle)
 	}
-	colliders := append([]Collider(nil), source.Colliders...)
-	sort.Slice(colliders, func(i, j int) bool { return colliders[i].ID < colliders[j].ID })
-	for _, collider := range colliders {
-		geometry, err := collider.Geometry(assets)
-		if err != nil {
-			return fail(err)
+	handles := make([]p.ShapeHandle, len(plans))
+	for i, plan := range plans {
+		collider := plan.collider
+		var shape p.ShapeHandle
+		switch {
+		case cooked != nil && cooked[i] != nil:
+			shape, err = registered.CreatePreparedShape(cooked[i])
+		case plan.share >= 0 && scaled != nil:
+			shape, err = scaled.CreateScaledShape(handles[plan.share], plan.geometry.ID, plan.geometry.Scale)
+		default:
+			shape, err = world.CreateShape(plan.geometry)
 		}
-		shape, err := world.CreateShape(geometry)
 		if err != nil {
 			return fail(fmt.Errorf("geometry %s: %w", collider.ID, err))
 		}
+		handles[i] = shape
 		instance.shapeOrder = append(instance.shapeOrder, shape)
 		desc := p.DefaultCollider(instance.bodies[collider.BodyID], shape)
 		desc.ID, desc.Owner = p.ContentID(collider.ID), owners[collider.OwnerID]
-		desc.LocalPose = p.Pose{Position: collider.Center, Rotation: collider.Rotation}
+		desc.LocalPose = plan.pose
 		desc.Enabled = collider.Enabled && collider.Active
 		desc.Roles = p.Roles{Solid: collider.Solid, Sensor: collider.Sensor, Query: collider.Query}
 		desc.Filter = p.CollisionFilter{Category: uint64(1) << collider.Layer, Mask: uint64(source.LayerCollisionMasks[collider.Layer])}

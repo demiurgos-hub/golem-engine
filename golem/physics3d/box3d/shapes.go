@@ -32,6 +32,9 @@ func (w *World) CreateCollider(d p.ColliderDesc) (p.ColliderHandle, error) {
 	if v.id.GetJointCount() != 0 {
 		return p.ColliderHandle{}, fmt.Errorf("%w: rebuild joints before changing body mass", p.ErrBusy)
 	}
+	if s.desc.Kind == p.HeightField && v.desc.Mode != p.Static {
+		return p.ColliderHandle{}, fmt.Errorf("%w: height fields require a static body", p.ErrUnsupported)
+	}
 	if containsMesh(s.desc) && v.desc.Mode != p.Static && (!w.config.Continuous || v.desc.Mode == p.FreeDynamic || v.desc.Mode == p.DrivenCharacter) {
 		return p.ColliderHandle{}, fmt.Errorf("%w: moving triangle collision requires a kinematic body and continuous motion admission", p.ErrUnsupported)
 	}
@@ -72,7 +75,7 @@ func (w *World) CreateCollider(d p.ColliderDesc) (p.ColliderHandle, error) {
 	return h, nil
 }
 func containsMesh(s p.ShapeDesc) bool {
-	if s.Kind == p.TriangleMesh {
+	if s.Kind == p.TriangleMesh || s.Kind == p.HeightField {
 		return true
 	}
 	for _, c := range s.Children {

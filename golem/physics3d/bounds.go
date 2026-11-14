@@ -27,9 +27,21 @@ func (s ShapeDesc) InBounds(pose Pose) bool {
 			}
 		}
 	case Convex, TriangleMesh:
-		for _, v := range s.Vertices {
-			if !pose.Transform(v).InBounds() {
+		for i := range s.Vertices {
+			if !pose.Transform(s.ScaledVertex(i)).InBounds() {
 				return false
+			}
+		}
+	case HeightField:
+		low, high := s.Height.HeightRange()
+		far := s.Height.Point(s.Height.Resolution-1, s.Height.Resolution-1)
+		for _, x := range []float32{0, far.X} {
+			for _, y := range []float32{low, high} {
+				for _, z := range []float32{0, far.Z} {
+					if !pose.Transform(Vec3{X: x, Y: y, Z: z}).InBounds() {
+						return false
+					}
+				}
 			}
 		}
 	case Compound:
