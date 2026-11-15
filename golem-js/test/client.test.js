@@ -1896,6 +1896,63 @@ test("GameClient applies ordered datagram state batches through the compact stat
   }
 });
 
+test("GameClient routes datagram event records to the event manager", async () => {
+  const previousWebTransport = globalThis.WebTransport;
+  globalThis.WebTransport = FakeWebTransport;
+  try {
+    const applied = [];
+    const events = [];
+    const client = new GameClient({
+      entityManager: {
+        applyUpdate() {},
+        applyCompactUpdate(frame) {
+          applied.push(frame);
+        },
+        get() {
+          return undefined;
+        },
+      },
+      eventManager: { applyRaw: (bytes) => events.push(bytes) },
+      decode: (bytes) => bytes,
+      encode: (cmd) => new Uint8Array(cmd.bytes),
+      encodePacket: (frames) => packetBytes(frames),
+      createChannel,
+    });
+    client.connect({ transport: "webtransport", url: "https://example.test" });
+    await delay(5);
+    const transport = FakeWebTransport.instances.at(-1);
+
+    transport.datagramReadable.push(encodeDatagramPacket({
+      packetSeq: 1,
+      ackSeq: 0,
+      ackMask: [0, 0, 0, 0],
+      flags: 0,
+      lane: 2,
+      messageID: 1,
+      orderedSeq: 0,
+      payload: framedBatchBytes([new Uint8Array([0, 7, 8]), new Uint8Array([1, 2])]),
+    }));
+    transport.datagramReadable.push(encodeDatagramPacket({
+      packetSeq: 2,
+      ackSeq: 0,
+      ackMask: [0, 0, 0, 0],
+      flags: 0,
+      lane: 1,
+      messageID: 0,
+      orderedSeq: 0,
+      payload: framedBatchBytes([new Uint8Array([0, 9])]),
+    }));
+    await delay(20);
+
+    assert.deepEqual(events.map((bytes) => Array.from(bytes)), [[7, 8], [9]]);
+    assert.deepEqual(applied.map((bytes) => Array.from(bytes)), [[1, 2]]);
+    client.disconnect();
+  } finally {
+    globalThis.WebTransport = previousWebTransport;
+    FakeWebTransport.instances.length = 0;
+  }
+});
+
 test("GameClient applies eventual state datagram batches through the compact state path", async () => {
   const previousWebTransport = globalThis.WebTransport;
   globalThis.WebTransport = FakeWebTransport;

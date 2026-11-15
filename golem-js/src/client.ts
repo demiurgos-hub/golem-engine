@@ -46,6 +46,7 @@ type AckMask = [number, number, number, number];
 
 const datagramLaneUnreliable: DatagramLane = 1;
 const datagramLaneReliableUnordered: DatagramLane = 2;
+const eventRecordTag = 0;
 const datagramLaneReliableOrdered: DatagramLane = 3;
 const datagramLaneEventualState: DatagramLane = 4;
 
@@ -384,6 +385,7 @@ export interface ReliableMessageChannel {
   onOpen(fn: () => void): void;
   onMessage(fn: (bytes: Uint8Array) => void): void;
   onUnreliableStateMessage?(fn: (bytes: Uint8Array) => void): void;
+  onReliableUnorderedMessage?(fn: (bytes: Uint8Array) => void): void;
   onReliableOrderedMessage?(fn: (bytes: Uint8Array) => void): void;
   onEventualStateMessage?(fn: (bytes: Uint8Array) => void): void;
   onClose(fn: (info: DisconnectInfo) => void): void;
@@ -1234,6 +1236,11 @@ export class GameClient {
         this._handleCompactStateBatch(bytes);
       }
     });
+    channel.onReliableUnorderedMessage?.((bytes) => {
+      if (isActive()) {
+        this._handleCompactStateBatch(bytes);
+      }
+    });
     channel.onReliableOrderedMessage?.((bytes) => {
       if (isActive()) {
         this._handleCompactStateBatch(bytes);
@@ -1261,6 +1268,11 @@ export class GameClient {
       throw new Error("golem-js: EntityManager does not support compact state updates");
     }
     for (const frame of decodeReliableBatchPayload(bytes)) {
+      // Event records start with a zero tag; a compact record's varint entity ID never does.
+      if (frame.byteLength > 0 && frame[0] === eventRecordTag) {
+        this.events?.applyRaw(frame.subarray(1));
+        continue;
+      }
       this.entities.applyCompactUpdate(frame);
     }
   }
@@ -1346,6 +1358,7 @@ class WebSocketReliableChannel implements ReliableMessageChannel {
   onOpen(fn: () => void): void { this._onOpen = fn; }
   onMessage(fn: (bytes: Uint8Array) => void): void { this._onMessage = fn; }
   onUnreliableStateMessage(_fn: (bytes: Uint8Array) => void): void {}
+  onReliableUnorderedMessage(_fn: (bytes: Uint8Array) => void): void {}
   onReliableOrderedMessage(_fn: (bytes: Uint8Array) => void): void {}
   onEventualStateMessage(_fn: (bytes: Uint8Array) => void): void {}
   onClose(fn: (info: DisconnectInfo) => void): void { this._onClose = fn; }
@@ -2054,6 +2067,10 @@ class WebTransportReliableChannel implements ReliableMessageChannel {
   onMessage(fn: (bytes: Uint8Array) => void): void { this._onMessage = fn; }
   onUnreliableStateMessage(fn: (bytes: Uint8Array) => void): void {
     this._onUnreliableStateMessage = fn;
+    this._datagramProtocol?.onUnreliableMessage(fn);
+  }
+  onReliableUnorderedMessage(fn: (bytes: Uint8Array) => void): void {
+    this._datagramProtocol?.onReliableUnorderedMessage(fn);
   }
   onReliableOrderedMessage(fn: (bytes: Uint8Array) => void): void {
     this._datagramProtocol?.onReliableOrderedMessage(fn);

@@ -103,6 +103,7 @@ namespace GolemEngine.Unity
         public event Action ConnectedEvent;
         public event Action<byte[]> MessageEvent;
         public event Action<byte[]> UnreliableStateMessageEvent;
+        public event Action<byte[]> ReliableUnorderedMessageEvent;
         public event Action<byte[]> ReliableOrderedMessageEvent;
         public event Action<byte[]> EventualStateMessageEvent;
         public event Action<GolemDisconnectInfo> DisconnectedEvent;
@@ -301,6 +302,7 @@ namespace GolemEngine.Unity
             switch (lane)
             {
                 case GolemDatagramLane.Unreliable: UnreliableStateMessageEvent?.Invoke(payload); break;
+                case GolemDatagramLane.ReliableUnordered: ReliableUnorderedMessageEvent?.Invoke(payload); break;
                 case GolemDatagramLane.ReliableOrdered: ReliableOrderedMessageEvent?.Invoke(payload); break;
                 case GolemDatagramLane.EventualState: EventualStateMessageEvent?.Invoke(payload); break;
             }

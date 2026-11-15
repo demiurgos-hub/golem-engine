@@ -47,6 +47,31 @@ namespace GolemEngine.Unity.Tests
         }
 
         [Test]
+        public void DispatchesDatagramEventRecordsToEventManager()
+        {
+            var manager = new RecordingCompactEntityManager();
+            var events = new RecordingEventManager();
+            var client = new GameClient(
+                manager,
+                bytes => bytes,
+                _ => Array.Empty<byte>(),
+                _ => Array.Empty<byte>(),
+                _ => new RecordingTransport(),
+                eventManager: events);
+
+            var frame = new byte[] { 1, 2, 3 };
+            var record = new byte[] { GolemDatagramProtocol.EventRecordTag, 7, 8 };
+            var batch = new List<byte>(GolemDatagramProtocol.EncodeLengthPrefixedFrame(record));
+            batch.AddRange(GolemDatagramProtocol.EncodeLengthPrefixedFrame(frame));
+            typeof(GameClient)
+                .GetMethod("HandleCompactStateBatch", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                ?.Invoke(client, new object[] { batch.ToArray() });
+
+            Assert.That(events.LastEvent, Is.EqualTo(new byte[] { 7, 8 }));
+            Assert.That(manager.LastCompactUpdate, Is.EqualTo(frame));
+        }
+
+        [Test]
         public void CompactStateBatchRequiresCompactEntityManager()
         {
             var client = new GameClient(
@@ -322,6 +347,12 @@ namespace GolemEngine.Unity.Tests
             public object Get(long entityId) { return null; }
         }
 
+        private sealed class RecordingEventManager : IEventManager
+        {
+            public byte[] LastEvent { get; private set; }
+            public void ApplyRaw(byte[] bytes) { LastEvent = bytes; }
+        }
+
         private sealed class RecordingTransport : IGolemTransport
         {
             public RecordingTransport(int maxDatagramBytes = 0)
@@ -339,6 +370,7 @@ namespace GolemEngine.Unity.Tests
             public event Action ConnectedEvent;
             public event Action<byte[]> MessageEvent;
             public event Action<byte[]> UnreliableStateMessageEvent;
+            public event Action<byte[]> ReliableUnorderedMessageEvent;
             public event Action<byte[]> ReliableOrderedMessageEvent;
             public event Action<byte[]> EventualStateMessageEvent;
             public event Action<GolemDisconnectInfo> DisconnectedEvent;

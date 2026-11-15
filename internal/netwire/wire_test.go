@@ -18,6 +18,25 @@ func unhex(t *testing.T, text string) []byte {
 	return data
 }
 
+func TestEventRecordGoldenBytes(t *testing.T) {
+	got := AppendEventRecord([]byte{0xff}, []byte{0x0a, 0x01})
+	if want := unhex(t, "ff00000003000a01"); !bytes.Equal(got, want) {
+		t.Fatalf("record = %x; want %x", got, want)
+	}
+	if len(got)-1 != EventRecordBytes([]byte{0x0a, 0x01}) {
+		t.Fatalf("record size %d differs from EventRecordBytes", len(got)-1)
+	}
+	if event, ok := EventRecord(got[1+FrameHeaderBytes:]); !ok || !bytes.Equal(event, []byte{0x0a, 0x01}) {
+		t.Fatalf("event = %x, %v", event, ok)
+	}
+	// Compact state records lead with a nonzero entity ID varint.
+	for _, frame := range [][]byte{{0x01, 0x02}, {0x80, 0x01}, nil} {
+		if _, ok := EventRecord(frame); ok {
+			t.Fatalf("frame %x was read as an event", frame)
+		}
+	}
+}
+
 func TestPacketGoldenBytes(t *testing.T) {
 	for _, tt := range []struct {
 		name  string

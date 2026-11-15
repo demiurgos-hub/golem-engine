@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- Server events can travel on WebTransport datagram lanes. An event schema's optional `delivery` key selects `stream` (default), `reliable_ordered`, `reliable_unordered` or `unreliable`; generated senders call the new `Server.SendServerEvent` / `BroadcastServerEvent`, and WebSocket sessions still receive these events on the reliable stream. Datagram events share the compact state batch format, marked by a zero tag byte, and fail when they exceed the lane's payload budget. Go, Unity and JS clients now deliver the reliable unordered lane and apply event records through their event managers. Custom transports must implement the new `OnReliableUnorderedMessage` (Go) or `ReliableUnorderedMessageEvent` (Unity) member.
+
 - `RetargetNavigationDestination` keeps an accepted route moving while a replacement is computed, then repairs it from the current body position without resetting speed. Evolving goals coalesce behind one in-flight search so frequent input cannot starve turning; safe interim routes never report the latest goal reached. `NavigationState.RetargetPending` exposes this work and admission metrics identify the accepted destination. `SetNavigationDestination` retains its immediate-stop behavior.
 
 - Navigation source decoding validates transformed geometry without retaining every placed triangle or computing discarded fingerprints. Strict and non-strict source admission remain consistent with baking.

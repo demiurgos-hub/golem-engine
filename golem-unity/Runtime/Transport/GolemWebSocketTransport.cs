@@ -19,6 +19,7 @@ namespace GolemEngine.Unity
         public event Action ConnectedEvent;
         public event Action<byte[]> MessageEvent;
         public event Action<byte[]> UnreliableStateMessageEvent;
+        public event Action<byte[]> ReliableUnorderedMessageEvent;
         public event Action<byte[]> ReliableOrderedMessageEvent;
         public event Action<byte[]> EventualStateMessageEvent;
         public event Action<GolemDisconnectInfo> DisconnectedEvent;

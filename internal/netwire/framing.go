@@ -27,6 +27,30 @@ func AppendFrame(dst, payload []byte) []byte {
 	return append(dst, payload...)
 }
 
+// EventRecordTag starts a datagram frame that carries one marshalled ServerEvent.
+// Compact state records start with a nonzero entity ID varint, so the tag never
+// collides with state on a shared datagram lane.
+const EventRecordTag byte = 0
+
+// EventRecordBytes returns the datagram payload size of one event record.
+func EventRecordBytes(event []byte) int { return FrameHeaderBytes + 1 + len(event) }
+
+// AppendEventRecord appends one length-prefixed, tagged event frame, without size validation.
+func AppendEventRecord(dst, event []byte) []byte {
+	start := len(dst)
+	dst = append(dst, 0, 0, 0, 0, EventRecordTag)
+	binary.BigEndian.PutUint32(dst[start:start+FrameHeaderBytes], uint32(1+len(event)))
+	return append(dst, event...)
+}
+
+// EventRecord borrows the ServerEvent bytes of a tagged datagram frame.
+func EventRecord(frame []byte) ([]byte, bool) {
+	if len(frame) == 0 || frame[0] != EventRecordTag {
+		return nil, false
+	}
+	return frame[1:], true
+}
+
 // ReadFrame reads one complete frame, enforcing the logical size cap before allocation.
 func ReadFrame(r io.Reader) ([]byte, error) {
 	var header [FrameHeaderBytes]byte

@@ -36,10 +36,11 @@ func DialChannel(ctx context.Context, options ConnectOptions) (ReliableMessageCh
 }
 
 type channelCallbacks struct {
-	onOpen                   func()
-	onMessage                func([]byte)
-	onUnreliableStateMessage func([]byte)
-	onReliableOrderedMessage func([]byte)
-	onEventualStateMessage   func([]byte)
-	onClose                  func(DisconnectInfo)
+	onOpen                     func()
+	onMessage                  func([]byte)
+	onUnreliableStateMessage   func([]byte)
+	onReliableUnorderedMessage func([]byte)
+	onReliableOrderedMessage   func([]byte)
+	onEventualStateMessage     func([]byte)
+	onClose                    func(DisconnectInfo)
 }

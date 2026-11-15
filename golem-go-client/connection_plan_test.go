@@ -672,6 +672,11 @@ func (c *trackedPlanChannel) OnUnreliableStateMessage(fn func([]byte)) {
 	c.callbacks.onUnreliableStateMessage = fn
 	c.callbacksMu.Unlock()
 }
+func (c *trackedPlanChannel) OnReliableUnorderedMessage(fn func([]byte)) {
+	c.callbacksMu.Lock()
+	c.callbacks.onReliableUnorderedMessage = fn
+	c.callbacksMu.Unlock()
+}
 func (c *trackedPlanChannel) OnReliableOrderedMessage(fn func([]byte)) {
 	c.callbacksMu.Lock()
 	c.callbacks.onReliableOrderedMessage = fn

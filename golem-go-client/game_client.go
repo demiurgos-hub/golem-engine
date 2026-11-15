@@ -339,6 +339,9 @@ func (c *GameClient) installChannel(generation uint64, channel ReliableMessageCh
 	channel.OnUnreliableStateMessage(func(data []byte) {
 		inbound.enqueue(inboundEventCompactState, data)
 	})
+	channel.OnReliableUnorderedMessage(func(data []byte) {
+		inbound.enqueue(inboundEventCompactState, data)
+	})
 	channel.OnReliableOrderedMessage(func(data []byte) {
 		inbound.enqueue(inboundEventCompactState, data)
 	})
@@ -563,11 +566,16 @@ func (c *GameClient) handleMessage(data []byte) {
 }
 
 func (c *GameClient) handleCompactStateBatch(data []byte) {
-	if c.entities == nil {
-		return
-	}
 	_ = decodeLengthPrefixedFrames(data, func(frame []byte) {
-		c.entities.ApplyCompactUpdate(frame)
+		if event, ok := netwire.EventRecord(frame); ok {
+			if c.events != nil {
+				c.events.ApplyRaw(event)
+			}
+			return
+		}
+		if c.entities != nil {
+			c.entities.ApplyCompactUpdate(frame)
+		}
 	})
 }
 

@@ -644,6 +644,7 @@ namespace GolemEngine.Unity
         {
             transport.MessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => HandleMessage(bytes));
             transport.UnreliableStateMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => HandleCompactStateBatch(bytes));
+            transport.ReliableUnorderedMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => HandleCompactStateBatch(bytes));
             transport.ReliableOrderedMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => HandleCompactStateBatch(bytes));
             transport.EventualStateMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => HandleCompactStateBatch(bytes));
         }
@@ -1283,7 +1284,15 @@ namespace GolemEngine.Unity
             {
                 throw new InvalidOperationException("golem-unity: EntityManager does not support compact state updates; regenerate the C# client code");
             }
-            GolemDatagramProtocol.DecodeLengthPrefixedFrames(bytes, compactEntities.ApplyCompactUpdate);
+            GolemDatagramProtocol.DecodeLengthPrefixedFrames(bytes, frame =>
+            {
+                if (GolemDatagramProtocol.TryGetEventRecord(frame, out var serverEvent))
+                {
+                    Events?.ApplyRaw(serverEvent);
+                    return;
+                }
+                compactEntities.ApplyCompactUpdate(frame);
+            });
         }
 
         private static int ClientPacketEntrySize(byte[] frame)

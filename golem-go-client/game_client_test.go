@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/demiurgos-hub/golem-engine/golem-go-client/pb"
+	"github.com/demiurgos-hub/golem-engine/internal/netwire"
 )
 
 type recordingEntities struct {
@@ -101,6 +102,9 @@ func (f *fakeChannel) OnOpen(fn func()) {
 func (f *fakeChannel) OnMessage(fn func([]byte)) { f.callbacks.onMessage = fn }
 func (f *fakeChannel) OnUnreliableStateMessage(fn func([]byte)) {
 	f.callbacks.onUnreliableStateMessage = fn
+}
+func (f *fakeChannel) OnReliableUnorderedMessage(fn func([]byte)) {
+	f.callbacks.onReliableUnorderedMessage = fn
 }
 func (f *fakeChannel) OnReliableOrderedMessage(fn func([]byte)) {
 	f.callbacks.onReliableOrderedMessage = fn
@@ -522,6 +526,42 @@ func TestGameClientRoutesDatagramStateThroughDispatcher(t *testing.T) {
 	_, _, lastFrame := entities.snapshot()
 	if string(lastFrame) != string(frame) {
 		t.Fatalf("last frame = %q, want %q", lastFrame, frame)
+	}
+}
+
+type recordingEvents struct{ raw chan []byte }
+
+func (r *recordingEvents) ApplyRaw(data []byte) { r.raw <- append([]byte(nil), data...) }
+
+func TestGameClientRoutesReliableUnorderedEventRecords(t *testing.T) {
+	entities := newRecordingEntities()
+	events := &recordingEvents{raw: make(chan []byte, 1)}
+	channel := &fakeChannel{connected: true}
+	client := NewGameClient(GameClientOptions{
+		EntityManager: entities,
+		EventManager:  events,
+		CreateChannel: func(context.Context, ConnectOptions) (ReliableMessageChannel, error) {
+			return channel, nil
+		},
+	})
+	if err := client.Connect(context.Background(), ConnectOptions{Transport: TransportWebTransport, URL: "https://example"}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer client.Disconnect()
+	batch := appendLengthPrefixedFrame(nil, []byte("compact"))
+	batch = netwire.AppendEventRecord(batch, []byte("event"))
+	channel.callbacks.onReliableUnorderedMessage(batch)
+	select {
+	case got := <-events.raw:
+		if string(got) != "event" {
+			t.Fatalf("event = %q, want the record body", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("event record was not applied")
+	}
+	waitForEntityCounts(t, entities, 0, 1)
+	if _, _, lastFrame := entities.snapshot(); string(lastFrame) != "compact" {
+		t.Fatalf("last frame = %q, want only the compact frame", lastFrame)
 	}
 }
 

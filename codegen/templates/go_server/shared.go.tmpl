@@ -409,12 +409,17 @@ func NewEventBroadcaster(srv *golem.Server) *EventBroadcaster {
 	return &EventBroadcaster{srv: srv}
 }
 {{range .Events}}
+{{- $stream := eq .DeliveryConst "EventStream"}}
 {{- if eq .Target "session"}}
 // Send{{.Name}} sends a {{.Name}} event to a single session.
 func (b *EventBroadcaster) Send{{.Name}}(sessionID int64{{range .Fields}}, {{.FieldName}} {{.GoType}}{{end}}) error {
 	evt := &{{.Name}}Event{ {{- range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.GoName}}: {{$f.FieldName}}{{end}} }
 	se := &ServerEvent{Payload: &ServerEvent_{{.Name}}Event{ {{.Name}}Event: evt}}
+{{- if $stream}}
 	return b.srv.Send(sessionID, golem.WrapServerEvent(se.Marshal()))
+{{- else}}
+	return b.srv.SendServerEvent(sessionID, golem.{{.DeliveryConst}}, se.Marshal())
+{{- end}}
 }
 {{- else if eq .Target "entity"}}
 // Broadcast{{.Name}} sends a {{.Name}} event for the given entity.{{if .FOIOnly}}
@@ -423,18 +428,30 @@ func (b *EventBroadcaster) Send{{.Name}}(sessionID int64{{range .Fields}}, {{.Fi
 func (b *EventBroadcaster) Broadcast{{.Name}}(entityID int64{{range .Fields}}, {{.FieldName}} {{.GoType}}{{end}}) error {
 	evt := &{{.Name}}Event{EntityId: entityID{{range .Fields}}, {{.GoName}}: {{.FieldName}}{{end}}}
 	se := &ServerEvent{Payload: &ServerEvent_{{.Name}}Event{ {{.Name}}Event: evt}}
+{{- if $stream}}
 	data := golem.WrapServerEvent(se.Marshal())
+{{- else}}
+	data := se.Marshal()
+{{- end}}
 {{- if .FOIOnly}}
 	for _, sid := range b.srv.SessionsKnowing(entityID) {
+{{- if $stream}}
 		if err := b.srv.Send(sid, data); err != nil {
+{{- else}}
+		if err := b.srv.SendServerEvent(sid, golem.{{.DeliveryConst}}, data); err != nil {
+{{- end}}
 			if errors.Is(err, golem.ErrSessionNotFound) {
 				continue
 			}
 			return err
 		}
 	}
-{{- else}}
+{{- else if $stream}}
 	if err := b.srv.BroadcastEvent(data); err != nil {
+		return err
+	}
+{{- else}}
+	if err := b.srv.BroadcastServerEvent(golem.{{.DeliveryConst}}, data); err != nil {
 		return err
 	}
 {{- end}}
@@ -445,7 +462,11 @@ func (b *EventBroadcaster) Broadcast{{.Name}}(entityID int64{{range .Fields}}, {
 func (b *EventBroadcaster) Broadcast{{.Name}}({{range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.FieldName}} {{$f.GoType}}{{end}}) error {
 	evt := &{{.Name}}Event{ {{- range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.GoName}}: {{$f.FieldName}}{{end}} }
 	se := &ServerEvent{Payload: &ServerEvent_{{.Name}}Event{ {{.Name}}Event: evt}}
+{{- if $stream}}
 	return b.srv.BroadcastEvent(golem.WrapServerEvent(se.Marshal()))
+{{- else}}
+	return b.srv.BroadcastServerEvent(golem.{{.DeliveryConst}}, se.Marshal())
+{{- end}}
 }
 {{- end}}
 {{end}}

@@ -94,6 +94,11 @@ func (c *WebSocketChannel) OnUnreliableStateMessage(fn func([]byte)) {
 	c.callbacks.onUnreliableStateMessage = fn
 }
 
+// OnReliableUnorderedMessage registers a reliable unordered datagram callback.
+func (c *WebSocketChannel) OnReliableUnorderedMessage(fn func([]byte)) {
+	c.callbacks.onReliableUnorderedMessage = fn
+}
+
 // OnReliableOrderedMessage registers a reliable ordered datagram callback.
 func (c *WebSocketChannel) OnReliableOrderedMessage(fn func([]byte)) {
 	c.callbacks.onReliableOrderedMessage = fn

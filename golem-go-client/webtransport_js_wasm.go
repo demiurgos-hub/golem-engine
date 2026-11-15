@@ -49,6 +49,9 @@ func (*WebTransportChannel) OnMessage(func([]byte)) {}
 // OnUnreliableStateMessage ignores callbacks for the unavailable transport.
 func (*WebTransportChannel) OnUnreliableStateMessage(func([]byte)) {}
 
+// OnReliableUnorderedMessage ignores callbacks for the unavailable transport.
+func (*WebTransportChannel) OnReliableUnorderedMessage(func([]byte)) {}
+
 // OnReliableOrderedMessage ignores callbacks for the unavailable transport.
 func (*WebTransportChannel) OnReliableOrderedMessage(func([]byte)) {}
 

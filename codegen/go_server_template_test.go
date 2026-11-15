@@ -766,3 +766,42 @@ func TestGenerateGoSharedTemplateSkipsSessionNotFoundDuringFOIEventFanout(t *tes
 		t.Fatal("shared helper should not keep errors.Is blank-assign now that snapshot helpers use errors")
 	}
 }
+
+func TestGenerateGoSharedTemplateRoutesDatagramEventDeliveries(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/go_server/shared.go.tmpl")
+	if err != nil {
+		t.Fatalf("loadEmbeddedTemplate: %v", err)
+	}
+
+	data := schema.SharedData{
+		GolemImport: "github.com/demiurgos-hub/golem-engine/golem",
+		GoPackage:   "generated",
+		Fingerprint: "test-fingerprint",
+		Events: []schema.EventData{
+			{Name: "Hit", Target: "entity", FOIOnly: true, Delivery: "unreliable"},
+			{Name: "Cast", Target: "entity", Delivery: "reliable_ordered"},
+			{Name: "Toast", Target: "session", Delivery: "reliable_unordered"},
+			{Name: "Weather", Target: "broadcast"},
+		},
+	}
+
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, data); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := out.String()
+
+	for _, want := range []string{
+		"if err := b.srv.SendServerEvent(sid, golem.EventUnreliable, data); err != nil {",
+		"if err := b.srv.BroadcastServerEvent(golem.EventReliableOrdered, data); err != nil {",
+		"return b.srv.SendServerEvent(sessionID, golem.EventReliableUnordered, se.Marshal())",
+		"return b.srv.BroadcastEvent(golem.WrapServerEvent(se.Marshal()))",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("generated event senders missing %q\n%s", want, content)
+		}
+	}
+	if got := strings.Count(content, "golem.WrapServerEvent("); got != 1 {
+		t.Fatalf("stream-wrapped event senders = %d, want only the stream event", got)
+	}
+}

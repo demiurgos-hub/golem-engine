@@ -74,6 +74,7 @@ namespace GolemEngine.Unity
         event Action ConnectedEvent;
         event Action<byte[]> MessageEvent;
         event Action<byte[]> UnreliableStateMessageEvent;
+        event Action<byte[]> ReliableUnorderedMessageEvent;
         event Action<byte[]> ReliableOrderedMessageEvent;
         event Action<byte[]> EventualStateMessageEvent;
         event Action<GolemDisconnectInfo> DisconnectedEvent;

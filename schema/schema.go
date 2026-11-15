@@ -726,7 +726,16 @@ type EventSchemaFile struct {
 	Target     string                   `yaml:"target"`      // required: "global", "session", or "entity"
 	EntityType string                   `yaml:"entity_type"` // PascalCase entity name; required when target is "entity"
 	FOIOnly    bool                     `yaml:"foi_only"`    // deliver only to sessions with entity in FOI; requires target "entity"
+	Delivery   string                   `yaml:"delivery"`    // optional: "stream" (default), "reliable_ordered", "reliable_unordered" or "unreliable"
 	Fields     map[string]EventFieldDef `yaml:"fields"`
+}
+
+// EventDeliveries maps each event delivery keyword to its runtime constant.
+var EventDeliveries = map[string]string{
+	"stream":             "EventStream",
+	"reliable_ordered":   "EventReliableOrdered",
+	"reliable_unordered": "EventReliableUnordered",
+	"unreliable":         "EventUnreliable",
 }
 
 // EventFieldDef defines a single field in an event schema.
@@ -752,7 +761,16 @@ type EventData struct {
 	Target     string // "global", "session", or "entity"
 	EntityType string // PascalCase entity name; set when Target is "entity"
 	FOIOnly    bool   // only valid when Target is "entity"
+	Delivery   string // EventDeliveries key; "stream" when the schema omits it
 	Fields     []EventFieldInfo
+}
+
+// DeliveryConst names the golem runtime constant for the event's delivery.
+func (e EventData) DeliveryConst() string {
+	if name, ok := EventDeliveries[e.Delivery]; ok {
+		return name
+	}
+	return EventDeliveries["stream"]
 }
 
 // ServerEventField is one oneof entry in the generated ServerEvent message.
@@ -810,6 +828,10 @@ func BuildEventData(ef EventSchemaFile, customTypes map[string]CustomTypeData) E
 		Target:     target,
 		EntityType: ef.EntityType,
 		FOIOnly:    ef.FOIOnly,
+		Delivery:   strings.TrimSpace(ef.Delivery),
+	}
+	if ed.Delivery == "" {
+		ed.Delivery = "stream"
 	}
 
 	fields, err := resolvePayloadFields("event", ef.Event, ed.Target, eventFieldDefinitions(ef.Fields), customTypes)
@@ -848,6 +870,9 @@ func ValidateEvents(events []EventData, entities []EntityData) error {
 			// valid
 		default:
 			return fmt.Errorf("event %q: target %q is invalid (must be \"global\", \"session\", or \"entity\")", ev.Name, ev.Target)
+		}
+		if _, ok := EventDeliveries[ev.Delivery]; !ok && ev.Delivery != "" {
+			return fmt.Errorf("event %q: delivery %q is invalid (must be \"stream\", \"reliable_ordered\", \"reliable_unordered\", or \"unreliable\")", ev.Name, ev.Delivery)
 		}
 		if ev.Target != "entity" {
 			if ev.EntityType != "" {

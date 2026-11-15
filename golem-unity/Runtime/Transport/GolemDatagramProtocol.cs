@@ -87,6 +87,25 @@ namespace GolemEngine.Unity
             }
         }
 
+        /// <summary>
+        /// Reads a server event record from one length-prefixed datagram frame.
+        /// Event records start with a zero tag byte, which a compact state
+        /// record's varint entity ID never does.
+        /// </summary>
+        public static bool TryGetEventRecord(byte[] frame, out byte[] serverEvent)
+        {
+            if (frame == null || frame.Length == 0 || frame[0] != EventRecordTag)
+            {
+                serverEvent = null;
+                return false;
+            }
+            serverEvent = new byte[frame.Length - 1];
+            Array.Copy(frame, 1, serverEvent, 0, serverEvent.Length);
+            return true;
+        }
+
+        public const byte EventRecordTag = 0;
+
         public void Send(GolemDatagramLane lane, byte[] payload)
         {
             if (lane == GolemDatagramLane.ReliableUnordered || lane == GolemDatagramLane.ReliableOrdered)

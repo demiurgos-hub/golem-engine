@@ -48,6 +48,8 @@ type (
 	Session         = golemnet.Session
 	Transport       = golemnet.Transport
 	CertificateHash = golemnet.CertificateHash
+	// EventDelivery selects the lane of a server event; see SendServerEvent.
+	EventDelivery = golemnet.EventDelivery
 
 	InterestManager = interest.Manager
 	InterestFOI     = interest.FOI
@@ -130,6 +132,13 @@ type (
 const (
 	TransportWebSocket    = golemnet.TransportWebSocket
 	TransportWebTransport = golemnet.TransportWebTransport
+)
+
+const (
+	EventStream            = golemnet.EventStream
+	EventReliableOrdered   = golemnet.EventReliableOrdered
+	EventReliableUnordered = golemnet.EventReliableUnordered
+	EventUnreliable        = golemnet.EventUnreliable
 )
 
 // ErrSessionNotFound reports that a targeted session disconnected before a send

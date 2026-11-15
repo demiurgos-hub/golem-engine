@@ -442,6 +442,11 @@ func (c *WebTransportChannel) OnUnreliableStateMessage(fn func([]byte)) {
 	c.callbacks.onUnreliableStateMessage = fn
 }
 
+// OnReliableUnorderedMessage registers a reliable unordered datagram callback.
+func (c *WebTransportChannel) OnReliableUnorderedMessage(fn func([]byte)) {
+	c.callbacks.onReliableUnorderedMessage = fn
+}
+
 // OnReliableOrderedMessage registers a reliable ordered datagram callback.
 func (c *WebTransportChannel) OnReliableOrderedMessage(fn func([]byte)) {
 	c.callbacks.onReliableOrderedMessage = fn
@@ -519,6 +524,10 @@ func (c *WebTransportChannel) deliverDatagram(lane uint8, payload []byte) {
 	case datagramLaneUnreliable:
 		if c.callbacks.onUnreliableStateMessage != nil {
 			c.callbacks.onUnreliableStateMessage(payload)
+		}
+	case datagramLaneReliableUnordered:
+		if c.callbacks.onReliableUnorderedMessage != nil {
+			c.callbacks.onReliableUnorderedMessage(payload)
 		}
 	case datagramLaneReliableOrdered:
 		if c.callbacks.onReliableOrderedMessage != nil {

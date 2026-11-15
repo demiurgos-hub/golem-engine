@@ -36,7 +36,7 @@ Reliable ordered receive starts at sequence zero. Future duplicate sequences rep
 
 Public state update modes are only `stream` and `datagram`. Treat server names such as `datagramLaneEventualState`, `SendEventualState`, and `EventualStateDatagramPayloads` as internal wire/protocol details of the datagram mode, not a third public lane.
 
-`GameClient` treats stream `ServerMessage` frames as wrapped protobuf payloads, while compact state datagrams are framed state records and go directly through `EntityManager.ApplyCompactUpdate`. Keep world updates and server events on the reliable stream path.
+`GameClient` treats stream `ServerMessage` frames as wrapped protobuf payloads, while datagram batches on every lane hold framed records: a zero first byte marks a server event for `EventManager.ApplyRaw`, and anything else is compact state for `EntityManager.ApplyCompactUpdate`. Keep world updates on the reliable stream path.
 
 Generated managers own client-side state: revisions reject stale updates; full state spawns/registers lifecycle hooks; deltas update existing entities only; collection/map deltas use nil as absent and non-nil empty values as explicit clears.
 

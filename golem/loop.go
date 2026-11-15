@@ -738,6 +738,20 @@ func (s *Server) BroadcastEvent(data []byte) error {
 	return s.listener.BroadcastRaw(data)
 }
 
+// SendServerEvent sends one marshalled ServerEvent to a session on the chosen
+// delivery lane. Sessions without that datagram lane, such as WebSocket
+// clients, receive it on the reliable stream. Generated event senders call
+// this for events whose schema sets a datagram delivery.
+func (s *Server) SendServerEvent(sessionID int64, delivery EventDelivery, event []byte) error {
+	return s.listener.SendEvent(sessionID, delivery, event, WrapServerEvent(event))
+}
+
+// BroadcastServerEvent sends one marshalled ServerEvent to every connected
+// session on the chosen delivery lane, with the same stream fallback.
+func (s *Server) BroadcastServerEvent(delivery EventDelivery, event []byte) error {
+	return s.listener.BroadcastEvent(delivery, event, WrapServerEvent(event))
+}
+
 // SendUnreliable sends one lossy datagram to a specific session when supported.
 func (s *Server) SendUnreliable(sessionID int64, data []byte) error {
 	return s.listener.SendUnreliable(sessionID, data)

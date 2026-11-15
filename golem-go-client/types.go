@@ -117,6 +117,7 @@ type ReliableMessageChannel interface {
 	OnOpen(func())
 	OnMessage(func([]byte))
 	OnUnreliableStateMessage(func([]byte))
+	OnReliableUnorderedMessage(func([]byte))
 	OnReliableOrderedMessage(func([]byte))
 	OnEventualStateMessage(func([]byte))
 	OnClose(func(DisconnectInfo))
