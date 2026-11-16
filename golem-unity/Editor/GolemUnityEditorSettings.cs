@@ -36,7 +36,7 @@ namespace GolemEngine.Unity.Editor
 
         /// <summary>
         /// When true, prefab/ScriptableObject/script asset changes schedule a coalesced Scribe export.
-        /// Manual <c>Golem/Scribe/Export All</c> always runs regardless of this setting.
+        /// Manual <c>Tools/Golem/Scribe/Export All</c> always runs regardless of this setting.
         /// </summary>
         public bool AutoExportOnAssetChange
         {
@@ -165,11 +165,11 @@ namespace GolemEngine.Unity.Editor
                 EditorGUILayout.TextField("Generated C# Output", GolemYamlConfig.TryGetCSharpClientAssetOut(ProjectRoot, out var csharpOut) ? csharpOut : "Not found in golem.yaml");
             }
             EditorGUILayout.HelpBox(
-                "Generated output paths come from golem.yaml. Configure integrations.csharp-client.out there, then run Golem > Generate Code.",
+                "Generated output paths come from golem.yaml. Configure integrations.csharp-client.out there, then run Tools > Golem > Generate Code.",
                 MessageType.None);
             serverCommand = EditorGUILayout.TextField("Server Command", ServerCommand);
             EditorGUILayout.HelpBox(
-                "Golem > Run Server opens this command in an external terminal at Project Root. Unity does not own, stop, or restart that process.",
+                "Tools > Golem > Run Server opens this command in an external terminal at Project Root. Unity does not own, stop, or restart that process.",
                 MessageType.None);
 
             EditorGUILayout.Space();
@@ -186,7 +186,7 @@ namespace GolemEngine.Unity.Editor
             }
             footprintsPath = EditorGUILayout.TextField("Footprints Path", FootprintsPath);
             EditorGUILayout.HelpBox(
-                "Menus: Golem/Scribe/Export All, Golem/Scribe/Validate (dry-run), Golem/Validate Setup (setup + Scribe). " +
+                "Under Tools > Golem, use Scribe > Export All, Scribe > Validate (dry-run), or Validate Setup (setup + Scribe). " +
                 "CI: -executeMethod GolemEngine.Unity.Editor.GolemScribeCI.ExportAllAndValidate",
                 MessageType.None);
             EditorGUILayout.HelpBox(
