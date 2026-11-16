@@ -20,7 +20,7 @@ namespace GolemEngine.Unity.Editor
         private GoPhysicsDebugCapture server;
         private bool serverCandidates, serverLabels = true, showServer = true;
 
-        [MenuItem("Tools/Golem/Scribe/Preview Physics World")]
+        [MenuItem("Golem/Scribe/Preview Physics World")]
         private static void Open() => GetWindow<GolemPhysicsPreview>("Golem Physics");
 
         private void OnEnable() => SceneView.duringSceneGui += Draw;

@@ -91,7 +91,7 @@ The generated C# factory shares manager setup and codec arguments through named 
 
 `TestUnityRuntimePolicyConsumer` compiles actual runtime sources and NUnit policy tests in separate C# 9 assemblies; its Unity boundary stubs do not validate frame/lifecycle behavior. `Tests/PlayMode` requires real Unity and its generated bridge fixture is checked against the template. Verify Runtime independently of optional WebTransport and compile that assembly separately with its existing dependency.
 
-**Unity editor menus.** Register Golem Engine menu commands under `Tools/Golem/`. Put bulk and selection-based Scribe commands together under `Tools/Golem/Scribe/`.
+**Unity editor menus.** Register Golem Engine main menu commands under the top-level `Golem/` menu. Put bulk and selection-based Scribe commands together under `Golem/Scribe/`.
 
 **Scribe editor boundaries:** all shared export helpers belong to `GolemEngine.Unity.Editor`; Runtime must never reference Editor. `GolemScribeContext.TryLoad` owns root → schema configuration → manifest loading, with input-path diagnostics on read failure. Load a fresh context for each sequential category export so the previous category's committed manifest records survive. `GolemBakeCommand` parses only the executable and argument remainder; executable lookup, execution, logging and refresh remain caller-owned.
 

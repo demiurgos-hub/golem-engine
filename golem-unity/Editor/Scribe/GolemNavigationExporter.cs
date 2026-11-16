@@ -58,7 +58,7 @@ namespace GolemEngine.Unity.Editor
             return result;
         }
 
-        [MenuItem("Tools/Golem/Scribe/Export Selected Navigation World")]
+        [MenuItem("Golem/Scribe/Export Selected Navigation World")]
         private static void ExportSelected()
         {
             var world = Selection.activeGameObject == null ? null : Selection.activeGameObject.GetComponentInParent<GolemNavigationWorld>(true);
@@ -68,7 +68,7 @@ namespace GolemEngine.Unity.Editor
             if (result.Errors.Count == 0) Debug.Log("Golem navigation source exported: " + result.OutputPath + ". Run the pure-Go baker explicitly to produce a navigation artifact.");
         }
 
-        [MenuItem("Tools/Golem/Scribe/Validate Selected Navigation World")]
+        [MenuItem("Golem/Scribe/Validate Selected Navigation World")]
         private static void ValidateSelected()
         {
             var world = Selection.activeGameObject == null ? null : Selection.activeGameObject.GetComponentInParent<GolemNavigationWorld>(true);

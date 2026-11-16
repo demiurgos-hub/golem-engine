@@ -122,7 +122,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Changed
 
-- Unity editor commands are now grouped under **Tools > Golem**, with bulk and selected Scribe commands together under **Tools > Golem > Scribe**.
+- The top-level **Golem > Scribe** menu now includes the selected content, physics, and navigation commands and Physics Preview.
 
 - Navigation baking retains canonical geometry and placements with shared asset indexes instead of expanding every placed mesh into permanent triangle storage. Selected tile builds preserve exact source/resolved identities, triangle order, transforms and diagnostics while materializing only their required geometry.
 

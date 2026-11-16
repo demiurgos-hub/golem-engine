@@ -131,7 +131,7 @@ namespace GolemEngine.Unity.Editor
             if (!AssetDatabase.IsValidFolder(outputFolder))
             {
                 warnings++;
-                Debug.LogWarning($"Generated C# output folder from golem.yaml does not exist in Unity assets: {outputFolder}. Run Tools > Golem > Generate Code.");
+                Debug.LogWarning($"Generated C# output folder from golem.yaml does not exist in Unity assets: {outputFolder}. Run Golem > Generate Code.");
                 return;
             }
 

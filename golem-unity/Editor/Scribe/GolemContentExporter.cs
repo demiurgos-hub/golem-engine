@@ -128,10 +128,10 @@ namespace GolemEngine.Unity.Editor
             }
         }
 
-        [MenuItem("Tools/Golem/Scribe/Export Selected Content Set")]
+        [MenuItem("Golem/Scribe/Export Selected Content Set")]
         private static void ExportSelected() => Log(Export(Selected(), GolemUnityEditorSettings.instance.ProjectRoot));
 
-        [MenuItem("Tools/Golem/Scribe/Validate Selected Content Set")]
+        [MenuItem("Golem/Scribe/Validate Selected Content Set")]
         private static void ValidateSelected() => Log(Validate(Selected(), GolemUnityEditorSettings.instance.ProjectRoot));
 
         private static GolemContentExportSet Selected()

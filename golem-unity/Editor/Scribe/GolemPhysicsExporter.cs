@@ -60,7 +60,7 @@ namespace GolemEngine.Unity.Editor
             return result;
         }
 
-        [MenuItem("Tools/Golem/Scribe/Export Selected Physics World")]
+        [MenuItem("Golem/Scribe/Export Selected Physics World")]
         private static void ExportSelected()
         {
             var world = Selection.activeGameObject == null ? null : Selection.activeGameObject.GetComponentInParent<GolemPhysicsWorld>(true);
@@ -70,7 +70,7 @@ namespace GolemEngine.Unity.Editor
             if (result.Errors.Count == 0) Debug.Log("Golem physics source exported: " + result.OutputPath);
         }
 
-        [MenuItem("Tools/Golem/Scribe/Validate Selected Physics World")]
+        [MenuItem("Golem/Scribe/Validate Selected Physics World")]
         private static void ValidateSelected()
         {
             var world = Selection.activeGameObject == null ? null : Selection.activeGameObject.GetComponentInParent<GolemPhysicsWorld>(true);
