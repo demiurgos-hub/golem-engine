@@ -85,7 +85,8 @@ func (c Cooker) PrepareShape(source p.ShapeDesc) (p.PreparedShape, error) {
 // CookShape validates and cooks portable geometry without creating world objects.
 // It preserves every nonzero-area triangle and constructs unreduced convex
 // hulls. Native hull limits apply to topology, not the submitted point count;
-// exceeding those limits is an error, never implicit simplification.
+// exceeding those limits is an error, never implicit simplification. Only a
+// shape's explicit HullVertexLimit admits a hull reduced to that vertex count.
 func CookShape(source p.ShapeDesc, settings CookSettings) (*CookedShape, error) {
 	if err := source.Validate(); err != nil {
 		return nil, err
@@ -128,7 +129,14 @@ func CookShape(source p.ShapeDesc, settings CookSettings) (*CookedShape, error) 
 		case p.Convex:
 			points := backendVertices(shape.Vertices, p.Identity())
 			points = uniqueHullPoints(points)
-			leaf.hull = b.CreateHullUnreduced(points, len(points))
+			if shape.HullVertexLimit > 0 {
+				leaf.hull = b.CreateHull(points, len(points), shape.HullVertexLimit)
+				if leaf.hull == nil {
+					return fmt.Errorf("%w: convex cooking failed (%d unique input points; hull vertex limit %d)", p.ErrUnsupported, len(points), shape.HullVertexLimit)
+				}
+			} else {
+				leaf.hull = b.CreateHullUnreduced(points, len(points))
+			}
 			if leaf.hull == nil {
 				return fmt.Errorf("%w: unreduced convex cooking failed (%d unique input points; native limits %d vertices/%d faces/%d edges)", p.ErrUnsupported, len(points), b.MaxHullVertices, b.MaxHullFaces, b.MaxHullEdges)
 			}
@@ -265,7 +273,7 @@ func geometryDigest(s p.ShapeDesc) ([sha256.Size]byte, int64) {
 
 func shapeDigest(s p.ShapeDesc, geometry [sha256.Size]byte) []byte {
 	d := newDigestWriter()
-	d.bytes([]byte("golem-box3d-shape-v1"))
+	d.bytes([]byte("golem-box3d-shape-v2"))
 	d.bytes([]byte(s.ID))
 	d.u32(uint32(s.Kind))
 	d.f32(s.Radius)
@@ -273,6 +281,7 @@ func shapeDigest(s p.ShapeDesc, geometry [sha256.Size]byte) []byte {
 	d.vec(s.PointB)
 	d.vec(s.HalfExtents)
 	d.vec(s.Scale)
+	d.u32(uint32(s.HullVertexLimit))
 	d.bytes(geometry[:])
 	d.u32(uint32(len(s.Children)))
 	for _, child := range s.Children {

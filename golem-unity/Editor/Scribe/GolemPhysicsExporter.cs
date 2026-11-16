@@ -17,6 +17,9 @@ namespace GolemEngine.Unity.Editor
     /// <summary>Captures resolved Unity collider hierarchies as portable physics source, without cooking or simulation.</summary>
     public static class GolemPhysicsExporter
     {
+        // PhysX cooks a convex MeshCollider into a hull of at most 255 vertices.
+        private const int UnityConvexHullVertexLimit = 255;
+
         /// <summary>The selected world's transaction result and actionable source diagnostics.</summary>
         public sealed class ExportResult
         {
@@ -239,6 +242,7 @@ namespace GolemEngine.Unity.Editor
             if (collider is MeshCollider mesh)
             {
                 result.Shape = mesh.convex ? "convex" : "mesh";
+                if (mesh.convex) result.HullVertexLimit = UnityConvexHullVertexLimit;
                 var assetSource = identity.Asset(mesh.sharedMesh, () => AssetIdentity(mesh.sharedMesh));
                 if (compact)
                 {

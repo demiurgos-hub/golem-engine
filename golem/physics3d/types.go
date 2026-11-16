@@ -74,17 +74,27 @@ func (h *HeightFieldDesc) HeightRange() (float32, float32) {
 // Scale multiplies top-level convex or mesh vertices per axis before the
 // collider pose; zero means unit scale and negative components mirror.
 // HeightField shapes are top-level and described by Height.
+// HullVertexLimit zero requires a convex hull of every input point; a nonzero
+// limit explicitly admits a hull of at most that many vertices, as Unity's
+// PhysX cooking builds for convex MeshColliders.
 type ShapeDesc struct {
 	ID                          ContentID
 	Kind                        ShapeKind
 	Radius                      float32
 	PointA, PointB, HalfExtents Vec3
 	Scale                       Vec3 `json:",omitzero"`
+	HullVertexLimit             int  `json:",omitzero"`
 	Vertices                    []Vec3
 	Indices                     []uint32
 	Children                    []ShapeChild
 	Height                      *HeightFieldDesc `json:",omitempty"`
 }
+
+// MinHullVertexLimit and MaxHullVertexLimit bound a nonzero ShapeDesc.HullVertexLimit.
+const (
+	MinHullVertexLimit = 4
+	MaxHullVertexLimit = 256
+)
 
 // MinShapeScale is the smallest supported magnitude of a ShapeDesc.Scale component.
 const MinShapeScale float32 = 0.01

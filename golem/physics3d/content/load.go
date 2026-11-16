@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 
 	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
@@ -72,7 +73,7 @@ func (prepared *Prepared) shapePlans() ([]shapePlan, error) {
 		}
 		plans[i] = shapePlan{collider: collider, geometry: geometry, pose: pose, share: -1}
 		if shared {
-			key := [2]string{collider.AssetID, collider.Shape}
+			key := [2]string{collider.AssetID, collider.Shape + "/" + strconv.Itoa(collider.HullVertexLimit)}
 			if index, ok := first[key]; ok {
 				plans[i].share = index
 			} else {

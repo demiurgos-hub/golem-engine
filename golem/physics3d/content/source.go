@@ -65,6 +65,8 @@ type Collider struct {
 	Character                                                                      *Character
 	Metadata                                                                       []Property
 	GeometryTransform                                                              *[16]float32 `json:",omitempty"`
+	// HullVertexLimit is the convex shape's explicit hull vertex limit; see physics3d.ShapeDesc.
+	HullVertexLimit int `json:",omitempty"`
 }
 type Character struct {
 	StepOffset, SlopeLimit, SkinWidth, MinimumMoveDistance float32
@@ -282,6 +284,9 @@ func (s *Source) Validate(l Limits) error {
 		if v.ID == "" || seen[v.ID] {
 			return invalid("collider identity")
 		}
+		if v.HullVertexLimit != 0 && v.Shape != "convex" {
+			return invalid("hull vertex limit on a non-convex collider")
+		}
 		seen[v.ID] = true
 		body, ok := bodies[v.BodyID]
 		if !ok {
@@ -396,7 +401,7 @@ func (c Collider) Placement(assets map[string]Asset, body Body) (shape p.ShapeDe
 	if (c.Shape == "convex" || c.Shape == "mesh") && c.GeometryTransform != nil && !hasNormalization(c.Metadata) {
 		if a, ok := assets[c.AssetID]; ok && a.Heightfield == nil {
 			if rigid, scale, ok := decomposeGeometryTransform(*c.GeometryTransform); ok && (c.Shape == "convex" || shareableMesh(a)) {
-				shape = p.ShapeDesc{ID: p.ContentID(c.ID + "/geometry"), Kind: p.Convex, Vertices: a.Vertices, Indices: a.Indices, Scale: scale}
+				shape = p.ShapeDesc{ID: p.ContentID(c.ID + "/geometry"), Kind: p.Convex, Vertices: a.Vertices, Indices: a.Indices, Scale: scale, HullVertexLimit: c.HullVertexLimit}
 				if c.Shape == "mesh" {
 					shape.Kind = p.TriangleMesh
 				}
@@ -441,7 +446,7 @@ func (c Collider) Geometry(assets map[string]Asset) (p.ShapeDesc, error) {
 		}
 		s.Kind = p.TriangleMesh
 		if c.Shape == "convex" {
-			s.Kind = p.Convex
+			s.Kind, s.HullVertexLimit = p.Convex, c.HullVertexLimit
 		}
 		a = a.expanded()
 		s.Vertices = a.Vertices

@@ -45,6 +45,7 @@ namespace GolemEngine.Unity.Editor
         public PhysicsCharacter Character;
         public PhysicsProperty[] Metadata = Array.Empty<PhysicsProperty>();
         public float[] GeometryTransform;
+        public int HullVertexLimit;
     }
     internal sealed class PhysicsCharacter
     {
@@ -137,7 +138,8 @@ namespace GolemEngine.Unity.Editor
             Layer = x.Layer, LayerName = x.LayerName, Shape = x.Shape, AssetID = x.AssetID, MaterialID = x.MaterialID,
             Enabled = x.Enabled, Active = x.Active, Solid = x.Solid, Sensor = x.Sensor, Query = x.Query,
             Center = x.Center, Rotation = x.Rotation, Size = x.Size, Radius = x.Radius, Height = x.Height,
-            Axis = x.Axis, ContactOffset = x.ContactOffset, Character = x.Character, Metadata = x.Metadata.OrderBy(p => p.Key, StringComparer.Ordinal).ToArray(), GeometryTransform = x.GeometryTransform
+            Axis = x.Axis, ContactOffset = x.ContactOffset, Character = x.Character, Metadata = x.Metadata.OrderBy(p => p.Key, StringComparer.Ordinal).ToArray(), GeometryTransform = x.GeometryTransform,
+            HullVertexLimit = x.HullVertexLimit
         };
 
         internal const string NormalizationPrefix = "golem.physics.zeroAreaNormalization.v1.";
@@ -349,6 +351,7 @@ namespace GolemEngine.Unity.Editor
                 else
                 {
                     Require(collider.Shape == "mesh" || collider.Shape == "convex" || collider.Shape == "terrain", "Unsupported shape: " + collider.Shape);
+                    Require(collider.HullVertexLimit == 0 || collider.Shape == "convex" && collider.HullVertexLimit >= 4 && collider.HullVertexLimit <= 256, "Invalid hull vertex limit: " + collider.ID);
                     Require(assets.ContainsKey(collider.AssetID ?? ""), "Missing collider geometry: " + collider.ID);
                     Require(body.Kind != "dynamic" || collider.Shape == "convex", "Dynamic non-convex geometry is unsupported: " + collider.ID);
                     Require(collider.Center.X == 0 && collider.Center.Y == 0 && collider.Center.Z == 0 && collider.Rotation.X == 0 && collider.Rotation.Y == 0 && collider.Rotation.Z == 0 && collider.Rotation.W == 1, "Mesh geometry must already be body-local: " + collider.ID);
@@ -369,6 +372,7 @@ namespace GolemEngine.Unity.Editor
                 }
                 var center = WorldPoint(body, collider.Center);
                 Require(collider.GeometryTransform == null, "Primitive colliders cannot carry a mesh geometry transform.");
+                Require(collider.HullVertexLimit == 0, "Primitive colliders cannot carry a hull vertex limit: " + collider.ID);
                 var radius = collider.Shape == "sphere" ? collider.Radius : collider.Shape == "capsule" ? collider.Height / 2 : (float)Math.Sqrt(collider.Size.X * collider.Size.X + collider.Size.Y * collider.Size.Y + collider.Size.Z * collider.Size.Z) / 2;
                 // Conservative containment is intentional: every accepted primitive lies inside the qualified envelope.
                 Envelope(new PhysicsVector(Math.Abs(center.X) + radius, Math.Abs(center.Y) + radius, Math.Abs(center.Z) + radius), source.CoordinateLimit);
@@ -440,6 +444,7 @@ namespace GolemEngine.Unity.Editor
             foreach (var field in value.GetType().GetFields(BindingFlags.Public | BindingFlags.Instance).OrderBy(x => x.Name, StringComparer.Ordinal))
             {
                 if (field.Name == "GeometryTransform" && field.GetValue(value) == null) continue;
+                if (field.Name == "HullVertexLimit" && (int)field.GetValue(value) == 0) continue;
                 output.Append(comma); Quote(output, field.Name); output.Append(':'); Write(output, field.GetValue(value)); comma = ",";
             }
             output.Append('}');

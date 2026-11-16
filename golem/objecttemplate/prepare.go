@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 
 	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
@@ -100,7 +101,10 @@ func (c *Catalog) prepare(t *Template, limits Limits) error {
 		plan.ownBody = shape.Kind == p.TriangleMesh && body.desc.Mode == p.Static && local != p.Identity()
 		if shared {
 			plan.key = "asset/" + collider.AssetID + "/" + collider.Shape
-			base := p.ShapeDesc{ID: p.ContentID(plan.key), Kind: shape.Kind, Vertices: shape.Vertices, Indices: shape.Indices}
+			if shape.HullVertexLimit != 0 {
+				plan.key += "/" + strconv.Itoa(shape.HullVertexLimit)
+			}
+			base := p.ShapeDesc{ID: p.ContentID(plan.key), Kind: shape.Kind, Vertices: shape.Vertices, Indices: shape.Indices, HullVertexLimit: shape.HullVertexLimit}
 			c.addBase(plan.key, base)
 		} else {
 			plan.key = "collider/" + t.ID + "/" + collider.ID

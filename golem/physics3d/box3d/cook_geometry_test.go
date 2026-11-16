@@ -1,6 +1,8 @@
 package box3d
 
 import (
+	"errors"
+	"math"
 	"testing"
 
 	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
@@ -25,6 +27,32 @@ func TestCookConvexUsesHullComplexity(t *testing.T) {
 	}
 	if cooked.leaves[0].hull.VertexCount != 8 || len(cooked.Source().Vertices) != len(source.Vertices) {
 		t.Fatal("input ownership or unreduced hull geometry changed")
+	}
+}
+
+func TestCookConvexHullVertexLimit(t *testing.T) {
+	source := p.ShapeDesc{Kind: p.Convex}
+	for i := range 2000 {
+		// A Fibonacci sphere places every point on the hull.
+		y := 1 - 2*(float64(i)+.5)/2000
+		r, angle := math.Sqrt(1-y*y), float64(i)*math.Pi*(3-math.Sqrt(5))
+		source.Vertices = append(source.Vertices, p.Vec3{X: float32(r * math.Cos(angle)), Y: float32(y), Z: float32(r * math.Sin(angle))})
+	}
+	if _, err := CookShape(source, DefaultCookSettings()); !errors.Is(err, p.ErrUnsupported) {
+		t.Fatalf("unreduced hull of 2000 surface points cooked: %v", err)
+	}
+	source.HullVertexLimit = 255
+	cooked, err := CookShape(source, DefaultCookSettings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := cooked.leaves[0].hull.VertexCount; count < p.MinHullVertexLimit || count > 255 {
+		t.Fatalf("reduced hull has %d vertices", count)
+	}
+	unlimited := source
+	unlimited.HullVertexLimit = 0
+	if shapeDigest(source, cooked.geometry) == nil || string(shapeDigest(source, cooked.geometry)) == string(shapeDigest(unlimited, cooked.geometry)) {
+		t.Fatal("hull vertex limit is not part of the shape identity")
 	}
 }
 

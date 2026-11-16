@@ -48,6 +48,22 @@ func TestShapeValidation(t *testing.T) {
 	}
 }
 
+func TestHullVertexLimitValidation(t *testing.T) {
+	hull := ShapeDesc{Kind: Convex, Vertices: []Vec3{{}, {X: 1}, {Y: 1}, {Z: 1}}, HullVertexLimit: 255}
+	if err := hull.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []ShapeDesc{
+		{Kind: Box, HalfExtents: Vec3{1, 1, 1}, HullVertexLimit: 255},
+		{Kind: Convex, Vertices: hull.Vertices, HullVertexLimit: MinHullVertexLimit - 1},
+		{Kind: Convex, Vertices: hull.Vertices, HullVertexLimit: MaxHullVertexLimit + 1},
+	} {
+		if s.Validate() == nil {
+			t.Fatalf("invalid hull vertex limit accepted: %+v", s)
+		}
+	}
+}
+
 func TestHeightFieldValidation(t *testing.T) {
 	valid := func() ShapeDesc {
 		return ShapeDesc{Kind: HeightField, Height: &HeightFieldDesc{Resolution: 3, SpacingX: 1, SpacingZ: 2, HeightStep: .5, Heights: make([]uint16, 9), Solid: []byte{0b1011}}}

@@ -21,6 +21,9 @@ func validateShape(s ShapeDesc, depth int, remaining *int) error {
 			return fmt.Errorf("%w: shape scale", ErrInvalid)
 		}
 	}
+	if s.HullVertexLimit != 0 && (s.Kind != Convex || s.HullVertexLimit < MinHullVertexLimit || s.HullVertexLimit > MaxHullVertexLimit) {
+		return fmt.Errorf("%w: hull vertex limit", ErrInvalid)
+	}
 	switch s.Kind {
 	case Sphere:
 		if s.Radius <= 0 {
