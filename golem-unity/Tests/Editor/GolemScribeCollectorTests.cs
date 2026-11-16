@@ -103,88 +103,12 @@ namespace GolemEngine.Unity.Editor.Tests
             Assert.That(desired.Single().Path, Is.EqualTo(old.Path));
         }
 
-        [Test]
-        public void InvalidFootprintRetainsGuidButDeletedAndUnmarkedSourcesDisappear()
-        {
-            var previous = PriorFootprints(Model("a", "old-a"), Model("b", "old-b"), Model("c", "old-c"));
-            var invalid = Prefab("a", "current-a", invalid: true);
-            var peer = Prefab("d", "peer");
-            var unmarked = new GameObject("unmarked");
-            _objects.Add(unmarked);
-            GolemFootprintExporter.CollectFootprints(2, "./footprints.golem.yaml", previous, _root,
-                new[] { invalid, peer, new ScribePrefabSource("c", "Assets/unmarked.prefab", unmarked) },
-                out var desired, out var count, out var errors);
-            Assert.That(errors, Is.Not.Empty);
-            Assert.That(count, Is.EqualTo(2));
-            Assert.That(GolemFootprintYamlBuilder.TryParse(desired.Single().PendingContent, out _, out var models), Is.True);
-            Assert.That(models.Select(m => m.Guid), Is.EquivalentTo(new[] { "a", "d" }));
-            Assert.That(models.Single(m => m.Guid == "a").Alias, Is.EqualTo("old-a"));
-        }
-
-        [Test]
-        public void PreservedAliasCannotDisplaceCurrentPeerAndRepeatedGuidIsSuppressed()
-        {
-            var previous = PriorFootprints(Model("a", "occupied"));
-            var invalid = Prefab("a", "ignored", invalid: true);
-            var peer = Prefab("b", "occupied");
-            GolemFootprintExporter.CollectFootprints(2, "footprints.golem.yaml", previous, _root,
-                new[] { invalid, peer, peer }, out var desired, out var count, out var errors);
-            Assert.That(count, Is.EqualTo(1));
-            Assert.That(errors, Has.Some.Contain("dropping preserved entry"));
-            GolemFootprintYamlBuilder.TryParse(desired.Single().PendingContent, out _, out var models);
-            Assert.That(models.Single().Guid, Is.EqualTo("b"));
-        }
-
-        [Test]
-        public void AliasConflictPreservesPriorDistinctAliasesAndAllInvalidFallbackRemainsWholeFile()
-        {
-            var previous = PriorFootprints(Model("a", "old-a"), Model("b", "old-b"));
-            GolemFootprintExporter.CollectFootprints(2, "footprints.golem.yaml", previous, _root,
-                new[] { Prefab("a", "duplicate"), Prefab("b", "duplicate") }, out var desired, out var count, out var errors);
-            Assert.That(errors, Has.Some.Contain("multiple prefabs"));
-            Assert.That(count, Is.EqualTo(2));
-            GolemFootprintYamlBuilder.TryParse(desired.Single().PendingContent, out _, out var models);
-            Assert.That(models.Select(m => m.Alias), Is.EquivalentTo(new[] { "old-a", "old-b" }));
-
-            var original = File.ReadAllText(Path.Combine(_root, "footprints.golem.yaml"));
-            GolemFootprintExporter.CollectFootprints(2, "footprints.golem.yaml", previous, _root,
-                new[] { Prefab("new-guid", "invalid", invalid: true) }, out desired, out count, out errors);
-            Assert.That(count, Is.Zero);
-            Assert.That(desired.Single().PendingContent, Is.EqualTo(original));
-        }
-
-        private ScribePrefabSource Prefab(string guid, string alias, bool invalid = false)
-        {
-            var prefab = new GameObject(guid);
-            _objects.Add(prefab);
-            prefab.AddComponent<GolemFootprint>().Alias = alias;
-            if (invalid) prefab.AddComponent<BoxCollider>();
-            else prefab.AddComponent<BoxCollider2D>();
-            return new ScribePrefabSource(guid, "Assets/" + guid + ".prefab", prefab);
-        }
-
         private GolemScribeArtifactRecord PriorCatalog(string type, string path)
         {
             var content = GolemYamlWriter.BuildDocument(new[] { "type: " + type, "fields: {}" });
             File.WriteAllText(Path.Combine(_root, path), content);
             return new GolemScribeArtifactRecord { Kind = GolemScribeConstants.ArtifactKindTypeSchema,
                 Entity = type, SourceGuid = "prior", Path = path, PendingContent = content, Hash = GolemScribeManifest.ComputeContentHash(content) };
-        }
-
-        private GolemScribeArtifactRecord[] PriorFootprints(params GolemFootprintModel[] models)
-        {
-            var content = GolemFootprintYamlBuilder.BuildYaml(2, models);
-            File.WriteAllText(Path.Combine(_root, "footprints.golem.yaml"), content);
-            return new[] { new GolemScribeArtifactRecord { Kind = GolemScribeConstants.ArtifactKindFootprint,
-                SourceGuid = GolemScribeConstants.FootprintAggregateSourceGuid, Path = "./footprints.golem.yaml",
-                Hash = GolemScribeManifest.ComputeContentHash(content) } };
-        }
-
-        private static GolemFootprintModel Model(string guid, string alias)
-        {
-            var model = new GolemFootprintModel { Guid = guid, Alias = alias, Name = guid };
-            model.Shapes.Add(new GolemFootprintShapeModel { Type = "aabb", W = 1, H = 1 });
-            return model;
         }
 
         private static readonly string[] CatalogKinds = { GolemScribeConstants.ArtifactKindTypeSchema,

@@ -23,6 +23,7 @@
     <Compile Include="../../Editor/Scribe/GolemPhysicsDocument.cs" />
     <Compile Include="../../Editor/Scribe/GolemGeometryDocument.cs" />
     <Compile Include="../../Editor/Scribe/GolemContentDocument.cs" />
+    <Compile Include="../../Editor/Scribe/GolemObjectTemplateDocument.cs" />
     <Compile Include="../Editor/GolemContentDocumentTests.cs" />
     <Compile Include="../Editor/GolemPhysicsDocumentTests.cs" />
     <Compile Include="../Editor/GolemGeometryDocumentTests.cs" />

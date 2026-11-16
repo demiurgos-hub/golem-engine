@@ -19,7 +19,7 @@ namespace GolemEngine.Unity.Editor.Tests
             var priorRoot = settings.ProjectRoot;
             var priorAutoExport = settings.AutoExportOnAssetChange;
             var priorAutoBake = settings.AutoBakeOnExport;
-            var priorFootprints = settings.FootprintsPath;
+            var priorTemplates = settings.ObjectTemplatesPath;
             GameObject source = null;
             GolemPrefabRegistry registry = null;
             try
@@ -29,7 +29,7 @@ namespace GolemEngine.Unity.Editor.Tests
                 Directory.CreateDirectory(root);
                 File.WriteAllText(Path.Combine(root, "golem.yaml"), "simulation:\n  dimensions: 2\n");
                 settings.ProjectRoot = root;
-                settings.FootprintsPath = "footprints.golem.yaml";
+                settings.ObjectTemplatesPath = "object-templates.json";
                 AssetDatabase.CreateFolder("Assets", "_GolemScribeDiscovery");
                 source = new GameObject("Discovery");
                 source.AddComponent<ScribeDiscoveryPlayer>();
@@ -84,7 +84,7 @@ namespace GolemEngine.Unity.Editor.Tests
                 settings.ProjectRoot = priorRoot;
                 settings.AutoExportOnAssetChange = priorAutoExport;
                 settings.AutoBakeOnExport = priorAutoBake;
-                settings.FootprintsPath = priorFootprints;
+                settings.ObjectTemplatesPath = priorTemplates;
                 GolemScribeScheduler.ResetForTests();
                 Directory.Delete(root, true);
             }

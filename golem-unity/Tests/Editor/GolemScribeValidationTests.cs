@@ -10,14 +10,14 @@ namespace GolemEngine.Unity.Editor.Tests
     public sealed class GolemScribeValidationTests
     {
         private string _previousProjectRoot;
-        private string _previousFootprintsPath;
+        private string _previousObjectTemplatesPath;
 
         [SetUp]
         public void SetUp()
         {
             var settings = GolemUnityEditorSettings.instance;
             _previousProjectRoot = settings.ProjectRoot;
-            _previousFootprintsPath = settings.FootprintsPath;
+            _previousObjectTemplatesPath = settings.ObjectTemplatesPath;
         }
 
         [TearDown]
@@ -25,7 +25,7 @@ namespace GolemEngine.Unity.Editor.Tests
         {
             var settings = GolemUnityEditorSettings.instance;
             settings.ProjectRoot = _previousProjectRoot;
-            settings.FootprintsPath = _previousFootprintsPath;
+            settings.ObjectTemplatesPath = _previousObjectTemplatesPath;
             GolemUnityEditorSettings.Save();
         }
 
@@ -191,7 +191,7 @@ namespace GolemEngine.Unity.Editor.Tests
         }
 
         [Test]
-        public void Validate_EndToEnd_FlagsBogusKindHostilePathMissingFileAndFootprintDims()
+        public void Validate_EndToEnd_FlagsBogusKindHostilePathMissingFileAndEditedTemplates()
         {
             var root = CreateTempRoot();
             try
@@ -199,13 +199,8 @@ namespace GolemEngine.Unity.Editor.Tests
                 WriteGolemYaml(root, dimensions: 2);
                 var missingPath = "schemas/entities/gone.yaml";
                 var goneYaml = GolemYamlWriter.BuildDocument(new[] { "entity: Gone", "vars:", "  {}" });
-                var badFootprints = GolemYamlWriter.BuildDocument(new[]
-                {
-                    "version: 1",
-                    "dimensions: 3",
-                    "footprints: {}"
-                });
-                WriteOwned(root, "footprints.golem.yaml", badFootprints);
+                var templates = GolemObjectTemplateDocument.Build(new ObjectTemplateCatalog { CatalogID = "object-templates", Dimensions = 2 });
+                WriteOwned(root, "object-templates.json", templates + " ");
 
                 var manifestRecords = new List<GolemScribeArtifactRecord>
                 {
@@ -234,10 +229,10 @@ namespace GolemEngine.Unity.Editor.Tests
                     },
                     new GolemScribeArtifactRecord
                     {
-                        Kind = GolemScribeConstants.ArtifactKindFootprint,
-                        SourceGuid = GolemScribeConstants.FootprintAggregateSourceGuid,
-                        Path = "footprints.golem.yaml",
-                        Hash = GolemScribeManifest.ComputeContentHash(badFootprints)
+                        Kind = GolemScribeConstants.ArtifactKindObjectTemplates,
+                        SourceGuid = GolemScribeConstants.ObjectTemplateSourceGuid,
+                        Path = "object-templates.json",
+                        Hash = GolemScribeManifest.ComputeContentHash(templates)
                     }
                 };
                 File.WriteAllText(
@@ -246,23 +241,23 @@ namespace GolemEngine.Unity.Editor.Tests
 
                 var settings = GolemUnityEditorSettings.instance;
                 settings.ProjectRoot = root;
-                settings.FootprintsPath = "footprints.golem.yaml";
+                settings.ObjectTemplatesPath = "object-templates.json";
                 GolemUnityEditorSettings.Save();
 
                 var beforeManifest = File.ReadAllText(GolemScribeManifest.ManifestPath(root));
-                var beforeFootprints = File.ReadAllText(Path.Combine(root, "footprints.golem.yaml"));
+                var beforeTemplates = File.ReadAllText(Path.Combine(root, "object-templates.json"));
 
                 var result = GolemScribeValidator.Validate(root);
 
                 Assert.That(result.Errors, Has.Some.Contain("unknown kind"));
                 Assert.That(result.Errors, Has.Some.Contain("Manifest ownership path rejected"));
                 Assert.That(result.Missing, Does.Contain(missingPath));
-                Assert.That(result.Errors, Has.Some.Contain("dimensions 3"));
+                Assert.That(result.ManuallyModified, Does.Contain("object-templates.json"));
                 Assert.That(result.HasFailures, Is.True);
 
                 // Dry-run must not mutate committed artifacts.
                 Assert.That(File.ReadAllText(GolemScribeManifest.ManifestPath(root)), Is.EqualTo(beforeManifest));
-                Assert.That(File.ReadAllText(Path.Combine(root, "footprints.golem.yaml")), Is.EqualTo(beforeFootprints));
+                Assert.That(File.ReadAllText(Path.Combine(root, "object-templates.json")), Is.EqualTo(beforeTemplates));
             }
             finally
             {

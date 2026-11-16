@@ -90,7 +90,6 @@ namespace GolemEngine.Unity.Editor
             try
             {
                 var identity = new GolemScribeIdentityContext(options);
-                string ObjectID(Component value, string explicitID) => identity.Object(value, () => ObjectIdentity(value, explicitID));
                 if (world == null) throw new InvalidOperationException("Select an object under a Navigation World marker.");
                 if (!world.gameObject.scene.IsValid() || string.IsNullOrEmpty(world.gameObject.scene.path) || world.gameObject.scene.isDirty)
                     throw new InvalidOperationException("Save the scene before export so object identities and source data can be restored reliably.");
@@ -98,63 +97,14 @@ namespace GolemEngine.Unity.Editor
                 if (string.IsNullOrWhiteSpace(world.OutputPath) || !world.OutputPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("Navigation output must be a project-relative .json path.");
 
-                var assets = new Dictionary<string, NavigationAsset>(StringComparer.Ordinal);
-                var instances = new List<NavigationInstance>();
-                foreach (var marker in world.GetComponentsInChildren<GolemNavigationSource>(true))
-                {
-                    if (marker.GetComponentInParent<GolemNavigationWorld>(true) != world) continue;
-                    if (marker.Area < 0 || marker.Area > 63) throw new InvalidOperationException(marker.name + ": area must be 0..63.");
-                    var transform = marker.transform.localToWorldMatrix;
-                    string assetID;
-                    if (marker.SourceCollider)
-                    {
-                        var collider = marker.SourceCollider;
-                        if (collider.GetComponentInParent<GolemNavigationWorld>(true) != world)
-                            throw new InvalidOperationException(marker.name + ": explicit collider must belong to the same navigation world.");
-                        if (collider is MeshCollider meshCollider)
-                        {
-                            var meshAsset = meshCollider.sharedMesh;
-                            assetID = identity.Asset(meshAsset, () => AssetIdentity(meshAsset)) + "/area/" + marker.Area.ToString(CultureInfo.InvariantCulture);
-                            if (!assets.ContainsKey(assetID)) assets.Add(assetID, CaptureMesh(meshAsset, assetID, marker.Area));
-                            transform = collider.transform.localToWorldMatrix;
-                        }
-                        else
-                        {
-                            assetID = GolemNavigationPrimitiveGeometry.Identity(collider, marker.Area);
-                            if (!assets.ContainsKey(assetID)) assets.Add(assetID, GolemNavigationPrimitiveGeometry.Capture(collider, assetID, marker.Area));
-                            transform = GolemNavigationPrimitiveGeometry.Transform(collider);
-                        }
-                    }
-                    else
-                    {
-                        var mesh = marker.GetComponent<MeshFilter>(); var terrain = marker.GetComponent<Terrain>();
-                        if ((mesh == null) == (terrain == null)) throw new InvalidOperationException(marker.name + ": source requires exactly one MeshFilter or Terrain on the same object, or an explicit SourceCollider.");
-                        if (terrain != null) ValidateTerrainTransform(marker.transform);
-                        var assetObject = mesh != null ? (UnityEngine.Object)mesh.sharedMesh : terrain.terrainData;
-                        assetID = identity.Asset(assetObject, () => AssetIdentity(assetObject)) + "/area/" + marker.Area.ToString(CultureInfo.InvariantCulture);
-                        if (!assets.ContainsKey(assetID)) assets.Add(assetID, mesh != null
-                            ? CaptureMesh(mesh.sharedMesh, assetID, marker.Area) : new NavigationAsset { ID = assetID, Heightfield = CaptureHeightfield(terrain.terrainData, marker.Area) });
-                    }
-                    instances.Add(new NavigationInstance
-                    {
-                        ID = ObjectID(marker, marker.StableID), AssetID = assetID, Revision = Revision(marker.Revision),
-                        Transform = Matrix(transform), Disabled = !marker.ExportEnabled || !marker.enabled
-                    });
-                }
-                var scene = new NavigationScene
-                {
-                    Assets = assets.Values.ToArray(), Instances = instances.ToArray(),
-                    Volumes = world.GetComponentsInChildren<GolemNavigationVolume>(true)
-                        .Where(m => m.GetComponentInParent<GolemNavigationWorld>(true) == world).Select(m => CaptureVolume(m, ObjectID)).ToArray(),
-                    Links = world.GetComponentsInChildren<GolemNavigationLink>(true)
-                        .Where(m => m.GetComponentInParent<GolemNavigationWorld>(true) == world).Select(m => CaptureLink(m, ObjectID)).ToArray()
-                };
+                var scene = CaptureScene(world.transform, component => component.GetComponentInParent<GolemNavigationWorld>(true) == world,
+                    identity, new Dictionary<string, NavigationAsset>(StringComparer.Ordinal));
                 var bytes = GolemGeometryDocument.BuildNavigation(scene.Assets);
                 var binaryPath = Path.ChangeExtension(world.OutputPath, ".golemgeo").Replace('\\', '/');
                 var hash = GolemScribeManifest.ComputeBytesHash(bytes);
                 var content = GolemNavigationDocument.Build(scene, CaptureConfig(world),
                     new NavigationGeometryReference { Path = Path.GetFileName(binaryPath), SHA256 = hash });
-                var sourceID = ObjectID(world, null);
+                var sourceID = identity.Object(world, () => ObjectIdentity(world, null));
                 records = new[]
                 {
                     new GolemScribeArtifactRecord { Kind = GolemScribeConstants.ArtifactKindNavigationSource, SourceGuid = sourceID,
@@ -166,6 +116,70 @@ namespace GolemEngine.Unity.Editor
                 return true;
             }
             catch (Exception ex) { error = ex.Message; return false; }
+        }
+
+        /// <summary>
+        /// Captures every owned source, volume and link below <paramref name="root"/> in world space.
+        /// The scene lists the assets it references; <paramref name="assets"/> may be shared across captures.
+        /// </summary>
+        internal static NavigationScene CaptureScene(Transform root, Func<Component, bool> owned, GolemScribeIdentityContext identity,
+            Dictionary<string, NavigationAsset> assets)
+        {
+            string ObjectID(Component value, string explicitID) => identity.Object(value, () => ObjectIdentity(value, explicitID));
+            var referenced = new Dictionary<string, NavigationAsset>(StringComparer.Ordinal);
+            void Reference(string id, Func<NavigationAsset> capture)
+            {
+                if (!assets.TryGetValue(id, out var asset)) assets.Add(id, asset = capture());
+                referenced[id] = asset;
+            }
+            var instances = new List<NavigationInstance>();
+            foreach (var marker in root.GetComponentsInChildren<GolemNavigationSource>(true))
+            {
+                if (!owned(marker)) continue;
+                if (marker.Area < 0 || marker.Area > 63) throw new InvalidOperationException(marker.name + ": area must be 0..63.");
+                var transform = marker.transform.localToWorldMatrix;
+                string assetID;
+                if (marker.SourceCollider)
+                {
+                    var collider = marker.SourceCollider;
+                    if (!owned(collider))
+                        throw new InvalidOperationException(marker.name + ": explicit collider must belong to the same navigation world or object template.");
+                    if (collider is MeshCollider meshCollider)
+                    {
+                        var meshAsset = meshCollider.sharedMesh;
+                        assetID = identity.Asset(meshAsset, () => AssetIdentity(meshAsset)) + "/area/" + marker.Area.ToString(CultureInfo.InvariantCulture);
+                        Reference(assetID, () => CaptureMesh(meshAsset, assetID, marker.Area));
+                        transform = collider.transform.localToWorldMatrix;
+                    }
+                    else
+                    {
+                        assetID = GolemNavigationPrimitiveGeometry.Identity(collider, marker.Area);
+                        Reference(assetID, () => GolemNavigationPrimitiveGeometry.Capture(collider, assetID, marker.Area));
+                        transform = GolemNavigationPrimitiveGeometry.Transform(collider);
+                    }
+                }
+                else
+                {
+                    var mesh = marker.GetComponent<MeshFilter>(); var terrain = marker.GetComponent<Terrain>();
+                    if ((mesh == null) == (terrain == null)) throw new InvalidOperationException(marker.name + ": source requires exactly one MeshFilter or Terrain on the same object, or an explicit SourceCollider.");
+                    if (terrain != null) ValidateTerrainTransform(marker.transform);
+                    var assetObject = mesh != null ? (UnityEngine.Object)mesh.sharedMesh : terrain.terrainData;
+                    assetID = identity.Asset(assetObject, () => AssetIdentity(assetObject)) + "/area/" + marker.Area.ToString(CultureInfo.InvariantCulture);
+                    Reference(assetID, () => mesh != null
+                        ? CaptureMesh(mesh.sharedMesh, assetID, marker.Area) : new NavigationAsset { ID = assetID, Heightfield = CaptureHeightfield(terrain.terrainData, marker.Area) });
+                }
+                instances.Add(new NavigationInstance
+                {
+                    ID = ObjectID(marker, marker.StableID), AssetID = assetID, Revision = Revision(marker.Revision),
+                    Transform = Matrix(transform), Disabled = !marker.ExportEnabled || !marker.enabled
+                });
+            }
+            return new NavigationScene
+            {
+                Assets = referenced.Values.ToArray(), Instances = instances.ToArray(),
+                Volumes = root.GetComponentsInChildren<GolemNavigationVolume>(true).Where(m => owned(m)).Select(m => CaptureVolume(m, ObjectID)).ToArray(),
+                Links = root.GetComponentsInChildren<GolemNavigationLink>(true).Where(m => owned(m)).Select(m => CaptureLink(m, ObjectID)).ToArray()
+            };
         }
 
         internal static NavigationConfig CaptureConfig(GolemNavigationWorld world) => new NavigationConfig

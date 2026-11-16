@@ -47,50 +47,55 @@ namespace GolemEngine.Unity.Editor
         internal static bool IsOwned(byte[] bytes) => bytes != null && bytes.Length >= Magic.Length
             && Magic.Select((value, index) => bytes[index] == value).All(value => value);
 
-        internal static byte[] BuildPhysics(IEnumerable<PhysicsAsset> assets)
+        internal static byte[] BuildPhysics(IEnumerable<PhysicsAsset> assets) => Build(assets, Array.Empty<NavigationAsset>());
+
+        internal static byte[] BuildNavigation(IEnumerable<NavigationAsset> assets) => Build(Array.Empty<PhysicsAsset>(), assets);
+
+        /// <summary>Writes physics (float32) and navigation (float64) assets into one sidecar ordered by ID.</summary>
+        internal static byte[] Build(IEnumerable<PhysicsAsset> physics, IEnumerable<NavigationAsset> navigation)
         {
-            var ordered = assets.OrderBy(asset => asset.ID, StringComparer.Ordinal).ToArray();
-            CheckBudget(ordered.Length, ordered.Select(asset => AssetSize(asset.ID, asset.SourceID ?? "", asset.Heightfield,
-                asset.Vertices?.Length ?? 0, asset.Indices?.Length / 3 ?? 0, 12)));
+            var ordered = physics.Select(asset => (asset.ID, Physics: asset, Navigation: (NavigationAsset)null))
+                .Concat(navigation.Select(asset => (asset.ID, Physics: (PhysicsAsset)null, Navigation: asset)))
+                .OrderBy(entry => entry.ID, StringComparer.Ordinal).ToArray();
+            for (var i = 1; i < ordered.Length; i++)
+                if (string.Equals(ordered[i - 1].ID, ordered[i].ID, StringComparison.Ordinal))
+                    throw new InvalidOperationException("Duplicate geometry identity: " + ordered[i].ID);
+            CheckBudget(ordered.Length, ordered.Select(entry => entry.Physics != null
+                ? AssetSize(entry.ID, entry.Physics.SourceID ?? "", entry.Physics.Heightfield, entry.Physics.Vertices?.Length ?? 0, entry.Physics.Indices?.Length / 3 ?? 0, 12)
+                : AssetSize(entry.ID, entry.ID, entry.Navigation.Heightfield, entry.Navigation.Vertices?.Length ?? 0, entry.Navigation.Triangles?.Length ?? 0, 24)));
             using (var stream = new MemoryStream())
             using (var writer = new BinaryWriter(stream, Utf8, true))
             {
                 writer.Write(Magic); writer.Write(checked((uint)ordered.Length));
-                foreach (var asset in ordered)
+                foreach (var entry in ordered)
                 {
-                    WriteString(writer, asset.ID); WriteString(writer, asset.SourceID ?? "");
-                    if (asset.Heightfield != null) { WriteHeightfield(writer, asset.Heightfield); continue; }
-                    writer.Write((byte)1);
-                    writer.Write(checked((uint)asset.Vertices.Length)); writer.Write(checked((uint)(asset.Indices.Length / 3)));
-                    foreach (var vertex in asset.Vertices) { writer.Write(vertex.X); writer.Write(vertex.Y); writer.Write(vertex.Z); }
-                    for (var i = 0; i < asset.Indices.Length; i += 3)
-                    { writer.Write(asset.Indices[i]); writer.Write(asset.Indices[i + 1]); writer.Write(asset.Indices[i + 2]); writer.Write((byte)0); }
+                    if (entry.Physics != null) WritePhysics(writer, entry.Physics);
+                    else WriteNavigation(writer, entry.Navigation);
                 }
                 return Finish(stream);
             }
         }
 
-        internal static byte[] BuildNavigation(IEnumerable<NavigationAsset> assets)
+        private static void WritePhysics(BinaryWriter writer, PhysicsAsset asset)
         {
-            var ordered = assets.OrderBy(asset => asset.ID, StringComparer.Ordinal).ToArray();
-            CheckBudget(ordered.Length, ordered.Select(asset => AssetSize(asset.ID, asset.ID, asset.Heightfield,
-                asset.Vertices?.Length ?? 0, asset.Triangles?.Length ?? 0, 24)));
-            using (var stream = new MemoryStream())
-            using (var writer = new BinaryWriter(stream, Utf8, true))
-            {
-                writer.Write(Magic); writer.Write(checked((uint)ordered.Length));
-                foreach (var asset in ordered)
-                {
-                    WriteString(writer, asset.ID); WriteString(writer, asset.ID);
-                    if (asset.Heightfield != null) { WriteHeightfield(writer, asset.Heightfield); continue; }
-                    writer.Write((byte)3);
-                    writer.Write(checked((uint)asset.Vertices.Length)); writer.Write(checked((uint)asset.Triangles.Length));
-                    foreach (var vertex in asset.Vertices) { writer.Write(vertex.X); writer.Write(vertex.Y); writer.Write(vertex.Z); }
-                    foreach (var triangle in asset.Triangles)
-                    { writer.Write(triangle.Indices[0]); writer.Write(triangle.Indices[1]); writer.Write(triangle.Indices[2]); writer.Write(checked((byte)triangle.Area)); }
-                }
-                return Finish(stream);
-            }
+            WriteString(writer, asset.ID); WriteString(writer, asset.SourceID ?? "");
+            if (asset.Heightfield != null) { WriteHeightfield(writer, asset.Heightfield); return; }
+            writer.Write((byte)1);
+            writer.Write(checked((uint)asset.Vertices.Length)); writer.Write(checked((uint)(asset.Indices.Length / 3)));
+            foreach (var vertex in asset.Vertices) { writer.Write(vertex.X); writer.Write(vertex.Y); writer.Write(vertex.Z); }
+            for (var i = 0; i < asset.Indices.Length; i += 3)
+            { writer.Write(asset.Indices[i]); writer.Write(asset.Indices[i + 1]); writer.Write(asset.Indices[i + 2]); writer.Write((byte)0); }
+        }
+
+        private static void WriteNavigation(BinaryWriter writer, NavigationAsset asset)
+        {
+            WriteString(writer, asset.ID); WriteString(writer, asset.ID);
+            if (asset.Heightfield != null) { WriteHeightfield(writer, asset.Heightfield); return; }
+            writer.Write((byte)3);
+            writer.Write(checked((uint)asset.Vertices.Length)); writer.Write(checked((uint)asset.Triangles.Length));
+            foreach (var vertex in asset.Vertices) { writer.Write(vertex.X); writer.Write(vertex.Y); writer.Write(vertex.Z); }
+            foreach (var triangle in asset.Triangles)
+            { writer.Write(triangle.Indices[0]); writer.Write(triangle.Indices[1]); writer.Write(triangle.Indices[2]); writer.Write(checked((byte)triangle.Area)); }
         }
 
         private static void WriteHeightfield(BinaryWriter writer, GolemHeightfield heightfield)

@@ -20,15 +20,22 @@ namespace GolemEngine.Unity.Editor
             GolemScribeConstants.ArtifactKindTypeSchema,
             GolemScribeConstants.ArtifactKindWorldSchema,
             GolemScribeConstants.ArtifactKindCatalogData,
-            GolemScribeConstants.ArtifactKindFootprint,
+            GolemScribeConstants.ArtifactKindObjectTemplates,
             GolemScribeConstants.ArtifactKindNavigationSource,
             GolemScribeConstants.ArtifactKindPhysicsSource,
             GolemScribeConstants.ArtifactKindContentSource
         };
 
-        // Scene navigation is explicitly exported/validated from a saved selected world; this prefab scan
-        // must not classify sources from unloaded scenes as orphaned.
-        private static readonly string[] AllKinds = KnownKinds.Where(k => k != GolemScribeConstants.ArtifactKindNavigationSource && k != GolemScribeConstants.ArtifactKindPhysicsSource && k != GolemScribeConstants.ArtifactKindContentSource).ToArray();
+        // Explicitly exported sources are validated by their own exporters, and programmatic template catalogs
+        // only by their source; this prefab scan must not classify them as orphaned.
+        private static readonly HashSet<string> SourceKinds = new HashSet<string>(StringComparer.Ordinal)
+        {
+            GolemScribeConstants.ArtifactKindObjectTemplates,
+            GolemScribeConstants.ArtifactKindNavigationSource,
+            GolemScribeConstants.ArtifactKindPhysicsSource,
+            GolemScribeConstants.ArtifactKindContentSource
+        };
+        private static readonly string[] AllKinds = KnownKinds.Where(k => !SourceKinds.Contains(k)).ToArray();
 
         /// <summary>Outcome of a dry-run Scribe validation.</summary>
         public sealed class ValidationResult
@@ -96,20 +103,15 @@ namespace GolemEngine.Unity.Editor
             result.Errors.AddRange(catalogErrors);
             desired.AddRange(catalogRecords);
 
-            var footprintsPath = GolemUnityEditorSettings.instance.FootprintsPath;
-            GolemFootprintExporter.CollectFootprints(
-                schema.Dimensions,
-                footprintsPath,
-                previous,
-                projectRoot,
-                out var footprintRecords,
-                out _,
-                out var footprintErrors);
-            result.Errors.AddRange(footprintErrors);
-            desired.AddRange(footprintRecords);
-
             CompareDesiredToDisk(projectRoot, previous, desired, AllKinds, result);
-            ValidateFootprintDocument(projectRoot, schema.Dimensions, footprintsPath, result);
+
+            var templateErrors = new List<string>();
+            GolemObjectTemplateExporter.CollectMarked(schema.Dimensions, GolemUnityEditorSettings.instance.ObjectTemplatesPath,
+                projectRoot, out var templateRecords, out _, templateErrors);
+            result.Errors.AddRange(templateErrors);
+            if (templateErrors.Count == 0)
+                CompareDesiredToDisk(projectRoot, previous, templateRecords, new[] { GolemScribeConstants.ArtifactKindObjectTemplates },
+                    result, GolemScribeConstants.ObjectTemplateSourceGuid);
             ValidatePrefabRegistryParity(registryMap, result);
 
             return result;
@@ -277,7 +279,7 @@ namespace GolemEngine.Unity.Editor
                 {
                     result.Errors.Add($"Manifest lists duplicate path '{normalized}'.");
                 }
-                if (record.Kind == GolemScribeConstants.ArtifactKindNavigationSource || record.Kind == GolemScribeConstants.ArtifactKindPhysicsSource || record.Kind == GolemScribeConstants.ArtifactKindContentSource)
+                if (SourceKinds.Contains(record.Kind))
                 {
                     var snapshot = GolemScribeArtifactReader.Read(projectRoot, normalized);
                     if (snapshot.Status == ScribeArtifactStatus.Missing) result.Missing.Add(normalized);
@@ -285,101 +287,12 @@ namespace GolemEngine.Unity.Editor
                         result.Errors.Add(snapshot.Error);
                     else if (!(record.Kind == GolemScribeConstants.ArtifactKindContentSource ? GolemContentDocument.IsOwned(snapshot.Content)
                         : snapshot.Bytes != null ? GolemGeometryDocument.IsOwned(snapshot.Bytes)
+                        : record.Kind == GolemScribeConstants.ArtifactKindObjectTemplates ? GolemObjectTemplateDocument.IsOwned(snapshot.Content)
                         : record.Kind == GolemScribeConstants.ArtifactKindNavigationSource ? GolemNavigationDocument.IsOwned(snapshot.Content)
                         : GolemPhysicsDocument.IsOwned(snapshot.Content)) || !string.Equals(snapshot.Hash, record.Hash, StringComparison.Ordinal))
                         result.ManuallyModified.Add(normalized);
                 }
             }
-        }
-
-        /// <summary>Validates footprints document version/dimensions when the file exists. Exposed for tests.</summary>
-        internal static void ValidateFootprintDocument(
-            string projectRoot,
-            int expectedDimensions,
-            string footprintsRelativePath,
-            ValidationResult result)
-        {
-            if (string.IsNullOrWhiteSpace(footprintsRelativePath))
-            {
-                return;
-            }
-
-            if (!GolemScribeArtifacts.TryResolveContainedPath(
-                    projectRoot, footprintsRelativePath, out var absolute, out var normalized, out var pathError))
-            {
-                result.Errors.Add("Footprints path rejected: " + pathError);
-                return;
-            }
-
-            var snapshot = GolemScribeArtifactReader.ReadAbsolute(absolute, normalized);
-            if (snapshot.Status == ScribeArtifactStatus.ReadFailure)
-            {
-                result.Errors.Add(snapshot.Error);
-                return;
-            }
-            if (snapshot.Status != ScribeArtifactStatus.Owned) return;
-            var text = snapshot.Content;
-
-            if (!TryReadFootprintHeader(text, out var version, out var dimensions))
-            {
-                result.Errors.Add($"Footprints artifact '{normalized}' is not a recognizable versioned footprints document.");
-                return;
-            }
-
-            if (version != GolemScribeConstants.FootprintFormatVersion)
-            {
-                result.Errors.Add(
-                    $"Footprints artifact '{normalized}' has version {version}; expected {GolemScribeConstants.FootprintFormatVersion}.");
-            }
-
-            if (dimensions != expectedDimensions)
-            {
-                result.Errors.Add(
-                    $"Footprints artifact '{normalized}' has dimensions {dimensions}; golem.yaml simulation.dimensions is {expectedDimensions}.");
-            }
-        }
-
-        private static bool TryReadFootprintHeader(string text, out int version, out int dimensions)
-        {
-            version = 0;
-            dimensions = 0;
-            var sawVersion = false;
-            var sawDimensions = false;
-            using (var reader = new StringReader(text ?? string.Empty))
-            {
-                string line;
-                while ((line = reader.ReadLine()) != null)
-                {
-                    var trimmed = line.Trim();
-                    if (trimmed.Length == 0 || trimmed.StartsWith("#", StringComparison.Ordinal))
-                    {
-                        continue;
-                    }
-
-                    var indent = line.Length - line.TrimStart().Length;
-                    if (indent != 0)
-                    {
-                        continue;
-                    }
-
-                    if (trimmed.StartsWith("version:", StringComparison.Ordinal))
-                    {
-                        if (int.TryParse(trimmed.Substring("version:".Length).Trim(), out version))
-                        {
-                            sawVersion = true;
-                        }
-                    }
-                    else if (trimmed.StartsWith("dimensions:", StringComparison.Ordinal))
-                    {
-                        if (int.TryParse(trimmed.Substring("dimensions:".Length).Trim(), out dimensions))
-                        {
-                            sawDimensions = true;
-                        }
-                    }
-                }
-            }
-
-            return sawVersion && sawDimensions;
         }
 
         /// <summary>

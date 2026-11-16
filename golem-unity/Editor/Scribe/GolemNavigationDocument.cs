@@ -240,7 +240,7 @@ namespace GolemEngine.Unity.Editor
 
         // Restricted to the wire DTOs above. Explicit numeric handling avoids locale-dependent numbers,
         // byte-array base64 conversion, native serializers, and Unity's reference-object serialization.
-        private static void Write(StringBuilder output, object value)
+        internal static void Write(StringBuilder output, object value)
         {
             if (value == null) { output.Append("null"); return; }
             if (value is string text) { Quote(output, text); return; }
@@ -268,7 +268,7 @@ namespace GolemEngine.Unity.Editor
             output.Append('}');
         }
 
-        private static void Quote(StringBuilder output, string value)
+        internal static void Quote(StringBuilder output, string value)
         {
             output.Append('"');
             foreach (var c in value)

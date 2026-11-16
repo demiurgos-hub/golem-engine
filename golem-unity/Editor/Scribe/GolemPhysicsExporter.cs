@@ -127,52 +127,75 @@ namespace GolemEngine.Unity.Editor
             foreach (var articulation in world.GetComponentsInChildren<ArticulationBody>(true))
                 if (articulation.GetComponentInParent<GolemPhysicsWorld>(true) == world)
                     throw new InvalidOperationException(articulation.name + ": ArticulationBody simulation is unsupported; export cannot reinterpret it as static geometry.");
-            var source = new PhysicsSource { Version = compact ? 2 : 1, WorldID = world.WorldID, Revision = (ulong)world.Revision };
-            for (var a = 0; a < 32; a++)
-            {
-                source.LayerCollisionMasks[a] = 0;
-                for (var b = 0; b < 32; b++) if (!UnityEngine.Physics.GetIgnoreLayerCollision(a, b)) source.LayerCollisionMasks[a] |= 1u << b;
-            }
-            var bodies = new Dictionary<string, PhysicsBody>(StringComparer.Ordinal);
-            var materials = new Dictionary<string, PhysicsMaterial>(StringComparer.Ordinal);
-            var colliders = new List<PhysicsCollider>(); var assets = new List<PhysicsAsset>();
-            var sharedAssets = new Dictionary<string, PhysicsAsset>(StringComparer.Ordinal);
-            var defaultMaterial = DefaultMaterial();
-            foreach (var rigidbody in world.GetComponentsInChildren<Rigidbody>(true))
-                if (rigidbody.GetComponentInParent<GolemPhysicsWorld>(true) == world)
-                    bodies.Add(ObjectID(rigidbody), CaptureBody(ObjectID(rigidbody), rigidbody.transform, rigidbody, world));
-            foreach (var collider in world.GetComponentsInChildren<Collider>(true))
-            {
-                if (collider.GetComponentInParent<GolemPhysicsWorld>(true) != world) continue;
-                try
-                {
-                    // attachedRigidbody may be null for inactive hierarchies; authoring must retain compound membership.
-                    var rigidbody = collider is CharacterController ? null : collider.GetComponentInParent<Rigidbody>(true);
-                    var bodyTransform = rigidbody ? rigidbody.transform : collider.transform;
-                    if (bodyTransform.GetComponentInParent<GolemPhysicsWorld>(true) != world)
-                        throw new InvalidOperationException("Attached body is outside the selected physics world.");
-                    var bodyID = rigidbody ? ObjectID(rigidbody) : ObjectID(bodyTransform) + (collider is CharacterController ? "/character" : "/static");
-                    if (!bodies.ContainsKey(bodyID)) bodies.Add(bodyID, CaptureBody(bodyID, bodyTransform, rigidbody, world));
-                    if (collider is CharacterController) bodies[bodyID].Kind = "kinematic";
-                    var item = CaptureCollider(collider, bodyID, bodyTransform, world, assets, sharedAssets, identity, compact);
-                    var material = collider.sharedMaterial ? collider.sharedMaterial : defaultMaterial;
-                    item.MaterialID = material ? identity.Asset(material, () => AssetIdentity(material)) : "unity-default-material";
-                    if (!materials.ContainsKey(item.MaterialID)) materials.Add(item.MaterialID, CaptureMaterial(item.MaterialID, material));
-                    colliders.Add(item);
-                }
-                catch (Exception ex) { throw new InvalidOperationException(Hierarchy(collider.transform) + " [" + collider.GetType().Name + "]: " + ex.Message, ex); }
-            }
-            source.Bodies = bodies.Values.ToArray(); source.Materials = materials.Values.ToArray(); source.Colliders = colliders.ToArray(); source.Assets = assets.ToArray();
+            var source = new PhysicsSource { Version = compact ? 2 : 1, WorldID = world.WorldID, Revision = (ulong)world.Revision, LayerCollisionMasks = LayerCollisionMasks() };
+            var capture = new PhysicsCapture();
+            CaptureHierarchy(world.transform, component => component.GetComponentInParent<GolemPhysicsWorld>(true) == world, identity, compact, capture);
+            source.Bodies = capture.Bodies.Values.ToArray(); source.Materials = capture.Materials.Values.ToArray();
+            source.Colliders = capture.Colliders.ToArray(); source.Assets = capture.Assets.ToArray();
             source.Joints = world.GetComponentsInChildren<Joint>(true).Where(j => j.GetComponentInParent<GolemPhysicsWorld>(true) == world)
                 .Select(j => GolemPhysicsJointCapture.Capture(j, world, ObjectID)).ToArray();
             return compact ? source : GolemPhysicsDocument.Normalize(source);
         }
 
-        private static PhysicsBody CaptureBody(string id, Transform transform, Rigidbody body, GolemPhysicsWorld world)
+        /// <summary>Bodies, colliders and materials captured from one hierarchy. Shared assets may span captures.</summary>
+        internal sealed class PhysicsCapture
+        {
+            internal readonly Dictionary<string, PhysicsBody> Bodies = new Dictionary<string, PhysicsBody>(StringComparer.Ordinal);
+            internal readonly Dictionary<string, PhysicsMaterial> Materials = new Dictionary<string, PhysicsMaterial>(StringComparer.Ordinal);
+            internal readonly List<PhysicsCollider> Colliders = new List<PhysicsCollider>();
+            /// <summary>Assets first captured by this capture; earlier captures sharing the dictionary own the rest.</summary>
+            internal readonly List<PhysicsAsset> Assets = new List<PhysicsAsset>();
+            internal readonly Dictionary<string, PhysicsAsset> SharedAssets;
+            internal PhysicsCapture(Dictionary<string, PhysicsAsset> sharedAssets = null)
+            {
+                SharedAssets = sharedAssets ?? new Dictionary<string, PhysicsAsset>(StringComparer.Ordinal);
+            }
+        }
+
+        internal static uint[] LayerCollisionMasks()
+        {
+            var masks = new uint[32];
+            for (var a = 0; a < 32; a++)
+                for (var b = 0; b < 32; b++) if (!UnityEngine.Physics.GetIgnoreLayerCollision(a, b)) masks[a] |= 1u << b;
+            return masks;
+        }
+
+        /// <summary>Captures every owned body and collider below <paramref name="root"/> in world space.</summary>
+        internal static void CaptureHierarchy(Transform root, Func<Component, bool> owned, GolemScribeIdentityContext identity, bool compact, PhysicsCapture capture)
+        {
+            string ObjectID(Component value) => identity.Object(value, () => Identity(value));
+            var defaultMaterial = DefaultMaterial();
+            foreach (var rigidbody in root.GetComponentsInChildren<Rigidbody>(true))
+                if (owned(rigidbody))
+                    capture.Bodies.Add(ObjectID(rigidbody), CaptureBody(ObjectID(rigidbody), rigidbody.transform, rigidbody, root));
+            foreach (var collider in root.GetComponentsInChildren<Collider>(true))
+            {
+                if (!owned(collider)) continue;
+                try
+                {
+                    // attachedRigidbody may be null for inactive hierarchies; authoring must retain compound membership.
+                    var rigidbody = collider is CharacterController ? null : collider.GetComponentInParent<Rigidbody>(true);
+                    var bodyTransform = rigidbody ? rigidbody.transform : collider.transform;
+                    if (!owned(bodyTransform))
+                        throw new InvalidOperationException("Attached body is outside the exported hierarchy.");
+                    var bodyID = rigidbody ? ObjectID(rigidbody) : ObjectID(bodyTransform) + (collider is CharacterController ? "/character" : "/static");
+                    if (!capture.Bodies.ContainsKey(bodyID)) capture.Bodies.Add(bodyID, CaptureBody(bodyID, bodyTransform, rigidbody, root));
+                    if (collider is CharacterController) capture.Bodies[bodyID].Kind = "kinematic";
+                    var item = CaptureCollider(collider, bodyID, bodyTransform, root, capture.Assets, capture.SharedAssets, identity, compact);
+                    var material = collider.sharedMaterial ? collider.sharedMaterial : defaultMaterial;
+                    item.MaterialID = material ? identity.Asset(material, () => AssetIdentity(material)) : "unity-default-material";
+                    if (!capture.Materials.ContainsKey(item.MaterialID)) capture.Materials.Add(item.MaterialID, CaptureMaterial(item.MaterialID, material));
+                    capture.Colliders.Add(item);
+                }
+                catch (Exception ex) { throw new InvalidOperationException(Hierarchy(collider.transform) + " [" + collider.GetType().Name + "]: " + ex.Message, ex); }
+            }
+        }
+
+        private static PhysicsBody CaptureBody(string id, Transform transform, Rigidbody body, Transform root)
         {
             var result = new PhysicsBody
             {
-                ID = id, OwnerID = Owner(transform, world), Position = Vector(transform.position), Rotation = Rotation(transform.rotation),
+                ID = id, OwnerID = Owner(transform, root), Position = Vector(transform.position), Rotation = Rotation(transform.rotation),
                 Active = transform.gameObject.activeInHierarchy, Enabled = !body || body.detectCollisions,
                 Kind = !body ? "static" : body.isKinematic ? "kinematic" : "dynamic"
             };
@@ -193,7 +216,7 @@ namespace GolemEngine.Unity.Editor
             return result;
         }
 
-        private static PhysicsCollider CaptureCollider(Collider collider, string bodyID, Transform body, GolemPhysicsWorld world, List<PhysicsAsset> assets,
+        private static PhysicsCollider CaptureCollider(Collider collider, string bodyID, Transform body, Transform root, List<PhysicsAsset> assets,
             Dictionary<string, PhysicsAsset> sharedAssets, GolemScribeIdentityContext identity, bool compact)
         {
             string ObjectID(Component value) => identity.Object(value, () => Identity(value));
@@ -202,7 +225,7 @@ namespace GolemEngine.Unity.Editor
             var result = new PhysicsCollider
             {
                 ID = ObjectID(collider), BodyID = bodyID, SourceID = ObjectID(collider), ParentID = collider.transform.parent ? ObjectID(collider.transform.parent) : "",
-                OwnerID = Owner(collider.transform, world), Enabled = collider.enabled, Active = collider.gameObject.activeInHierarchy,
+                OwnerID = Owner(collider.transform, root), Enabled = collider.enabled, Active = collider.gameObject.activeInHierarchy,
                 Layer = collider.gameObject.layer, LayerName = LayerMask.LayerToName(collider.gameObject.layer),
                 Solid = !collider.isTrigger, Sensor = collider.isTrigger, ContactOffset = collider.contactOffset
             };
@@ -413,13 +436,13 @@ namespace GolemEngine.Unity.Editor
             return property.objectReferenceValue as UnityPhysicsMaterial;
         }
 
-        private static string Owner(Transform transform, GolemPhysicsWorld world)
+        private static string Owner(Transform transform, Transform root)
         {
             for (var current = transform; current; current = current.parent)
             {
                 var metadata = current.GetComponent<GolemPhysicsMetadata>();
                 if (metadata && !string.IsNullOrWhiteSpace(metadata.OwnerID)) return metadata.OwnerID;
-                if (current == world.transform) break;
+                if (current == root) break;
             }
             return "";
         }

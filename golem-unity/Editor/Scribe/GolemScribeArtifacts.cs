@@ -21,7 +21,7 @@ namespace GolemEngine.Unity.Editor
             public bool TypeSchemaBytesChanged;
             public bool WorldSchemaBytesChanged;
             public bool CatalogDataBytesChanged;
-            public bool FootprintBytesChanged;
+            public bool ObjectTemplateBytesChanged;
             public bool AnyBytesChanged;
 
             /// <summary>True when type or world schema bytes changed (catalog data alone does not count).</summary>
@@ -140,7 +140,7 @@ namespace GolemEngine.Unity.Editor
                 result.TypeSchemaBytesChanged = false;
                 result.WorldSchemaBytesChanged = false;
                 result.CatalogDataBytesChanged = false;
-                result.FootprintBytesChanged = false;
+                result.ObjectTemplateBytesChanged = false;
                 result.AnyBytesChanged = false;
                 return result;
             }
@@ -164,9 +164,9 @@ namespace GolemEngine.Unity.Editor
             {
                 result.CatalogDataBytesChanged = true;
             }
-            else if (kind == GolemScribeConstants.ArtifactKindFootprint)
+            else if (kind == GolemScribeConstants.ArtifactKindObjectTemplates)
             {
-                result.FootprintBytesChanged = true;
+                result.ObjectTemplateBytesChanged = true;
             }
         }
 

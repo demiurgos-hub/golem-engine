@@ -422,7 +422,7 @@ namespace GolemEngine.Unity.Editor
         private static bool Finite(float x) => !float.IsNaN(x) && !float.IsInfinity(x);
         private static bool Nonnegative(float x) => Finite(x) && x >= 0;
         private static void Require(bool ok, string message) { if (!ok) throw new InvalidOperationException(message); }
-        private static void Write(StringBuilder output, object value)
+        internal static void Write(StringBuilder output, object value)
         {
             if (value == null) { output.Append("null"); return; }
             if (value is string text) { Quote(output, text); return; }
@@ -444,7 +444,7 @@ namespace GolemEngine.Unity.Editor
             }
             output.Append('}');
         }
-        private static void Quote(StringBuilder output, string value)
+        internal static void Quote(StringBuilder output, string value)
         {
             output.Append('"');
             foreach (var c in value)

@@ -12,14 +12,14 @@ namespace GolemEngine.Unity.Editor.Tests
 {
     /// <summary>
     /// End-to-end Scribe fixture: player + monster schemas/registry, monster catalog GUID ref,
-    /// non-entity wall footprint — no scene artifacts and no wall entity/replication.
+    /// non-entity wall Object Template — no scene artifacts and no wall entity/replication.
     /// </summary>
     public sealed class GolemScribeEndToEndTests
     {
         private const string AssetFolder = "Assets/_GolemScribePhase5E2E";
         private readonly List<string> _createdPaths = new List<string>();
         private string _previousProjectRoot;
-        private string _previousFootprintsPath;
+        private string _previousObjectTemplatesPath;
         private bool _previousAutoExport;
         private bool _previousAutoBake;
         private string _tempProjectRoot;
@@ -62,7 +62,7 @@ namespace GolemEngine.Unity.Editor.Tests
         {
             var settings = GolemUnityEditorSettings.instance;
             _previousProjectRoot = settings.ProjectRoot;
-            _previousFootprintsPath = settings.FootprintsPath;
+            _previousObjectTemplatesPath = settings.ObjectTemplatesPath;
             _previousAutoExport = settings.AutoExportOnAssetChange;
             _previousAutoBake = settings.AutoBakeOnExport;
 
@@ -120,7 +120,7 @@ namespace GolemEngine.Unity.Editor.Tests
 
             var settings = GolemUnityEditorSettings.instance;
             settings.ProjectRoot = _previousProjectRoot;
-            settings.FootprintsPath = _previousFootprintsPath;
+            settings.ObjectTemplatesPath = _previousObjectTemplatesPath;
             settings.AutoExportOnAssetChange = _previousAutoExport;
             settings.AutoBakeOnExport = _previousAutoBake;
             GolemUnityEditorSettings.Save();
@@ -138,7 +138,7 @@ namespace GolemEngine.Unity.Editor.Tests
         public void EndToEnd_PlayerMonsterWall_RegistryParity_NoWallEntityOrSceneArtifacts()
         {
             // Test-assembly MonoBehaviours do not survive PrefabUtility reload, so entity schemas are
-            // built from attributed types directly. Wall uses Runtime GolemFootprint and real export.
+            // built from attributed types directly. Wall uses Runtime GolemObjectTemplate and real export.
             _tempProjectRoot = Path.Combine(Path.GetTempPath(), "golem-scribe-e2e-" + Path.GetRandomFileName());
             Directory.CreateDirectory(_tempProjectRoot);
             File.WriteAllText(
@@ -180,7 +180,7 @@ namespace GolemEngine.Unity.Editor.Tests
                 entityDesired);
             Assert.That(entityReconcile.Errors, Is.Empty, string.Join("; ", entityReconcile.Errors));
 
-            var wallPrefab = CreateWallFootprintPrefab(AssetFolder + "/Prefabs/ScribeE2EWall.prefab");
+            CreateWallTemplatePrefab(AssetFolder + "/Prefabs/ScribeE2EWall.prefab");
             AssetDatabase.SaveAssets();
             AssetDatabase.Refresh();
 
@@ -197,16 +197,11 @@ namespace GolemEngine.Unity.Editor.Tests
 
             var settings = GolemUnityEditorSettings.instance;
             settings.ProjectRoot = _tempProjectRoot;
-            settings.FootprintsPath = "footprints.golem.yaml";
+            settings.ObjectTemplatesPath = "object-templates.json";
             GolemUnityEditorSettings.Save();
 
-            var footprintExport = GolemFootprintExporter.ExportAll();
-            var fixtureFootprintErrors = footprintExport.Errors
-                .Where(e => e.IndexOf("ScribeE2E", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                            e.IndexOf("ScribeE2EWall", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                            e.IndexOf(AssetFolder, StringComparison.OrdinalIgnoreCase) >= 0)
-                .ToList();
-            Assert.That(fixtureFootprintErrors, Is.Empty, string.Join("\n", fixtureFootprintErrors));
+            var templateExport = GolemObjectTemplateExporter.ExportAll();
+            Assert.That(templateExport.Errors, Is.Empty, string.Join("\n", templateExport.Errors));
 
             Assert.That(File.Exists(Path.Combine(_tempProjectRoot, playerModel.RelativePath)), Is.True);
             Assert.That(File.Exists(Path.Combine(_tempProjectRoot, monsterModel.RelativePath)), Is.True);
@@ -222,15 +217,13 @@ namespace GolemEngine.Unity.Editor.Tests
                 Assert.That(Path.GetFileName(file).ToLowerInvariant(), Does.Not.Contain("wall"));
             }
 
-            var footprintsPath = Path.Combine(_tempProjectRoot, "footprints.golem.yaml");
-            Assert.That(File.Exists(footprintsPath), Is.True);
-            var footprintsText = File.ReadAllText(footprintsPath);
-            var wallGuid = AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(wallPrefab));
-            Assert.That(footprintsText, Does.Contain(wallGuid));
-            Assert.That(footprintsText, Does.Contain("alias: scribe_e2e_wall"));
-            Assert.That(footprintsText, Does.Contain("version: 1"));
-            Assert.That(footprintsText, Does.Contain("dimensions: 2"));
-            Assert.That(footprintsText, Does.Not.Contain("entity:"));
+            var templatesPath = Path.Combine(_tempProjectRoot, "object-templates.json");
+            Assert.That(File.Exists(templatesPath), Is.True);
+            var templatesText = File.ReadAllText(templatesPath);
+            Assert.That(templatesText, Does.Contain("{\"ID\":\"scribe_e2e_wall\""));
+            Assert.That(templatesText, Does.Contain("\"Kind\":\"box\""));
+            Assert.That(templatesText, Does.Contain("\"Dimensions\": 2"));
+            Assert.That(File.Exists(Path.ChangeExtension(templatesPath, ".golemgeo")), Is.False);
 
             Assert.That(Directory.Exists(Path.Combine(_tempProjectRoot, "schemas", "scenes")), Is.False);
             Assert.That(File.Exists(Path.Combine(_tempProjectRoot, "scenes.golem.yaml")), Is.False);
@@ -239,39 +232,25 @@ namespace GolemEngine.Unity.Editor.Tests
             Assert.That(_hostRegistry.GetPrefab("ScribeE2EMonster"), Is.SameAs(monsterGo));
             Assert.That(_hostRegistry.GetPrefab("ScribeE2EWall"), Is.Null);
 
-            // Dry-run compare for the fixture entity + footprint artifacts (no writes).
+            // Dry-run compare for the fixture entity + template artifacts (no writes).
             var previous = GolemScribeManifest.Load(_tempProjectRoot);
-            GolemFootprintExporter.CollectFootprints(
-                2,
-                "footprints.golem.yaml",
-                previous,
-                _tempProjectRoot,
-                out var footprintDesired,
-                out _,
-                out var collectErrors);
-            Assert.That(
-                collectErrors.Where(e => e.IndexOf("ScribeE2E", StringComparison.OrdinalIgnoreCase) >= 0).ToList(),
-                Is.Empty);
+            var collectErrors = new List<string>();
+            GolemObjectTemplateExporter.CollectMarked(2, "object-templates.json", _tempProjectRoot,
+                out var templateDesired, out _, collectErrors);
+            Assert.That(collectErrors, Is.Empty);
 
-            var desired = entityDesired.Concat(footprintDesired).ToList();
             var validation = new GolemScribeValidator.ValidationResult();
-            GolemScribeValidator.CompareDesiredToDisk(
-                _tempProjectRoot,
-                previous,
-                desired,
-                new[]
-                {
-                    GolemScribeConstants.ArtifactKindEntitySchema,
-                    GolemScribeConstants.ArtifactKindFootprint
-                },
-                validation);
+            GolemScribeValidator.CompareDesiredToDisk(_tempProjectRoot, previous, entityDesired,
+                new[] { GolemScribeConstants.ArtifactKindEntitySchema }, validation);
+            GolemScribeValidator.CompareDesiredToDisk(_tempProjectRoot, previous, templateDesired,
+                new[] { GolemScribeConstants.ArtifactKindObjectTemplates }, validation, GolemScribeConstants.ObjectTemplateSourceGuid);
             Assert.That(validation.IsClean, Is.True,
                 string.Join("; ", validation.Errors.Concat(validation.Missing).Concat(validation.Stale)
                     .Concat(validation.Orphaned).Concat(validation.ManuallyModified)));
         }
 
         [Test]
-        public void FixtureComposition_WallIsFootprintOnly_CatalogGuidIsOpaqueString()
+        public void FixtureComposition_WallIsTemplateOnly_CatalogGuidIsOpaqueString()
         {
             var root = Path.Combine(Path.GetTempPath(), "golem-scribe-e2e-comp-" + Path.GetRandomFileName());
             Directory.CreateDirectory(root);
@@ -301,17 +280,11 @@ namespace GolemEngine.Unity.Editor.Tests
                     }
                 };
 
-                var wall = new GolemFootprintModel
+                var wall = new ObjectTemplate
                 {
-                    Guid = "fedcba9876543210fedcba9876543210",
-                    Name = "ScribeE2EWall",
-                    AssetPath = "Assets/Prefabs/ScribeE2EWall.prefab",
-                    Alias = "scribe_e2e_wall"
+                    ID = "scribe_e2e_wall", SourceID = "Assets/Prefabs/ScribeE2EWall.prefab",
+                    Shapes = new[] { new ObjectTemplateShape { ID = "root/collider2d/0", Kind = "box", Width = 2f, Height = 1f, OffsetY = 0.5f, Layer = "Default" } }
                 };
-                wall.Shapes.Add(new GolemFootprintShapeModel
-                {
-                    Type = "aabb", W = 2f, H = 1f, OffsetX = 0f, OffsetY = 0.5f, Trigger = false, Layer = "Default"
-                });
 
                 var desired = new List<GolemScribeArtifactRecord>
                 {
@@ -325,8 +298,8 @@ namespace GolemEngine.Unity.Editor.Tests
                         GolemCatalogSchemaBuilder.BuildWorldYaml(catalogModel), catalogModel.TypeName),
                     Artifact(GolemScribeConstants.ArtifactKindCatalogData, catalogModel.CatalogDataRelativePath,
                         GolemCatalogSchemaBuilder.BuildCatalogDataYaml(rows), catalogModel.TypeName),
-                    Artifact(GolemScribeConstants.ArtifactKindFootprint, "footprints.golem.yaml",
-                        GolemFootprintYamlBuilder.BuildYaml(2, new[] { wall }), null)
+                    Artifact(GolemScribeConstants.ArtifactKindObjectTemplates, "object-templates.json",
+                        GolemObjectTemplateDocument.Build(new ObjectTemplateCatalog { CatalogID = "object-templates", Dimensions = 2, Templates = new[] { wall } }), null)
                 };
 
                 var reconcile = GolemScribeArtifacts.ReconcileKinds(
@@ -337,7 +310,7 @@ namespace GolemEngine.Unity.Editor.Tests
                         GolemScribeConstants.ArtifactKindTypeSchema,
                         GolemScribeConstants.ArtifactKindWorldSchema,
                         GolemScribeConstants.ArtifactKindCatalogData,
-                        GolemScribeConstants.ArtifactKindFootprint
+                        GolemScribeConstants.ArtifactKindObjectTemplates
                     },
                     Array.Empty<GolemScribeArtifactRecord>(),
                     desired);
@@ -355,9 +328,8 @@ namespace GolemEngine.Unity.Editor.Tests
                     Assert.That(File.ReadAllText(file), Does.Not.Contain("Wall"));
                 }
 
-                var footprints = File.ReadAllText(Path.Combine(root, "footprints.golem.yaml"));
-                Assert.That(footprints, Does.Contain("alias: scribe_e2e_wall"));
-                Assert.That(footprints, Does.Not.Contain("entity:"));
+                var templates = File.ReadAllText(Path.Combine(root, "object-templates.json"));
+                Assert.That(templates, Does.Contain("{\"ID\":\"scribe_e2e_wall\""));
                 Assert.That(Directory.Exists(Path.Combine(root, "schemas", "scenes")), Is.False);
 
                 var previous = GolemScribeManifest.Load(root);
@@ -372,7 +344,7 @@ namespace GolemEngine.Unity.Editor.Tests
                         GolemScribeConstants.ArtifactKindTypeSchema,
                         GolemScribeConstants.ArtifactKindWorldSchema,
                         GolemScribeConstants.ArtifactKindCatalogData,
-                        GolemScribeConstants.ArtifactKindFootprint
+                        GolemScribeConstants.ArtifactKindObjectTemplates
                     },
                     result);
                 Assert.That(result.IsClean, Is.True, string.Join("; ", result.Errors.Concat(result.Stale)));
@@ -404,12 +376,10 @@ namespace GolemEngine.Unity.Editor.Tests
             }
         }
 
-        private GameObject CreateWallFootprintPrefab(string path)
+        private GameObject CreateWallTemplatePrefab(string path)
         {
             var go = new GameObject("ScribeE2EWall");
-            var marker = go.AddComponent<GolemFootprint>();
-            marker.Alias = "scribe_e2e_wall";
-            marker.IncludedLayers = ~0;
+            go.AddComponent<GolemObjectTemplate>().TemplateID = "scribe_e2e_wall";
             var box = go.AddComponent<BoxCollider2D>();
             box.size = new Vector2(2f, 1f);
             box.offset = new Vector2(0f, 0.5f);
@@ -451,7 +421,7 @@ namespace GolemEngine.Unity.Editor.Tests
             {
                 Kind = kind,
                 SourceGuid = string.IsNullOrEmpty(entity)
-                    ? GolemScribeConstants.FootprintAggregateSourceGuid
+                    ? GolemScribeConstants.ObjectTemplateSourceGuid
                     : "cccccccccccccccccccccccccccccccc",
                 Entity = entity,
                 Path = path,

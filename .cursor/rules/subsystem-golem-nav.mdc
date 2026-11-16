@@ -54,7 +54,7 @@ Dynamic column rebuilds may share private immutable construction arrays, never r
 
 Authored-link metadata changes dirty endpoint/radius influence columns across the finite region height. Link attachment can succeed outside authored source Y bounds within climb tolerance; vertical AABB rejection must never hide its metadata change. Preserve old/new XZ influence and finite bounds, then retain the normal bake/clearance padding.
 
-`nav/navmesh/navbuild` and its `cmd/golem-nav-bake` consume explicit `{Generator?, Scene, Config}` JSON matching navmesh-go's generic source contract. Input is bounded and unknown fields rejected. Geometry generation lives in navmesh-go; collision footprints remain collision-only. `golem-bake` retains schema/code-generation responsibilities. Scribe may export explicit server navigation source but does not bake with Unity navigation.
+`nav/navmesh/navbuild` and its `cmd/golem-nav-bake` consume explicit `{Generator?, Scene, Config}` JSON matching navmesh-go's generic source contract. Input is bounded and unknown fields rejected. Geometry generation lives in navmesh-go; physics colliders never become walkable source implicitly. `golem-bake` retains schema/code-generation responsibilities. Scribe may export explicit server navigation source but does not bake with Unity navigation.
 
 Root `golem/navigation*.go` owns queues, lifecycle, movement, motor/traversal callbacks, readiness and stable intent checkpoints. The adapter module must not import it. `examples/navigation-server` is an independent nested module proving bake/artifact/load/update/restart through the server.
 

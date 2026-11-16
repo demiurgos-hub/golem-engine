@@ -26,28 +26,28 @@ namespace GolemEngine.Unity.Editor
         public static bool IsSuppressed =>
             SessionState.GetBool(SuppressKey, false) || GolemScribeSession.SuppressCount > 0;
 
-        /// <summary>Queues a full Scribe reconcile (entities + catalogs + footprints; same work as Export All).</summary>
+        /// <summary>Queues a full Scribe reconcile (entities + catalogs + object templates; same work as Export All).</summary>
         public static void RequestExportAll()
         {
             SessionState.SetBool(PendingKey, true);
             Schedule();
         }
 
-        /// <summary>Outcome of a synchronous full Scribe export (entities + catalogs + footprints).</summary>
+        /// <summary>Outcome of a synchronous full Scribe export (entities + catalogs + object templates).</summary>
         public sealed class ImmediateExportResult
         {
             public readonly List<string> Errors = new List<string>();
             public readonly List<string> Warnings = new List<string>();
             public bool EntitySchemaBytesChanged;
             public bool CatalogSchemaBytesChanged;
-            public bool FootprintBytesChanged;
+            public bool ObjectTemplateBytesChanged;
             public bool AnyBytesChanged;
             public int EntityCount;
             public int CatalogCount;
-            public int FootprintCount;
+            public int ObjectTemplateCount;
             public bool EntityHasErrors;
             public bool CatalogHasErrors;
-            public bool FootprintHasErrors;
+            public bool ObjectTemplateHasErrors;
 
             /// <summary>True when any exporter reported errors.</summary>
             public bool HasErrors => Errors.Count > 0;
@@ -56,7 +56,7 @@ namespace GolemEngine.Unity.Editor
         /// <summary>
         /// Runs Export All synchronously (no <see cref="EditorApplication.delayCall"/>).
         /// Safe for batch-mode CI. When <paramref name="runBake"/> is true and auto-bake is enabled,
-        /// queues bake only for successful schema byte changes (footprints never bake).
+        /// queues bake only for successful schema byte changes (object templates never bake).
         /// </summary>
         public static ImmediateExportResult ExportAllImmediate(bool runBake = true)
         {
@@ -85,29 +85,29 @@ namespace GolemEngine.Unity.Editor
             {
                 var entityExport = GolemEntityExporter.ExportAll();
                 var catalogExport = GolemCatalogExporter.ExportAll();
-                var footprintExport = GolemFootprintExporter.ExportAll();
+                var templateExport = GolemObjectTemplateExporter.ExportAll();
 
                 result.Warnings.AddRange(entityExport.Warnings);
                 result.Warnings.AddRange(catalogExport.Warnings);
-                result.Warnings.AddRange(footprintExport.Warnings);
+                result.Warnings.AddRange(templateExport.Warnings);
                 result.Errors.AddRange(entityExport.Errors);
                 result.Errors.AddRange(catalogExport.Errors);
-                result.Errors.AddRange(footprintExport.Errors);
+                result.Errors.AddRange(templateExport.Errors);
 
                 result.EntityCount = entityExport.EntityCount;
                 result.CatalogCount = catalogExport.CatalogCount;
-                result.FootprintCount = footprintExport.FootprintCount;
+                result.ObjectTemplateCount = templateExport.TemplateCount;
                 result.EntityHasErrors = entityExport.Errors.Count > 0;
                 result.CatalogHasErrors = catalogExport.Errors.Count > 0;
-                result.FootprintHasErrors = footprintExport.Errors.Count > 0;
+                result.ObjectTemplateHasErrors = templateExport.Errors.Count > 0;
                 result.EntitySchemaBytesChanged = entityExport.EntitySchemaBytesChanged;
                 result.CatalogSchemaBytesChanged = catalogExport.SchemaBytesChanged;
-                result.FootprintBytesChanged = footprintExport.FootprintBytesChanged;
+                result.ObjectTemplateBytesChanged = templateExport.BytesChanged;
                 result.AnyBytesChanged =
                     entityExport.EntitySchemaBytesChanged ||
                     catalogExport.SchemaBytesChanged ||
                     catalogExport.CatalogDataBytesChanged ||
-                    footprintExport.FootprintBytesChanged;
+                    templateExport.BytesChanged;
 
                 if (runBake)
                 {
@@ -182,7 +182,7 @@ namespace GolemEngine.Unity.Editor
 
         /// <summary>
         /// Called after script reload to resume a pending coalesce across domain reloads.
-        /// Catalog/entity/footprint source changes are reflected only after reload completes — never during
+        /// Catalog/entity/object template source changes are reflected only after reload completes — never during
         /// the import that triggered compilation.
         /// </summary>
         public static void HandleScriptsReloaded()
@@ -326,9 +326,9 @@ namespace GolemEngine.Unity.Editor
                     Debug.Log($"Golem Scribe: exported {export.CatalogCount} catalog(s).");
                 }
 
-                if (!export.FootprintHasErrors)
+                if (!export.ObjectTemplateHasErrors)
                 {
-                    Debug.Log($"Golem Scribe: exported {export.FootprintCount} footprint prefab(s).");
+                    Debug.Log($"Golem Scribe: exported {export.ObjectTemplateCount} object template(s).");
                 }
             }
             catch (Exception ex)

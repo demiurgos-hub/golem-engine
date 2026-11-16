@@ -1,0 +1,21 @@
+---
+description: golem/objecttemplate — root-local Object Template catalogs, shared-shape 3D placement, 2D collision placement, placed navigation, and the Unity GolemObjectTemplateExporter contract.
+globs: golem/objecttemplate/**/*,golem-unity/Editor/Scribe/GolemObjectTemplate*.cs,golem-unity/Runtime/Scribe/GolemObjectTemplate.cs
+alwaysApply: false
+---
+
+# `golem/objecttemplate`
+
+This separate Go module loads reusable definitions exported once per prefab and places copies at runtime. Templates never store world positions; hosts own placement data and pass a root `Transform`. It depends on physics3d, collision, geometry and navmesh-go, never on the root runtime or registry. Test it explicitly with `GOWORK=off go test ./...`.
+
+**Catalog format:** strict JSON (`Generator` "Golem Scribe object templates v1", `Version` 1, `CatalogID`, `Revision`, `Dimensions`) with unknown fields rejected. 3D catalogs carry the 32-entry layer collision matrix, materials and an optional hash-verified `.golemgeo` sidecar holding both physics and navigation assets; navigation asset IDs end in `/area/N`. 2D catalogs carry only `Shapes` (circle or box, root-local offset, Unity layer label, trigger). A 3D template needs colliders or navigation, and navigation instances must reference sidecar assets. Materials require equal static and dynamic friction.
+
+**Template identity:** template IDs are host-chosen. Element IDs are root-relative hierarchy paths (`root/child/N/...` plus `/collider/N`, `/collider2d/N`, `/body/N` or `/component/<FullType>/<ordinal>`); a static body is `<transform path>/static`. Placed body, collider and navigation IDs are `<placementID>/<elementID>`, so every placed collider stays addressable and checkpoints stay unique.
+
+**3D placement:** `Catalog.Cook` prepares base shapes once with the backend preparer. `Placer3D` is tick-owned and refcounts shapes per collider and scale; placements own only their bodies and colliders, and `Placement3D.Remove` releases shape references without re-cooking. `Place` composes rotation and per-axis scale, rejects scale that would shear a shape, keeps heightfields unscaled and rolls back fully on failure. Placement does not synchronize the world.
+
+**Navigation:** `NavigationAssets` expands heightfields with the navigation diagonal. `Template.PlaceNavigation` returns placed instances, volumes and links with a nonzero revision; instances accept any transform, while volumes and links require yaw-only rotation and equal X/Z scale. `Navigation.Changes`/`Removal` feed `dynamic.World`.
+
+**2D placement:** `Placer2D` places shapes on `collision.Backend` under negative synthetic IDs from an `IDAllocator`, with translation, positive per-axis scale and quarter turns about Z; it validates the whole placement before mutating the backend. `LayerResolver` maps layer labels to layer and mask.
+
+**Unity exporter:** `GolemObjectTemplateExporter.Export` captures saved prefab asset roots through `LoadPrefabContents` with the root at the identity transform, so output is independent of scene identity. Scribe Export All collects prefabs whose root carries one `GolemObjectTemplate` (ID defaults to the prefab GUID; nested markers fail) into the configured Object Templates path under a dedicated source GUID; programmatic catalogs use their own source GUIDs and are never orphaned by validation. Export All uses the schema's dimensions; programmatic export takes them explicitly. Components of the other dimension, dynamic bodies, joints, unsupported 2D rotations and box edge radii fail; every error is reported and any error leaves the existing catalog untouched. Template export never invokes `golem-bake`.

@@ -26,7 +26,7 @@ namespace GolemEngine.Unity.Editor
         [SerializeField] private string assetFolder = "Assets/Golem";
         [SerializeField] private bool autoExportOnAssetChange = true;
         [SerializeField] private bool autoBakeOnExport = true;
-        [SerializeField] private string footprintsPath = GolemScribeConstants.DefaultFootprintsPath;
+        [SerializeField] private string objectTemplatesPath = GolemScribeConstants.DefaultObjectTemplatesPath;
 
         public string ProjectRoot
         {
@@ -52,16 +52,16 @@ namespace GolemEngine.Unity.Editor
         }
 
         /// <summary>
-        /// Project-root-relative path for the Scribe-managed footprints.golem.yaml artifact.
-        /// Footprint changes never trigger golem-bake.
+        /// Project-root-relative .json path of the Object Template catalog exported from prefabs marked with
+        /// GolemObjectTemplate. Object Template changes never trigger golem-bake.
         /// </summary>
-        public string FootprintsPath
+        public string ObjectTemplatesPath
         {
-            get => string.IsNullOrWhiteSpace(footprintsPath)
-                ? GolemScribeConstants.DefaultFootprintsPath
-                : footprintsPath.Replace('\\', '/').Trim();
-            set => footprintsPath = string.IsNullOrWhiteSpace(value)
-                ? GolemScribeConstants.DefaultFootprintsPath
+            get => string.IsNullOrWhiteSpace(objectTemplatesPath)
+                ? GolemScribeConstants.DefaultObjectTemplatesPath
+                : objectTemplatesPath.Replace('\\', '/').Trim();
+            set => objectTemplatesPath = string.IsNullOrWhiteSpace(value)
+                ? GolemScribeConstants.DefaultObjectTemplatesPath
                 : value.Replace('\\', '/').Trim();
         }
 
@@ -184,7 +184,7 @@ namespace GolemEngine.Unity.Editor
             {
                 AutoBakeOnExport = nextAutoBake;
             }
-            footprintsPath = EditorGUILayout.TextField("Footprints Path", FootprintsPath);
+            objectTemplatesPath = EditorGUILayout.TextField("Object Templates Path", ObjectTemplatesPath);
             EditorGUILayout.HelpBox(
                 "Menus: Golem/Scribe/Export All, Golem/Scribe/Validate (dry-run), Golem/Validate Setup (setup + Scribe). " +
                 "CI: -executeMethod GolemEngine.Unity.Editor.GolemScribeCI.ExportAllAndValidate",
@@ -192,7 +192,7 @@ namespace GolemEngine.Unity.Editor
             EditorGUILayout.HelpBox(
                 "Auto Export schedules coalesced reconciles after prefab/catalog/script imports. " +
                 "Auto Bake runs golem-bake only after entity or catalog type/world schema bytes change. " +
-                "Footprint changes never invoke bake. Generated C# refreshes do not recursively re-export.",
+                "Object Template changes never invoke bake. Generated C# refreshes do not recursively re-export.",
                 MessageType.None);
             if (GolemYamlConfig.TryGetProjectSchema(ProjectRoot, out var schema, out var schemaError))
             {
@@ -206,8 +206,8 @@ namespace GolemEngine.Unity.Editor
                         "Manifest",
                         System.IO.Path.Combine(ProjectRoot, GolemScribeConstants.ManifestFileName).Replace('\\', '/'));
                     EditorGUILayout.TextField(
-                        "Footprints (resolved)",
-                        System.IO.Path.Combine(ProjectRoot, FootprintsPath).Replace('\\', '/'));
+                        "Object Templates (resolved)",
+                        System.IO.Path.Combine(ProjectRoot, ObjectTemplatesPath).Replace('\\', '/'));
                 }
             }
             else
@@ -230,7 +230,7 @@ namespace GolemEngine.Unity.Editor
                 AssetFolder = assetFolder;
                 AutoExportOnAssetChange = autoExportOnAssetChange;
                 AutoBakeOnExport = autoBakeOnExport;
-                FootprintsPath = footprintsPath;
+                ObjectTemplatesPath = objectTemplatesPath;
                 Save();
             }
         }

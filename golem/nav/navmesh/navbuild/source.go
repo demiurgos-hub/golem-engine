@@ -1,5 +1,5 @@
 // Package navbuild validates explicit server navigation source exports. It does
-// not infer walkable surfaces from collision footprints, entity schemas, or a
+// not infer walkable surfaces from physics colliders, entity schemas, or a
 // client's navigation mesh. Geometry generation stays in navmesh-go.
 package navbuild
 

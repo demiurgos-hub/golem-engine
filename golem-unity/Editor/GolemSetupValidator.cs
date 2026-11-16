@@ -182,12 +182,12 @@ namespace GolemEngine.Unity.Editor
                 return;
             }
 
-            var footprints = settings.FootprintsPath;
+            var templates = settings.ObjectTemplatesPath;
             Debug.Log(
                 "Golem Scribe paths: " +
                 $"entity_schema={schema.EntitySchema}, types_schema={schema.TypesSchema}, " +
                 $"world_schema={schema.WorldSchema}, dimensions={schema.Dimensions}, " +
-                $"footprints={footprints}, auto_export={settings.AutoExportOnAssetChange}, " +
+                $"object_templates={templates}, auto_export={settings.AutoExportOnAssetChange}, " +
                 $"auto_bake={settings.AutoBakeOnExport}");
         }
 

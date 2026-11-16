@@ -9,15 +9,14 @@ namespace GolemEngine.Unity.Editor
         public const string ArtifactKindTypeSchema = "type_schema";
         public const string ArtifactKindWorldSchema = "world_schema";
         public const string ArtifactKindCatalogData = "catalog_data";
-        public const string ArtifactKindFootprint = "footprint";
+        public const string ArtifactKindObjectTemplates = "object_templates";
         public const string ArtifactKindNavigationSource = "navigation_source";
         public const string ArtifactKindPhysicsSource = "physics_source";
         public const string ArtifactKindContentSource = "content_source";
         public const string CatalogDataDirectory = "catalogs";
-        public const string DefaultFootprintsPath = "footprints.golem.yaml";
-        /// <summary>Synthetic manifest source_guid for the aggregate footprints artifact.</summary>
-        public const string FootprintAggregateSourceGuid = "ffffffffffffffffffffffffffffffff";
-        public const int FootprintFormatVersion = 1;
+        public const string DefaultObjectTemplatesPath = "object-templates.json";
+        /// <summary>Manifest source_guid of the marker-driven catalog; programmatic catalogs append ":&lt;path&gt;".</summary>
+        public const string ObjectTemplateSourceGuid = "golem-object-templates";
         public const int ManifestVersion = 1;
         public const int ReservedRevisionProtoField = 1000;
     }

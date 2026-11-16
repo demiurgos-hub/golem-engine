@@ -8,6 +8,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- **Object Templates** replace collision footprints. Mark a prefab root with `GolemObjectTemplate` (the ID defaults to the prefab GUID) and Scribe Export All writes one root-local catalog to the Object Templates path; `GolemObjectTemplateExporter.Export` writes additional catalogs from host-chosen prefab sets. 3D templates keep every physics body, collider, material and navigation source, with shared meshes and terrain in one `.golemgeo` sidecar; 2D templates hold circle and box shapes. The new `golem/objecttemplate` module cooks each shape once, places and removes copies at runtime under `<placementID>/<elementID>` IDs with rotation and non-shearing scale, and returns placed navigation for baking or `dynamic.World` changes.
+
 - Server events can travel on WebTransport datagram lanes. An event schema's optional `delivery` key selects `stream` (default), `reliable_ordered`, `reliable_unordered` or `unreliable`; generated senders call the new `Server.SendServerEvent` / `BroadcastServerEvent`, and WebSocket sessions still receive these events on the reliable stream. Datagram events share the compact state batch format, marked by a zero tag byte, and fail when they exceed the lane's payload budget. Go, Unity and JS clients now deliver the reliable unordered lane and apply event records through their event managers. Custom transports must implement the new `OnReliableUnorderedMessage` (Go) or `ReliableUnorderedMessageEvent` (Unity) member.
 
 - `RetargetNavigationDestination` keeps an accepted route moving while a replacement is computed, then repairs it from the current body position without resetting speed. Evolving goals coalesce behind one in-flight search so frequent input cannot starve turning; safe interim routes never report the latest goal reached. `NavigationState.RetargetPending` exposes this work and admission metrics identify the accepted destination. `SetNavigationDestination` retains its immediate-stop behavior.
@@ -135,6 +137,10 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 - Navigation qualification's `Suite` and `Full` launchers now run the three mixed scene families at 1,000 agents only; `Full` retains the two-hour 1,000-agent soak. Existing diagnostic agent-count controls remain available.
 
 - Physics source loading is faster for large Scribe worlds. `content.DecodePrepared` decodes and prepares in one validation pass, and `Prepared.CookShapes` cooks a source's shapes in parallel without touching a world; `Prepared.LoadCooked` then only registers them, so independent sources can cook concurrently. Copies of one asset that differ by rotation, translation and per-axis scale share cooked hulls and BVHs through the new `ShapeDesc.Scale`. Static terrain on Unity's 16-bit height grid loads as the new native `HeightField` shape (`HeightFieldDesc`) instead of an expanded mesh, keeping the physical cell diagonal and holes. `Collider.Placement` reports which geometry a collider loads as; query results agree with the previous transformed geometry within float32 rounding. Breaking change to unreleased APIs: heightfield `content.Asset` values keep `Heightfield` instead of expanded vertices (`Collider.Geometry` still expands them), and preparation version 4 and cook version 3 change fingerprints, so re-prepare existing captures.
+
+### Removed
+
+- **Breaking:** `golem/footprint`, `GolemFootprint` and `footprints.golem.yaml` are gone. Replace `GolemFootprint` with `GolemObjectTemplate`, `footprint.Load` with `objecttemplate.DecodeFile`, and the footprint placers with `objecttemplate.Placer2D` (2D) or `objecttemplate.NewPlacer3D` on a physics3d world (3D). The Footprints Path setting is now the Object Templates path; re-export to regenerate the catalog.
 
 ### Fixed
 
