@@ -224,7 +224,7 @@ namespace GolemEngine.Unity.Editor
             RejectLayerOverrides(collider);
             var result = new PhysicsCollider
             {
-                ID = ObjectID(collider), BodyID = bodyID, SourceID = ObjectID(collider), ParentID = collider.transform.parent ? ObjectID(collider.transform.parent) : "",
+                ID = ObjectID(collider), BodyID = bodyID, SourceID = ObjectID(collider), ParentID = collider.transform.parent && collider.transform != root ? ObjectID(collider.transform.parent) : "",
                 OwnerID = Owner(collider.transform, root), Enabled = collider.enabled, Active = collider.gameObject.activeInHierarchy,
                 Layer = collider.gameObject.layer, LayerName = LayerMask.LayerToName(collider.gameObject.layer),
                 Solid = !collider.isTrigger, Sensor = collider.isTrigger, ContactOffset = collider.contactOffset

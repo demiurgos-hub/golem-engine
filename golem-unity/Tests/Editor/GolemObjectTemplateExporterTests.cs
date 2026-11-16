@@ -113,6 +113,7 @@ namespace GolemEngine.Unity.Editor.Tests
             {
                 root.transform.SetPositionAndRotation(new Vector3(50, 3, -20), Quaternion.Euler(0, 40, 0));
                 root.transform.localScale = new Vector3(2, 3, 2);
+                root.AddComponent<BoxCollider>().size = new Vector3(4, 0.5f, 4);
                 Child(root, "box", new Vector3(1, 0.5f, 0)).AddComponent<BoxCollider>().size = new Vector3(2, 1, 1);
                 var rock = Child(root, "rock", new Vector3(0, 1, 2));
                 rock.transform.localRotation = Quaternion.Euler(10, 20, 30);
