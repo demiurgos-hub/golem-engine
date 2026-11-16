@@ -4,7 +4,9 @@ using System.IO;
 using System.Linq;
 using NUnit.Framework;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace GolemEngine.Unity.Editor.Tests
 {
@@ -77,18 +79,68 @@ namespace GolemEngine.Unity.Editor.Tests
             var dynamic = Prefab("Dynamic", root => { root.AddComponent<SphereCollider>(); root.AddComponent<Rigidbody>(); });
             var empty = Prefab("Empty", root => Child(root, "nothing", Vector3.zero));
             var flat = Prefab("Flat", root => root.AddComponent<BoxCollider2D>());
-            var scene = new GameObject("SceneObject");
+            var inactive = new GameObject("Inactive");
+            inactive.AddComponent<BoxCollider>();
+            inactive.SetActive(false);
+            var moved = new GameObject("Moved");
+            moved.transform.position = new Vector3(1, 0, 0);
+            Child(moved, "child", Vector3.zero).AddComponent<BoxCollider>();
             try
             {
-                var errors = CollectErrors(3, ("dynamic", dynamic), ("empty", empty), ("flat", flat), ("scene", scene), ("empty", empty), (" padded", dynamic));
+                var errors = CollectErrors(3, ("dynamic", dynamic), ("empty", empty), ("flat", flat), ("inactive", inactive),
+                    ("moved", moved.transform.GetChild(0).gameObject), ("asset child", empty.transform.GetChild(0).gameObject),
+                    ("empty", empty), (" padded", dynamic));
                 Assert.That(errors, Has.Some.Contain("dynamic Rigidbody"));
                 Assert.That(errors, Has.Some.Contain("no colliders or navigation sources"));
                 Assert.That(errors, Has.Some.Contain("2D colliders do not belong in a 3D catalog"));
+                Assert.That(errors, Has.Some.Contain("Inactive (template 'inactive'): scene templates must be active in the hierarchy"));
+                Assert.That(errors, Has.Some.Contain("parent must sit at the world origin"));
                 Assert.That(errors, Has.Some.Contain("saved prefab asset roots"));
                 Assert.That(errors, Has.Some.Contain("duplicate template ID 'empty'"));
                 Assert.That(errors, Has.Some.Contain("without surrounding whitespace"));
             }
-            finally { UnityEngine.Object.DestroyImmediate(scene); }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(inactive);
+                UnityEngine.Object.DestroyImmediate(moved);
+            }
+        }
+
+        [Test]
+        public void SceneTemplatesMatchTheirPrefabAndKeepTheCallerPose()
+        {
+            void Build(GameObject root)
+            {
+                root.transform.SetPositionAndRotation(new Vector3(50, 3, -20), Quaternion.Euler(0, 40, 0));
+                root.transform.localScale = new Vector3(2, 3, 2);
+                Child(root, "box", new Vector3(1, 0.5f, 0)).AddComponent<BoxCollider>().size = new Vector3(2, 1, 1);
+                var rock = Child(root, "rock", new Vector3(0, 1, 2));
+                rock.transform.localRotation = Quaternion.Euler(10, 20, 30);
+                rock.AddComponent<MeshCollider>().sharedMesh = mesh;
+                rock.AddComponent<MeshFilter>().sharedMesh = mesh;
+                rock.AddComponent<GolemNavigationSource>();
+            }
+            var prefab = Prefab("Crate", Build);
+            var preview = EditorSceneManager.NewPreviewScene();
+            try
+            {
+                var staging = new GameObject("Staging");
+                SceneManager.MoveGameObjectToScene(staging, preview);
+                var copy = new GameObject("Crate");
+                Build(copy);
+                copy.transform.SetParent(staging.transform, false);
+                var pose = (copy.transform.localPosition, copy.transform.localRotation, copy.transform.localScale);
+
+                var fromPrefab = Collect(3, new GolemObjectTemplateSource("crate", prefab));
+                var fromScene = Collect(3, new GolemObjectTemplateSource("crate", copy, "Assets/Authored/Crate.prefab"));
+
+                Assert.That(fromScene[0].PendingContent, Does.Contain("{\"ID\":\"crate\",\"SourceID\":\"Assets/Authored/Crate.prefab\""));
+                Assert.That(fromScene[0].PendingContent.Replace("Assets/Authored/Crate.prefab", AssetDatabase.GetAssetPath(prefab)),
+                    Is.EqualTo(fromPrefab[0].PendingContent));
+                Assert.That(fromScene[1].PendingBytes, Is.EqualTo(fromPrefab[1].PendingBytes));
+                Assert.That((copy.transform.localPosition, copy.transform.localRotation, copy.transform.localScale), Is.EqualTo(pose));
+            }
+            finally { EditorSceneManager.ClosePreviewScene(preview); }
         }
 
         [Test]
@@ -142,11 +194,13 @@ namespace GolemEngine.Unity.Editor.Tests
             Assert.That(records, Is.Empty);
         }
 
-        private GolemScribeArtifactRecord[] Collect(int dimensions, params (string id, GameObject prefab)[] templates)
+        private GolemScribeArtifactRecord[] Collect(int dimensions, params (string id, GameObject prefab)[] templates) =>
+            Collect(dimensions, templates.Select(t => new GolemObjectTemplateSource(t.id, t.prefab)).ToArray());
+
+        private GolemScribeArtifactRecord[] Collect(int dimensions, params GolemObjectTemplateSource[] templates)
         {
             var errors = new List<string>();
-            var ok = GolemObjectTemplateExporter.TryCollect("templates.json", "test", templates.Select(t => new GolemObjectTemplateSource(t.id, t.prefab)).ToList(),
-                dimensions, out var records, errors);
+            var ok = GolemObjectTemplateExporter.TryCollect("templates.json", "test", templates, dimensions, out var records, errors);
             Assert.That(ok, Is.True, string.Join("\n", errors));
             return records;
         }

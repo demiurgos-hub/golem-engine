@@ -7,16 +7,21 @@ using UnityEngine;
 
 namespace GolemEngine.Unity.Editor
 {
-    /// <summary>One prefab exported as an Object Template under a server-facing ID.</summary>
+    /// <summary>One prefab, or one hierarchy in a scene, exported as an Object Template under a server-facing ID.</summary>
     public sealed class GolemObjectTemplateSource
     {
         public readonly string ID;
         public readonly GameObject Prefab;
+        /// <summary>The template's diagnostic <c>SourceID</c>; null uses the prefab's asset path.</summary>
+        public readonly string SourceID;
 
-        public GolemObjectTemplateSource(string id, GameObject prefab)
+        /// <param name="prefab">A saved prefab asset root, or an active scene object whose parent, if any, sits at the world origin
+        /// with no rotation or scale. A scene object is captured as it is, including unsaved changes.</param>
+        public GolemObjectTemplateSource(string id, GameObject prefab, string sourceID = null)
         {
             ID = id;
             Prefab = prefab;
+            SourceID = sourceID;
         }
     }
 
@@ -40,8 +45,8 @@ namespace GolemEngine.Unity.Editor
         }
 
         /// <summary>
-        /// Exports <paramref name="templates"/> to a project-relative <c>.json</c> catalog path. Each prefab must be a
-        /// saved prefab asset root. Other catalogs, including the marker-driven one, keep their manifest entries.
+        /// Exports <paramref name="templates"/> to a project-relative <c>.json</c> catalog path. Each source is a saved
+        /// prefab asset root or an active scene object. Other catalogs, including the marker-driven one, keep their manifest entries.
         /// </summary>
         public static ExportResult Export(string catalogPath, IEnumerable<GolemObjectTemplateSource> templates, int dimensions = 3)
         {
@@ -148,7 +153,9 @@ namespace GolemEngine.Unity.Editor
             var ids = new HashSet<string>(StringComparer.Ordinal);
             foreach (var template in templates)
             {
-                var name = template?.Prefab ? AssetDatabase.GetAssetPath(template.Prefab) : "<missing prefab>";
+                var name = !template?.Prefab ? "<missing prefab>"
+                    : EditorUtility.IsPersistent(template.Prefab) ? AssetDatabase.GetAssetPath(template.Prefab)
+                    : template.SourceID ?? template.Prefab.name;
                 try
                 {
                     if (template == null || string.IsNullOrWhiteSpace(template.ID) || template.ID.Trim() != template.ID)
@@ -202,27 +209,60 @@ namespace GolemEngine.Unity.Editor
 
         private static ObjectTemplate Capture(GolemObjectTemplateSource template, CatalogState state)
         {
-            var path = template.Prefab ? AssetDatabase.GetAssetPath(template.Prefab) : null;
+            if (!template.Prefab) throw new InvalidOperationException("templates need a saved prefab asset root or an active scene object.");
+            if (!EditorUtility.IsPersistent(template.Prefab)) return CaptureSceneObject(template, state);
+            var path = AssetDatabase.GetAssetPath(template.Prefab);
             if (string.IsNullOrEmpty(path) || !path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase)
                 || AssetDatabase.LoadAssetAtPath<GameObject>(path) != template.Prefab)
-                throw new InvalidOperationException("templates must be saved prefab asset roots.");
+                throw new InvalidOperationException("asset templates must be saved prefab asset roots.");
             var root = PrefabUtility.LoadPrefabContents(path);
             try
             {
                 root.transform.localPosition = Vector3.zero;
                 root.transform.localRotation = Quaternion.identity;
                 root.transform.localScale = Vector3.one;
-                foreach (var transform in root.GetComponentsInChildren<Transform>(true))
-                    if (PrefabUtility.GetPrefabInstanceStatus(transform.gameObject) == PrefabInstanceStatus.MissingAsset)
-                        throw new InvalidOperationException(transform.name + ": missing nested prefab source.");
-                var identity = new GolemObjectTemplateIdentity(root.transform);
-                var context = new GolemScribeIdentityContext(new GolemScribeExportOptions { StableObjectIdentity = identity.Resolve });
-                var result = new ObjectTemplate { ID = template.ID, SourceID = path };
-                if (state.Dimensions == 2) Capture2D(root.transform, context, result);
-                else Capture3D(root.transform, context, state, result);
-                return result;
+                return CaptureRoot(root.transform, template.ID, template.SourceID ?? path, state);
             }
             finally { PrefabUtility.UnloadPrefabContents(root); }
+        }
+
+        /// <summary>Captures a scene hierarchy at the identity pose, then gives the caller its pose back.</summary>
+        /// <remarks>Collider and body activity is read from <c>activeInHierarchy</c>, so an inactive object would export inactive colliders.</remarks>
+        private static ObjectTemplate CaptureSceneObject(GolemObjectTemplateSource template, CatalogState state)
+        {
+            var root = template.Prefab.transform;
+            if (!template.Prefab.activeInHierarchy) throw new InvalidOperationException("scene templates must be active in the hierarchy.");
+            if (root.parent && !root.parent.localToWorldMatrix.isIdentity)
+                throw new InvalidOperationException("a scene template's parent must sit at the world origin with no rotation or scale.");
+            var position = root.localPosition;
+            var rotation = root.localRotation;
+            var scale = root.localScale;
+            try
+            {
+                root.localPosition = Vector3.zero;
+                root.localRotation = Quaternion.identity;
+                root.localScale = Vector3.one;
+                return CaptureRoot(root, template.ID, template.SourceID, state);
+            }
+            finally
+            {
+                root.localPosition = position;
+                root.localRotation = rotation;
+                root.localScale = scale;
+            }
+        }
+
+        private static ObjectTemplate CaptureRoot(Transform root, string id, string sourceID, CatalogState state)
+        {
+            foreach (var transform in root.GetComponentsInChildren<Transform>(true))
+                if (PrefabUtility.GetPrefabInstanceStatus(transform.gameObject) == PrefabInstanceStatus.MissingAsset)
+                    throw new InvalidOperationException(transform.name + ": missing nested prefab source.");
+            var identity = new GolemObjectTemplateIdentity(root);
+            var context = new GolemScribeIdentityContext(new GolemScribeExportOptions { StableObjectIdentity = identity.Resolve });
+            var result = new ObjectTemplate { ID = id, SourceID = sourceID ?? "" };
+            if (state.Dimensions == 2) Capture2D(root, context, result);
+            else Capture3D(root, context, state, result);
+            return result;
         }
 
         private static void Capture3D(Transform root, GolemScribeIdentityContext context, CatalogState state, ObjectTemplate template)
