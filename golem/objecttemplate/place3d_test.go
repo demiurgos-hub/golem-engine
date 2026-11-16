@@ -3,6 +3,7 @@ package objecttemplate
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 
 	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
@@ -179,5 +180,45 @@ func TestCookedCatalogPlacesWithoutRecooking(t *testing.T) {
 	cancel()
 	if _, err = catalog.Cook(cancelled, world.ShapePreparer(), 1); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
+	}
+}
+
+type countingPreparer struct {
+	p.ShapePreparer
+	calls atomic.Int32
+}
+
+func (c *countingPreparer) PrepareShape(source p.ShapeDesc) (p.PreparedShape, error) {
+	c.calls.Add(1)
+	return c.ShapePreparer.PrepareShape(source)
+}
+
+func TestCookSelectedTemplatesLeavesOthersToPlacement(t *testing.T) {
+	world := newWorld(t)
+	catalog := testCatalog(t)
+	preparer := &countingPreparer{ShapePreparer: world.ShapePreparer()}
+	cooked, err := catalog.Cook(context.Background(), preparer, 2, "rock", "rock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rock, _ := catalog.Template("rock")
+	keys := map[string]bool{}
+	for _, plan := range rock.colliders {
+		keys[plan.key] = true
+	}
+	if int(preparer.calls.Load()) != len(keys) || len(cooked.shapes) != len(keys) || len(keys) >= len(catalog.baseOrder) {
+		t.Fatalf("cooked %d shapes for %d rock shapes of %d catalog shapes", preparer.calls.Load(), len(keys), len(catalog.baseOrder))
+	}
+	placer, err := NewPlacer3D(world, catalog, cooked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"rock", "terrain"} {
+		if _, err = placer.Place(id, id, At(p.Vec3{X: 300}, p.Quat{W: 1}), 0); err != nil {
+			t.Fatal(id, err)
+		}
+	}
+	if _, err = catalog.Cook(context.Background(), preparer, 1, "missing"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unknown template cooked: %v", err)
 	}
 }

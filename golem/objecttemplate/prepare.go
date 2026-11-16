@@ -131,20 +131,39 @@ func (c *Catalog) addBase(key string, shape p.ShapeDesc) {
 	c.baseOrder = append(c.baseOrder, key)
 }
 
-// Cooked holds every catalog shape cooked once outside a world.
+// Cooked holds catalog shapes cooked once outside a world.
 type Cooked struct {
 	catalog *Catalog
 	shapes  map[string]p.PreparedShape
 }
 
-// Cook prepares every unit-scale template shape with up to workers concurrent
-// preparer calls. Shapes that share an asset are cooked once for the catalog.
-func (c *Catalog) Cook(ctx context.Context, preparer p.ShapePreparer, workers int) (*Cooked, error) {
+// Cook prepares the unit-scale shapes of templateIDs, or of every template when
+// none are given, with up to workers concurrent preparer calls. Shapes that
+// share an asset are cooked once for the catalog. A placer creates any other
+// shape in its world when first placed.
+func (c *Catalog) Cook(ctx context.Context, preparer p.ShapePreparer, workers int, templateIDs ...string) (*Cooked, error) {
 	if c == nil || preparer == nil || ctx == nil || c.Dimensions != 3 {
 		return nil, ErrInvalid
 	}
-	cooked := &Cooked{catalog: c, shapes: make(map[string]p.PreparedShape, len(c.baseOrder))}
-	results := make([]p.PreparedShape, len(c.baseOrder))
+	keys := c.baseOrder
+	if len(templateIDs) > 0 {
+		selected := map[string]bool{}
+		keys = nil
+		for _, id := range templateIDs {
+			t, ok := c.Template(id)
+			if !ok {
+				return nil, invalid("unknown template %s", id)
+			}
+			for _, plan := range t.colliders {
+				if !selected[plan.key] {
+					selected[plan.key] = true
+					keys = append(keys, plan.key)
+				}
+			}
+		}
+	}
+	cooked := &Cooked{catalog: c, shapes: make(map[string]p.PreparedShape, len(keys))}
+	results := make([]p.PreparedShape, len(keys))
 	next := make(chan int)
 	var failure error
 	var once sync.Once
@@ -154,9 +173,9 @@ func (c *Catalog) Cook(ctx context.Context, preparer p.ShapePreparer, workers in
 		go func() {
 			defer wait.Done()
 			for i := range next {
-				shape, err := preparer.PrepareShape(c.bases[c.baseOrder[i]])
+				shape, err := preparer.PrepareShape(c.bases[keys[i]])
 				if err != nil {
-					once.Do(func() { failure = fmt.Errorf("geometry %s: %w", c.baseOrder[i], err) })
+					once.Do(func() { failure = fmt.Errorf("geometry %s: %w", keys[i], err) })
 					continue
 				}
 				results[i] = shape
@@ -164,7 +183,7 @@ func (c *Catalog) Cook(ctx context.Context, preparer p.ShapePreparer, workers in
 		}()
 	}
 	var stopped error
-	for i := range c.baseOrder {
+	for i := range keys {
 		if err := ctx.Err(); err != nil {
 			stopped = err
 			break
@@ -179,7 +198,7 @@ func (c *Catalog) Cook(ctx context.Context, preparer p.ShapePreparer, workers in
 	if stopped != nil {
 		return nil, stopped
 	}
-	for i, key := range c.baseOrder {
+	for i, key := range keys {
 		cooked.shapes[key] = results[i]
 	}
 	return cooked, nil
