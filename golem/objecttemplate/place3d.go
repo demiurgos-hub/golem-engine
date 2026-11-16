@@ -121,7 +121,7 @@ func (pl *Placer3D) Place(id, templateID string, at Transform, owner int64) (*Pl
 			local.Position = conjugate(t.bodies[plan.body].rotation, scale).apply(local.Position)
 			m = conjugate(plan.rotation, scale)
 		}
-		key, shape, err := pl.shapeFor(plan, m, unit)
+		key, shape, err := pl.shapeFor(plan, m, scale, unit)
 		if err != nil {
 			return fail(fmt.Errorf("collider %s: %w", plan.source.ID, err))
 		}
@@ -154,15 +154,26 @@ func (pl *Placer3D) Place(id, templateID string, at Transform, owner int64) (*Pl
 }
 
 // shapeFor acquires the shared shape for a collider whose collider-frame
-// placement scale is m.
-func (pl *Placer3D) shapeFor(plan *colliderPlan, m mat3, unit bool) (string, p.ShapeHandle, error) {
+// placement scale is m. Spheres and capsules follow Unity's approximation of
+// non-uniform scale instead of becoming ellipsoids.
+func (pl *Placer3D) shapeFor(plan *colliderPlan, m mat3, scale p.Vec3, unit bool) (string, p.ShapeHandle, error) {
 	switch plan.shape.Kind {
 	case p.HeightField:
 		if !unit {
 			return "", p.ShapeHandle{}, fmt.Errorf("%w: height fields cannot be scaled", p.ErrUnsupported)
 		}
 		return pl.acquireBase(plan.key)
-	case p.Sphere, p.Capsule, p.Box:
+	case p.Sphere:
+		if unit {
+			return pl.acquireBase(plan.key)
+		}
+		factor := max(scale.X, scale.Y, scale.Z)
+		desc := plan.shape
+		desc.Radius *= factor
+		key := plan.key + "@" + vecKey(p.Vec3{X: factor, Y: factor, Z: factor})
+		desc.ID = p.ContentID(key)
+		return pl.acquire(key, "", func() (p.ShapeHandle, error) { return pl.world.CreateShape(desc) })
+	case p.Capsule, p.Box:
 		if unit {
 			return pl.acquireBase(plan.key)
 		}
@@ -170,7 +181,7 @@ func (pl *Placer3D) shapeFor(plan *colliderPlan, m mat3, unit bool) (string, p.S
 		if !ok {
 			return "", p.ShapeHandle{}, fmt.Errorf("%w: placement scale would shear a primitive", p.ErrUnsupported)
 		}
-		desc, err := scaledPrimitive(plan.shape, d)
+		desc, err := scaledPrimitive(plan.shape, d, plan.source.Axis)
 		if err != nil {
 			return "", p.ShapeHandle{}, err
 		}
@@ -199,26 +210,22 @@ func (pl *Placer3D) shapeFor(plan *colliderPlan, m mat3, unit bool) (string, p.S
 
 var unitVec = p.Vec3{X: 1, Y: 1, Z: 1}
 
-func scaledPrimitive(shape p.ShapeDesc, d p.Vec3) (p.ShapeDesc, error) {
+// scaledPrimitive scales a primitive by the per-axis collider-frame scale d.
+// A capsule keeps Unity's shape: its radius takes the larger scale across
+// axis and its total height the scale along it, never shorter than a sphere.
+func scaledPrimitive(shape p.ShapeDesc, d p.Vec3, axis int) (p.ShapeDesc, error) {
 	switch shape.Kind {
-	case p.Sphere:
-		if d.X != d.Y || d.Y != d.Z {
-			return shape, fmt.Errorf("%w: spheres need uniform scale", p.ErrUnsupported)
-		}
-		shape.Radius *= d.X
 	case p.Capsule:
-		axis, radius := d.Y, [2]float32{d.X, d.Z}
-		switch {
-		case shape.PointB.X != 0:
-			axis, radius = d.X, [2]float32{d.Y, d.Z}
-		case shape.PointB.Z != 0:
-			axis, radius = d.Z, [2]float32{d.X, d.Y}
+		scale := [3]float32{d.X, d.Y, d.Z}
+		if axis < 0 || axis > 2 {
+			return shape, fmt.Errorf("%w: capsule axis %d", p.ErrInvalid, axis)
 		}
-		if radius[0] != radius[1] {
-			return shape, fmt.Errorf("%w: capsules need equal scale across their axis", p.ErrUnsupported)
-		}
-		shape.Radius *= radius[0]
-		shape.PointA, shape.PointB = shape.PointA.Mul(axis), shape.PointB.Mul(axis)
+		radius := shape.Radius * max(scale[(axis+1)%3], scale[(axis+2)%3])
+		half := max(0, (shape.PointB.Length()+shape.Radius)*scale[axis]-radius)
+		var end [3]float32
+		end[axis] = half
+		shape.Radius, shape.PointB = radius, p.Vec3{X: end[0], Y: end[1], Z: end[2]}
+		shape.PointA = shape.PointB.Mul(-1)
 	case p.Box:
 		shape.HalfExtents = scaleVec(shape.HalfExtents, d)
 	}

@@ -90,6 +90,26 @@ func TestScaledPlacementsScaleGeometryOrRejectShear(t *testing.T) {
 		t.Fatalf("scaled capsule hit %+v", hit)
 	}
 
+	// Non-uniform scale keeps Unity's capsule: radius from the larger scale across its
+	// Y axis (Z=2), total height from the scale along it (Y=3).
+	stretched := Transform{Position: p.Vec3{X: 100}, Rotation: p.Quat{W: 1}, Scale: p.Vec3{X: 1, Y: 3, Z: 2}}
+	if _, err = placer.Place("stretched", "rock", stretched, 0); err != nil {
+		t.Fatal(err)
+	}
+	if hit, ok := rayDown(t, world, 103, 0); !ok || hit.Content != "stretched/root/capsule" || !near(hit.Point.Y, 6) {
+		t.Fatalf("stretched capsule top %+v", hit)
+	}
+	if hit, ok := rayDown(t, world, 103.9, 0); !ok || hit.Content != "stretched/root/capsule" {
+		t.Fatalf("stretched capsule radius %+v", hit)
+	}
+	if _, err = placer.Place("wide-portal", "portal", stretched, 0); err != nil {
+		t.Fatal("sphere under non-uniform scale:", err)
+	}
+	portal, _ := testCatalog(t).Template("portal")
+	if _, ok := placer.shapes[portal.colliders[0].key+"@"+vecKey(p.Vec3{X: 3, Y: 3, Z: 3})]; !ok {
+		t.Fatal("sphere did not take its largest scale")
+	}
+
 	tilted := Transform{Position: p.Vec3{X: 40}, Rotation: p.Quat{W: 1}, Scale: p.Vec3{X: 1, Y: 3, Z: 1}}
 	before := len(placer.shapes)
 	if _, err = placer.Place("sheared", "tilted-capsule", tilted, 0); !errors.Is(err, p.ErrUnsupported) {
