@@ -144,6 +144,13 @@ namespace GolemEngine.Unity
             bool accepted;
             lock (_lock)
             {
+                // Entity state rejects frames older than the last one applied, so acknowledging a late state packet
+                // would lose the changes only it carries. Left unacknowledged, the server resends what is still missing.
+                if (packet.Lane == GolemDatagramLane.EventualState && _recvPackets.IsBehind(packet.PacketSeq))
+                {
+                    return;
+                }
+
                 accepted = _recvPackets.Accept(packet.PacketSeq);
                 if (accepted)
                 {
@@ -626,6 +633,8 @@ namespace GolemEngine.Unity
             public bool Init { get; private set; }
             public ushort Latest { get; private set; }
             public uint[] Mask { get; } = new uint[AckMaskWordCount];
+
+            public bool IsBehind(ushort seq) => Init && SequenceNewer(Latest, seq);
 
             public bool Accept(ushort seq)
             {

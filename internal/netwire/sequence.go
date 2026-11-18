@@ -27,6 +27,11 @@ type SequenceWindow struct {
 // Snapshot returns the current selective ACK fields, or zero before first receipt.
 func (w *SequenceWindow) Snapshot() ACK { return ACK{Sequence: w.latest, Mask: w.mask} }
 
+// Behind reports a sequence older than the newest one observed.
+func (w *SequenceWindow) Behind(sequence uint16) bool {
+	return w.initialized && Newer(w.latest, sequence)
+}
+
 // Accept records a new sequence or previously unseen in-window predecessor.
 func (w *SequenceWindow) Accept(sequence uint16) bool {
 	if !w.initialized {

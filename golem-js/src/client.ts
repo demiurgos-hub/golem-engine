@@ -1468,6 +1468,10 @@ class SequenceWindow {
   latest = 0;
   mask: AckMask = emptyAckMask();
 
+  behind(seq: number): boolean {
+    return this.init && seqGreater(this.latest, seq);
+  }
+
   accept(seq: number): boolean {
     if (!this.init) {
       this.init = true;
@@ -1756,6 +1760,11 @@ class WebTransportDatagramProtocol {
     const packet = decodeDatagramPacket(bytes);
     this._applyPeerAcks(packet.ackSeq, packet.ackMask, now);
     if ((packet.flags & datagramFlagAckOnly) !== 0) {
+      return;
+    }
+    // Entity state rejects frames older than the last one applied, so acknowledging a late state packet would lose
+    // the changes only it carries. Left unacknowledged, the server resends what is still missing.
+    if (packet.lane === datagramLaneEventualState && this._recvPackets.behind(packet.packetSeq)) {
       return;
     }
     const accepted = this._recvPackets.accept(packet.packetSeq);

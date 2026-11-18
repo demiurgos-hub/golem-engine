@@ -42,6 +42,28 @@ namespace GolemEngine.Unity.Tests
         }
 
         [Test]
+        public void LateEventualStateIsNeitherDeliveredNorAcknowledged()
+        {
+            var sent = new List<byte[]>();
+            var protocol = new GolemDatagramProtocol(sent.Add);
+            var delivered = new List<byte[]>();
+            protocol.Receive(
+                EncodePacket(10, 0, GolemDatagramLane.EventualState, new byte[] { 1 }, stateToken: 1),
+                (_, payload) => delivered.Add(payload));
+            protocol.Receive(
+                EncodePacket(9, 0, GolemDatagramLane.EventualState, new byte[] { 2 }, stateToken: 2),
+                (_, payload) => delivered.Add(payload));
+
+            protocol.SendDueAck(DateTime.UtcNow.AddSeconds(1));
+
+            Assert.That(delivered, Has.Count.EqualTo(1));
+            Assert.That(delivered[0], Is.EqualTo(new byte[] { 1 }));
+            Assert.That(sent, Has.Count.EqualTo(1));
+            var firstMaskWord = (sent[0][4] << 24) | (sent[0][5] << 16) | (sent[0][6] << 8) | sent[0][7];
+            Assert.That(firstMaskWord & 1, Is.Zero);
+        }
+
+        [Test]
         public void ReliableOrderedBuffersUntilMissingSequenceArrives()
         {
             var protocol = new GolemDatagramProtocol(_ => { });

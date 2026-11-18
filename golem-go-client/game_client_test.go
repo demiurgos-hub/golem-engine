@@ -716,6 +716,48 @@ func TestDatagramProtocolPiggybacksStateAckOnStreamPayload(t *testing.T) {
 	}
 }
 
+func TestDatagramProtocolLeavesLateStatePacketsUnacknowledged(t *testing.T) {
+	var sent [][]byte
+	protocol := newDatagramProtocol(func(data []byte) error {
+		sent = append(sent, append([]byte(nil), data...))
+		return nil
+	}, 50*time.Millisecond)
+	var delivered []uint64
+	receive := func(sequence uint16, token uint64) {
+		t.Helper()
+		packet, err := encodeDatagramPacket(datagramPacket{
+			Sequence:   sequence,
+			Lane:       datagramLaneEventualState,
+			StateToken: token,
+			Payload:    appendLengthPrefixedFrame(nil, []byte("state")),
+		})
+		if err != nil {
+			t.Fatalf("encodeDatagramPacket: %v", err)
+		}
+		if err := protocol.receive(packet, func(uint8, []byte) { delivered = append(delivered, token) }); err != nil {
+			t.Fatalf("receive: %v", err)
+		}
+	}
+	receive(10, 1)
+	receive(9, 2)
+	if len(delivered) != 1 || delivered[0] != 1 {
+		t.Fatalf("delivered tokens = %v, want only the newest packet", delivered)
+	}
+	if err := protocol.sendDueAck(time.Now().Add(50 * time.Millisecond)); err != nil {
+		t.Fatalf("sendDueAck: %v", err)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("ack datagrams = %d, want 1", len(sent))
+	}
+	ack, err := decodeDatagramPacket(sent[0])
+	if err != nil {
+		t.Fatalf("decode ACK packet: %v", err)
+	}
+	if ack.ACK.Sequence != 10 || ack.ACK.Acknowledges(9) {
+		t.Fatalf("ack = %+v, want packet 9 reported missing", ack.ACK)
+	}
+}
+
 func TestDatagramProtocolSendsDueAckOnlyPacket(t *testing.T) {
 	var sent [][]byte
 	protocol := newDatagramProtocol(func(data []byte) error {

@@ -130,6 +130,12 @@ func (p *datagramProtocol) receive(data []byte, deliver func(uint8, []byte)) err
 		return nil
 	}
 	p.mu.Lock()
+	// Entity state rejects frames older than the last one applied, so acknowledging a late state packet would lose
+	// the changes only it carries. Left unacknowledged, the server resends whatever no newer packet covers.
+	if packet.Lane == datagramLaneEventualState && p.recvPackets.Behind(packet.Sequence) {
+		p.mu.Unlock()
+		return nil
+	}
 	accepted := p.recvPackets.Accept(packet.Sequence)
 	if accepted {
 		p.scheduleAckLocked(now)

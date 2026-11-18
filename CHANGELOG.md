@@ -144,6 +144,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Datagram clients leave a late entity state packet unacknowledged, so the server resends changes that the client would otherwise discard as stale.
+
 - Unity transport callbacks no longer create dispatcher GameObjects from background threads during startup or Play Mode teardown. Main-thread bootstrap owns the dispatcher; disabled/destroyed dispatchers discard queued and late callbacks before a fresh lifetime begins.
 
 - Continuous physics reuses sensor endpoint observations when all body poses and world inputs are unchanged, avoiding repeated mesh overlap work in idle worlds. Contact phases, queries, mutation invalidation and moving-counterpart sweeps retain their existing semantics.
