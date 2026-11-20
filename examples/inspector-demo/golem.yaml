@@ -1,0 +1,11 @@
+entity_schema: schemas/entities
+types_schema: schemas/types
+simulation:
+  dimensions: 3
+proto:
+  package: inspectordemo
+  out: generated/entities.proto
+integrations:
+  go-server:
+    out: generated
+    package: generated

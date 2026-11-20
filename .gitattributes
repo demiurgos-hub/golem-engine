@@ -1,2 +1,4 @@
 .gitattributes text eol=lf
 *.mdc text eol=lf
+# Golden protocol fixtures shared by the Go and TypeScript inspector codecs.
+golem/inspector/wire/testdata/*.bin binary

@@ -171,6 +171,7 @@ type Server struct {
 	onTickEnd            []func(tick uint64, wall time.Duration)
 	onTick               TickFunc
 	onUpdates            UpdateFunc
+	replicationObservers replicationObservers
 	onContact            ContactFunc
 	onContact3D          Contact3DFunc
 	removalSerializer    RemovalSerializer
@@ -1350,6 +1351,9 @@ func (s *Server) runBroadcastTick() error {
 	if err != nil {
 		return err
 	}
+	// Observers run after sends; flushed masks and removal storage stay valid
+	// until the next FlushAll.
+	defer s.publishReplicationFrame(result)
 	deltasFlushed := len(result.Deltas)
 	live := s.reg.All()
 	sessionIDs := s.listener.SessionIDs()
@@ -1763,6 +1767,7 @@ func (s *Server) runInterestTick() error {
 	if err != nil {
 		return err
 	}
+	defer s.publishReplicationFrame(result)
 	tick, err := s.prepareReplicationTick(result)
 	if err != nil {
 		return err

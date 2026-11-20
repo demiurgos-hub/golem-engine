@@ -1,5 +1,5 @@
 ---
-description: bake pipeline — schema/code generation, explicit Scribe content definition bundles, bounded generated Unity integration, portable navigation/physics source ownership and codec compatibility.
+description: bake pipeline — schema/code generation (including the go-server inspector schema descriptor), explicit Scribe content definition bundles, bounded generated Unity integration, portable navigation/physics source ownership and codec compatibility.
 globs:
   - schema/**/*.go
   - codegen/**/*.go
@@ -22,6 +22,8 @@ alwaysApply: false
 ---
 
 # `bake` pipeline
+
+The go-server target also writes `inspector_schema.go` (`InspectorSchema()`), built by `codegen/go_inspector.go` from the same resolved wire layout and envelope tags as the codecs, so field tags and dirty bits cannot drift from the encoders. `examples/inspector-demo` checks the baked descriptor against baked encoders.
 
 Navigation `Settings.ClearancePrecision` is omitted for legacy binary64 arithmetic and set to `binary32` by Unity Scribe because its profile/cell fields are authored as floats. Quantize height/radius upward and climb downward after rounding operands and quotient in the selected precision; do not use epsilon snapping. Validation, tile padding, baking and artifact validation share this policy. Binary32 artifacts require feature bit 1; default artifact/fingerprint bytes stay compatible. C# validation forces stored IEEE binary32 values even on Mono. This setting never changes geometry, transforms, terrain samples or map coverage.
 

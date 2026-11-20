@@ -1,0 +1,4 @@
+entity: Beacon
+global: true
+vars:
+  intensity: {tag: 1, type: float, sync: tick}

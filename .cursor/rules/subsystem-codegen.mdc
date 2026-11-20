@@ -1,5 +1,5 @@
 ---
-description: codegen — wire emitters, separate immutable Go content views and finalized bundles, physics writer bindings, templates, integration output ownership and containment.
+description: codegen — wire emitters, the go-server inspector schema descriptor, separate immutable Go content views and finalized bundles, physics writer bindings, templates, integration output ownership and containment.
 globs:
   - codegen/**/*.go
   - codegen/**/*.tmpl
@@ -7,6 +7,8 @@ alwaysApply: false
 ---
 
 # `codegen`
+
+`go_inspector.go` emits go-server `inspector_schema.go` as a `wire.Schema` literal from `EntityData.ProtoWireLayout` and the resolved `EntityUpdate` envelope; bits come from the delta layout (tick vars), never from `AllVars`. The descriptor is validated at bake time and imports `<golem_import>/inspector/wire`.
 
 Opt-in portable content produces only Go-server `Definitions.go` and `ContentDefinitions.json`, selected by `integration_outputs.go`. `go_content.go` emits eagerly decoded private `Content<Type>` records, typed reference lookups and copied collection accessors; no backing maps/slices escape. It imports the canonical independent `golem/content` package even when `golem_import` selects a consumer runtime facade. `LoadDefinitions` always requires the finalized schema hash and validates explicit imports before publication. Content generation validates names before any bake output and preserves protocol/world descriptors, existing catalog behavior and the legacy snapshot fingerprint. Optional fields return presence separately from zero values; references resolve by stable content identity, including declared imported catalogs, without recursive materialization. Keep consumer factories, lifecycle creation and behavior outside this generator.
 

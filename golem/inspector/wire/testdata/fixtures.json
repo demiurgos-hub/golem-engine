@@ -1,0 +1,632 @@
+{
+  "messages": [
+    {
+      "name": "register",
+      "file": "register.bin",
+      "type": "Register",
+      "want": {
+        "targetId": "cave-7",
+        "labels": {
+          "map": "caves",
+          "region": "eu"
+        },
+        "epoch": 2,
+        "engineVersion": "v0.4.0",
+        "schema": {
+          "fingerprint": "abc123",
+          "dimensions": 3,
+          "removedTag": 5,
+          "entities": [
+            {
+              "name": "Actor",
+              "stateTag": 1,
+              "deltaTag": 2,
+              "global": false,
+              "fields": [
+                {
+                  "name": "entity_id",
+                  "tag": 1,
+                  "bit": -1,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "int64",
+                  "keyType": "",
+                  "role": "identity"
+                },
+                {
+                  "name": "pos_x",
+                  "tag": 2,
+                  "bit": 0,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "float",
+                  "keyType": "",
+                  "role": "position"
+                },
+                {
+                  "name": "pos_y",
+                  "tag": 3,
+                  "bit": 1,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "float",
+                  "keyType": "",
+                  "role": "position"
+                },
+                {
+                  "name": "pos_z",
+                  "tag": 4,
+                  "bit": 2,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "float",
+                  "keyType": "",
+                  "role": "position"
+                },
+                {
+                  "name": "revision",
+                  "tag": 1000,
+                  "bit": -1,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "uint64",
+                  "keyType": "",
+                  "role": "revision"
+                },
+                {
+                  "name": "name",
+                  "tag": 5,
+                  "bit": -1,
+                  "sync": "once",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "string",
+                  "keyType": "",
+                  "role": "variable"
+                },
+                {
+                  "name": "health",
+                  "tag": 6,
+                  "bit": 3,
+                  "sync": "tick",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "int32",
+                  "keyType": "",
+                  "role": "variable"
+                },
+                {
+                  "name": "gold",
+                  "tag": 7,
+                  "bit": 4,
+                  "sync": "tick",
+                  "ownerOnly": true,
+                  "kind": 0,
+                  "type": "uint32",
+                  "keyType": "",
+                  "role": "variable"
+                },
+                {
+                  "name": "tags",
+                  "tag": 8,
+                  "bit": 5,
+                  "sync": "tick",
+                  "ownerOnly": false,
+                  "kind": 2,
+                  "type": "string",
+                  "keyType": "",
+                  "role": "variable"
+                },
+                {
+                  "name": "stats",
+                  "tag": 9,
+                  "bit": 6,
+                  "sync": "tick",
+                  "ownerOnly": false,
+                  "kind": 3,
+                  "type": "int32",
+                  "keyType": "string",
+                  "role": "variable"
+                },
+                {
+                  "name": "held",
+                  "tag": 10,
+                  "bit": 7,
+                  "sync": "tick",
+                  "ownerOnly": false,
+                  "kind": 1,
+                  "type": "Item",
+                  "keyType": "",
+                  "role": "variable"
+                }
+              ],
+              "is3d": true
+            },
+            {
+              "name": "Marker",
+              "stateTag": 3,
+              "deltaTag": 4,
+              "global": true,
+              "fields": [
+                {
+                  "name": "entity_id",
+                  "tag": 1,
+                  "bit": -1,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "int64",
+                  "keyType": "",
+                  "role": "identity"
+                },
+                {
+                  "name": "pos_x",
+                  "tag": 2,
+                  "bit": 0,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "float",
+                  "keyType": "",
+                  "role": "position"
+                },
+                {
+                  "name": "pos_y",
+                  "tag": 3,
+                  "bit": 1,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "float",
+                  "keyType": "",
+                  "role": "position"
+                },
+                {
+                  "name": "revision",
+                  "tag": 1000,
+                  "bit": -1,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "uint64",
+                  "keyType": "",
+                  "role": "revision"
+                }
+              ],
+              "is3d": false
+            }
+          ],
+          "types": [
+            {
+              "name": "Item",
+              "fields": [
+                {
+                  "name": "name",
+                  "tag": 1,
+                  "bit": -1,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "string",
+                  "keyType": "",
+                  "role": ""
+                },
+                {
+                  "name": "qty",
+                  "tag": 2,
+                  "bit": -1,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "int32",
+                  "keyType": "",
+                  "role": ""
+                }
+              ]
+            }
+          ]
+        },
+        "tickRate": 20
+      }
+    },
+    {
+      "name": "observe_status",
+      "file": "observe_status.bin",
+      "type": "ObserveStatus",
+      "want": {
+        "state": 2,
+        "entityCount": 2,
+        "epoch": 2
+      }
+    },
+    {
+      "name": "snapshot_begin",
+      "file": "snapshot_begin.bin",
+      "type": "SnapshotBegin",
+      "want": {
+        "targetId": "cave-7",
+        "epoch": 2,
+        "seq": 1,
+        "tick": 900,
+        "entityCount": 1
+      }
+    },
+    {
+      "name": "snapshot_chunk",
+      "file": "snapshot_chunk.bin",
+      "type": "SnapshotChunk",
+      "want": {
+        "targetId": "cave-7",
+        "epoch": 2,
+        "seq": 2,
+        "entities": [
+          {
+            "id": 42,
+            "typeTag": 1,
+            "state": "CCoVAADAPx0AAADAJQAAJEEqA0FkYTD5//////////8BOGNCBANyZWRCAQBKBwoDc3RyEAxSCQoFc3dvcmQQAcA+Aw=="
+          }
+        ]
+      }
+    },
+    {
+      "name": "snapshot_end",
+      "file": "snapshot_end.bin",
+      "type": "SnapshotEnd",
+      "want": {
+        "targetId": "cave-7",
+        "epoch": 2,
+        "seq": 3
+      }
+    },
+    {
+      "name": "batch",
+      "file": "batch.bin",
+      "type": "Batch",
+      "want": {
+        "targetId": "cave-7",
+        "epoch": 2,
+        "seq": 4,
+        "tick": 905,
+        "spawns": [
+          {
+            "id": 43,
+            "typeTag": 3,
+            "state": "CCs="
+          }
+        ],
+        "deltas": [
+          {
+            "id": 42,
+            "typeTag": 1,
+            "revision": 4,
+            "mask": 105,
+            "delta": "CCoVAACAQDAAQgDAPgQ="
+          }
+        ],
+        "removals": [
+          {
+            "id": 41,
+            "revision": 9
+          }
+        ]
+      }
+    },
+    {
+      "name": "ping",
+      "file": "ping.bin",
+      "type": "Ping",
+      "want": {
+        "clientTime": 1700000000000
+      }
+    },
+    {
+      "name": "pong",
+      "file": "pong.bin",
+      "type": "Pong",
+      "want": {
+        "clientTime": 1700000000000
+      }
+    },
+    {
+      "name": "observe_start",
+      "file": "observe_start.bin",
+      "type": "ObserveStart",
+      "want": {}
+    },
+    {
+      "name": "observe_stop",
+      "file": "observe_stop.bin",
+      "type": "ObserveStop",
+      "want": {}
+    },
+    {
+      "name": "error",
+      "file": "error.bin",
+      "type": "Error",
+      "want": {
+        "code": "target_not_found",
+        "message": "no such target",
+        "targetId": "x"
+      }
+    },
+    {
+      "name": "subscribe",
+      "file": "subscribe.bin",
+      "type": "Subscribe",
+      "want": {
+        "targetId": "cave-7"
+      }
+    },
+    {
+      "name": "resync",
+      "file": "resync.bin",
+      "type": "Resync",
+      "want": {
+        "targetId": "cave-7"
+      }
+    },
+    {
+      "name": "target_schema",
+      "file": "target_schema.bin",
+      "type": "TargetSchema",
+      "want": {
+        "targetId": "cave-7",
+        "schema": {
+          "fingerprint": "abc123",
+          "dimensions": 3,
+          "removedTag": 5,
+          "entities": [
+            {
+              "name": "Actor",
+              "stateTag": 1,
+              "deltaTag": 2,
+              "global": false,
+              "fields": [
+                {
+                  "name": "entity_id",
+                  "tag": 1,
+                  "bit": -1,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "int64",
+                  "keyType": "",
+                  "role": "identity"
+                },
+                {
+                  "name": "pos_x",
+                  "tag": 2,
+                  "bit": 0,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "float",
+                  "keyType": "",
+                  "role": "position"
+                },
+                {
+                  "name": "pos_y",
+                  "tag": 3,
+                  "bit": 1,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "float",
+                  "keyType": "",
+                  "role": "position"
+                },
+                {
+                  "name": "pos_z",
+                  "tag": 4,
+                  "bit": 2,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "float",
+                  "keyType": "",
+                  "role": "position"
+                },
+                {
+                  "name": "revision",
+                  "tag": 1000,
+                  "bit": -1,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "uint64",
+                  "keyType": "",
+                  "role": "revision"
+                },
+                {
+                  "name": "name",
+                  "tag": 5,
+                  "bit": -1,
+                  "sync": "once",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "string",
+                  "keyType": "",
+                  "role": "variable"
+                },
+                {
+                  "name": "health",
+                  "tag": 6,
+                  "bit": 3,
+                  "sync": "tick",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "int32",
+                  "keyType": "",
+                  "role": "variable"
+                },
+                {
+                  "name": "gold",
+                  "tag": 7,
+                  "bit": 4,
+                  "sync": "tick",
+                  "ownerOnly": true,
+                  "kind": 0,
+                  "type": "uint32",
+                  "keyType": "",
+                  "role": "variable"
+                },
+                {
+                  "name": "tags",
+                  "tag": 8,
+                  "bit": 5,
+                  "sync": "tick",
+                  "ownerOnly": false,
+                  "kind": 2,
+                  "type": "string",
+                  "keyType": "",
+                  "role": "variable"
+                },
+                {
+                  "name": "stats",
+                  "tag": 9,
+                  "bit": 6,
+                  "sync": "tick",
+                  "ownerOnly": false,
+                  "kind": 3,
+                  "type": "int32",
+                  "keyType": "string",
+                  "role": "variable"
+                },
+                {
+                  "name": "held",
+                  "tag": 10,
+                  "bit": 7,
+                  "sync": "tick",
+                  "ownerOnly": false,
+                  "kind": 1,
+                  "type": "Item",
+                  "keyType": "",
+                  "role": "variable"
+                }
+              ],
+              "is3d": true
+            },
+            {
+              "name": "Marker",
+              "stateTag": 3,
+              "deltaTag": 4,
+              "global": true,
+              "fields": [
+                {
+                  "name": "entity_id",
+                  "tag": 1,
+                  "bit": -1,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "int64",
+                  "keyType": "",
+                  "role": "identity"
+                },
+                {
+                  "name": "pos_x",
+                  "tag": 2,
+                  "bit": 0,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "float",
+                  "keyType": "",
+                  "role": "position"
+                },
+                {
+                  "name": "pos_y",
+                  "tag": 3,
+                  "bit": 1,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "float",
+                  "keyType": "",
+                  "role": "position"
+                },
+                {
+                  "name": "revision",
+                  "tag": 1000,
+                  "bit": -1,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "uint64",
+                  "keyType": "",
+                  "role": "revision"
+                }
+              ],
+              "is3d": false
+            }
+          ],
+          "types": [
+            {
+              "name": "Item",
+              "fields": [
+                {
+                  "name": "name",
+                  "tag": 1,
+                  "bit": -1,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "string",
+                  "keyType": "",
+                  "role": ""
+                },
+                {
+                  "name": "qty",
+                  "tag": 2,
+                  "bit": -1,
+                  "sync": "",
+                  "ownerOnly": false,
+                  "kind": 0,
+                  "type": "int32",
+                  "keyType": "",
+                  "role": ""
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "world_status",
+      "file": "world_status.bin",
+      "type": "WorldStatus",
+      "want": {
+        "targetId": "cave-7",
+        "epoch": 2,
+        "entityCount": 1,
+        "ready": true,
+        "agentConnected": true,
+        "observeState": 2,
+        "tick": 905
+      }
+    },
+    {
+      "name": "resync_required",
+      "file": "resync_required.bin",
+      "type": "ResyncRequired",
+      "want": {
+        "targetId": "cave-7",
+        "epoch": 2,
+        "reason": "seq_gap"
+      }
+    }
+  ],
+  "merge": {
+    "typeTag": 1,
+    "state": "CCoVAADAPx0AAADAJQAAJEEqA0FkYTD5//////////8BOGNCBANyZWRCAQBKBwoDc3RyEAxSCQoFc3dvcmQQAcA+Aw==",
+    "delta": "CCoVAACAQDAAQgDAPgQ=",
+    "mask": "105",
+    "merged": "CCoVAACAQB0AAADAJQAAJEEqA0FkYTAAOGNCAFIJCgVzd29yZBABwD4E"
+  }
+}

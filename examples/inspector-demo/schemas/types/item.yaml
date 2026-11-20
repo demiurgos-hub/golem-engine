@@ -1,0 +1,4 @@
+type: Item
+fields:
+  name: {tag: 1, type: string}
+  qty: {tag: 2, type: int32}

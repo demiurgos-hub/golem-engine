@@ -1,0 +1,13 @@
+---
+description: cmd/golem-inspector — thin hub binary embedding the built inspector UI.
+globs:
+  - cmd/golem-inspector/**/*
+  - scripts/build-golem-inspector.*
+alwaysApply: false
+---
+
+# `cmd/golem-inspector`
+
+Thin entrypoint over `golem/inspector/hub`: flags with `GOLEM_INSPECTOR_*` environment fallbacks, TLS validation, graceful shutdown and a `hash-password` helper. Keep hub behavior in the hub package, not here, and do not import the `golem` runtime.
+
+The UI is embedded from `web/dist`, which `npm run build` in `golem-inspector/` writes. Only `web/dist/.gitkeep` is committed; without a UI build the binary serves `placeholder/index.html`. Release builds and the Dockerfile run the UI build before `go build`.

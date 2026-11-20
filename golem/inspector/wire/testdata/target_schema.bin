@@ -1,0 +1,25 @@
+¬È
+cave-7ﬁ
+abc123"ë
+Actor* 
+	entity_id:int64Jidentity*
+pos_x:floatJposition*
+pos_y:floatJposition*
+pos_z:floatJposition*!
+revisionË:uint64Jrevision*"
+name"once:stringJvariable*#
+health"tick:int32Jvariable*$
+gold"tick(:uint32Jvariable*$
+tags
+"tick0:stringJvariable*,
+stats	"tick0:int32BstringJvariable*"
+held
+"tick0:ItemJvariable0"ç
+Marker * 
+	entity_id:int64Jidentity*
+pos_x:floatJposition*
+pos_y:floatJposition*!
+revisionË:uint64Jrevision*,
+Item
+name:string
+qty:int32

@@ -17,6 +17,7 @@ const (
 	eventCodecOutput
 	contentCodeOutput
 	contentBundleOutput
+	inspectorSchemaOutput
 )
 
 type outputCondition uint8
@@ -122,11 +123,12 @@ var integrationSpecs map[string]integrationSpec
 func init() {
 	integrationSpecs = map[string]integrationSpec{
 		"go-server": {defaultImport: "github.com/demiurgos-hub/golem-engine/golem", defaultPackage: "synced",
-			hooks: Integration{PostProcess: gofmtFile, GenerateExtra: generateGoProto},
+			hooks: Integration{PostProcess: gofmtFile, GenerateExtra: generateGoServerExtra},
 			outputs: []outputRule{
 				{role: entityOutput, entityName: func(name string) string { return schema.ToSnakeCase(name) + "_synced.go" }, template: "go_server/server.go.tmpl"},
 				{role: sharedOutput, file: "golem_helpers.go", template: "go_server/shared.go.tmpl", condition: alwaysOutput},
 				{role: entityCodecOutput, file: "entities_pb.go", condition: alwaysOutput},
+				{role: inspectorSchemaOutput, file: "inspector_schema.go", condition: alwaysOutput},
 				{role: worldCodecOutput, file: "world_pb.go", condition: withWorld},
 				{role: eventCodecOutput, file: "events_pb.go", condition: withEvents},
 				{role: contentCodeOutput, file: "Definitions.go", condition: withContent},

@@ -14,7 +14,7 @@ func TestIntegrationOutputInventories(t *testing.T) {
 		target, defaultImport, defaultPackage string
 		base, world, events                   []string
 	}{
-		{"go-server", "github.com/demiurgos-hub/golem-engine/golem", "synced", []string{"test_actor_synced.go", "golem_helpers.go", "entities_pb.go"}, []string{"world_pb.go"}, []string{"events_pb.go"}},
+		{"go-server", "github.com/demiurgos-hub/golem-engine/golem", "synced", []string{"test_actor_synced.go", "golem_helpers.go", "entities_pb.go", "inspector_schema.go"}, []string{"world_pb.go"}, []string{"events_pb.go"}},
 		{"go-client", "github.com/demiurgos-hub/golem-engine/golem-go-client", "synced", []string{"test_actor_synced.go", "entity_manager.go", "client.go", "entities_pb.go"}, []string{"world_manager.go", "world_pb.go"}, []string{"event_manager.go", "events_pb.go"}},
 		{"js-client", "golem-engine", "", []string{"TestActorSynced.ts", "EntityManager.ts", "client.ts", "entities_pb.ts"}, []string{"WorldManager.ts", "world_pb.ts"}, []string{"EventManager.ts", "events_pb.ts"}},
 		{"csharp-client", "GolemEngine.Unity", "Golem.Generated", []string{"SyncedTestActor.cs", "EntityManager.cs", "Client.cs", "EntitiesPb.cs"}, []string{"WorldManager.cs", "WorldPb.cs"}, []string{"EventManager.cs", "EventsPb.cs"}},

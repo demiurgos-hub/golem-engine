@@ -55,6 +55,9 @@ node_modules/
 /golem-threlte/dist/
 /golem-threlte/.svelte-kit/
 /golem-threlte/.vitest/
+# Inspector UI build embedded by cmd/golem-inspector; only the placeholder is tracked.
+/cmd/golem-inspector/web/dist/*
+!/cmd/golem-inspector/web/dist/.gitkeep
 /examples/threlte/gen/
 /examples/threlte/web/src/gen/
 /examples/threlte/web/src/generated/

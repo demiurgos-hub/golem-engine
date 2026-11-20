@@ -1,0 +1,5 @@
+entity: Merchant
+vars:
+  shop: {tag: 1, type: string, sync: once}
+  mood: {tag: 2, type: string, sync: tick}
+  stock: {tag: 3, type: "dict<string, uint32>", sync: tick}
