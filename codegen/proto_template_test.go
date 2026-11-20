@@ -98,3 +98,27 @@ func TestEntitiesProtoRendersExplicitEnvelopeTags(t *testing.T) {
 		}
 	}
 }
+
+func TestEntitiesProtoRendersSpaceEnvelopeMessages(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/proto/entities.proto.tmpl")
+	if err != nil {
+		t.Fatalf("load entities proto template: %v", err)
+	}
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, schema.ProtoTemplateData{Package: "game", GoPackage: "example.com/game", EntityRemovedTag: 1}); err != nil {
+		t.Fatalf("execute entities proto template: %v", err)
+	}
+	content := out.String()
+	for _, want := range []string{
+		"message SpaceChanged {\n  uint32 space = 1;\n  uint64 transition = 2;\n}",
+		"message SpaceSettled {\n  uint64 transition = 1;\n}",
+		"message WorldCleared {\n  string name = 1;\n}",
+		"SpaceChanged space_changed = 4;",
+		"SpaceSettled space_settled = 5;",
+		"WorldCleared world_cleared = 6;",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("generated entities.proto missing %q\n%s", want, content)
+		}
+	}
+}

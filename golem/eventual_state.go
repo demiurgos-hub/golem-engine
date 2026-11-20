@@ -24,6 +24,9 @@ type eventualStateTracker struct {
 	dirtyQueue   []int64
 	inFlight     map[uint64][]eventualStateChange
 	inFlightFree [][]eventualStateChange
+	// gated merges changes sent on the stream while a space transition awaits
+	// SpaceAck; releaseGated turns them into dirty state. Nil when unused.
+	gated map[int64]eventualStateChange
 }
 
 type eventualStateFrame struct {
@@ -203,6 +206,7 @@ func (t *eventualStateTracker) clearDirty(id int64) {
 
 func (t *eventualStateTracker) clearEntity(id int64) {
 	t.clearDirty(id)
+	delete(t.gated, id)
 	for token, changes := range t.inFlight {
 		dst := changes[:0]
 		for _, ch := range changes {
@@ -217,6 +221,33 @@ func (t *eventualStateTracker) clearEntity(id int64) {
 		}
 		t.inFlight[token] = dst
 	}
+}
+
+// markGated records a change delivered on the stream while datagrams are held
+// back for a space transition.
+func (t *eventualStateTracker) markGated(ch eventualStateChange) {
+	if ch.id == 0 || (!ch.full && ch.mask == 0) {
+		return
+	}
+	if t.gated == nil {
+		t.gated = make(map[int64]eventualStateChange)
+	}
+	if existing, ok := t.gated[ch.id]; ok {
+		ch = mergeEventualChange(existing, ch)
+	}
+	t.gated[ch.id] = ch
+}
+
+// releaseGated marks every change sent on the stream while gated dirty again,
+// so the next datagrams carry those fields' current values even if they
+// overtake the stream deltas.
+func (t *eventualStateTracker) releaseGated(isLive func(int64) bool) {
+	for id, ch := range t.gated {
+		if isLive == nil || isLive(id) {
+			t.markDirtyChange(ch)
+		}
+	}
+	t.gated = nil
 }
 
 func (t *eventualStateTracker) clearEntities(ids []int64) {

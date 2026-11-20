@@ -11,7 +11,7 @@
   "2/js/entities_pb.ts": "c39b4a5ca270e2b6f1cfc3831ed68dc84200c4f20eb526ba162677ba56f3dc50",
   "2/js/events_pb.ts": "c393e9c85314054444d05d89963d9df17513893d56d286c2dd6c2100d277a352",
   "2/js/world_pb.ts": "e970515d0fa9e05686faa4ef77ee0aca05eb46c746665beaf119fd7040454106",
-  "2/proto/entities.proto.tmpl": "7daee766d891b4d4c27ce21a4a881b3168ac829bfd62f43f71e19ba66623dd87",
+  "2/proto/entities.proto.tmpl": "393b9ab16cd17203cf7baa3f58ccdc04aaf3e3ec90266c422ccc1dd1ee336bd1",
   "3/cs/EntitiesPb.cs": "b576b7aad68dc85daaf46b0a1cce7ff3263944b6930e4631974ca0e9c16e61e3",
   "3/cs/EventsPb.cs": "dc093061d60f45d37f8c66c1e4d9ddd446c9e111ddb5e541f33c7f5e86023ced",
   "3/cs/WorldPb.cs": "5002457a05c580dccdd5fb45009e3152053c2a870453119b6863b9559deec53d",
@@ -24,5 +24,5 @@
   "3/js/entities_pb.ts": "9e9260f7b1ad329141d78632c2015fd8dd5bb86930b543f3ebc3b3bce351ffa4",
   "3/js/events_pb.ts": "c393e9c85314054444d05d89963d9df17513893d56d286c2dd6c2100d277a352",
   "3/js/world_pb.ts": "e970515d0fa9e05686faa4ef77ee0aca05eb46c746665beaf119fd7040454106",
-  "3/proto/entities.proto.tmpl": "08a9a190d9ad4fce16e62027fedbfd0651a239e2bd16725e292bc53be5e755bf"
+  "3/proto/entities.proto.tmpl": "628594acac13f104dee5aee2740c080f852f15d32136ea94b12d6e2cfb95ce93"
 }

@@ -74,6 +74,36 @@ func validateReliableMessageSizes(frames [][]byte) error {
 	return nil
 }
 
+// ConcatReliableFrames packs consecutive logical reliable frames into as few
+// logical frames as the 256 KiB reliable message cap allows, preserving byte
+// order. It is meant for frames whose concatenation is itself a valid frame,
+// such as wrapped ServerMessage envelopes. A single frame above the cap is kept
+// on its own so the usual size validation reports it. The input is not
+// modified; packed frames own new storage.
+func ConcatReliableFrames(frames [][]byte) [][]byte {
+	if len(frames) < 2 {
+		return frames
+	}
+	remaining := 0
+	for _, f := range frames {
+		remaining += len(f)
+	}
+	out := make([][]byte, 0, 1)
+	var cur []byte
+	for _, f := range frames {
+		if cur != nil && len(cur)+len(f) > maxReliableMessageBytes {
+			out = append(out, cur)
+			cur = nil
+		}
+		if cur == nil {
+			cur = make([]byte, 0, min(remaining, maxReliableMessageBytes))
+		}
+		cur = append(cur, f...)
+		remaining -= len(f)
+	}
+	return append(out, cur)
+}
+
 type reliableChunkEncoder struct {
 	encodedLen  func(frame []byte) int
 	appendFrame func(dst []byte, frame []byte) []byte

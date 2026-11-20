@@ -1,17 +1,19 @@
 ---
-description: golem/interest — spatial hash membership indexes and field-of-interest manager.
+description: golem/interest — spatial hash membership indexes and the per-space field-of-interest manager.
 globs: golem/interest/**/*.go
 alwaysApply: false
 ---
 
 # `golem/interest`
 
-**Spatial interest management:** a `Grid` (spatial hash with configurable cell size, Insert/Remove/Move/Query) and a `Manager` that tracks per-session fields of interest. `FOI` describes a circular area anchored to an entity with a radius and hysteresis margin. `Diff` holds per-session enter/stay/exit entity ID lists computed each tick.
+**Spatial interest management:** a `Grid` (spatial hash with configurable cell size, Insert/Remove/Move/Query) and a `Manager` that tracks per-session fields of interest. `FOI` describes a circular area anchored to an entity with a radius and hysteresis margin. `Diff` holds per-session enter/stay/exit entity ID lists computed each tick plus `Space`, the session's space for that tick.
 
 **`Manager`** owns the `Grid` and per-session known sets. Key methods: `AssignFOI(sessionID, entityID, radius, margin)` / `RemoveFOI(sessionID)` for lifecycle; `UpdateGrid(registry)` synchronises the grid with all live entities (inserts new, removes stale, moves changed) and records deleted globals in reused `removedGlobals`; `ComputeDiffs()` returns a `map[sessionID]*Diff` by querying each session's FOI against the grid, applying hysteresis (enter at `Radius`, exit at `Radius+Margin`), and diffing against the previous known set. `ComputeDiffsFiltered(allow)` applies an optional predicate before Entered/Stayed and forces Exited when a previously known entity becomes disallowed; `ComputeDiffs()` remains equivalent to a nil (allow-all) filter. Global entities (`IsGlobal() == true`) bypass spatial checks but still pass through the allow predicate (Server supplies visibility-group membership). Deleted globals emit Exited via `removedGlobals` even when the FOI anchor is not on the grid. This package does not store group policy.
+
+**Spaces:** the Manager keeps one grid per space (`grid` is space 0; other grids are created on demand and dropped when empty), space-0 `globals` plus `globalsBySpace`, `entitySpace` (non-zero spaces of tracked entities and globals) and `sessionSpace` (non-zero last space of FOI sessions). `UpdateGrid` runs the single-space loop over `Registry.All()` while `!SpacesInUse()` and no entity was left outside space 0 (rechecking after the read); otherwise it reads `AppendSpaced` once and moves entities between grids and global sets. `ComputeDiffsFiltered` resolves each session's space from its anchor (on a grid or global), else keeps the last space (`SetSessionSpace` seeds it; `SessionSpace` and `SessionFOI` read it), then queries only that space's grid and globals. Known entities outside the space exit: non-candidates and other-space globals through the known sweep, and live other-space entities explicitly in the missing-anchor globals-only branch. After every call each known set lies inside its `Diff.Space`. With no spaced entities and no non-zero session space both methods skip all space lookups.
 
 **Not thread-safe.** All methods are called exclusively from the game tick goroutine (single-writer), under Server `interestMu`. The parent **`golem`** package creates and drives the Manager inside `runLoop`; consumers interact via `Server.AssignFOI` / `Server.RemoveFOI`.
 
 **Grid membership:** private addToCell/removeFromCell helpers own cell-map creation, membership changes, and empty-cell pruning. Insert/Move/Remove own the position and cellOf indexes. Same-cell Move updates the position without rehashing. UpdateGrid uses Insert's existing insert-or-move contract; global policy and stale-entity cleanup remain in Manager.
 
-Depends on **`golem/registry`** for the `Entity` interface and `Registry.All()`. Does **not** import `golem`, `golem/net`, `golem/visibility`, or `golem/world`.
+Depends on **`golem/registry`** for the `Entity` interface, `SpaceID`, `Registry.All()`, `SpacesInUse()` and `AppendSpaced()`. Does **not** import `golem`, `golem/net`, `golem/visibility`, or `golem/world`.

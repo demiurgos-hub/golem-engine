@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
@@ -404,5 +405,137 @@ func BenchmarkSendEventualConnected(b *testing.B) {
 			b.Fatal("feedback timed out")
 		}
 		b.StartTimer()
+	}
+}
+
+func expectNoReplicationDatagram(t testing.TB, peer *webtransport.Session) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if data, err := peer.ReceiveDatagram(ctx); err == nil {
+		t.Fatalf("unexpected datagram %q", data)
+	}
+}
+
+// TestSpaceTransitionGatesDatagramsUntilSpaceAck uses a real WebTransport peer
+// in datagram mode: after a transition, deltas use the ordered stream until the
+// client acknowledges it, then datagrams resume and first resend what the
+// stream carried meanwhile.
+func TestSpaceTransitionGatesDatagramsUntilSpaceAck(t *testing.T) {
+	for _, interestMode := range []bool{false, true} {
+		name, cellSize := "broadcast", 0.0
+		if interestMode {
+			name, cellSize = "interest", 8
+		}
+		t.Run(name, func(t *testing.T) {
+			s, peer, stream, sid := replicationTestPeer(t, cellSize)
+			s.SetRemovalSerializer(func(id int64, _ uint64) ([]byte, error) { return []byte("removed"), nil })
+			writer := stream.(io.Writer)
+			avatar := &replicationContractEntity{interestTickEntity: interestTickEntity{id: 1, full: []byte("avatar-full"), revision: 1}}
+			crate := &replicationContractEntity{interestTickEntity: interestTickEntity{id: 2, x: 1, full: []byte("crate-full"), revision: 1}}
+			opts := AvatarOptions{}
+			if interestMode {
+				opts.FOIRadius, opts.FOIMargin = 10, 1
+			}
+			if err := s.SpawnAvatar(&Session{ID: sid}, avatar, opts); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.CreateEntity(crate); err != nil {
+				t.Fatal(err)
+			}
+			run := s.runBroadcastTick
+			if interestMode {
+				run = s.runInterestTick
+			}
+			tick := func() {
+				t.Helper()
+				if err := run(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tick()
+			spawned := append(decodeServerTokens(t, mustReadReliableFrame(t, stream)), decodeServerTokens(t, mustReadReliableFrame(t, stream))...)
+			if slices.Sort(spawned); !slices.Equal(spawned, []string{"avatar-full", "crate-full"}) {
+				t.Fatalf("spawn frames = %q", spawned)
+			}
+			crate.flush, crate.revision = []byte("d0"), 2
+			tick()
+			if got := receiveReplicationDatagram(t, peer); !bytes.Contains(got, []byte("d0")) {
+				t.Fatalf("datagram before transition = %q", got)
+			}
+
+			crate.flush = nil
+			if err := s.MoveToSpace(SpaceTransfer{To: 3, Entities: []int64{avatar.id, crate.id}}); err != nil {
+				t.Fatal(err)
+			}
+			tick()
+			// The whole transition arrives as one logical stream frame.
+			got := decodeServerTokens(t, mustReadReliableFrame(t, stream))
+			if len(got) != 4 || got[0] != "changed:3:1" || got[3] != "settled:1" || !slices.Contains(got, "avatar-full") || !slices.Contains(got, "crate-full") {
+				t.Fatalf("transition frame = %q", got)
+			}
+
+			crate.flush, crate.revision = []byte("d1"), 3
+			tick()
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"d1"}) {
+				t.Fatalf("gated delta = %q", got)
+			}
+			expectNoReplicationDatagram(t, peer)
+
+			// A stale acknowledgement keeps the gate closed.
+			if _, err := writer.Write(netwire.AppendFrame(nil, golemnet.ClientSpaceAckControlFrame(7))); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := writer.Write(netwire.AppendFrame(nil, golemnet.ClientSpaceAckControlFrame(1))); err != nil {
+				t.Fatal(err)
+			}
+			for acks := 0; acks < 2; {
+				select {
+				case m := <-s.msgQueue:
+					if m.kind == msgSpaceAck {
+						acks++
+						s.applySpaceAck(m.sess.ID, m.transition)
+					}
+				case <-time.After(3 * time.Second):
+					t.Fatal("SpaceAck was not delivered")
+				}
+			}
+			s.interestMu.Lock()
+			_, pending := s.spaceAckPending[sid]
+			s.interestMu.Unlock()
+			if pending {
+				t.Fatal("SpaceAck did not release the gate")
+			}
+
+			// No new change: the first datagram resends the field the stream
+			// carried while gated, with its current value.
+			crate.flush, crate.compact = nil, []byte("current")
+			tick()
+			if got := receiveReplicationDatagram(t, peer); !bytes.Contains(got, []byte("current")) {
+				t.Fatalf("post-ack datagram = %q", got)
+			}
+			crate.flush, crate.compact, crate.revision = []byte("d3"), nil, 4
+			tick()
+			if got := receiveReplicationDatagram(t, peer); !bytes.Contains(got, []byte("d3")) {
+				t.Fatalf("datagram after ack = %q", got)
+			}
+
+			// Back to space 0: a new transition closes the gate again.
+			crate.flush = nil
+			if err := s.MoveToSpace(SpaceTransfer{To: 0, Entities: []int64{avatar.id, crate.id}}); err != nil {
+				t.Fatal(err)
+			}
+			tick()
+			got = decodeServerTokens(t, mustReadReliableFrame(t, stream))
+			if len(got) != 4 || got[0] != "changed:0:2" || got[3] != "settled:2" {
+				t.Fatalf("return transition frame = %q", got)
+			}
+			crate.flush, crate.revision = []byte("d4"), 5
+			tick()
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"d4"}) {
+				t.Fatalf("gated delta after return = %q", got)
+			}
+			expectNoReplicationDatagram(t, peer)
+		})
 	}
 }

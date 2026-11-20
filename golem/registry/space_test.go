@@ -258,3 +258,33 @@ func TestReplaceWithoutHooksSwapsSpaces(t *testing.T) {
 		t.Fatalf("empty replacement kept spaces: %v", err)
 	}
 }
+
+func TestSetSpacesIsAllOrNothing(t *testing.T) {
+	r := NewRegistry()
+	for id := int64(1); id <= 3; id++ {
+		if err := r.AddWithoutSpawn(&lifecycleTestEntity{id: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	flushMoves(t, r)
+	if bad, ok := r.SetSpaces([]int64{1, 2, 99}, 4); ok || bad != 99 {
+		t.Fatalf("SetSpaces with an unknown entity = %d, %v", bad, ok)
+	}
+	if spaceOf(t, r, 1) != 0 || r.SpacesInUse() {
+		t.Fatal("rejected SetSpaces changed a space")
+	}
+	if moves := flushMoves(t, r); moves != nil {
+		t.Fatalf("rejected SetSpaces recorded %v", moves)
+	}
+	if _, ok := r.SetSpaces([]int64{1, 2, 2}, 4); !ok {
+		t.Fatal("SetSpaces rejected published entities")
+	}
+	if spaceOf(t, r, 1) != 4 || spaceOf(t, r, 2) != 4 || spaceOf(t, r, 3) != 0 {
+		t.Fatal("SetSpaces did not move the batch")
+	}
+	moves := flushMoves(t, r)
+	sort.Slice(moves, func(i, j int) bool { return moves[i].ID < moves[j].ID })
+	if want := []SpaceMove{{ID: 1, From: 0, To: 4}, {ID: 2, From: 0, To: 4}}; !reflect.DeepEqual(moves, want) {
+		t.Fatalf("moves = %v, want %v", moves, want)
+	}
+}

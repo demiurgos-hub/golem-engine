@@ -22,3 +22,17 @@ func decodeClientReliableAckControlFrame(data []byte) ([]byte, uint16, ackMask12
 	}
 	return payload, ack.Sequence, ack.Mask, matched, nil
 }
+
+// ClientSpaceAckControlFrame returns the reliable control frame a client sends
+// to acknowledge the space transition with the given counter.
+func ClientSpaceAckControlFrame(transition uint64) []byte {
+	return netwire.AppendSpaceAckControl(nil, transition)
+}
+
+func decodeClientSpaceAckControlFrame(data []byte) (uint64, bool, error) {
+	transition, matched, err := netwire.DecodeSpaceAckControl(data)
+	if err != nil {
+		return 0, true, fmt.Errorf("golem/net: SpaceAck control frame has %d bytes, want %d", len(data), netwire.SpaceAckControlBytes)
+	}
+	return transition, matched, nil
+}

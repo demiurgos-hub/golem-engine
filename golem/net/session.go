@@ -415,6 +415,7 @@ func (s *Session) readPump(
 	onReliableUnordered func(*Session, []byte),
 	onReliableOrdered func(*Session, []byte),
 	onEventualStateFeedback func(*Session, []EventualStateDelivery),
+	onSpaceAck func(*Session, uint64),
 ) {
 	defer s.closeNow()
 	ctx, cancel := context.WithCancel(ctx)
@@ -514,6 +515,20 @@ func (s *Session) readPump(
 			onEventualStateFeedback(s, feedback)
 		}
 		if len(data) == 0 {
+			return
+		}
+		// A SpaceAck may arrive alone or as the payload of an ACK control frame.
+		transition, isSpaceAck, err := decodeClientSpaceAckControlFrame(data)
+		if err != nil {
+			readPumpErr = err
+			s.closeNow()
+			cancel()
+			return
+		}
+		if isSpaceAck {
+			if !s.isClosing() && onSpaceAck != nil {
+				onSpaceAck(s, transition)
+			}
 			return
 		}
 		if !s.isClosing() && onMsg != nil {

@@ -39,9 +39,15 @@ func (r *Registry) SetSpace(id int64, space SpaceID) bool {
 	if r.entities[id] == nil {
 		return false
 	}
+	r.moveLocked(id, space)
+	return true
+}
+
+// moveLocked sets a published entity's space and coalesces its pending move.
+func (r *Registry) moveLocked(id int64, space SpaceID) {
 	from := r.spaces[id]
 	if from == space {
-		return true
+		return
 	}
 	r.setSpaceLocked(id, space)
 	if i, ok := r.moveIndex[id]; ok {
@@ -50,7 +56,24 @@ func (r *Registry) SetSpace(id int64, space SpaceID) bool {
 		r.moveIndex[id] = len(r.moves)
 		r.moves = append(r.moves, SpaceMove{ID: id, From: from, To: space})
 	}
-	return true
+}
+
+// SetSpaces moves every listed published entity to space under one lock,
+// recording each move as SetSpace does. When any ID is unknown or still
+// provisional it changes nothing and returns that ID and false. Duplicate IDs
+// are harmless.
+func (r *Registry) SetSpaces(ids []int64, space SpaceID) (int64, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, id := range ids {
+		if r.entities[id] == nil {
+			return id, false
+		}
+	}
+	for _, id := range ids {
+		r.moveLocked(id, space)
+	}
+	return 0, true
 }
 
 // SpacesInUse reports whether any published or provisional entity is outside

@@ -11,6 +11,11 @@ const (
 	CloseControlPrefix    = "\x00OGS\x01"
 	ACKControlPrefix      = "\x00OGS\x02"
 	ACKControlHeaderBytes = len(ACKControlPrefix) + 2 + AckMaskBytes
+	// SpaceAckControlPrefix starts the client's reliable acknowledgement of a
+	// space transition: the prefix followed by the transition counter as a
+	// big-endian uint64, SpaceAckControlBytes in total.
+	SpaceAckControlPrefix = "\x00OGS\x03"
+	SpaceAckControlBytes  = len(SpaceAckControlPrefix) + 8
 )
 
 // SizeError reports a size boundary without choosing an endpoint's diagnostic.
@@ -111,4 +116,22 @@ func DecodeACKControl(data []byte) ([]byte, ACK, bool, error) {
 		return nil, ACK{}, true, io.ErrUnexpectedEOF
 	}
 	return data[ACKControlHeaderBytes:], readACK(data[len(ACKControlPrefix):]), true, nil
+}
+
+// AppendSpaceAckControl appends a SpaceAck control frame for transition.
+func AppendSpaceAckControl(dst []byte, transition uint64) []byte {
+	dst = append(dst, SpaceAckControlPrefix...)
+	return binary.BigEndian.AppendUint64(dst, transition)
+}
+
+// DecodeSpaceAckControl recognizes the SpaceAck prefix. Unmatched data reports
+// false; a recognized frame of the wrong length is an error.
+func DecodeSpaceAckControl(data []byte) (uint64, bool, error) {
+	if !bytes.HasPrefix(data, []byte(SpaceAckControlPrefix)) {
+		return 0, false, nil
+	}
+	if len(data) != SpaceAckControlBytes {
+		return 0, true, SizeError{uint64(len(data)), uint64(SpaceAckControlBytes)}
+	}
+	return binary.BigEndian.Uint64(data[len(SpaceAckControlPrefix):]), true, nil
 }

@@ -176,6 +176,29 @@ func TestControlGoldenBytesAndOwnership(t *testing.T) {
 	}
 }
 
+func TestSpaceAckControlGoldenBytes(t *testing.T) {
+	want := unhex(t, "004f4753030102030405060708")
+	got := AppendSpaceAckControl([]byte{}, 0x0102030405060708)
+	if !bytes.Equal(got, want) || len(got) != SpaceAckControlBytes {
+		t.Fatalf("SpaceAck control = %x", got)
+	}
+	transition, matched, err := DecodeSpaceAckControl(want)
+	if err != nil || !matched || transition != 0x0102030405060708 {
+		t.Fatalf("decoded = %d %v %v", transition, matched, err)
+	}
+	for _, other := range [][]byte{[]byte("plain"), AppendCloseControl(nil), AppendACKControl(nil, ACK{}, nil)} {
+		if _, matched, err := DecodeSpaceAckControl(other); matched || err != nil {
+			t.Fatalf("unrelated frame %x matched=%v err=%v", other, matched, err)
+		}
+	}
+	for _, bad := range [][]byte{want[:len(want)-1], append(append([]byte(nil), want...), 0)} {
+		var size SizeError
+		if _, matched, err := DecodeSpaceAckControl(bad); !matched || !errors.As(err, &size) {
+			t.Fatalf("wrong-length SpaceAck %x matched=%v err=%v", bad, matched, err)
+		}
+	}
+}
+
 type testWriter struct {
 	writes int
 	data   []byte

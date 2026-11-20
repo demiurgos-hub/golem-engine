@@ -55,6 +55,28 @@ func (l *Listener) BroadcastEvent(delivery EventDelivery, event, streamFrame []b
 	return nil
 }
 
+// SendEventTo queues one marshalled ServerEvent for each listed session that is
+// still connected, falling back to streamFrame per session as SendEvent does.
+// Sessions that are no longer connected are skipped.
+func (l *Listener) SendEventTo(sessionIDs []int64, delivery EventDelivery, event, streamFrame []byte) error {
+	record, err := eventRecord(delivery, event, streamFrame)
+	if err != nil {
+		return err
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	for _, id := range sessionIDs {
+		s, ok := l.sessions[id]
+		if !ok {
+			continue
+		}
+		if err := s.sendEvent(delivery, record, streamFrame); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func eventRecord(delivery EventDelivery, event, streamFrame []byte) ([]byte, error) {
 	if err := validateReliableMessageSize(streamFrame); err != nil {
 		return nil, err

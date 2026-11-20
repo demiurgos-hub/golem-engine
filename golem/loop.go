@@ -38,6 +38,7 @@ const (
 	msgReliableOrdered   msgKind = 4
 	msgEventualFeedback  msgKind = 5
 	msgDisconnect        msgKind = 6
+	msgSpaceAck          msgKind = 7
 )
 
 // pendingMsg is a session event queued from a connection goroutine to be
@@ -47,6 +48,7 @@ type pendingMsg struct {
 	sess             *Session
 	data             []byte
 	eventualFeedback []golemnet.EventualStateDelivery
+	transition       uint64 // msgSpaceAck
 }
 
 const msgQueueCap = 4096
@@ -156,6 +158,10 @@ type Server struct {
 	visibility           *visibility.Manager
 	broadcastKnown       map[int64]map[int64]struct{} // sessionID → known entity IDs (broadcast mode)
 	ownershipRefresh     map[int64]ownershipRefresh   // entityID → coalesced ownership confidentiality transition
+	sessionSpaceExplicit map[int64]SpaceID            // SetSessionSpace spaces (non-zero; interestMu)
+	sentSpace            map[int64]SpaceID            // spaces announced to clients (non-zero; interestMu)
+	spaceTransitionSeq   map[int64]uint64             // last space transition counter per session (interestMu)
+	spaceAckPending      map[int64]uint64             // latest transition awaiting SpaceAck per session (interestMu)
 	collision            collision.Backend
 	collision3D          collision3d.Backend
 	layers               *collision.Layers
@@ -193,9 +199,11 @@ type Server struct {
 	sessionAvatar map[int64]int64 // sessionID → entityID (or avatarSpawnPending)
 	avatarSession map[int64]int64 // entityID → sessionID
 
-	// interestMu guards interest.Manager, visibility.Manager, and broadcastKnown
-	// through Server APIs (AssignFOI, RemoveFOI, visibility group ops,
-	// SessionsKnowing, UpdateGrid+ComputeDiffs, broadcast known-set updates).
+	// interestMu guards interest.Manager, visibility.Manager, broadcastKnown and
+	// the session space maps through Server APIs (AssignFOI, RemoveFOI,
+	// visibility group ops, SessionsKnowing, session space APIs and moves,
+	// UpdateGrid+ComputeDiffs, broadcast known-set updates).
+	// Lock order with the registry: interestMu before the registry mutex.
 	// Lock order with avatarMu: interestMu before avatarMu when both are needed.
 	// Never hold interestMu across network sends, FullUpdate, or registry hooks.
 	// Visibility policy is point-in-time: mutations after a replication/snapshot
@@ -285,6 +293,10 @@ func NewServer(cfg ServerConfig) *Server {
 		avatarSession:         make(map[int64]int64),
 		visibility:            visibility.NewManager(),
 		broadcastKnown:        make(map[int64]map[int64]struct{}),
+		sessionSpaceExplicit:  make(map[int64]SpaceID),
+		sentSpace:             make(map[int64]SpaceID),
+		spaceTransitionSeq:    make(map[int64]uint64),
+		spaceAckPending:       make(map[int64]uint64),
 	}
 	if cfg.CellSize > 0 {
 		s.interest = interest.NewManager(cfg.CellSize)
@@ -332,6 +344,7 @@ func NewServer(cfg ServerConfig) *Server {
 	s.listener.OnReliableUnordered(s.enqueueReliableUnordered)
 	s.listener.OnReliableOrdered(s.enqueueReliableOrdered)
 	s.listener.OnEventualStateFeedback(s.enqueueEventualStateFeedback)
+	s.listener.OnSpaceAck(s.enqueueSpaceAck)
 	s.listener.OnDisconnect(s.enqueueDisconnect)
 	return s
 }
@@ -876,7 +889,12 @@ func (s *Server) AssignFOI(sessionID, entityID int64, radius, margin float64) {
 	}
 	s.interestMu.Lock()
 	defer s.interestMu.Unlock()
+	hadFOI := s.interest.HasFOI(sessionID)
 	s.interest.AssignFOI(sessionID, entityID, radius, margin)
+	if !hadFOI {
+		// Kept while the anchor is missing; replaced once it resolves.
+		s.interest.SetSessionSpace(sessionID, s.fallbackSessionSpaceLocked(sessionID))
+	}
 }
 
 // RemoveFOI removes a session's field of interest and clears its known set.
@@ -1063,6 +1081,13 @@ func (s *Server) enqueueEventualStateFeedback(sess *Session, feedback []golemnet
 	s.enqueue(pendingMsg{kind: msgEventualFeedback, sess: sess, eventualFeedback: feedback})
 }
 
+// enqueueSpaceAck is installed on the Listener as the SpaceAck hook. It runs on
+// the connection goroutine and pushes the acknowledged transition counter for
+// tick-time dispatch.
+func (s *Server) enqueueSpaceAck(sess *Session, transition uint64) {
+	s.enqueue(pendingMsg{kind: msgSpaceAck, sess: sess, transition: transition})
+}
+
 // enqueueDisconnect is installed on the Listener as the OnDisconnect hook. It
 // runs on the connection goroutine and pushes a disconnect event for tick-time
 // dispatch. The listener always passes a non-nil *Session (see
@@ -1101,6 +1126,8 @@ func (s *Server) drainMessages() {
 				}
 			case msgEventualFeedback:
 				s.applyEventualStateFeedback(m.sess.ID, m.eventualFeedback)
+			case msgSpaceAck:
+				s.applySpaceAck(m.sess.ID, m.transition)
 			case msgDisconnect:
 				// Listener disconnect events always carry a non-nil *Session.
 				if s.eventualTrackers != nil {
@@ -1378,6 +1405,9 @@ func (s *Server) runBroadcastTick() error {
 // shouldFilterBroadcastLocked reports whether broadcast replication must run
 // the per-session known-set path. Caller must hold interestMu.
 func (s *Server) shouldFilterBroadcastLocked(sessionIDs []int64, live []Entity) bool {
+	if s.spacesActiveLocked() {
+		return true
+	}
 	if s.visibility.HasGroupedEntities() {
 		return true
 	}
@@ -1560,7 +1590,8 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 	if s.onUpdates != nil && len(tick.updates) > 0 {
 		s.onUpdates(tick.updates)
 	}
-	live := s.reg.All()
+	live := s.reg.AppendSpaced(tick.spaced[:0])
+	tick.spaced = live
 	s.interestMu.Lock()
 	ownershipPending := s.snapshotOwnershipRefreshLocked()
 	s.interestMu.Unlock()
@@ -1571,8 +1602,8 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 			s.clearBroadcastKnownSession(sid)
 			continue
 		}
-		entered, stayed, exited := s.computeBroadcastDiff(sid, live)
-		sent, disconnected, err := s.deliverReplicationDiff(sid, transport, interest.Diff{Entered: entered, Stayed: stayed, Exited: exited}, tick, ownershipPending, replicationVisibility)
+		diff, plan := s.computeBroadcastDiff(sid, live)
+		sent, disconnected, err := s.deliverReplicationDiff(sid, transport, diff, tick, ownershipPending, replicationVisibility, plan)
 		total.add(sent)
 		if err != nil {
 			return err
@@ -1619,11 +1650,22 @@ func (s *Server) clearBroadcastKnownSession(sessionID int64) {
 }
 
 // computeBroadcastDiff updates broadcast known state for sessionID and returns
-// enter/stay/exit entity IDs. Known transitions are accepted here (queued sends
-// count as known), matching interest-mode semantics.
-func (s *Server) computeBroadcastDiff(sessionID int64, live []Entity) (entered, stayed, exited []int64) {
+// its enter/stay/exit diff with the session's space plan. Known transitions are
+// accepted here (queued sends count as known), matching interest-mode
+// semantics. Only entities in the session's space are desired; the announced
+// space changes under the same lock as the known set.
+func (s *Server) computeBroadcastDiff(sessionID int64, live []registry.SpacedEntity) (interest.Diff, sessionSpacePlan) {
 	s.interestMu.Lock()
 	defer s.interestMu.Unlock()
+
+	var (
+		diff interest.Diff
+		plan sessionSpacePlan
+	)
+	if s.spacesActiveLocked() {
+		plan = s.planSessionSpaceLocked(sessionID, s.fallbackSessionSpaceLocked(sessionID))
+		diff.Space = plan.space
+	}
 
 	known := s.broadcastKnown[sessionID]
 	if known == nil {
@@ -1632,28 +1674,28 @@ func (s *Server) computeBroadcastDiff(sessionID int64, live []Entity) (entered, 
 	}
 
 	desired := make(map[int64]struct{}, len(live))
-	for _, e := range live {
-		id := e.EntityID()
-		if s.visibility.Allows(sessionID, id) {
+	for _, se := range live {
+		id := se.Entity.EntityID()
+		if se.Space == plan.space && s.visibility.Allows(sessionID, id) {
 			desired[id] = struct{}{}
 		}
 	}
 
 	for id := range desired {
 		if _, ok := known[id]; ok {
-			stayed = append(stayed, id)
+			diff.Stayed = append(diff.Stayed, id)
 		} else {
-			entered = append(entered, id)
+			diff.Entered = append(diff.Entered, id)
 			known[id] = struct{}{}
 		}
 	}
 	for id := range known {
 		if _, ok := desired[id]; !ok {
-			exited = append(exited, id)
+			diff.Exited = append(diff.Exited, id)
 			delete(known, id)
 		}
 	}
-	return entered, stayed, exited
+	return diff, plan
 }
 
 // applyBlindBroadcastKnown incrementally maintains broadcast known sets on the
@@ -1692,13 +1734,15 @@ func (s *Server) cleanupVisibilityForRemovals(removalIDs []int64) {
 	}
 }
 
-// cleanupVisibilityOnDisconnect clears session group membership and broadcast
-// known state. Interest FOI cleanup remains in cleanupAvatarOnDisconnect.
+// cleanupVisibilityOnDisconnect clears session group membership, broadcast
+// known state and session space state. Interest FOI cleanup remains in
+// cleanupAvatarOnDisconnect.
 func (s *Server) cleanupVisibilityOnDisconnect(sessionID int64) {
 	s.interestMu.Lock()
 	defer s.interestMu.Unlock()
 	s.visibility.RemoveSession(sessionID)
 	delete(s.broadcastKnown, sessionID)
+	s.clearSessionSpaceLocked(sessionID)
 }
 
 // entitySnapshotForSession returns connect-time entity frames visible to
@@ -1710,12 +1754,15 @@ func (s *Server) cleanupVisibilityOnDisconnect(sessionID int64) {
 // successful snapshot IDs become known and can be removed on the next
 // replication pass. Provider/write failures never commit known state.
 func (s *Server) entitySnapshotForSession(sessionID int64) ([]golemnet.EntitySnapshot, error) {
-	all := s.reg.All()
+	all := s.reg.AppendSpaced(nil)
 	allowed := make([]Entity, 0, len(all))
 	s.interestMu.Lock()
-	for _, e := range all {
-		if s.visibility.Allows(sessionID, e.EntityID()) {
-			allowed = append(allowed, e)
+	// The announced space is 0 at connect; later space changes arrive as a
+	// replication transition.
+	space := s.sentSpace[sessionID]
+	for _, se := range all {
+		if se.Space == space && s.visibility.Allows(sessionID, se.Entity.EntityID()) {
+			allowed = append(allowed, se.Entity)
 		}
 	}
 	s.interestMu.Unlock()
@@ -1757,6 +1804,7 @@ func copyInterestDiffs(in map[int64]*interest.Diff) map[int64]*interest.Diff {
 			Entered: append([]int64(nil), d.Entered...),
 			Stayed:  append([]int64(nil), d.Stayed...),
 			Exited:  append([]int64(nil), d.Exited...),
+			Space:   d.Space,
 		}
 	}
 	return out
@@ -1767,7 +1815,15 @@ func (s *Server) runInterestTick() error {
 	// Manager diffs are reused: copy while locked, before flushing or callbacks.
 	s.interestMu.Lock()
 	s.interest.UpdateGrid(s.reg)
-	diffs := copyInterestDiffs(s.interest.ComputeDiffsFiltered(s.visibility.Allows))
+	computed := s.interest.ComputeDiffsFiltered(s.visibility.Allows)
+	// Plans are made with the known-set decisions so the announced space and
+	// the known set change together.
+	spacesActive := s.spacesActiveLocked()
+	var spacePlans map[int64]sessionSpacePlan
+	if spacesActive {
+		spacePlans = s.planInterestSpacesLocked(computed)
+	}
+	diffs := copyInterestDiffs(computed)
 	ownershipPending := s.snapshotOwnershipRefreshLocked()
 	s.interestMu.Unlock()
 	result, err := s.reg.FlushAll()
@@ -1793,10 +1849,20 @@ func (s *Server) runInterestTick() error {
 			continue
 		}
 		diff, ok := diffs[sid]
+		plan := spacePlans[sid]
 		if !ok {
-			continue
+			if !spacesActive {
+				continue
+			}
+			// Sessions without an FOI know no entities but still learn about
+			// space changes through an empty transition.
+			plan = s.planSessionWithoutFOI(sid)
+			if plan.transition == 0 {
+				continue
+			}
+			diff = &interest.Diff{Space: plan.space}
 		}
-		sent, disconnected, err := s.deliverReplicationDiff(sid, transport, *diff, tick, ownershipPending, replicationFOI)
+		sent, disconnected, err := s.deliverReplicationDiff(sid, transport, *diff, tick, ownershipPending, replicationFOI, plan)
 		total.add(sent)
 		if err != nil {
 			return err

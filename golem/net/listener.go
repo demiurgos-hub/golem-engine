@@ -43,6 +43,7 @@ type Listener struct {
 	onReliableUnordered     func(*Session, []byte)
 	onReliableOrdered       func(*Session, []byte)
 	onEventualStateFeedback func(*Session, []EventualStateDelivery)
+	onSpaceAck              func(*Session, uint64)
 	onDisconnect            func(*Session)
 	messageWrapper          func([]byte) []byte      // wraps outgoing entity frames (ServerMessage tag 1)
 	worldSnapshotFunc       func() ([][]byte, error) // returns fully-wrapped ServerMessage bytes for world data
@@ -160,6 +161,12 @@ func (l *Listener) OnReliableOrdered(fn func(*Session, []byte)) { l.onReliableOr
 func (l *Listener) OnEventualStateFeedback(fn func(*Session, []EventualStateDelivery)) {
 	l.onEventualStateFeedback = fn
 }
+
+// OnSpaceAck registers a hook called with the transition counter when a client
+// acknowledges a space transition with the SpaceAck control frame
+// (netwire.SpaceAckControlPrefix plus a big-endian uint64). The frame is
+// consumed by the session and never reaches OnMessage.
+func (l *Listener) OnSpaceAck(fn func(*Session, uint64)) { l.onSpaceAck = fn }
 
 // OnDisconnect registers a hook called when a client disconnects.
 func (l *Listener) OnDisconnect(fn func(*Session)) { l.onDisconnect = fn }
@@ -962,7 +969,7 @@ func (l *Listener) serveAcceptedSession(ctx context.Context, sess *Session, r *h
 		l.onConnect(sess)
 	}
 	go sess.writePump(ctx)
-	sess.readPump(ctx, l.onMessage, l.onDatagram, l.onReliableUnordered, l.onReliableOrdered, l.onEventualStateFeedback)
+	sess.readPump(ctx, l.onMessage, l.onDatagram, l.onReliableUnordered, l.onReliableOrdered, l.onEventualStateFeedback, l.onSpaceAck)
 	log.Printf("golem/net: session %d disconnected remote=%q transport=%q", sess.ID, sess.RemoteAddr, sess.transportKind())
 	if l.onDisconnect != nil {
 		l.onDisconnect(sess)

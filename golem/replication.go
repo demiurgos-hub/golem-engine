@@ -25,6 +25,7 @@ type replicationScratch struct {
 	eventualFrames     map[int64]eventualPreparedFrame
 	eventualDirty      []eventualStateChange
 	eventualPrepared   []eventualPreparedFrame
+	spaced             []registry.SpacedEntity // live entities with spaces (filtered broadcast)
 }
 
 // reset clears the reused per-tick lookup maps while preserving capacity.
@@ -140,7 +141,12 @@ const (
 
 // deliverReplicationDiff reports a disconnected send separately from preparation
 // errors, so caller-owned known-set cleanup cannot swallow serializer failures.
-func (s *Server) deliverReplicationDiff(sessionID int64, transport golemnet.Transport, diff interest.Diff, tick *replicationTick, ownershipPending map[int64]ownershipRefresh, scope replicationScope) (eventualStateSendStats, bool, error) {
+// A plan with a transition delivers the space transition instead; a gated plan
+// sends this session's incremental deltas on the ordered stream.
+func (s *Server) deliverReplicationDiff(sessionID int64, transport golemnet.Transport, diff interest.Diff, tick *replicationTick, ownershipPending map[int64]ownershipRefresh, scope replicationScope, plan sessionSpacePlan) (eventualStateSendStats, bool, error) {
+	if plan.transition != 0 {
+		return s.deliverSpaceTransition(sessionID, transport, diff, tick, plan, scope)
+	}
 	var stats eventualStateSendStats
 	scratch := tick.replicationScratch
 	spawnData, deltaData := scratch.spawnData, scratch.deltaData
@@ -148,7 +154,8 @@ func (s *Server) deliverReplicationDiff(sessionID int64, transport golemnet.Tran
 	wrappedDeltas, wrappedPublicDelta := scratch.wrappedDeltas, scratch.wrappedPublicDelta
 	eventualChanges, eventualFrames := scratch.eventualChanges, scratch.eventualFrames
 	ownerScopedDeltas := tick.ownerScopedDeltas
-	sessionDatagrams := s.usesDatagramStateUpdates() && transport == golemnet.TransportWebTransport
+	datagramCapable := s.usesDatagramStateUpdates() && transport == golemnet.TransportWebTransport
+	sessionDatagrams := datagramCapable && !plan.gated
 	var (
 		streamFrames         [][]byte
 		eventualDirty        = scratch.eventualDirty[:0]
@@ -156,7 +163,7 @@ func (s *Server) deliverReplicationDiff(sessionID int64, transport golemnet.Tran
 	)
 
 	for _, id := range diff.Entered {
-		if sessionDatagrams {
+		if datagramCapable {
 			s.clearEventualEntity(sessionID, id)
 		}
 		data, ok, err := s.wrappedFullForSession(sessionID, id, spawnData, wrappedFull, wrappedPublicFull)
@@ -190,6 +197,13 @@ func (s *Server) deliverReplicationDiff(sessionID int64, transport golemnet.Tran
 				}
 				if send {
 					streamFrames = append(streamFrames, data)
+					if datagramCapable {
+						if ch, ok := eventualChanges[id]; ok {
+							if sch, ok := s.eventualChangeForSession(sessionID, ch); ok {
+								s.eventualTracker(sessionID).markGated(sch)
+							}
+						}
+					}
 				}
 			}
 		}
@@ -204,7 +218,7 @@ func (s *Server) deliverReplicationDiff(sessionID int64, transport golemnet.Tran
 		}
 	}
 	for _, id := range diff.Exited {
-		if sessionDatagrams {
+		if datagramCapable {
 			s.clearEventualEntity(sessionID, id)
 		}
 		data, err := s.wrappedExit(tick, id, scope)

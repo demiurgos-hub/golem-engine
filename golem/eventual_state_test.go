@@ -332,3 +332,33 @@ func TestNonEventualLanesDoNotUseMaskAwareDeltaAPI(t *testing.T) {
 		})
 	}
 }
+
+func TestEventualStateTrackerGatedChangesBecomeDirtyOnRelease(t *testing.T) {
+	tracker := newEventualStateTracker()
+	tracker.markGated(eventualStateChange{id: 1, mask: 1})
+	tracker.markGated(eventualStateChange{id: 1, mask: 4, public: true})
+	tracker.markGated(eventualStateChange{id: 2, mask: 2})
+	tracker.markGated(eventualStateChange{id: 3, full: true})
+	tracker.markGated(eventualStateChange{id: 4, mask: 8})
+	tracker.markGated(eventualStateChange{id: 5}) // empty change: ignored
+	if tracker.hasDirty() {
+		t.Fatal("gated changes must not be dirty before release")
+	}
+	tracker.clearEntity(2) // exited while gated
+	tracker.releaseGated(func(id int64) bool { return id != 4 })
+	if tracker.gated != nil {
+		t.Fatal("release kept gated changes")
+	}
+	want := map[int64]eventualStateChange{
+		1: {id: 1, mask: 5, public: true},
+		3: {id: 3, full: true},
+	}
+	if len(tracker.dirtySet) != len(want) {
+		t.Fatalf("dirty = %+v, want %+v", tracker.dirtySet, want)
+	}
+	for id, ch := range want {
+		if tracker.dirtySet[id] != ch {
+			t.Fatalf("dirty[%d] = %+v, want %+v", id, tracker.dirtySet[id], ch)
+		}
+	}
+}
