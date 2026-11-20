@@ -797,24 +797,19 @@ func TestSpaceServicesGuardSnapshotsCheckpointsAndSetup(t *testing.T) {
 	if err := <-s.SaveContentSnapshot("fp", strings.Repeat("a", 64), t.TempDir()+"/manifest.json"); err == nil || !strings.Contains(err.Error(), "entity-only") {
 		t.Fatalf("content snapshot with physics in space 5 = %v", err)
 	}
-	if _, err := s.CapturePhysicsCheckpoint(PhysicsCheckpointOptions{}); !errors.Is(err, errMultiSpaceCheckpoint) {
-		t.Fatalf("multi-space checkpoint capture = %v", err)
+	if _, err := s.CapturePhysicsCheckpoint(PhysicsCheckpointOptions{}); err == nil || !strings.Contains(err.Error(), "space 5 has physics but no checkpoint options") {
+		t.Fatalf("checkpoint capture without space 5 options = %v", err)
 	}
-	if err := s.RestorePhysicsCheckpoint(PhysicsCheckpoint{}, PhysicsRestoreOptions{}); !errors.Is(err, errMultiSpaceCheckpoint) {
-		t.Fatalf("multi-space checkpoint restore = %v", err)
+	if err := s.RestorePhysicsCheckpoint(PhysicsCheckpoint{}, PhysicsRestoreOptions{}); !errors.Is(err, p.ErrInvalid) {
+		t.Fatalf("invalid checkpoint restore = %v", err)
 	}
-	if _, err := s.CaptureNavigationCheckpoint("id", "fp", 1, nil); !errors.Is(err, errMultiSpaceCheckpoint) {
-		t.Fatalf("multi-space navigation checkpoint = %v", err)
+	if _, err := s.CaptureNavigationCheckpoint("id", "fp", 1, nil); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("space 0 navigation checkpoint without navigation = %v", err)
 	}
 	s.runtime(5).physics.stepping = true
 	err := s.CreateEntityWithSetupIn(0, &navigationTestEntity{id: 9}, func(Entity) (func() error, error) { return nil, nil })
 	s.runtime(5).physics.stepping = false
 	if !errors.Is(err, p.ErrBusy) {
 		t.Fatalf("entity setup while space 5 steps = %v", err)
-	}
-	c := PhysicsCheckpoint{Entities: []PhysicsEntityCheckpoint{{}}, Attachments: []PhysicsAttachmentCheckpoint{{EntityID: 4}}}
-	c.Entities[0].Record.EntityID, c.Entities[0].Record.Space = 4, 2
-	if err := c.validateSpaceZeroServices(); !errors.Is(err, errMultiSpaceCheckpoint) {
-		t.Fatalf("checkpoint attachment outside space 0 = %v", err)
 	}
 }

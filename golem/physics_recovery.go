@@ -7,11 +7,15 @@ import (
 	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
 )
 
-// PreparedPhysicsRecovery owns a privately reconstructed desired world pair.
-// The host applies captured desired source to captured accepted physical state,
-// migrating body/joint state by stable IDs, and prepares matching navigation.
-// Nothing may mutate live state before return. Geometry identifies the resulting
-// source leases; callback implementations and backend handles are not persisted.
+// PreparedPhysicsRecovery owns one space's privately reconstructed desired world
+// pair. The host applies the space's captured desired source to its captured
+// accepted physical state, migrating body/joint state by stable IDs, and
+// prepares matching navigation. Nothing may mutate live state before return.
+// Geometry identifies the resulting source leases; callback implementations and
+// backend handles are not persisted. A multi-space restore prepares one pair per
+// pending space (PhysicsRestoreOptions.PreparePendingWorld for space 0,
+// PhysicsSpaceRestoreOptions.PreparePendingWorld for the others); its identity
+// must match that space's section.
 type PreparedPhysicsRecovery struct {
 	CheckpointID, PhysicsFingerprint, NavigationFingerprint string
 	PhysicsRevision, NavigationRevision                     uint64
@@ -31,8 +35,8 @@ func (r PreparedPhysicsRecovery) Discard() {
 	}
 }
 
-func (r PreparedPhysicsRecovery) validate(c PhysicsCheckpoint) error {
-	if r.Physics == nil || r.Navigation == nil || len(r.Geometry) > 100000 || r.CheckpointID != c.CheckpointID || r.PhysicsFingerprint != c.DesiredPhysicsFingerprint || r.NavigationFingerprint != c.Navigation.SourceFingerprint || r.PhysicsRevision != c.DesiredPhysicsRevision || r.NavigationRevision != c.Navigation.DesiredRevision {
+func (r PreparedPhysicsRecovery) validate(checkpointID string, c PhysicsSpaceCheckpoint) error {
+	if r.Physics == nil || r.Navigation == nil || len(r.Geometry) > 100000 || r.CheckpointID != checkpointID || r.PhysicsFingerprint != c.DesiredPhysicsFingerprint || r.NavigationFingerprint != c.Navigation.SourceFingerprint || r.PhysicsRevision != c.DesiredPhysicsRevision || r.NavigationRevision != c.Navigation.DesiredRevision {
 		return fmt.Errorf("%w: pending recovery pair identity mismatch", p.ErrInvalid)
 	}
 	keys := map[string]bool{}
@@ -65,7 +69,7 @@ func validatePendingPhysicsGeometry(changes []PhysicsGeometryPending) error {
 }
 
 // physicsWorldPending reports whether space 0's physical or navigation world
-// has pending geometry; paired checkpoints cover space 0 only.
+// has pending geometry; checkpoint capture asks each space's runtime.
 func (s *Server) physicsWorldPending() bool { return s.space0.physicsWorldPending() }
 
 func (rt *spaceRuntime) physicsWorldPending() bool {

@@ -32,21 +32,28 @@ type NavigationCheckpoint struct {
 	Agents            []NavigationIntent `json:"agents"`
 }
 
-// CaptureNavigationCheckpoint copies tick-owned intents and already captured
-// immutable desired-world bytes. JSON encoding stores these opaque bytes as base64.
-// The bytes should come from the geometry backend's
+// CaptureNavigationCheckpoint copies space 0's tick-owned intents and already
+// captured immutable desired-world bytes. JSON encoding stores these opaque
+// bytes as base64. The bytes should come from the geometry backend's
 // desired-state checkpoint, including source objects, blockers and link states.
-// It covers space 0 and is rejected while another space has physics or surface
-// navigation.
+// Space(id).CaptureNavigationCheckpoint captures another space's navigation.
 func (s *Server) CaptureNavigationCheckpoint(id, fingerprint string, revision uint64, desiredWorld []byte) (NavigationCheckpoint, error) {
-	if s.multiSpaceServices() {
-		return NavigationCheckpoint{}, errMultiSpaceCheckpoint
-	}
-	if s.navigation == nil {
+	return captureNavigationCheckpoint(&s.space0, id, fingerprint, revision, desiredWorld)
+}
+
+// CaptureNavigationCheckpoint copies this space's tick-owned intents and
+// desired-world bytes; see Server.CaptureNavigationCheckpoint.
+func (sp *Space) CaptureNavigationCheckpoint(id, fingerprint string, revision uint64, desiredWorld []byte) (NavigationCheckpoint, error) {
+	return captureNavigationCheckpoint(sp.srv.runtime(sp.id), id, fingerprint, revision, desiredWorld)
+}
+
+func captureNavigationCheckpoint(rt *spaceRuntime, id, fingerprint string, revision uint64, desiredWorld []byte) (NavigationCheckpoint, error) {
+	n := rt.nav()
+	if n == nil {
 		return NavigationCheckpoint{}, errors.New("golem: navigation is not configured")
 	}
 	out := NavigationCheckpoint{Version: 1, CheckpointID: id, SourceFingerprint: fingerprint, DesiredRevision: revision, DesiredWorld: append([]byte(nil), desiredWorld...)}
-	for _, a := range s.navigation.agents {
+	for _, a := range n.agents {
 		if a.state.HasDestination {
 			out.Agents = append(out.Agents, NavigationIntent{EntityID: a.id, Profile: a.config.Profile, Destination: a.state.Destination})
 		}
@@ -89,14 +96,26 @@ func EncodeNavigationCheckpoint(checkpoint NavigationCheckpoint) ([]byte, error)
 	return json.Marshal(checkpoint)
 }
 
-// RestoreNavigationIntents validates every required attachment before replacing
-// any intent. Restore desired world state and entity identities first, while the
-// readiness barrier is closed; open it only after all restoration succeeds.
+// RestoreNavigationIntents validates every required attachment of space 0's
+// navigation before replacing any intent. Restore desired world state and
+// entity identities first, while the readiness barrier is closed; open it only
+// after all restoration succeeds. Space(id).RestoreNavigationIntents restores
+// another space's intents.
 func (s *Server) RestoreNavigationIntents(checkpoint NavigationCheckpoint, expectedFingerprint string) error {
+	return s.restoreNavigationIntents(&s.space0, checkpoint, expectedFingerprint)
+}
+
+// RestoreNavigationIntents restores this space's navigation intents inside its
+// restoration barrier; see Server.RestoreNavigationIntents.
+func (sp *Space) RestoreNavigationIntents(checkpoint NavigationCheckpoint, expectedFingerprint string) error {
+	return sp.srv.restoreNavigationIntents(sp.srv.runtime(sp.id), checkpoint, expectedFingerprint)
+}
+
+func (s *Server) restoreNavigationIntents(rt *spaceRuntime, checkpoint NavigationCheckpoint, expectedFingerprint string) error {
 	if err := validateNavigationCheckpoint(checkpoint); err != nil {
 		return err
 	}
-	n := s.navigation
+	n := rt.nav()
 	if n == nil || !n.restoring {
 		return errors.New("golem: restore navigation intents inside a restoration barrier")
 	}
@@ -112,6 +131,7 @@ func (s *Server) RestoreNavigationIntents(checkpoint NavigationCheckpoint, expec
 			return fmt.Errorf("golem: navigation profile mismatch for entity %d", intent.EntityID)
 		}
 	}
+	// An agent of n lives in n's space, so the entity-keyed calls resolve n.
 	for _, a := range n.agents {
 		_ = s.StopNavigation(a.id)
 	}

@@ -2,7 +2,6 @@ package golem
 
 import (
 	"cmp"
-	"errors"
 	"fmt"
 	"slices"
 
@@ -126,21 +125,6 @@ func (s *Server) anyPhysics() bool {
 	}
 	return false
 }
-
-// multiSpaceServices reports whether a space other than 0 has physics or
-// surface navigation. Paired checkpoints cover space 0 only for now.
-func (s *Server) multiSpaceServices() bool {
-	for _, rt := range s.spaceOrder {
-		if rt.physics != nil || rt.navigation != nil {
-			return true
-		}
-	}
-	return false
-}
-
-// errMultiSpaceCheckpoint rejects paired checkpoints while another space than 0
-// has physics or surface navigation.
-var errMultiSpaceCheckpoint = errors.New("golem: multi-space physics/navigation checkpoints are not supported yet; only space 0 may have physics or surface navigation")
 
 // servicesQuiescent rejects work that must not interleave with any space's
 // physics step, accepted-frame callbacks, restoration or open navigation frame.

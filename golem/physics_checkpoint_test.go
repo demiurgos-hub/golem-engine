@@ -25,6 +25,7 @@ type physicsCheckpointTestWorld struct {
 	*physicsTestWorld
 	prepareErr, commitErr, trajectoryErr error
 	discards                             int
+	restoreWorld                         uint64 // handle world of restored bodies (default 42)
 }
 
 func (w *physicsCheckpointTestWorld) CaptureCheckpoint(id, fingerprint string) (p.Checkpoint, error) {
@@ -44,9 +45,13 @@ func (w *physicsCheckpointTestWorld) PrepareRestore(c p.Checkpoint) (p.PreparedR
 		return nil, w.prepareErr
 	}
 	r := &physicsCheckpointTestRestore{world: w, states: map[p.BodyHandle]p.BodyState{}, ids: map[p.ContentID]p.BodyHandle{}}
+	world := w.restoreWorld
+	if world == 0 {
+		world = 42
+	}
 	for i, body := range c.Bodies {
 		d := body.Description
-		h := p.BodyHandle{World: 42, Index: uint32(i + 1), Generation: 1}
+		h := p.BodyHandle{World: world, Index: uint32(i + 1), Generation: 1}
 		r.states[h] = p.BodyState{Handle: h, ID: d.ID, Owner: d.Owner, Mode: d.Mode, Pose: d.Pose, Anchor: d.Pose.Compose(d.Anchor), LinearVelocity: d.LinearVelocity, AngularVelocity: d.AngularVelocity, Enabled: d.Enabled, Awake: d.Awake}
 		r.ids[d.ID] = h
 	}
