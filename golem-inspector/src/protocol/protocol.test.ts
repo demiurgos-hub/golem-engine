@@ -57,6 +57,26 @@ describe('golden fixtures', () => {
     expect(encodePing(1700000000000)).toEqual(load('ping.bin'));
   });
 
+  it('decodes entity spaces and space moves', () => {
+    const chunk = decodeMessage(load('snapshot_chunk_spaces.bin'));
+    if (chunk?.type !== 'snapshotChunk') throw new Error('chunk fixture');
+    expect(chunk.entities.map((e) => [e.id, e.space])).toEqual([
+      [42, 0],
+      [43, 3],
+    ]);
+    const batch = decodeMessage(load('batch_spaces.bin'));
+    if (batch?.type !== 'batch') throw new Error('batch fixture');
+    expect(batch.spawns.map((e) => [e.id, e.space])).toEqual([[44, 2]]);
+    expect(batch.moves).toEqual([
+      { id: 42, space: 3 },
+      { id: 43, space: 0 },
+    ]);
+    const plain = decodeMessage(load('batch.bin'));
+    if (plain?.type !== 'batch') throw new Error('batch fixture');
+    expect(plain.moves).toEqual([]);
+    expect(plain.spawns[0]?.space).toBe(0);
+  });
+
   it('merges deltas exactly like the Go hub', () => {
     const { merge } = index;
     const reg = decodeMessage(load('register.bin'));

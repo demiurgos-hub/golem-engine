@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { chooseTargetId, fetchTargets, targetsUrlFromWs, updateTargetSearch, type InspectorTarget } from '../api/targets';
 import { createWsClient, DEFAULT_WS_URL, type WsClient } from '../api/wsClient';
 import { defaultPlane, type Plane } from '../lib/entityTypes';
-import { EMPTY_FILTERS, filterEntities, type ClientFilters } from '../lib/filters';
+import { EMPTY_FILTERS, filterEntities, spacesOf, type ClientFilters } from '../lib/filters';
 import { createConnectionStore, type ConnectionState, type ConnectionStore } from '../store/connectionStore';
 import { createDebugLog, type DebugLog } from '../store/debugLog';
 import { createEntityStore, type EntityRecord, type EntityStore, type EntityStoreSnapshot } from '../store/entityStore';
@@ -23,6 +23,8 @@ interface InspectorContextValue {
   selectedTarget: InspectorTarget | null;
   selectTarget: (targetId: string) => void;
   filteredEntities: EntityRecord[];
+  /** Distinct spaces of all entities, ascending; space UI shows only when there are several. */
+  spaces: number[];
   plane: Plane;
   setPlane: (plane: Plane) => void;
 }
@@ -114,6 +116,9 @@ export function InspectorProvider({ children }: { children: ReactNode }) {
 
   const snap = useSyncExternalStore(entityStore.subscribe, entityStore.getState, entityStore.getState);
   const filteredEntities = useMemo(() => filterEntities(snap.entities.values(), filters), [snap.entities, filters]);
+  const spacesKey = useMemo(() => spacesOf(snap.entities.values()).join(','), [snap.entities]);
+  // Keyed by content so the array keeps its identity across batches.
+  const spaces = useMemo(() => (spacesKey === '' ? [] : spacesKey.split(',').map(Number)), [spacesKey]);
 
   useEffect(() => {
     if (selectedId !== null && !snap.entities.has(selectedId)) setSelectedId(null);
@@ -138,10 +143,11 @@ export function InspectorProvider({ children }: { children: ReactNode }) {
       selectedTarget: targets.find((t) => t.targetId === selectedTargetId) ?? null,
       selectTarget,
       filteredEntities,
+      spaces,
       plane,
       setPlane: setPlaneOverride,
     }),
-    [entityStore, connectionStore, debugLog, client, filters, selectedId, targets, targetsLoading, targetsError, selectedTargetId, selectTarget, filteredEntities, plane],
+    [entityStore, connectionStore, debugLog, client, filters, selectedId, targets, targetsLoading, targetsError, selectedTargetId, selectTarget, filteredEntities, spaces, plane],
   );
 
   return <InspectorContext.Provider value={value}>{children}</InspectorContext.Provider>;

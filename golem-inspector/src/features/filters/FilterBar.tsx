@@ -4,13 +4,18 @@ import { legend } from '../../lib/entityTypes';
 import { EMPTY_FILTERS, type ClientFilters } from '../../lib/filters';
 
 export function FilterBar() {
-  const { filters, setFilters, client } = useInspector();
+  const { filters, setFilters, client, spaces } = useInspector();
   const { schema } = useEntityStore();
   const types = legend(schema);
+  // Space toggles appear only when the world uses several spaces (or a space
+  // filter is still active), so single-space games see no extra controls.
+  const spaceOptions = [...new Set([...spaces, ...filters.spaces])].sort((a, b) => a - b);
 
   const patch = (partial: Partial<ClientFilters>) => setFilters({ ...filters, ...partial });
   const toggleType = (name: string) =>
     patch({ typeNames: filters.typeNames.includes(name) ? filters.typeNames.filter((t) => t !== name) : [...filters.typeNames, name] });
+  const toggleSpace = (space: number) =>
+    patch({ spaces: filters.spaces.includes(space) ? filters.spaces.filter((s) => s !== space) : [...filters.spaces, space] });
 
   return (
     <div className="filter-bar">
@@ -41,6 +46,26 @@ export function FilterBar() {
           );
         })}
       </div>
+      {spaceOptions.length > 1 || filters.spaces.length > 0 ? (
+        <div className="filter-types" role="group" aria-label="Spaces">
+          {spaceOptions.map((space) => {
+            const selected = filters.spaces.includes(space);
+            const active = filters.spaces.length === 0 || selected;
+            return (
+              <button
+                key={space}
+                type="button"
+                className={`type-toggle${selected ? ' type-toggle--on' : ''}`}
+                style={{ opacity: active ? 1 : 0.35 }}
+                aria-pressed={selected}
+                onClick={() => toggleSpace(space)}
+              >
+                Space {space}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
       <div className="filter-actions">
         <button type="button" className="btn" onClick={() => setFilters(EMPTY_FILTERS)}>
           Clear

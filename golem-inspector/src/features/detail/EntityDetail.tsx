@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { useEntityStore, useSelectedEntity } from '../../hooks/useInspector';
+import { useEntityStore, useInspector, useSelectedEntity } from '../../hooks/useInspector';
 import { typeColor } from '../../lib/entityTypes';
 import { decodeEntity, readVarintField } from '../../protocol/decode';
 import { entityByTag } from '../../protocol/messages';
@@ -8,6 +8,7 @@ import { FieldTree } from './ValueTree';
 export function EntityDetail() {
   const entity = useSelectedEntity();
   const { schema } = useEntityStore();
+  const { spaces } = useInspector();
   const schemaEntity = entity ? entityByTag(schema, entity.typeTag) : undefined;
   // Only the selected entity is fully decoded, and only when it changes.
   const decoded = useMemo(
@@ -55,6 +56,12 @@ export function EntityDetail() {
                 {schemaEntity?.global ? <span className="field-badge">global</span> : null}
               </dd>
             </div>
+            {spaces.length > 1 || entity.space !== 0 ? (
+              <div>
+                <dt>Space</dt>
+                <dd className="mono">{entity.space}</dd>
+              </div>
+            ) : null}
             <div>
               <dt>Revision</dt>
               <dd className="mono">{revision.toString()}</dd>

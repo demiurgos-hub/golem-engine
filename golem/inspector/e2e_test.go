@@ -176,6 +176,25 @@ func TestEndToEndServerAgentHubBrowser(t *testing.T) {
 			break
 		}
 	}
+
+	// A space move reaches the browser through the hub.
+	if err := srv.Post(func(s *golem.Server) {
+		if err := s.SetEntitySpace(1, 2); err != nil {
+			t.Error(err)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		b, ok := read().(*wire.Batch)
+		if !ok || len(b.Moves) == 0 {
+			continue
+		}
+		if b.Moves[0] != (wire.SpaceMove{ID: 1, Space: 2}) {
+			t.Fatalf("browser move = %+v", b.Moves)
+		}
+		break
+	}
 	info := h.Targets()[0]
 	if info.ObserveState != "ready" || info.ViewerCount != 1 || info.EntityCount != 1 || info.Labels["map"] != "test" {
 		t.Fatalf("target info = %+v", info)

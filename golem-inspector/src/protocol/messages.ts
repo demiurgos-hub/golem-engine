@@ -58,6 +58,8 @@ export interface EntityState {
   id: number;
   typeTag: number;
   state: Uint8Array;
+  /** The entity's space; absent or 0 is the default space. */
+  space?: number;
 }
 
 export interface EntityDelta {
@@ -73,13 +75,19 @@ export interface Removal {
   revision: number;
 }
 
+/** An entity's new space; spawns carry theirs in EntityState instead. */
+export interface SpaceMove {
+  id: number;
+  space: number;
+}
+
 export type Message =
   | { type: 'register'; targetId: string; labels: Record<string, string>; epoch: number; engineVersion: string; schema: Schema | null; tickRate: number }
   | { type: 'observeStatus'; state: ObserveState; entityCount: number; epoch: number }
   | { type: 'snapshotBegin'; targetId: string; epoch: number; seq: number; tick: number; entityCount: number }
   | { type: 'snapshotChunk'; targetId: string; epoch: number; seq: number; entities: EntityState[] }
   | { type: 'snapshotEnd'; targetId: string; epoch: number; seq: number }
-  | { type: 'batch'; targetId: string; epoch: number; seq: number; tick: number; spawns: EntityState[]; deltas: EntityDelta[]; removals: Removal[] }
+  | { type: 'batch'; targetId: string; epoch: number; seq: number; tick: number; spawns: EntityState[]; deltas: EntityDelta[]; removals: Removal[]; moves: SpaceMove[] }
   | { type: 'ping'; clientTime: number }
   | { type: 'pong'; clientTime: number }
   | { type: 'observeStart' }
@@ -217,12 +225,13 @@ export function decodeSchema(r: Reader): Schema {
 }
 
 function decodeEntityState(r: Reader): EntityState {
-  const e: EntityState = { id: 0, typeTag: 0, state: new Uint8Array() };
+  const e: EntityState = { id: 0, typeTag: 0, state: new Uint8Array(), space: 0 };
   while (!r.done) {
     const { field: f, wire: w } = r.tag();
     if (f === 1) e.id = i64(r, f, w);
     else if (f === 2) e.typeTag = u(r, f, w);
     else if (f === 3) { r.expect(f, w, WIRE_BYTES); e.state = r.bytes(); }
+    else if (f === 4) e.space = u(r, f, w);
     else r.skip(w);
   }
   return e;
@@ -326,7 +335,7 @@ function decodeBody(type: MessageType, r: Reader): Message {
       return m;
     }
     case 'batch': {
-      const m: MessageOf<'batch'> = { type, targetId: '', epoch: 0, seq: 0, tick: 0, spawns: [], deltas: [], removals: [] };
+      const m: MessageOf<'batch'> = { type, targetId: '', epoch: 0, seq: 0, tick: 0, spawns: [], deltas: [], removals: [], moves: [] };
       while (!r.done) {
         const { field: f, wire: w } = r.tag();
         switch (f) {
@@ -346,6 +355,18 @@ function decodeBody(type: MessageType, r: Reader): Message {
               else rr.skip(t.wire);
             }
             m.removals.push(rm);
+            break;
+          }
+          case 8: {
+            const mr = sub(r, f, w);
+            const mv: SpaceMove = { id: 0, space: 0 };
+            while (!mr.done) {
+              const t = mr.tag();
+              if (t.field === 1) mv.id = i64(mr, t.field, t.wire);
+              else if (t.field === 2) mv.space = u(mr, t.field, t.wire);
+              else mr.skip(t.wire);
+            }
+            m.moves.push(mv);
             break;
           }
           default: r.skip(w);

@@ -125,6 +125,12 @@ func fixtureMessages() []struct {
 			Spawns:   []EntityState{{ID: 43, TypeTag: 3, State: []byte{8, 43}}},
 			Deltas:   []EntityDelta{{ID: 42, TypeTag: 1, Revision: 4, Mask: mask, Delta: delta}},
 			Removals: []Removal{{ID: 41, Revision: 9}}}},
+		{"snapshot_chunk_spaces", &SnapshotChunk{TargetID: "cave-7", Epoch: 2, Seq: 2, Entities: []EntityState{
+			{ID: 42, TypeTag: 1, State: actorState()},
+			{ID: 43, TypeTag: 3, State: []byte{8, 43}, Space: 3}}}},
+		{"batch_spaces", &Batch{TargetID: "cave-7", Epoch: 2, Seq: 5, Tick: 906,
+			Spawns: []EntityState{{ID: 44, TypeTag: 3, State: []byte{8, 44}, Space: 2}},
+			Moves:  []SpaceMove{{ID: 42, Space: 3}, {ID: 43, Space: 0}}}},
 		{"ping", &Ping{ClientTime: 1700000000000}},
 		{"pong", &Pong{ClientTime: 1700000000000}},
 		{"observe_start", &ObserveStart{}},
@@ -334,5 +340,30 @@ func TestEncodeBatchFrameMatchesEncode(t *testing.T) {
 	want.Seq = 77
 	if !reflect.DeepEqual(got, &want) {
 		t.Fatalf("got %#v want %#v", got, &want)
+	}
+}
+
+// TestSpaceZeroIsNotEncoded keeps single-space traffic byte-identical to the
+// encoding before spaces existed: space 0 and empty moves add no bytes.
+func TestSpaceZeroIsNotEncoded(t *testing.T) {
+	e := EntityState{ID: 42, TypeTag: 1, State: actorState()}
+	legacy := &pb.Writer{}
+	legacy.Tag(1, 0).Int64(42)
+	legacy.Tag(2, 0).Uint32(1)
+	legacy.Tag(3, 2).Bytes(actorState())
+	if !bytes.Equal(e.encode(), legacy.Finish()) {
+		t.Fatal("space 0 changed the EntityState encoding")
+	}
+	e.Space = 7
+	if got := len(e.encode()); got > e.EncodedSize() {
+		t.Fatalf("encoded %d bytes, EncodedSize %d", got, e.EncodedSize())
+	}
+	b := &Batch{Epoch: 1, Seq: 1, Moves: []SpaceMove{{ID: 5}}}
+	got, err := Decode(Encode(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := got.(*Batch).Moves; len(m) != 1 || m[0] != (SpaceMove{ID: 5}) {
+		t.Fatalf("move to space 0 = %+v", m)
 	}
 }

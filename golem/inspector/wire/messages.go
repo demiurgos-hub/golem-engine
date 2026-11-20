@@ -92,13 +92,16 @@ type Batch struct {
 	Spawns   []EntityState `json:"spawns,omitempty"`
 	Deltas   []EntityDelta `json:"deltas,omitempty"`
 	Removals []Removal     `json:"removals,omitempty"`
+	Moves    []SpaceMove   `json:"moves,omitempty"`
 }
 
-// EntityState is one entity's full state; State is the game's XState message.
+// EntityState is one entity's full state; State is the game's XState message
+// and Space the entity's space (0 is the default space and is not encoded).
 type EntityState struct {
 	ID      int64  `json:"id"`
 	TypeTag uint32 `json:"typeTag"`
 	State   []byte `json:"state"`
+	Space   uint32 `json:"space,omitempty"`
 }
 
 // EntityDelta is one entity's change; Delta is the game's XDelta message and
@@ -115,6 +118,12 @@ type EntityDelta struct {
 type Removal struct {
 	ID       int64  `json:"id"`
 	Revision uint64 `json:"revision"`
+}
+
+// SpaceMove reports that an entity is now in Space.
+type SpaceMove struct {
+	ID    int64  `json:"id"`
+	Space uint32 `json:"space"`
 }
 
 // Ping is a heartbeat; the hub answers with Pong echoing ClientTime.
@@ -542,6 +551,22 @@ func decodeBatch(r *reader) *Batch {
 			}
 			r.adopt(sub)
 			v.Removals = append(v.Removals, rm)
+		case 8:
+			sub := newReader(r.bytesField(f, wt))
+			mv := SpaceMove{}
+			for !sub.done() {
+				ef, ewt := sub.tag()
+				switch ef {
+				case 1:
+					mv.ID = sub.int64Field(ef, ewt)
+				case 2:
+					mv.Space = sub.uint32Field(ef, ewt)
+				default:
+					sub.skip(ewt)
+				}
+			}
+			r.adopt(sub)
+			v.Moves = append(v.Moves, mv)
 		default:
 			r.skip(wt)
 		}
@@ -561,6 +586,8 @@ func decodeEntityState(parent *reader, buf []byte) EntityState {
 			e.TypeTag = r.uint32Field(f, wt)
 		case 3:
 			e.State = r.bytesField(f, wt)
+		case 4:
+			e.Space = r.uint32Field(f, wt)
 		default:
 			r.skip(wt)
 		}
@@ -660,6 +687,12 @@ func (m *Batch) encodeBody(w *pb.Writer) {
 		putUint(e, 2, m.Removals[i].Revision)
 		putMessage(w, 7, e.Finish())
 	}
+	for i := range m.Moves {
+		e := &pb.Writer{}
+		putInt(e, 1, m.Moves[i].ID)
+		putUint(e, 2, uint64(m.Moves[i].Space))
+		putMessage(w, 8, e.Finish())
+	}
 }
 
 func (e *EntityState) encode() []byte {
@@ -667,12 +700,13 @@ func (e *EntityState) encode() []byte {
 	putInt(w, 1, e.ID)
 	putUint(w, 2, uint64(e.TypeTag))
 	putBytes(w, 3, e.State)
+	putUint(w, 4, uint64(e.Space))
 	return w.Finish()
 }
 
-// EncodedSize returns the encoded size of e inside a Batch or SnapshotChunk,
-// including its field key and length prefix; used to split frames.
-func (e *EntityState) EncodedSize() int { return len(e.State) + 32 }
+// EncodedSize returns an upper bound for e's encoded size inside a Batch or
+// SnapshotChunk, including its field key and length prefix; used to split frames.
+func (e *EntityState) EncodedSize() int { return len(e.State) + 40 }
 
 func (e *EntityDelta) encode() []byte {
 	w := &pb.Writer{}

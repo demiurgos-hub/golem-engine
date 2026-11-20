@@ -9,6 +9,6 @@ alwaysApply: false
 
 Private npm package (React 19, Vite, Vitest) built into `cmd/golem-inspector/web/dist`. It knows no game: entity types, fields, colors and map plane come from the `Schema` the hub forwards. `src/protocol/` mirrors `golem/inspector/wire` (bigint 64-bit varints, same merge semantics) and is verified against the Go golden fixtures; keep both in lockstep.
 
-Filters are client-side and never re-subscribe. Only the selected entity is fully decoded; list and map read positions. The UI is read-only. It loads no third-party resources (the hub sends a same-origin CSP). Do not commit `dist/` output.
+Filters are client-side and never re-subscribe. Spaces (`EntityRecord.space`) share coordinates: the space filter, list badge, detail row and map space selector (lowest space by default, plus "All") appear only when the world has more than one space, so space-0-only worlds look unchanged. Only the selected entity is fully decoded; list and map read positions. The UI is read-only. It loads no third-party resources (the hub sends a same-origin CSP). Do not commit `dist/` output.
 
 Run `npm test`, `npm run typecheck` and `npm run build` in `golem-inspector/`.
