@@ -14,13 +14,15 @@ import (
 // fingerprint should be the generated SchemaFingerprint constant from the
 // consumer's generated code (e.g. synced.SchemaFingerprint). It is embedded in
 // the file header and validated on Load to detect schema changes between saves.
+// Each entity's space is recorded; the file keeps snapshot format version 1
+// while every entity is in space 0.
 func (s *Server) SaveSnapshot(fingerprint, path string) <-chan error {
-	return snapshot.Save(s.reg.All(), fingerprint, path)
+	return snapshot.SaveSpaced(s.reg.AppendSpaced(nil), fingerprint, path)
 }
 
 // LoadSnapshot reads a snapshot file, restores all entities via the provided
-// restore function, registers them with their original IDs, and advances the
-// entity ID counter past the highest restored ID.
+// restore function, registers them with their original IDs in their recorded
+// space, and advances the entity ID counter past the highest restored ID.
 //
 // restore should be the generated synced.RestoreEntity function. Records whose
 // type is unknown to restore (it returns a non-nil error) are silently skipped—
@@ -42,7 +44,7 @@ func (s *Server) LoadSnapshot(path, fingerprint string, restore func(snapshot.Re
 			// Unknown type — entity was removed from the schema; skip it.
 			continue
 		}
-		if err := s.CreateEntity(entity); err != nil {
+		if err := s.CreateEntityIn(rec.Space, entity); err != nil {
 			return fmt.Errorf("snapshot: restoring entity %d (%s): %w", rec.EntityID, rec.TypeName, err)
 		}
 		if rec.EntityID > maxID {

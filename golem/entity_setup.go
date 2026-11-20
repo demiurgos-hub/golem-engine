@@ -26,8 +26,15 @@ type EntitySetup func(Entity) (rollback func() error, err error)
 // frames and restoration. Setup must not advance simulation, change the entity
 // identity, publish it itself, or mutate unrelated entities. Unattached resources
 // acquired before a panic remain the callback's responsibility. Assigned IDs are
-// consumed even on failure. Existing CreateEntity behavior is unchanged.
-func (s *Server) CreateEntityWithSetup(e Entity, setup EntitySetup, owner ...int64) (err error) {
+// consumed even on failure. Existing CreateEntity behavior is unchanged. The
+// entity is placed in space 0; use CreateEntityWithSetupIn for another space.
+func (s *Server) CreateEntityWithSetup(e Entity, setup EntitySetup, owner ...int64) error {
+	return s.CreateEntityWithSetupIn(0, e, setup, owner...)
+}
+
+// CreateEntityWithSetupIn is CreateEntityWithSetup with the entity placed in
+// space. EntitySpace resolves the provisional entity's space during setup.
+func (s *Server) CreateEntityWithSetupIn(space SpaceID, e Entity, setup EntitySetup, owner ...int64) (err error) {
 	if len(owner) > 1 {
 		return fmt.Errorf("golem: CreateEntityWithSetup expects 0 or 1 owner session ID, got %d", len(owner))
 	}
@@ -47,7 +54,7 @@ func (s *Server) CreateEntityWithSetup(e Entity, setup EntitySetup, owner ...int
 	if binder, ok := e.(ServerBinder); ok {
 		binder.BindServer(s)
 	}
-	if err := s.reg.AddProvisional(e, owner...); err != nil {
+	if err := s.reg.AddProvisionalIn(space, e, owner...); err != nil {
 		return err
 	}
 	id := e.EntityID()

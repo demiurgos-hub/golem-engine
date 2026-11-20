@@ -16,9 +16,11 @@ type AvatarOptions struct {
 	FOIRadius float64
 	// FOIMargin is the hysteresis margin passed to AssignFOI when FOIRadius > 0.
 	FOIMargin float64
+	// Space is the space the avatar is created in. The zero value is space 0.
+	Space SpaceID
 }
 
-// SpawnAvatar registers e as sess's avatar: CreateEntity(e, sess.ID), optional FOI
+// SpawnAvatar registers e as sess's avatar: CreateEntityIn(opts.Space, e, sess.ID), optional FOI
 // when opts.FOIRadius > 0, and session↔entity avatar indexes.
 //
 // Duplicate calls for a session that already has a live avatar return an error;
@@ -39,7 +41,7 @@ func (s *Server) SpawnAvatar(sess *Session, e Entity, opts AvatarOptions) error 
 		return err
 	}
 
-	if err := s.CreateEntity(e, sess.ID); err != nil {
+	if err := s.CreateEntityIn(opts.Space, e, sess.ID); err != nil {
 		s.releaseAvatarReservation(sess.ID)
 		return err
 	}

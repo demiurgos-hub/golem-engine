@@ -3,6 +3,7 @@ package registry
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 // FlushResult holds the per-tick output of FlushAll, categorised by lifecycle event.
@@ -15,6 +16,10 @@ type FlushResult struct {
 	Deltas           [][]byte // FlushUpdate for dirty pre-existing entities
 	Removals         []int64  // IDs removed since last flush
 	RemovalRevisions []uint64 // removal revisions corresponding 1:1 with Removals
+	// Moves lists published entities whose space changed since the last flush,
+	// one coalesced entry per entity in first-move order. Entities spawned or
+	// removed in the same window and net no-op moves are omitted.
+	Moves []SpaceMove
 }
 
 // Registry is a thread-safe container for all live entities in the game world.
@@ -25,7 +30,11 @@ type Registry struct {
 	mu                sync.RWMutex
 	entities          map[int64]Entity
 	provisional       map[int64]Entity
-	owners            map[int64]int64 // entityID → ownerSessionID
+	owners            map[int64]int64   // entityID → ownerSessionID
+	spaces            map[int64]SpaceID // entityID → space; non-zero entries only
+	spaceCount        atomic.Int64      // len(spaces), readable without the mutex
+	moves             []SpaceMove       // pending moves since the last flush
+	moveIndex         map[int64]int     // entityID → index in moves
 	spawned           []Entity
 	despawned         []int64
 	despawnedRevision []uint64
@@ -37,6 +46,8 @@ func NewRegistry() *Registry {
 		entities:    make(map[int64]Entity),
 		provisional: make(map[int64]Entity),
 		owners:      make(map[int64]int64),
+		spaces:      make(map[int64]SpaceID),
+		moveIndex:   make(map[int64]int),
 	}
 }
 
@@ -67,15 +78,25 @@ func (r *Registry) AddOwned(e Entity, ownerSessionID int64) error {
 // flush, but does not call OnSpawn. Server uses this to register colliders
 // between successful insertion and the spawn hook.
 func (r *Registry) AddWithoutSpawn(e Entity) error {
-	return r.insert(e, 0, false)
+	return r.insert(0, e, 0, false)
 }
 
 // AddOwnedWithoutSpawn is AddOwned without calling OnSpawn.
 func (r *Registry) AddOwnedWithoutSpawn(e Entity, ownerSessionID int64) error {
-	return r.insert(e, ownerSessionID, true)
+	return r.insert(0, e, ownerSessionID, true)
 }
 
-func (r *Registry) insert(e Entity, ownerSessionID int64, hasOwner bool) error {
+// AddWithoutSpawnIn is AddWithoutSpawn with the entity placed in space.
+func (r *Registry) AddWithoutSpawnIn(space SpaceID, e Entity) error {
+	return r.insert(space, e, 0, false)
+}
+
+// AddOwnedWithoutSpawnIn is AddOwnedWithoutSpawn with the entity placed in space.
+func (r *Registry) AddOwnedWithoutSpawnIn(space SpaceID, e Entity, ownerSessionID int64) error {
+	return r.insert(space, e, ownerSessionID, true)
+}
+
+func (r *Registry) insert(space SpaceID, e Entity, ownerSessionID int64, hasOwner bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	id := e.EntityID()
@@ -89,6 +110,7 @@ func (r *Registry) insert(e Entity, ownerSessionID int64, hasOwner bool) error {
 	if hasOwner {
 		r.owners[id] = ownerSessionID
 	}
+	r.setSpaceLocked(id, space)
 	r.spawned = append(r.spawned, e)
 	return nil
 }
@@ -128,13 +150,15 @@ func (r *Registry) SetOwner(entityID, sessionID int64) bool {
 }
 
 // DeleteEntity unregisters an entity by ID and records it for removal broadcast.
-// Also cleans up any ownership entry. If the entity implements Remover,
-// OnRemove is called after deletion. No-op if the ID doesn't exist.
+// Also cleans up any ownership and space entry and drops a pending space move.
+// If the entity implements Remover, OnRemove is called after deletion. No-op if
+// the ID doesn't exist.
 func (r *Registry) DeleteEntity(id int64) {
 	r.mu.Lock()
 	if _, pending := r.provisional[id]; pending {
 		delete(r.provisional, id)
 		delete(r.owners, id)
+		r.setSpaceLocked(id, 0)
 		r.mu.Unlock()
 		return
 	}
@@ -142,6 +166,8 @@ func (r *Registry) DeleteEntity(id int64) {
 	if exists {
 		delete(r.entities, id)
 		delete(r.owners, id)
+		r.setSpaceLocked(id, 0)
+		r.dropMoveLocked(id)
 		r.despawned = append(r.despawned, id)
 		r.despawnedRevision = append(r.despawnedRevision, removalRevision(e))
 	}
@@ -195,8 +221,8 @@ func (r *Registry) TickAll(dt float64) {
 	}
 }
 
-// FlushAll collects all pending lifecycle events and dirty-field deltas into
-// a FlushResult, then resets the tracking state.
+// FlushAll collects all pending lifecycle events, space moves and dirty-field
+// deltas into a FlushResult, then resets the tracking state.
 // Spawned entities get FullUpdate (skipping FlushUpdate to avoid redundancy).
 // Pre-existing entities get FlushUpdate as before.
 func (r *Registry) FlushAll() (FlushResult, error) {
@@ -234,7 +260,14 @@ func (r *Registry) FlushAll() (FlushResult, error) {
 
 	result.Removals = r.despawned
 	result.RemovalRevisions = r.despawnedRevision
+	for _, m := range r.moves {
+		// A spawn already carries the final space; deletions leave tombstones.
+		if m.From != m.To && !spawnedIDs[m.ID] {
+			result.Moves = append(result.Moves, m)
+		}
+	}
 
+	r.resetMovesLocked()
 	r.spawned = r.spawned[:0]
 	r.despawned = r.despawned[:0]
 	r.despawnedRevision = r.despawnedRevision[:0]

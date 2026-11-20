@@ -42,7 +42,7 @@ func (s *Server) SaveContentSnapshot(fingerprint, contentHash, manifestPath stri
 	if err := s.entitySetupAllowed(); err != nil {
 		return fail(err)
 	}
-	data, err := snapshot.Capture(s.reg.All(), fingerprint)
+	data, err := snapshot.CaptureSpaced(s.reg.AppendSpaced(nil), fingerprint)
 	if err != nil {
 		return fail(err)
 	}

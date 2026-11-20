@@ -2,20 +2,25 @@ package registry
 
 import "fmt"
 
-// RestoreEntry pairs an entity with its optional command owner for atomic recovery.
+// RestoreEntry pairs an entity with its optional command owner and its space
+// for atomic recovery.
 type RestoreEntry struct {
 	Entity Entity
 	Owner  int64
+	Space  SpaceID
 }
 
-// ReplaceWithoutHooks validates and replaces every entity in one critical section.
-// It queues complete spawns and removals for the next flush without invoking
+// ReplaceWithoutHooks validates and replaces every entity, owner and space in
+// one critical section and drops pending space moves, since every restored
+// entity is respawned in its final space. It queues complete spawns and
+// removals for the next flush without invoking
 // OnSpawn/OnRemove. Recovery hosts must quiesce gameplay and connected clients,
 // restore dependent systems, and dispatch their explicit restoration hooks after
 // the complete world is ready. Invalid entries leave the registry unchanged.
 func (r *Registry) ReplaceWithoutHooks(entries []RestoreEntry) error {
 	entities := make(map[int64]Entity, len(entries))
 	owners := make(map[int64]int64)
+	spaces := make(map[int64]SpaceID)
 	spawned := make([]Entity, 0, len(entries))
 	for _, entry := range entries {
 		if entry.Entity == nil {
@@ -29,6 +34,9 @@ func (r *Registry) ReplaceWithoutHooks(entries []RestoreEntry) error {
 		spawned = append(spawned, entry.Entity)
 		if entry.Owner != 0 {
 			owners[id] = entry.Owner
+		}
+		if entry.Space != 0 {
+			spaces[id] = entry.Space
 		}
 	}
 	r.mu.Lock()
@@ -45,6 +53,9 @@ func (r *Registry) ReplaceWithoutHooks(entries []RestoreEntry) error {
 		}
 	}
 	r.entities, r.owners, r.spawned = entities, owners, spawned
+	r.spaces = spaces
+	r.spaceCount.Store(int64(len(spaces)))
+	r.resetMovesLocked()
 	r.despawned, r.despawnedRevision = removed, revisions
 	return nil
 }

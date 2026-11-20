@@ -408,8 +408,15 @@ type ServerBinder interface {
 //
 // With no extra owner arguments the entity is unowned (e.g. world NPC); with
 // one argument that value is the owning session ID for command authority.
-// More than one owner argument is invalid.
+// More than one owner argument is invalid. The entity is placed in space 0;
+// use CreateEntityIn to place it in another space.
 func (s *Server) CreateEntity(e Entity, owner ...int64) error {
+	return s.CreateEntityIn(0, e, owner...)
+}
+
+// CreateEntityIn is CreateEntity with the entity placed in space. EntitySpace
+// reports the space as soon as the entity is registered, including in OnSpawn.
+func (s *Server) CreateEntityIn(space SpaceID, e Entity, owner ...int64) error {
 	if len(owner) > 1 {
 		return fmt.Errorf("golem: CreateEntity expects 0 or 1 owner session ID, got %d", len(owner))
 	}
@@ -428,9 +435,9 @@ func (s *Server) CreateEntity(e Entity, owner ...int64) error {
 
 	var err error
 	if len(owner) == 1 {
-		err = s.reg.AddOwnedWithoutSpawn(e, owner[0])
+		err = s.reg.AddOwnedWithoutSpawnIn(space, e, owner[0])
 	} else {
-		err = s.reg.AddWithoutSpawn(e)
+		err = s.reg.AddWithoutSpawnIn(space, e)
 	}
 	if err != nil {
 		return err

@@ -55,6 +55,7 @@ type PhysicsGeometryCheckpoint struct {
 }
 
 // PhysicsEntityCheckpoint contains authoritative serialized entity state.
+// Record.Space keeps the entity's space and is omitted from JSON in space 0.
 type PhysicsEntityCheckpoint struct {
 	Record snapshot.Record
 	Owner  int64
@@ -135,7 +136,8 @@ func (s *Server) CapturePhysicsCheckpoint(options PhysicsCheckpointOptions) (Phy
 			return PhysicsCheckpoint{}, e
 		}
 		owner, _ := s.Owner(entity.EntityID())
-		c.Entities = append(c.Entities, PhysicsEntityCheckpoint{Record: snapshot.Record{EntityID: entity.EntityID(), TypeName: entity.TypeName(), StateData: append([]byte(nil), data...)}, Owner: owner})
+		space, _ := s.reg.Space(entity.EntityID())
+		c.Entities = append(c.Entities, PhysicsEntityCheckpoint{Record: snapshot.Record{EntityID: entity.EntityID(), TypeName: entity.TypeName(), StateData: append([]byte(nil), data...), Space: space}, Owner: owner})
 	}
 	for _, id := range ps.ordered() {
 		a := ps.agents[id]
@@ -465,7 +467,7 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 			binder.BindServer(s)
 		}
 		entities[entity.EntityID()] = entity
-		entries = append(entries, registry.RestoreEntry{Entity: entity, Owner: record.Owner})
+		entries = append(entries, registry.RestoreEntry{Entity: entity, Owner: record.Owner, Space: record.Record.Space})
 		maxID = max(maxID, entity.EntityID())
 	}
 	agents := map[int64]*physicsAttachment{}
