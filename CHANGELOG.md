@@ -151,6 +151,8 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- Generated Go, JS and C# entity managers no longer lose datagram changes for an entity whose spawn is still in flight. A compact state record can overtake the reliable-stream full state that spawns its entity; the client used to drop it while still acknowledging the packet, so those fields stayed stale until they changed again. Managers now hold such records (at most 256, oldest dropped first) and apply the ones newer than the spawn right after it; removal and `Clear` discard them. Re-run `golem-bake` to pick this up.
+
 - Datagram clients leave a late entity state packet unacknowledged, so the server resends changes that the client would otherwise discard as stale.
 
 - Unity transport callbacks no longer create dispatcher GameObjects from background threads during startup or Play Mode teardown. Main-thread bootstrap owns the dispatcher; disabled/destroyed dispatchers discard queued and late callbacks before a fresh lifetime begins.

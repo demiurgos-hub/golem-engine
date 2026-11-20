@@ -12,10 +12,17 @@ type SyncedEntity interface {
 	Revision() uint64
 }
 
+// maxHeldCompactUpdates bounds compact records held for entities whose spawn
+// has not arrived yet.
+const maxHeldCompactUpdates = 256
+
 // EntityManager manages synced entities and dispatches incoming EntityUpdate messages.
 type EntityManager struct {
 	entities      map[int64]SyncedEntity
 	lastRevisions map[int64]uint64
+	heldCompact   map[int64][][]byte // compact records that arrived before their entity's spawn
+	heldOrder     []int64            // entity IDs in the order their first record was held
+	heldCount     int
 	onSpawn       func(SyncedEntity)
 	onUpdate      func(SyncedEntity)
 	onRemove      func(int64)
@@ -71,6 +78,7 @@ func (m *EntityManager) Clear() {
 		m.removeEntity(id)
 	}
 	clear(m.lastRevisions)
+	m.dropHeldCompact()
 }
 {{range .Entities}}
 
@@ -114,10 +122,14 @@ func (m *EntityManager) ApplyEntityUpdate(update *EntityUpdate) {
 		}
 		m.lastRevisions[id] = revision
 		m.removeEntity(id)
+		m.dropHeldCompactFor(id)
 	}
 }
 
-// ApplyCompactUpdate processes a compact datagram state record for a known entity.
+// ApplyCompactUpdate processes a compact datagram state record. A record for an
+// entity that is not known yet is held until its full state arrives: datagrams
+// can overtake the reliable stream that carries the spawn. Held records newer
+// than the spawn are applied right after it.
 func (m *EntityManager) ApplyCompactUpdate(frame []byte) {
 	r := pb.NewReader(frame)
 	id := r.Int64()
@@ -128,6 +140,7 @@ func (m *EntityManager) ApplyCompactUpdate(frame []byte) {
 	}
 	entity := m.entities[id]
 	if entity == nil {
+		m.holdCompact(id, frame)
 		return
 	}
 	body := r.Remaining()
@@ -156,6 +169,61 @@ func (m *EntityManager) removeEntity(id int64) {
 	}
 	if m.onRemove != nil {
 		m.onRemove(id)
+	}
+}
+
+func (m *EntityManager) holdCompact(id int64, frame []byte) {
+	if m.heldCompact == nil {
+		m.heldCompact = make(map[int64][][]byte)
+	}
+	for m.heldCount >= maxHeldCompactUpdates && len(m.heldOrder) > 0 {
+		oldest := m.heldOrder[0]
+		m.heldOrder = m.heldOrder[1:]
+		m.dropHeldCompactFor(oldest)
+	}
+	if _, ok := m.heldCompact[id]; !ok {
+		if len(m.heldOrder) >= 2*maxHeldCompactUpdates {
+			// Forget IDs whose records were already replayed or dropped.
+			live := m.heldOrder[:0]
+			for _, heldID := range m.heldOrder {
+				if _, ok := m.heldCompact[heldID]; ok {
+					live = append(live, heldID)
+				}
+			}
+			m.heldOrder = live
+		}
+		m.heldOrder = append(m.heldOrder, id)
+	}
+	m.heldCompact[id] = append(m.heldCompact[id], append([]byte(nil), frame...))
+	m.heldCount++
+}
+
+func (m *EntityManager) dropHeldCompactFor(id int64) {
+	if held, ok := m.heldCompact[id]; ok {
+		m.heldCount -= len(held)
+		delete(m.heldCompact, id)
+		if m.heldCount == 0 {
+			m.heldOrder = m.heldOrder[:0]
+		}
+	}
+}
+
+func (m *EntityManager) dropHeldCompact() {
+	clear(m.heldCompact)
+	m.heldOrder = m.heldOrder[:0]
+	m.heldCount = 0
+}
+
+// replayHeldCompact applies records held for a newly spawned entity; the
+// revision check skips those older than its full state.
+func (m *EntityManager) replayHeldCompact(id int64) {
+	held, ok := m.heldCompact[id]
+	if !ok {
+		return
+	}
+	m.dropHeldCompactFor(id)
+	for _, frame := range held {
+		m.ApplyCompactUpdate(frame)
 	}
 }
 
@@ -189,6 +257,7 @@ func (m *EntityManager) applyState{{.Name}}(st *{{.Name}}State) {
 		if m.onSpawn != nil {
 			m.onSpawn(entity)
 		}
+		m.replayHeldCompact(id)
 		return
 	}
 	if m.onUpdate != nil {

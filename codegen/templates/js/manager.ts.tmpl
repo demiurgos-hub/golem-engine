@@ -10,10 +10,16 @@ import { Synced{{.Name}} } from "./{{.Name}}Synced.js";
 {{end}}
 export type SyncedEntity = {{if .Entities}}{{range $i, $e := .Entities}}{{if $i}} | {{end}}Synced{{$e.Name}}{{end}}{{else}}never{{end}};
 
+/** Bounds compact records held for entities whose spawn has not arrived yet. */
+const maxHeldCompactUpdates = 256;
+
 /** Manages all synced entities and dispatches incoming EntityUpdate messages. */
 export class EntityManager {
   private _entities = new Map<number, SyncedEntity>();
   private _lastRevisions = new Map<number, number>();
+  /** Compact records that arrived before their entity's spawn, in hold order. */
+  private _heldCompact = new Map<number, Uint8Array[]>();
+  private _heldCount = 0;
   private _onSpawn = new Set<(entity: SyncedEntity) => void>();
   private _onUpdate = new Set<(entity: SyncedEntity) => void>();
   private _onRemove = new Set<(entityId: number) => void>();
@@ -65,6 +71,8 @@ export class EntityManager {
       this._removeEntity(id);
     }
     this._lastRevisions.clear();
+    this._heldCompact.clear();
+    this._heldCount = 0;
   }
 {{range .Entities}}
   /**
@@ -95,10 +103,15 @@ export class EntityManager {
       if (this._isStale(id, revision)) return;
       this._lastRevisions.set(id, revision);
       this._removeEntity(id);
+      this._dropHeldCompact(id);
     }
   }
 
-  /** Process a compact datagram state record for an already-known entity. */
+  /**
+   * Process a compact datagram state record. A record for an entity that is not
+   * known yet is held until its full state arrives, because datagrams can
+   * overtake the reliable stream that carries the spawn.
+   */
   applyCompactUpdate(frame: Uint8Array) {
     const r = new PbReader(frame);
     const id = Number(r.int64());
@@ -106,7 +119,10 @@ export class EntityManager {
     const mask = Number(r.uint64());
     if (mask === 0 || this._isStale(id, revision)) return;
     const entity = this._entities.get(id);
-    if (!entity) return;
+    if (!entity) {
+      this._holdCompact(id, frame);
+      return;
+    }
     const body = r.remaining();
 {{- range .Entities}}
     if (entity instanceof Synced{{.Name}}) {
@@ -124,6 +140,36 @@ export class EntityManager {
     if (!removed || !this._entities.delete(id)) return;
     (removed as EntityLifecycle).onRemove?.();
     for (const fn of this._onRemove) fn(id);
+  }
+
+  private _holdCompact(id: number, frame: Uint8Array): void {
+    while (this._heldCount >= maxHeldCompactUpdates) {
+      const oldest = this._heldCompact.keys().next();
+      if (oldest.done) break;
+      this._dropHeldCompact(oldest.value);
+    }
+    let held = this._heldCompact.get(id);
+    if (!held) {
+      held = [];
+      this._heldCompact.set(id, held);
+    }
+    held.push(frame.slice());
+    this._heldCount++;
+  }
+
+  private _dropHeldCompact(id: number): void {
+    const held = this._heldCompact.get(id);
+    if (!held) return;
+    this._heldCount -= held.length;
+    this._heldCompact.delete(id);
+  }
+
+  /** Apply records held for a newly spawned entity; older ones fail the revision check. */
+  private _replayHeldCompact(id: number): void {
+    const held = this._heldCompact.get(id);
+    if (!held) return;
+    this._dropHeldCompact(id);
+    for (const frame of held) this.applyCompactUpdate(frame);
   }
 
   private _isStale(entityId: number, revision: number): boolean {
@@ -146,6 +192,7 @@ export class EntityManager {
     if (isNew) {
       (e as EntityLifecycle).onSpawn?.();
       for (const fn of this._onSpawn) fn(e!);
+      this._replayHeldCompact(id);
     } else {
       for (const fn of this._onUpdate) fn(e!);
     }

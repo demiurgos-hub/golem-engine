@@ -16,6 +16,11 @@ namespace {{.GoPackage}}
     {
         private readonly Dictionary<long, object> _entities = new Dictionary<long, object>();
         private readonly Dictionary<long, ulong> _lastRevisions = new Dictionary<long, ulong>();
+        // Compact records that arrived before their entity's spawn, bounded by MaxHeldCompactUpdates.
+        private const int MaxHeldCompactUpdates = 256;
+        private readonly Dictionary<long, List<byte[]>> _heldCompact = new Dictionary<long, List<byte[]>>();
+        private readonly Queue<long> _heldOrder = new Queue<long>();
+        private int _heldCount;
         private Action<object> _onSpawn;
         private Action<object> _onUpdate;
         private Action<long> _onRemove;
@@ -51,6 +56,9 @@ namespace {{.GoPackage}}
                 RemoveEntity(id);
             }
             _lastRevisions.Clear();
+            _heldCompact.Clear();
+            _heldOrder.Clear();
+            _heldCount = 0;
         }
 {{range .Entities}}
         public void Register{{.Name}}(Func<long, Synced{{.Name}}> factory) { _{{.LowerName}}Factory = factory; }
@@ -82,9 +90,14 @@ namespace {{.GoPackage}}
                 if (IsStale(id, revision)) return;
                 _lastRevisions[id] = revision;
                 RemoveEntity(id);
+                DropHeldCompact(id);
             }
         }
 
+        /// <summary>
+        /// Apply a compact datagram state record. A record for an entity that is not known yet is held until
+        /// its full state arrives, because datagrams can overtake the reliable stream that carries the spawn.
+        /// </summary>
         public void ApplyCompactUpdate(byte[] frame)
         {
             var reader = new PbReader(frame);
@@ -92,7 +105,11 @@ namespace {{.GoPackage}}
             var revision = reader.Uint64();
             var mask = reader.Uint64();
             if (mask == 0 || IsStale(id, revision)) return;
-            if (!_entities.TryGetValue(id, out var existing)) return;
+            if (!_entities.TryGetValue(id, out var existing))
+            {
+                HoldCompact(id, frame);
+                return;
+            }
             var body = reader.Remaining();
 {{range .Entities}}
             if (existing is Synced{{.Name}})
@@ -111,6 +128,51 @@ namespace {{.GoPackage}}
             if (!_entities.TryGetValue(id, out var removed) || !_entities.Remove(id)) return;
             if (removed is IEntityLifecycle lifecycle) lifecycle.OnRemove();
             _onRemove?.Invoke(id);
+        }
+
+        private void HoldCompact(long id, byte[] frame)
+        {
+            while (_heldCount >= MaxHeldCompactUpdates && _heldOrder.Count > 0)
+            {
+                DropHeldCompact(_heldOrder.Dequeue());
+            }
+            if (!_heldCompact.TryGetValue(id, out var held))
+            {
+                if (_heldOrder.Count >= 2 * MaxHeldCompactUpdates)
+                {
+                    // Forget IDs whose records were already replayed or dropped.
+                    var live = new List<long>(_heldOrder);
+                    _heldOrder.Clear();
+                    foreach (var heldId in live)
+                    {
+                        if (_heldCompact.ContainsKey(heldId)) _heldOrder.Enqueue(heldId);
+                    }
+                }
+                held = new List<byte[]>();
+                _heldCompact[id] = held;
+                _heldOrder.Enqueue(id);
+            }
+            held.Add((byte[])frame.Clone());
+            _heldCount++;
+        }
+
+        private void DropHeldCompact(long id)
+        {
+            if (!_heldCompact.TryGetValue(id, out var held)) return;
+            _heldCount -= held.Count;
+            _heldCompact.Remove(id);
+            if (_heldCount == 0) _heldOrder.Clear();
+        }
+
+        // Apply records held for a newly spawned entity; the revision check skips those older than its full state.
+        private void ReplayHeldCompact(long id)
+        {
+            if (!_heldCompact.TryGetValue(id, out var held)) return;
+            DropHeldCompact(id);
+            foreach (var frame in held)
+            {
+                ApplyCompactUpdate(frame);
+            }
         }
 
         private bool IsStale(long entityId, ulong revision)
@@ -132,6 +194,7 @@ namespace {{.GoPackage}}
             {
                 if (entity is IEntityLifecycle lifecycle) lifecycle.OnSpawn();
                 _onSpawn?.Invoke(entity);
+                ReplayHeldCompact(id);
             }
             else
             {

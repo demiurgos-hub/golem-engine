@@ -34,6 +34,21 @@ func TestManagerLifecycle(t *testing.T) {
  func(){defer func(){if recover()==nil {t.Fatal("missing panic")}}();m.Clear()}()
  if called||m.Get(7)!=nil {t.Fatal("throw ordering")};state(7,19);if m.Get(7)!=nil {t.Fatal("throw reset tombstone")}
 }
+// A compact datagram record can overtake the stream spawn of its entity.
+func TestManagerHoldsCompactBeforeSpawn(t *testing.T) {
+ m:=NewEntityManager();updates:=0;m.OnUpdate(func(SyncedEntity){updates++})
+ state:=func(id int64,rev uint64){m.ApplyEntityUpdate(&EntityUpdate{Payload:&EntityUpdate_ActorState{ActorState:&ActorState{EntityId:id,Revision:rev,Items:[]Item{{Id:1}}}}})}
+ compact:=func(id int64,rev uint64,items []Item){m.ApplyCompactUpdate((&pb.Writer{}).Int64(id).Uint64(rev).Uint64(1).Raw((&ActorDelta{Items:items}).Marshal()).Finish())}
+ compact(5,4,[]Item{});compact(5,6,[]Item{{Id:1},{Id:2}})
+ if m.Get(5)!=nil {t.Fatal("held record created an entity")}
+ state(5,5);a:=m.Get(5).(*SyncedActor)
+ if a.Revision()!=6||len(a.Items())!=2||updates!=1 {t.Fatal("held records not replayed",a.Revision(),a.Items(),updates)}
+ compact(6,4,[]Item{{Id:1},{Id:2}});m.ApplyEntityUpdate(&EntityUpdate{Payload:&EntityUpdate_EntityRemoved{EntityRemoved:&EntityRemoved{EntityId:6,Revision:4}}})
+ state(6,4);if len(m.Get(6).(*SyncedActor).Items())!=1 {t.Fatal("removal kept held records")}
+ for i:=0;i<300;i++ {compact(int64(1000+i),1,nil)}
+ if m.heldCount!=256||len(m.heldCompact)!=256 {t.Fatal("held records unbounded",m.heldCount)}
+ m.Clear();if m.heldCount!=0||len(m.heldCompact)!=0 {t.Fatal("clear kept held records")}
+}
 `
 
 const jsManagerContract = `import assert from 'node:assert/strict';
@@ -65,6 +80,18 @@ state(7,0);assert.ok(m.get(7));m.clear();
 class ThrowingActor extends SyncedActor { onRemove(){throw new Error('hook');} }
 m.registerActor(ThrowingActor);state(7,20);let called=false;m.onRemove(()=>called=true);
 assert.throws(()=>m.clear(),/hook/);assert.equal(called,false);assert.equal(m.get(7),undefined);state(7,19);assert.equal(m.get(7),undefined);
+// A compact datagram record can overtake the stream spawn of its entity.
+const h=new EntityManager();let held=0;h.onUpdate(()=>held++);
+const hstate=(id,revision)=>h.applyUpdate({actorState:Object.assign(new ActorState(),{entityId:id,revision,items:[{id:1}]})});
+const hcompact=(id,revision,items)=>{
+ const body=ActorDelta.encode(Object.assign(new ActorDelta(),{items}));const header=new PbWriter().int64(id).uint64(revision).uint64(1).finish();
+ const bytes=new Uint8Array(header.length+body.length);bytes.set(header);bytes.set(body,header.length);h.applyCompactUpdate(bytes);
+};
+hcompact(5,4,[]);hcompact(5,6,[{id:1},{id:2}]);assert.equal(h.get(5),undefined);
+hstate(5,5);assert.equal(h.get(5).revision,6);assert.equal(h.get(5).items.length,2);assert.equal(held,1);
+hcompact(6,4,[{id:1},{id:2}]);h.applyUpdate({entityRemoved:{entityId:6,revision:4}});hstate(6,4);assert.equal(h.get(6).items.length,1);
+for(let i=0;i<300;i++)hcompact(1000+i,1,[]);assert.equal(h._heldCount,256);assert.equal(h._heldCompact.size,256);
+h.clear();assert.equal(h._heldCount,0);
 `
 
 const csManagerContract = `using System;using System.Collections.Generic;using System.Linq;using Generated;using GolemEngine.Unity;
@@ -90,6 +117,17 @@ static class ManagerContract {
  state(7,0);Check(m.Get(7)!=null,"clear revisions");m.Clear();
  m.RegisterActor(id=>new Actor(id,()=>{throw new Exception("hook");}));state(7,20);bool called=false;m.OnRemove(_=>called=true);
  failed=false;try{m.Clear();}catch{failed=true;}Check(failed&&!called&&m.Get(7)==null,"throw ordering");state(7,19);Check(m.Get(7)==null,"throw reset revisions");
+ // A compact datagram record can overtake the stream spawn of its entity.
+ var h=new EntityManager();int held=0;h.OnUpdate(_=>held++);
+ Action<long,ulong> hstate=(id,rev)=>h.ApplyUpdate(new EntityUpdate{ActorState=new ActorState{EntityId=id,Revision=rev,Items=new List<Item>{new Item{Id=1}}}});
+ Action<long,ulong,List<Item>> hcompact=(id,rev,items)=>h.ApplyCompactUpdate(new PbWriter().Int64(id).Uint64(rev).Uint64(1).Finish().Concat(ActorDelta.Encode(new ActorDelta{Items=items})).ToArray());
+ hcompact(5,4,new List<Item>());hcompact(5,6,new List<Item>{new Item{Id=1},new Item{Id=2}});Check(h.Get(5)==null,"held record created an entity");
+ hstate(5,5);var a=(SyncedActor)h.Get(5);Check(a.Revision==6&&a.Items.Count==2&&held==1,"held records not replayed");
+ hcompact(6,4,new List<Item>{new Item{Id=1},new Item{Id=2}});h.ApplyUpdate(new EntityUpdate{EntityRemoved=new EntityRemoved{EntityId=6,Revision=4}});
+ hstate(6,4);Check(((SyncedActor)h.Get(6)).Items.Count==1,"removal kept held records");
+ for(int i=0;i<300;i++)hcompact(1000+i,1,new List<Item>());
+ for(long id=1000;id<1300;id++){hstate(id,1);}
+ Check(held==1+256,"held records unbounded");h.Clear();
  }
 }
 `
