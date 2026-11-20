@@ -116,6 +116,15 @@ export function worldStore<T>(read: () => T, listen: (fn: (value: T) => void) =>
   return managedStore(read, refresh => listen(refresh));
 }
 
+/** Expose the client's current space; connect and disconnect resets arrive through connection state. */
+export function spaceStore(client: GameClient): ManagedReadable<number> {
+  return managedStore(() => client.space, refresh => {
+    let last = client.space;
+    const changed = () => { if (client.space !== last) { last = client.space; refresh(); } };
+    return combineUnsubscribers(client.subscribeSpaceChanged(changed), client.subscribeConnectionState(changed));
+  });
+}
+
 export type EntityEventDispatch<E extends EntityIdentity> = (entity: E, name: string, payload: unknown) => void;
 export interface GolemAdapter<C extends GameClient, B, E extends EntityIdentity = EntityIdentity> {
   readonly key: symbol;

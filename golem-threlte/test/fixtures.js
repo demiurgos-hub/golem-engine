@@ -1,4 +1,4 @@
-import { GameClient } from 'golem-engine';
+import { GameClient, PbWriter } from 'golem-engine';
 
 export class Actor {
   constructor(entityId, health = 100, x = 0) {
@@ -49,6 +49,11 @@ export function fixture(initial = []) {
     subscribeEvents: dispatch => listen('event', dispatch),
     updateWorld(changes) { Object.assign(world.current, changes); emit('world', world.current); },
     subscribeWorld: listener => listen('world', listener),
+    changeSpace(space, transition = 1) {
+      const changed = new PbWriter().tag(1, 0).int32(space).tag(2, 0).int64(transition).finish();
+      const settled = new PbWriter().tag(1, 0).int64(transition).finish();
+      controls.channels.at(-1).receive(new PbWriter().tag(4, 2).bytes(changed).tag(5, 2).bytes(settled).finish());
+    },
     listenerCount() { return Object.values(listeners).reduce((sum, group) => sum + group.size, 0); },
   };
   const client = new GameClient({
@@ -64,7 +69,8 @@ export function fixture(initial = []) {
         maxMessageBytes: 32000,
         onOpen(fn) { this.openHandler = fn; },
         onClose(fn) { this.closeHandler = fn; },
-        onMessage() {},
+        onMessage(fn) { this.messageHandler = fn; },
+        receive(bytes) { this.messageHandler?.(bytes); },
         send() {},
         close() { controls.closeCalls++; this.connected = false; },
         open() { this.connected = true; this.openHandler?.(); },

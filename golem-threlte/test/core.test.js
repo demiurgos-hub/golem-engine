@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   EntityPresentationMount, PresentationBinding, createEntityViewBuilder,
-  createEntityViewRegistry, createGolemAdapter, entityCollection, worldStore,
+  createEntityViewRegistry, createGolemAdapter, entityCollection, spaceStore, worldStore,
 } from '../dist/core.js';
 import { Actor, Beacon, fixture } from './fixtures.js';
 
@@ -247,4 +247,28 @@ test('events queued for a removed binding are dropped', () => {
   binding.destroy();
   binding.activate();
   assert.equal(binding.active, false);
+});
+
+test('space store follows space changes and silent connection resets, then releases the client', () => {
+  const state = fixture();
+  state.client.connect('ws://localhost/game');
+  state.channels[0].open();
+  const space = spaceStore(state.client);
+  const values = [];
+  const unsubscribe = space.subscribe(value => values.push(value));
+  state.changeSpace(4);
+  state.changeSpace(4, 2);
+  state.channels[0].fail();
+  state.client.connect('ws://localhost/game');
+  state.channels[1].open();
+  state.changeSpace(2);
+  assert.deepEqual(values, [0, 4, 0, 2]);
+  unsubscribe();
+  state.changeSpace(9, 2);
+  assert.deepEqual(values, [0, 4, 0, 2]);
+  const late = [];
+  const again = space.subscribe(value => late.push(value));
+  assert.deepEqual(late, [9]);
+  again(); space.destroy();
+  state.client.disconnect();
 });

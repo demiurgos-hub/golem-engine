@@ -19,3 +19,14 @@ describe("PbReader.int32", () => {
     assert.equal(new PbReader(enc).sint32(), -7);
   });
 });
+
+describe("PbReader.skip", () => {
+  it("skips a length-delimited field past its payload", () => {
+    const enc = new PbWriter().tag(9, 2).bytes(new Uint8Array([7, 7, 7])).tag(1, 0).int32(5).finish();
+    const r = new PbReader(enc);
+    r.skip(r.tag().wire);
+    assert.deepEqual(r.tag(), { field: 1, wire: 0 });
+    assert.equal(r.int32(), 5);
+    assert.equal(r.done, true);
+  });
+});

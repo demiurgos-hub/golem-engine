@@ -46,6 +46,6 @@ test("missing handlers use the reader's existing skip behavior, including malfor
     assert.deepEqual(seen,[['entity',7]]);client.disconnect();
   }
   const {receive,seen,client}=receiver();
-  assert.doesNotThrow(()=>receive(new Uint8Array([10,1,7,34,127])));
+  assert.doesNotThrow(()=>receive(new Uint8Array([10,1,7,58,127])));
   assert.deepEqual(seen,[['entity',7]]);client.disconnect();
 });

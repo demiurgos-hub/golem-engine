@@ -177,7 +177,13 @@ export class PbReader {
     switch (wireType) {
       case 0: this._uvarint(); break;
       case 1: this._pos += 8; break;
-      case 2: this._pos += this._uvarint(); break;
+      case 2: {
+        // Read the length before updating _pos: `_pos += _uvarint()` would add
+        // the length to the position from before the length prefix.
+        const len = this._uvarint();
+        this._pos += len;
+        break;
+      }
       case 5: this._pos += 4; break;
       default: throw new Error(`unsupported wire type ${wireType}`);
     }

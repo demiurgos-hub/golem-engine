@@ -223,3 +223,16 @@ test('owned provider cancellation fences unresolved connection options after des
   expect(state.connectCalls).toBe(before);
   expect(state.listenerCount()).toBe(0);
 });
+
+test('provider context exposes the client space as a store', async () => {
+  const state = browserFixture();
+  const { target } = await start(state);
+  const shown = () => target.querySelector('[data-testid="space"]')?.textContent;
+  expect(shown()).toBe('0');
+  state.changeSpace(3);
+  await tick();
+  expect(shown()).toBe('3');
+  state.channels[0].fail();
+  await tick();
+  expect(shown()).toBe('0');
+});

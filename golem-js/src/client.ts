@@ -33,6 +33,12 @@ const datagramSchedulerIntervalMs = 2;
 const datagramResendBudgetPerWake = 16;
 const clientCloseControlFrame = new Uint8Array([0x00, 0x4f, 0x47, 0x53, 0x01]);
 const clientReliableAckControlFrame = new Uint8Array([0x00, 0x4f, 0x47, 0x53, 0x02]);
+const clientSpaceAckControlFrame = new Uint8Array([0x00, 0x4f, 0x47, 0x53, 0x03]);
+const clientSpaceAckControlBytes = clientSpaceAckControlFrame.byteLength + 8;
+// Compact datagram batches held while a space transition is open. Built-in
+// datagrams are at most 1200 bytes, so the batch count normally binds first.
+const maxHeldSpaceTransitionBatches = 1024;
+const maxHeldSpaceTransitionBytes = 4 * 1024 * 1024;
 const clientReliableAckControlHeaderBytes = clientReliableAckControlFrame.byteLength + 2 + datagramAckMaskBytes;
 const webTransportCloseFrameTimeoutMs = 100;
 const webTransportCloseCompletionTimeoutMs = 250;
@@ -605,6 +611,13 @@ export class GameClient {
   private _finalizedGeneration = -1;
   private _planAffinityKey?: string;
   private _stickyWebSocket = false;
+  private _space = 0;
+  private readonly _spaceChangedListeners = new Set<
+    (oldSpace: number, newSpace: number) => void
+  >();
+  private _spaceTransition?: number;
+  private _heldBatches: Uint8Array[] = [];
+  private _heldBytes = 0;
 
   constructor(options: GameClientOptions) {
     this.entities = options.entityManager;
@@ -665,7 +678,7 @@ export class GameClient {
       const safeInfo = sanitizeDisconnectInfo(options.transport, ev);
       this._connectionOpened = false;
       this._clearQueuedFrames();
-      this._clearEntities();
+      this._clearSessionState();
       this._channel = null;
       this._setConnectionState({ type: "disconnected", info: safeInfo });
       if (this._isCurrentGeneration(generation)) this._onDisconnect?.(safeInfo);
@@ -972,7 +985,7 @@ export class GameClient {
       this._connectionOpened = false;
       this._attemptAbort = undefined;
       this._clearQueuedFrames();
-      this._clearEntities();
+      this._clearSessionState();
       const info = sanitizeDisconnectInfo(options.transport, {
         wasClean: _info.wasClean,
         code: _info.code,
@@ -1025,7 +1038,7 @@ export class GameClient {
     this._channel = null;
     this._connectionOpened = false;
     this._clearQueuedFrames();
-    this._clearEntities();
+    this._clearSessionState();
     const info: DisconnectInfo = {
       wasClean: false,
       reason,
@@ -1046,7 +1059,7 @@ export class GameClient {
     this._channel = null;
     this._connectionOpened = false;
     this._clearQueuedFrames();
-    this._clearEntities();
+    this._clearSessionState();
     try {
       const closeResult = channel?.close();
       if (
@@ -1147,6 +1160,27 @@ export class GameClient {
   /** Current transport state; cancelling a pending connection returns to idle. */
   get connectionState(): GameClientConnectionState {
     return this._connectionState;
+  }
+
+  /**
+   * Space announced by the server for the current connection. It is 0 before
+   * the first space change and resets to 0 on connect and disconnect without a
+   * space-changed notification.
+   */
+  get space(): number {
+    return this._space;
+  }
+
+  /**
+   * Observe space changes. Listeners run synchronously when the server's
+   * SpaceChanged message is applied, before any entity, world or event frame
+   * that follows it. Connect and disconnect resets are not reported.
+   */
+  subscribeSpaceChanged(listener: (oldSpace: number, newSpace: number) => void): () => void {
+    this._spaceChangedListeners.add(listener);
+    return () => {
+      this._spaceChangedListeners.delete(listener);
+    };
   }
 
   /** Observe current and subsequent transport states; observers may cancel or replace the connection. */
@@ -1254,16 +1288,98 @@ export class GameClient {
   }
 
   private _handleMessage(bytes: Uint8Array): void {
+    // A callback may disconnect or reconnect; later fields belong to the old connection.
+    const generation = this._connectionGeneration;
+    const live = () => this._isCurrentGeneration(generation);
     visitServerMessage(bytes, {
-      entityUpdate: payload => this.entities.applyUpdate(this._decode(payload)),
+      entityUpdate: payload => {
+        if (live()) this.entities.applyUpdate(this._decode(payload));
+      },
       worldUpdate: this._decodeWorld && this.world
-        ? payload => this.world!.applyUpdate(this._decodeWorld!(payload))
+        ? payload => {
+          if (live()) this.world!.applyUpdate(this._decodeWorld!(payload));
+        }
         : undefined,
-      serverEvent: this.events ? payload => this.events!.applyRaw(payload) : undefined,
+      serverEvent: this.events
+        ? payload => {
+          if (live()) this.events!.applyRaw(payload);
+        }
+        : undefined,
+      spaceChanged: payload => {
+        if (live()) this._applySpaceChanged(payload);
+      },
+      spaceSettled: payload => {
+        if (live()) this._applySpaceSettled(payload);
+      },
+      worldCleared: payload => {
+        if (live()) this._applyWorldCleared(decodeWorldCleared(payload));
+      },
     });
   }
 
+  /** Open or supersede a transition and notify before the following frames apply. */
+  private _applySpaceChanged(payload: Uint8Array): void {
+    const { space, transition } = decodeSpaceChanged(payload);
+    this._spaceTransition = transition;
+    const oldSpace = this._space;
+    this._space = space;
+    if (oldSpace === space) {
+      return;
+    }
+    const generation = this._connectionGeneration;
+    for (const listener of [...this._spaceChangedListeners]) {
+      if (!this._isCurrentGeneration(generation) || this._space !== space) {
+        break;
+      }
+      if (this._spaceChangedListeners.has(listener)) listener(oldSpace, space);
+    }
+  }
+
+  /**
+   * Close the matching transition, apply the batches held during it in arrival
+   * order (the generated managers' revision fence drops superseded state) and
+   * acknowledge it with SpaceAck.
+   */
+  private _applySpaceSettled(payload: Uint8Array): void {
+    const transition = decodeSpaceSettled(payload);
+    if (this._spaceTransition !== transition) {
+      return;
+    }
+    const held = this._heldBatches;
+    this._clearSpaceTransition();
+    const generation = this._connectionGeneration;
+    for (const batch of held) {
+      if (!this._isCurrentGeneration(generation)) {
+        return;
+      }
+      this._applyCompactStateBatch(batch);
+    }
+    const channel = this._channel;
+    if (this._isCurrentGeneration(generation) && channel?.connected) {
+      channel.send(encodeSpaceAck(transition));
+    }
+  }
+
+  /** World managers do not expose per-type clearing yet; the message is decoded and ignored. */
+  private _applyWorldCleared(_name: string): void {}
+
   private _handleCompactStateBatch(bytes: Uint8Array): void {
+    if (this._spaceTransition === undefined) {
+      this._applyCompactStateBatch(bytes);
+      return;
+    }
+    if (
+      this._heldBatches.length >= maxHeldSpaceTransitionBatches ||
+      this._heldBytes + bytes.byteLength > maxHeldSpaceTransitionBytes
+    ) {
+      this._failConnection("space transition hold-back overflow");
+      return;
+    }
+    this._heldBatches.push(bytes.slice());
+    this._heldBytes += bytes.byteLength;
+  }
+
+  private _applyCompactStateBatch(bytes: Uint8Array): void {
     if (!this.entities.applyCompactUpdate) {
       throw new Error("golem-js: EntityManager does not support compact state updates");
     }
@@ -1283,8 +1399,52 @@ export class GameClient {
     this._flushScheduled = false;
   }
 
-  private _clearEntities(): void {
+  private _clearSpaceTransition(): void {
+    this._spaceTransition = undefined;
+    this._heldBatches = [];
+    this._heldBytes = 0;
+  }
+
+  /** Drop per-connection replica state: entities, space and any open transition. */
+  private _clearSessionState(): void {
+    this._space = 0;
+    this._clearSpaceTransition();
     this.entities.clear?.();
+  }
+
+  /** Close the established connection after a client protocol failure. */
+  private _failConnection(reason: string): void {
+    const channel = this._channel;
+    if (channel == null) {
+      return;
+    }
+    const generation = ++this._connectionGeneration;
+    this._attemptAbort?.abort();
+    this._attemptAbort = undefined;
+    this._clearAttemptTimeout();
+    this._channel = null;
+    this._connectionOpened = false;
+    this._clearQueuedFrames();
+    this._clearSessionState();
+    try {
+      const closeResult = channel.close();
+      if (
+        closeResult != null &&
+        typeof (closeResult as Promise<void>).then === "function"
+      ) {
+        void Promise.resolve(closeResult).catch(() => {});
+      }
+    } catch {
+      // The failure is still reported when closing the channel throws.
+    }
+    const info: DisconnectInfo = {
+      wasClean: false,
+      reason,
+      error: sanitizedTransportError(reason),
+    };
+    console.error("golem-js: disconnected was_clean=false reason=" + reason);
+    this._setConnectionState({ type: "disconnected", info });
+    if (this._isCurrentGeneration(generation)) this._onDisconnect?.(info);
   }
 
   /** Replace the legacy connected callback; multicast observers are unaffected. */
@@ -2201,6 +2361,10 @@ export function createChannel(options: ConnectOptions): ReliableMessageChannel {
 
 type ServerMessageHandlers = {
   [K in keyof ServerMessage]?: (payload: Uint8Array) => void;
+} & {
+  spaceChanged?: (payload: Uint8Array) => void;
+  spaceSettled?: (payload: Uint8Array) => void;
+  worldCleared?: (payload: Uint8Array) => void;
 };
 
 function visitServerMessage(bytes: Uint8Array, handlers: ServerMessageHandlers): void {
@@ -2209,10 +2373,62 @@ function visitServerMessage(bytes: Uint8Array, handlers: ServerMessageHandlers):
     const { field, wire } = r.tag();
     const handler = field === 1 ? handlers.entityUpdate
       : field === 2 ? handlers.worldUpdate
-      : field === 3 ? handlers.serverEvent : undefined;
+      : field === 3 ? handlers.serverEvent
+      : field === 4 ? handlers.spaceChanged
+      : field === 5 ? handlers.spaceSettled
+      : field === 6 ? handlers.worldCleared : undefined;
     if (wire === 2 && handler) handler(r.bytes());
     else r.skip(wire);
   }
+}
+
+/** Decode SpaceChanged{uint32 space = 1; uint64 transition = 2}; absent fields are zero. */
+function decodeSpaceChanged(bytes: Uint8Array): { space: number; transition: number } {
+  let space = 0;
+  let transition = 0;
+  const r = new PbReader(bytes);
+  while (!r.done) {
+    const { field, wire } = r.tag();
+    if (field === 1 && wire === 0) space = r.uint32();
+    else if (field === 2 && wire === 0) transition = r.uint64();
+    else r.skip(wire);
+  }
+  return { space, transition };
+}
+
+/** Decode SpaceSettled{uint64 transition = 1}. */
+function decodeSpaceSettled(bytes: Uint8Array): number {
+  let transition = 0;
+  const r = new PbReader(bytes);
+  while (!r.done) {
+    const { field, wire } = r.tag();
+    if (field === 1 && wire === 0) transition = r.uint64();
+    else r.skip(wire);
+  }
+  return transition;
+}
+
+/** Decode WorldCleared{string name = 1}. */
+function decodeWorldCleared(bytes: Uint8Array): string {
+  let name = "";
+  const r = new PbReader(bytes);
+  while (!r.done) {
+    const { field, wire } = r.tag();
+    if (field === 1 && wire === 2) name = r.string();
+    else r.skip(wire);
+  }
+  return name;
+}
+
+/** Encode the SpaceAck control frame: prefix plus big-endian uint64 transition. */
+function encodeSpaceAck(transition: number): Uint8Array {
+  const out = new Uint8Array(clientSpaceAckControlBytes);
+  out.set(clientSpaceAckControlFrame, 0);
+  const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+  const prefix = clientSpaceAckControlFrame.byteLength;
+  view.setUint32(prefix, Math.floor(transition / 0x1_0000_0000), false);
+  view.setUint32(prefix + 4, transition >>> 0, false);
+  return out;
 }
 
 /** Decode a ServerMessage envelope, extracting the inner payload by field tag. */

@@ -29,6 +29,8 @@ type inboundDispatcher struct {
 	done    chan struct{}
 	stopped chan struct{}
 	once    sync.Once
+	// space is this connection's open space transition (dispatcher-only).
+	space spaceTransitionState
 }
 
 // newInboundDispatcher creates a paused serialized inbound event dispatcher.
@@ -65,6 +67,16 @@ func (d *inboundDispatcher) stop() {
 	d.once.Do(func() { close(d.done) })
 }
 
+// isDone reports whether the dispatcher has been stopped.
+func (d *inboundDispatcher) isDone() bool {
+	select {
+	case <-d.done:
+		return true
+	default:
+		return false
+	}
+}
+
 // run processes inbound events until the dispatcher is stopped.
 func (d *inboundDispatcher) run(c *GameClient) {
 	defer close(d.stopped)
@@ -97,6 +109,8 @@ type GameClient struct {
 	inbound            *inboundDispatcher
 	onOpen             func()
 	onClose            func(DisconnectInfo)
+	onSpaceChanged     func(oldSpace, newSpace SpaceID)
+	space              SpaceID
 	lastErr            error
 	closedCh           chan struct{}
 	generation         uint64
@@ -321,6 +335,7 @@ func (c *GameClient) installChannel(generation uint64, channel ReliableMessageCh
 				c.inbound = nil
 			}
 			c.connectedTransport = ""
+			c.space = 0
 			shouldNotify = true
 			c.lastErr = info.Err
 			closeOnce(&c.closedCh)
@@ -384,6 +399,7 @@ func (c *GameClient) installChannel(generation uint64, channel ReliableMessageCh
 	c.channel = channel
 	c.inbound = inbound
 	c.connectedTransport = options.Transport
+	c.space = 0
 	c.lastErr = nil
 	c.closedCh = make(chan struct{})
 	installed = true
@@ -420,6 +436,7 @@ func (c *GameClient) Disconnect() {
 	c.channel = nil
 	c.inbound = nil
 	c.connectedTransport = ""
+	c.space = 0
 	shouldNotify := channel != nil
 	onClose := c.onClose
 	if shouldNotify {
@@ -442,6 +459,38 @@ func (c *GameClient) Disconnect() {
 			log.Printf("golem-go-client: disconnect was_clean=%v error=%v", true, nil)
 			onClose(DisconnectInfo{WasClean: true})
 		}
+	}
+}
+
+// failConnection closes the connection served by dispatcher d with err and
+// reports one unclean OnDisconnect. It runs on the dispatcher goroutine.
+func (c *GameClient) failConnection(d *inboundDispatcher, err error) {
+	c.mu.Lock()
+	channel := c.channel
+	if c.inbound != d || channel == nil {
+		c.mu.Unlock()
+		return
+	}
+	c.generation++
+	cancel := c.attemptCancel
+	c.attemptCancel = nil
+	c.channel = nil
+	c.inbound = nil
+	c.connectedTransport = ""
+	c.space = 0
+	c.lastErr = err
+	closeOnce(&c.closedCh)
+	onClose := c.onClose
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	d.stop()
+	_ = channel.Close()
+	c.clearEntities()
+	log.Printf("golem-go-client: disconnect was_clean=%v error=%v", false, err)
+	if onClose != nil {
+		onClose(DisconnectInfo{Err: err})
 	}
 }
 
@@ -530,19 +579,40 @@ func (c *GameClient) dispatchInboundEvent(dispatcher *inboundDispatcher, event i
 	}
 	switch event.kind {
 	case inboundEventStream:
-		c.handleMessage(event.data)
+		c.handleMessage(dispatcher, event.data)
 	case inboundEventCompactState:
+		if dispatcher.space.open {
+			c.holdCompactStateBatch(dispatcher, event.data)
+			return
+		}
 		c.handleCompactStateBatch(event.data)
 	}
 }
 
-func (c *GameClient) handleMessage(data []byte) {
+// handleMessage applies every ServerMessage field of one stream frame in order.
+// Space fields are identified by field number; their payloads may be empty.
+func (c *GameClient) handleMessage(d *inboundDispatcher, data []byte) {
 	messages, err := decodeServerMessages(data)
 	if err != nil {
 		c.setLastErr(err)
 		return
 	}
 	for _, msg := range messages {
+		if d.isDone() {
+			return
+		}
+		switch msg.Field {
+		case serverMessageSpaceChangedField:
+			space, transition := decodeSpaceChanged(msg.Payload)
+			c.applySpaceChanged(d, space, transition)
+			continue
+		case serverMessageSpaceSettledField:
+			c.applySpaceSettled(d, decodeSpaceSettled(msg.Payload))
+			continue
+		case serverMessageWorldClearedField:
+			c.applyWorldCleared(decodeWorldCleared(msg.Payload))
+			continue
+		}
 		if len(msg.EntityUpdate) > 0 && c.decodeEntity != nil && c.entities != nil {
 			update, err := c.decodeEntity(msg.EntityUpdate)
 			if err == nil {
