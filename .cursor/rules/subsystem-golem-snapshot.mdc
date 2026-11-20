@@ -1,5 +1,5 @@
 ---
-description: golem/snapshot — entity snapshot compatibility, strict startup entity restoration, versioned portable/paired physics checkpoints, stable reconstruction and timed-intent recovery boundaries.
+description: golem/snapshot — entity snapshot compatibility (version 1, and version 2 with entity spaces), strict startup entity restoration, versioned portable/paired physics checkpoints (single- and multi-space), stable reconstruction and timed-intent recovery boundaries.
 globs:
   - golem/snapshot/**/*.go
   - golem/snapshot*.go

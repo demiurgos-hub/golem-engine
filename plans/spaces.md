@@ -1,5 +1,32 @@
 # Spaces in golem-engine: implementation plan
 
+## Status
+
+Milestones M1–M9 are implemented on `feature/spaces`:
+
+| Milestone | Commit |
+| --- | --- |
+| M1 Space identity | `8013bb3` |
+| M2 Per-space replication and transitions | `f6a7f3a` (preceded by the fix `3010c7e`, compact records that overtake their spawn) |
+| M3 Client runtimes | `987bdfe` |
+| M4 Per-space world data | `f76d51b` |
+| M5 Space runtimes, legacy collision, 2D navigation | `881ab65` |
+| M6 Per-space physics, 3D navigation, transfer | `0c670d4` |
+| M7 Multi-space checkpoints | `33b1d86` |
+| M8 Inspector | `6ac1172` |
+| M9 Reconciliation | the commit that adds this section |
+
+Known follow-ups:
+- `examples/` and qualification consumers; regenerate the checked-in examples' `entities.proto` (fields 4–6).
+- Website docs: a Spaces page (sessions, transfer, world data, per-space services, client callbacks, compatibility notes).
+- Fractured worker and client.
+- Creating or removing serviced spaces after `Run`.
+- A connect-time initial-space hook for broadcast mode.
+- Space-scoped generated `EventBroadcaster`, deferred because `Broadcast<X>InSpace` may collide with schema event names; use `Space(id).BroadcastServerEvent` meanwhile.
+- Pre-existing, found in M2 and not fixed: ownership-refresh full states and oversized stream-fallback deltas travel on the reliable stream and can be overtaken by datagrams from later ticks. `3010c7e` fixed only the spawn case; transitions themselves are covered by the SpaceAck gate.
+- Pre-existing flaky hub test `TestShutdownClosesSocketsWithServiceRestart`.
+- The `golem-threlte` browser test was not run (Playwright Chromium build 1243 missing).
+
 ## Context
 
 Fractured needs caves hosted in the same Go worker as the overworld. Cave and overworld coordinates overlap, and players walk into a cave carrying a crate or pulling a Handcart. golem-engine has no notion of separate coordinate spaces today:
