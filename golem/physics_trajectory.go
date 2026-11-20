@@ -88,11 +88,12 @@ func (a PhysicsTrajectory) validate(start p.Pose) (float32, error) {
 // capsule controllers retain their orientation. Blocked actions keep actual
 // physical readback; this method does not teleport or choose client authority.
 func (s *Server) StartPhysicsTrajectory(id int64, request PhysicsTrajectory) (PhysicsTrajectoryToken, error) {
-	ps := s.physics
+	rt := s.runtimeOf(id)
+	ps := rt.phys()
 	if err := ps.mutable(); err != nil {
 		return PhysicsTrajectoryToken{}, err
 	}
-	if s.navigation != nil && s.navigation.frame != nil {
+	if n := rt.nav(); n != nil && n.frame != nil {
 		return PhysicsTrajectoryToken{}, p.ErrBusy
 	}
 	a := ps.agents[id]
@@ -131,7 +132,7 @@ func (s *Server) StartPhysicsTrajectory(id int64, request PhysicsTrajectory) (Ph
 	if err = capability.ValidatePoseMotion(a.body, segments); err != nil {
 		return PhysicsTrajectoryToken{}, err
 	}
-	if n := s.navigation; n != nil {
+	if n := rt.nav(); n != nil {
 		if agent := n.agents[id]; agent != nil {
 			if !agent.config.StagedPhysics {
 				return PhysicsTrajectoryToken{}, p.ErrUnsupported
@@ -156,7 +157,7 @@ func (s *Server) StartPhysicsTrajectory(id int64, request PhysicsTrajectory) (Ph
 			return PhysicsTrajectoryToken{}, err
 		}
 	}
-	if n := s.navigation; n != nil && n.agents[id] != nil {
+	if n := rt.nav(); n != nil && n.agents[id] != nil {
 		if err = s.StopNavigation(id); err != nil {
 			return PhysicsTrajectoryToken{}, err
 		}
@@ -178,7 +179,7 @@ func (s *Server) StartPhysicsTrajectory(id int64, request PhysicsTrajectory) (Ph
 // CancelPhysicsTrajectory stops future ownership without rewinding any body or
 // removing momentum already transferred to other bodies. Stale tokens fail.
 func (s *Server) CancelPhysicsTrajectory(token PhysicsTrajectoryToken) error {
-	ps := s.physics
+	ps := s.runtimeOf(token.EntityID).phys()
 	if err := ps.mutable(); err != nil {
 		return err
 	}
@@ -198,10 +199,11 @@ func (s *Server) CancelPhysicsTrajectory(token PhysicsTrajectoryToken) error {
 
 // PhysicsTrajectoryState returns a copied state on the tick owner.
 func (s *Server) PhysicsTrajectoryState(id int64) (PhysicsTrajectoryState, error) {
-	if s.physics == nil || s.physics.trajectories[id] == nil {
+	ps := s.runtimeOf(id).phys()
+	if ps == nil || ps.trajectories[id] == nil {
 		return PhysicsTrajectoryState{}, p.ErrStale
 	}
-	return s.physics.trajectories[id].state, nil
+	return ps.trajectories[id].state, nil
 }
 
 type physicsTrajectoryFrame struct {
@@ -240,7 +242,7 @@ func (ps *physicsService) prepareTrajectory(id int64, state p.BodyState, f *Navi
 	}
 	ready := true
 	var safety surface.RegionalSafety
-	if n := ps.server.navigation; n != nil && !f.Contains(id) {
+	if n := ps.space.nav(); n != nil && !f.Contains(id) {
 		safety = n.regionalSafety(a.request.SafetyProfile)
 		ready = !n.navigationFrameBarrier() && n.backend.CurrentRevision(a.request.SafetyProfile) != 0
 		if safety == nil {

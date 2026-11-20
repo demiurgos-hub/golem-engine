@@ -36,7 +36,7 @@ func (s *Server) SaveContentSnapshot(fingerprint, contentHash, manifestPath stri
 	if !validContentHash(contentHash) || fingerprint == "" || manifestPath == "" {
 		return fail(errors.New("golem: content snapshot requires fingerprint, SHA-256 content hash and manifest path"))
 	}
-	if s.physics != nil {
+	if s.anyPhysics() {
 		return fail(errors.New("golem: content snapshot is entity-only; use paired physics checkpoints"))
 	}
 	if err := s.entitySetupAllowed(); err != nil {
@@ -122,7 +122,7 @@ func (s *Server) LoadContentSnapshot(manifestPath, fingerprint, contentHash stri
 	s.lifeMu.Lock()
 	created := s.life == lifecycleCreated
 	s.lifeMu.Unlock()
-	if !created || s.physics != nil {
+	if !created || s.anyPhysics() {
 		return errors.New("golem: LoadContentSnapshot requires entity-only startup before Run")
 	}
 	if restore == nil || !validContentHash(contentHash) {

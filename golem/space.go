@@ -3,6 +3,7 @@ package golem
 import (
 	"fmt"
 
+	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
 	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
@@ -31,8 +32,11 @@ func (s *Server) EntitySpace(id int64) (SpaceID, bool) {
 // define rejects the move.
 //
 // Call before Run or on the tick goroutine, outside physics callbacks, active
-// frames and restoration; use Post from a contact callback. Entities attached
-// to physics or navigation, or being deleted, are rejected.
+// frames, restoration and the per-space simulation phase; use Post from a
+// contact or navigation callback. Entities being deleted are rejected. A
+// navigation-attached entity is reattached idle in the destination (see
+// MoveToSpace); a physics-attached entity needs MoveToSpace with
+// SpaceTransfer.RebuildPhysics and is rejected here.
 func (s *Server) SetEntitySpace(id int64, space SpaceID) error {
 	return s.MoveToSpace(SpaceTransfer{To: space, Entities: []int64{id}})
 }
@@ -44,11 +48,64 @@ type SpaceTransfer struct {
 	To SpaceID
 	// Entities lists the published entities to move. Duplicates are rejected.
 	Entities []int64
+	// RebuildPhysics creates the replacement bodies of the physics-attached
+	// entities in the destination world dst, while the source bodies still
+	// exist. It is called once, on the tick goroutine, with every moved physics
+	// entity's accepted source state (in Entities order), and returns the new
+	// body for each of them; joints between moved bodies are recreated here too.
+	// It must only create bodies, colliders and joints in dst and must not call
+	// Server APIs. Required when any moved entity is attached to physics.
+	RebuildPhysics func(dst p.World, src []PhysicsTransferSource) (map[int64]p.BodyHandle, error)
+}
+
+// PhysicsTransferSource is one physics-attached entity moved by MoveToSpace,
+// as seen by SpaceTransfer.RebuildPhysics.
+type PhysicsTransferSource struct {
+	// Entity is the moving entity.
+	Entity int64
+	// From is the entity's source space.
+	From SpaceID
+	// Body is the accepted state of the source body (pose, gameplay anchor,
+	// mode, mass, velocities, activation and character support). Its handle
+	// belongs to the source world.
+	Body p.BodyState
+	// Config is the attachment configuration the destination attachment keeps.
+	Config PhysicsAttachmentConfig
 }
 
 // MoveToSpace moves every entity of t to t.To in one step. All entities are
-// validated first, with the same rules as SetEntitySpace; when any is rejected
-// nothing moves. Moves are reported in the next ReplicationFrame.Moved.
+// validated first; when any is rejected nothing moves. Moves are reported in
+// the next ReplicationFrame.Moved.
+//
+// Each entity must exist, be published and not be in deletion, and the
+// destination must have the services the entity uses: a physics world for a
+// physics attachment (plus t.RebuildPhysics), surface navigation for a
+// navigation attachment. MoveToSpace returns an error wrapping
+// physics3d.ErrBusy while any space is stepping, dispatching accepted-frame
+// callbacks, restoring or holding a prepared navigation frame, and during the
+// per-space simulation phase; callbacks must use Server.Post. It returns
+// ErrServerNotRunning while the server stops.
+//
+// Physics-attached entities are rebuilt before anything changes: RebuildPhysics
+// runs once on the destination world and must return a body for every moved
+// physics entity; each body is admitted like AttachPhysics (owner binding,
+// complete-volume placement with the entity's PhysicsPlacementPolicy,
+// navigation mode) and must keep the source body's motion mode. When the
+// callback fails or any body is rejected, every returned body is destroyed
+// (with its colliders and joints) and nothing changes. Then the source
+// attachments are detached (destroying the source bodies and their joints and
+// cancelling timed trajectories and navigation), schema colliders and the
+// registry space move, navigation is reattached in the destination with the
+// same configuration but no destination intent (idle), and physics is
+// attached to the new body with the same PhysicsAttachmentConfig. The new
+// body's gameplay anchor defines the entity position, written through its
+// Position3DWriter.
+//
+// Not carried to the destination: timed trajectories, contact history,
+// navigation routes and destinations, pending forces and retained controller
+// velocity intent, physics commands queued in the source space, and joints to
+// bodies that were not moved. A failing source body destruction faults the
+// source space (Run ends).
 //
 // A session whose avatar or FOI anchor moves follows it to the new space on the
 // next replication pass. The entities it already knew that moved with it are
@@ -76,8 +133,9 @@ func (s *Server) MoveToSpace(t SpaceTransfer) error {
 	return s.applySpaceMove(op, t)
 }
 
-// checkSpaceMutable rejects space changes while stopping, during physics steps
-// and callbacks, navigation frames and restoration.
+// checkSpaceMutable rejects space changes while stopping, during any space's
+// physics steps and callbacks, navigation frames and restoration, during the
+// per-space simulation phase and while another transfer runs.
 func (s *Server) checkSpaceMutable(op string) error {
 	s.lifeMu.Lock()
 	stopping := s.life == lifecycleStopping || s.life == lifecycleStopped
@@ -85,47 +143,10 @@ func (s *Server) checkSpaceMutable(op string) error {
 	if stopping {
 		return ErrServerNotRunning
 	}
-	if ps := s.physics; ps != nil {
-		if err := ps.mutable(); err != nil {
-			return fmt.Errorf("golem: %s: %w", op, err)
-		}
+	if s.transferring || s.simulatingSpaces {
+		return fmt.Errorf("golem: %s is unavailable while spaces simulate or transfer: %w", op, p.ErrBusy)
 	}
-	if n := s.navigation; n != nil && (n.restoring || n.restoreErr != nil || n.frame != nil) {
-		return fmt.Errorf("golem: %s is unavailable during navigation frames or restoration", op)
-	}
-	return nil
-}
-
-// applySpaceMove validates every entity of t, including its legacy collider
-// transfer, and then moves them together: the registry move and the collider
-// moves between space layer helpers happen in the same tick-owned step.
-// interestMu makes the batch atomic for session-space readers.
-func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
-	for _, id := range t.Entities {
-		if ps := s.physics; ps != nil && ps.agents[id] != nil {
-			return fmt.Errorf("golem: %s: entity %d is attached to physics", op, id)
-		}
-		if n := s.navigation; n != nil {
-			if n.deleting[id] {
-				return fmt.Errorf("golem: %s: entity %d is being deleted", op, id)
-			}
-			if n.agents[id] != nil {
-				return fmt.Errorf("golem: %s: entity %d is attached to navigation", op, id)
-			}
-		}
-	}
-	colliders, err := s.planColliderMoves(op, t)
-	if err != nil {
-		return err
-	}
-	s.interestMu.Lock()
-	bad, moved := s.reg.SetSpaces(t.Entities, t.To)
-	s.interestMu.Unlock()
-	if !moved {
-		return fmt.Errorf("golem: %s: entity %d is not published", op, bad)
-	}
-	applyColliderMoves(colliders)
-	return nil
+	return s.servicesQuiescent(op)
 }
 
 // SetSessionSpace sets the space of a session that has neither an FOI anchor
@@ -176,8 +197,9 @@ func (s *Server) SessionsInSpace(space SpaceID) []int64 {
 
 // Space is a lightweight handle to one space of a Server. Handles are cheap;
 // two handles for the same ID behave identically. Each space has its own
-// legacy collision backends and layer helpers, spatial queries and 2D nav
-// backend; the matching Server methods act on space 0.
+// legacy collision backends and layer helpers, spatial queries, 2D nav
+// backend, physics world and surface navigation (space_services.go); the
+// matching Server methods act on space 0.
 type Space struct {
 	srv *Server
 	id  SpaceID

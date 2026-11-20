@@ -414,12 +414,7 @@ func (s *Server) finalizeLifecycle() {
 	if s.runCancel != nil {
 		s.runCancel()
 	}
-	if s.navigation != nil {
-		s.navigation.stop()
-	}
-	if s.physics != nil {
-		s.physics.stop()
-	}
+	s.stopServices()
 	if s.taskPool != nil {
 		s.taskPool.StopAndWait()
 		// Pond skips user work for accepted tasks still queued when the pool

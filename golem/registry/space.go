@@ -29,6 +29,17 @@ func (r *Registry) Space(id int64) (SpaceID, bool) {
 	return r.spaces[id], true
 }
 
+// PublishedSpace returns the space of a published entity, or (0, false) when
+// the ID is unknown or still provisional.
+func (r *Registry) PublishedSpace(id int64) (SpaceID, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.entities[id] == nil {
+		return 0, false
+	}
+	return r.spaces[id], true
+}
+
 // SetSpace moves a published entity to space and records the move for the
 // next FlushAll. Moves coalesce per entity: the flush reports the space held
 // at the previous flush and the latest space. Setting the current space is a

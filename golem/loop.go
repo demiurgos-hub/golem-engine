@@ -199,6 +199,11 @@ type Server struct {
 	eventualTrackers     map[int64]*eventualStateTracker
 	nextEventualToken    uint64
 
+	// Per-space service coordination (space_runtime.go, space_transfer.go).
+	navigationBySpace map[SpaceID]*navigationService // non-zero spaces' navigation (lifeMu; written before Run)
+	simulatingSpaces  bool                           // per-space step loop running with several runtimes
+	transferring      bool                           // MoveToSpace rebuild/commit in progress
+
 	// Avatar indexes (session ↔ entity). Protected by avatarMu; never hold
 	// avatarMu while calling registry hooks or interest AssignFOI/RemoveFOI.
 	avatarMu      sync.Mutex
@@ -466,15 +471,18 @@ func (s *Server) CreateEntityIn(space SpaceID, e Entity, owner ...int64) error {
 // before OnRemove). Safe to call repeatedly; does not hold the avatar mutex
 // while invoking registry hooks (OnRemove) or interest operations.
 // Physics attachments are destroyed before OnRemove. During accepted physics
-// callbacks deletion is deferred to the next tick's input boundary.
+// callbacks of the entity's space deletion is deferred to the next tick's input
+// boundary.
 func (s *Server) DeleteEntity(id int64) {
-	if ps := s.physics; ps != nil && ps.dispatching {
+	rt := s.runtimeOf(id)
+	ps, n := rt.phys(), rt.nav()
+	if ps != nil && ps.dispatching {
 		if err := ps.queueDelete(id); err != nil {
 			ps.fault = err
 		}
 		return
 	}
-	if n := s.navigation; n != nil {
+	if n != nil {
 		if n.deleting[id] {
 			return
 		}
@@ -482,11 +490,11 @@ func (s *Server) DeleteEntity(id int64) {
 		defer delete(n.deleting, id)
 	}
 	s.clearAvatarByEntity(id)
-	if err := s.DetachPhysics(id); err != nil {
-		s.physics.fault = err
+	if err := ps.detachEntity(id); err != nil {
+		ps.fault = err
 		return
 	}
-	s.DetachNavigation(id)
+	n.detach(id)
 	if e, ok := s.reg.Get(id); ok {
 		s.unregisterCollider(e)
 	}
@@ -1208,9 +1216,12 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	s.life = lifecycleRunning
-	if s.navigation != nil {
-		s.navigation.start(runCtx)
-	}
+	_ = s.eachRuntime(func(rt *spaceRuntime) error {
+		if rt.navigation != nil {
+			rt.navigation.start(runCtx)
+		}
+		return nil
+	})
 	s.lifeMu.Unlock()
 
 	// Stop accepting before cancelling workers when the caller context ends.
@@ -1277,36 +1288,26 @@ func (s *Server) runLoop(ctx context.Context) error {
 			for _, fn := range s.onTickStart {
 				fn(s.tick)
 			}
-			if s.physics != nil {
-				if err := s.physics.drain(); err != nil {
-					return err
-				}
+			if err := s.drainPhysics(); err != nil {
+				return err
 			}
 
 			s.drainAsyncCallbacks()
 			s.drainMessages()
-			if s.navigation != nil {
-				s.navigation.prepare()
-			}
+			s.prepareNavigation()
 
 			s.reg.TickAll(dt)
 
 			if s.onTick != nil {
 				s.onTick(dt, s)
 			}
-			if s.physics != nil {
-				if err := s.physics.step(dt); err != nil {
-					return err
-				}
-			} else if s.navigation != nil {
-				s.navigation.advance(dt)
+			if err := s.stepSpaces(dt); err != nil {
+				return err
 			}
 
 			s.stepCollision(dt)
 
-			if s.navigation != nil {
-				s.navigation.reconcile()
-			}
+			s.reconcileNavigation()
 			if s.interest != nil {
 				if err := s.runInterestTick(); err != nil {
 					return err

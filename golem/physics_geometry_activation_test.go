@@ -55,9 +55,9 @@ func TestPhysicsActivatedNavigationCannotPublishSupersededDesiredIdentity(t *tes
 	s.physics.geometryIdentities = map[string]PhysicsGeometryIdentity{"cell": r.Identity}
 	newer := r
 	newer.Identity.Revision++
-	s.rememberPhysicsGeometry(newer, false)
+	s.space0.rememberPhysicsGeometry(newer, false)
 	private := &physicsCheckpointNavigation{commit: func() error { t.Error("superseded navigation published"); return nil }}
-	b := &physicsActivatedNavigation{server: s, request: r, navigation: private}
+	b := &physicsActivatedNavigation{space: &s.space0, request: r, navigation: private}
 	if err := b.Commit(); !errors.Is(err, p.ErrStale) {
 		t.Fatalf("old desired identity remained admissible: %v", err)
 	}

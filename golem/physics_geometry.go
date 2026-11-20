@@ -45,15 +45,20 @@ type PhysicsGeometryRequest struct {
 // source lease before the next physics frame. Before-publication failures remove
 // the candidate and retain the previous lease; unexpected cleanup failure closes
 // readiness. Quarantine remains on failure until a later explicit world change.
+// It acts on space 0's physics world and navigation; see Space.QueuePhysicsGeometry.
 func (s *Server) QueuePhysicsGeometry(request PhysicsGeometryRequest) (uint64, error) {
-	if err := s.physics.mutable(); err != nil {
+	return s.queuePhysicsGeometry(&s.space0, request)
+}
+
+func (s *Server) queuePhysicsGeometry(rt *spaceRuntime, request PhysicsGeometryRequest) (uint64, error) {
+	if err := rt.phys().mutable(); err != nil {
 		return 0, err
 	}
-	if s.navigation == nil || request.Identity.Key == "" || len(request.Identity.Key) > 4096 || request.Identity.Revision == 0 || request.Identity.PhysicsFingerprint == "" || len(request.Identity.PhysicsFingerprint) > 4096 || request.Identity.NavigationFingerprint == "" || len(request.Identity.NavigationFingerprint) > 4096 || request.Prepare == nil || request.Quarantine == nil || len(request.Profiles) == 0 || len(request.Profiles) > 256 || !validTraversalBounds(request.Bounds) {
+	if rt.navigation == nil || request.Identity.Key == "" || len(request.Identity.Key) > 4096 || request.Identity.Revision == 0 || request.Identity.PhysicsFingerprint == "" || len(request.Identity.PhysicsFingerprint) > 4096 || request.Identity.NavigationFingerprint == "" || len(request.Identity.NavigationFingerprint) > 4096 || request.Prepare == nil || request.Quarantine == nil || len(request.Profiles) == 0 || len(request.Profiles) > 256 || !validTraversalBounds(request.Bounds) {
 		return 0, p.ErrInvalid
 	}
 	request.Profiles = append([]surface.ProfileID(nil), request.Profiles...)
-	if err := s.physicsGeometryCapacity(request.Identity.Key); err != nil {
+	if err := rt.physicsGeometryCapacity(request.Identity.Key); err != nil {
 		return 0, err
 	}
 	for _, profile := range request.Profiles {
@@ -64,11 +69,11 @@ func (s *Server) QueuePhysicsGeometry(request PhysicsGeometryRequest) (uint64, e
 	if err := request.Quarantine(); err != nil {
 		return 0, err
 	}
-	if !s.physicsGeometryQuarantined(request) {
+	if !rt.physicsGeometryQuarantined(request) {
 		return 0, errors.New("golem: physics geometry requires an active navigation quarantine")
 	}
-	s.rememberPhysicsGeometry(request, false)
-	generation, err := s.QueueNavigationBuild("physics/"+request.Identity.Key, request.Priority, func(ctx context.Context) (NavigationBuildResult, error) {
+	rt.rememberPhysicsGeometry(request, false)
+	generation, err := s.queueNavigationBuild(rt.navigation, "physics/"+request.Identity.Key, request.Priority, func(ctx context.Context) (NavigationBuildResult, error) {
 		prepared, err := request.Prepare(ctx)
 		if err != nil {
 			if prepared.Navigation != nil {
@@ -82,38 +87,47 @@ func (s *Server) QueuePhysicsGeometry(request PhysicsGeometryRequest) (uint64, e
 			}
 			return nil, errors.New("golem: prepared physics/navigation identity mismatch")
 		}
-		return &physicsGeometryBuild{server: s, request: request, prepared: prepared}, nil
+		return &physicsGeometryBuild{space: rt, request: request, prepared: prepared}, nil
 	})
 	return generation, err
 }
 
-// PhysicsGeometry returns the accepted source lease for a stable cell/object key.
-// It is tick-owned. Ownership remains with Server; do not remove or mutate its bodies
-// directly. Runtime entity attachments must detach before that source is replaced.
+// PhysicsGeometry returns space 0's accepted source lease for a stable
+// cell/object key. It is tick-owned. Ownership remains with Server; do not
+// remove or mutate its bodies directly. Runtime entity attachments must detach
+// before that source is replaced.
 func (s *Server) PhysicsGeometry(key string) (*content.Instance, bool) {
-	if s.physics == nil {
+	return s.space0.physics.geometryLease(key)
+}
+
+func (ps *physicsService) geometryLease(key string) (*content.Instance, bool) {
+	if ps == nil {
 		return nil, false
 	}
-	instance, ok := s.physics.geometry[key]
+	instance, ok := ps.geometry[key]
 	return instance, ok
 }
 
-// PhysicsReady reports tick-owned physics readiness, including coherent restoration.
+// PhysicsReady reports space 0's tick-owned physics readiness, including
+// coherent restoration.
 func (s *Server) PhysicsReady() (ready, restoring bool, err error) {
-	if s.physics == nil {
+	return s.space0.physics.readiness()
+}
+
+func (ps *physicsService) readiness() (ready, restoring bool, err error) {
+	if ps == nil {
 		return false, false, errors.New("golem: physics is not configured")
 	}
-	ps := s.physics
 	return !ps.closed && !ps.restoring && ps.fault == nil, ps.restoring, ps.fault
 }
 
-func (s *Server) physicsGeometryQuarantined(request PhysicsGeometryRequest) bool {
+func (rt *spaceRuntime) physicsGeometryQuarantined(request PhysicsGeometryRequest) bool {
 	for _, profile := range request.Profiles {
-		if safety := s.navigation.regionalSafety(profile); safety != nil {
+		if safety := rt.navigation.regionalSafety(profile); safety != nil {
 			if safety.SafeBounds(request.Bounds.Min, request.Bounds.Max) {
 				return false
 			}
-		} else if !s.navigation.profileUnavailable(profile) {
+		} else if !rt.navigation.profileUnavailable(profile) {
 			return false
 		}
 	}
@@ -121,7 +135,7 @@ func (s *Server) physicsGeometryQuarantined(request PhysicsGeometryRequest) bool
 }
 
 type physicsGeometryBuild struct {
-	server                    *Server
+	space                     *spaceRuntime
 	request                   PhysicsGeometryRequest
 	prepared                  PreparedPhysicsGeometry
 	done, navigationCommitted bool
@@ -132,11 +146,11 @@ func (b *physicsGeometryBuild) Commit() error {
 	if b.done {
 		return p.ErrStale
 	}
-	s, ps := b.server, b.server.physics
+	rt, ps := b.space, b.space.physics
 	if err := ps.mutable(); err != nil {
 		return err
 	}
-	if s.navigation.frame != nil || !s.physicsGeometryQuarantined(b.request) {
+	if rt.navigation.frame != nil || !rt.physicsGeometryQuarantined(b.request) {
 		return p.ErrBusy
 	}
 	if pending, ok := ps.geometryPending[b.request.Identity.Key]; !b.activation && (!ok || pending.Identity != b.request.Identity) {
@@ -231,10 +245,10 @@ func (b *physicsGeometryBuild) Commit() error {
 }
 
 func (b *physicsGeometryBuild) fault(err error) {
-	b.server.physics.fault = fmt.Errorf("golem: geometry publication requires coherent recovery: %w", err)
-	b.server.physics.restoring = true
-	b.server.navigation.restoring = true
-	b.server.navigation.restoreErr = err
+	b.space.physics.fault = fmt.Errorf("golem: geometry publication requires coherent recovery: %w", err)
+	b.space.physics.restoring = true
+	b.space.navigation.restoring = true
+	b.space.navigation.restoreErr = err
 }
 
 func (b *physicsGeometryBuild) Discard() {

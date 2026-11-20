@@ -108,18 +108,23 @@ type navigationFramePlan struct {
 	actionReady bool
 }
 
-// PrepareNavigationFrame runs the normal fair movement admission once for this
-// server tick. Legacy agents still move synchronously; StagedPhysics agents only
-// produce proposals. The host must commit or abort before preparing another tick.
-// A server without navigation returns a nil frame and no error.
+// PrepareNavigationFrame runs space 0's normal fair movement admission once for
+// this server tick. Legacy agents still move synchronously; StagedPhysics agents
+// only produce proposals. The host must commit or abort before preparing another
+// tick. A server without navigation returns a nil frame and no error. Frames
+// belong to one space: the frame APIs of another space reject it as foreign.
 func (s *Server) PrepareNavigationFrame(dt float64) (*NavigationFrame, error) {
+	return s.space0.navigation.prepareFrame(dt)
+}
+
+func (n *navigationService) prepareFrame(dt float64) (*NavigationFrame, error) {
 	if !finiteNumber(dt) || dt <= 0 {
 		return nil, errors.New("golem: navigation frame delta must be finite and positive")
 	}
-	n := s.navigation
 	if n == nil {
 		return nil, nil
 	}
+	s := n.server
 	if n.frame != nil {
 		return nil, errors.New("golem: previous navigation frame is still open")
 	}
@@ -149,7 +154,7 @@ func (s *Server) PrepareNavigationFrame(dt float64) (*NavigationFrame, error) {
 			}
 			position, _, ok := n.position(id)
 			if !ok || !fitsNavigationEntity(position) {
-				_ = s.AbortNavigationFrame(f)
+				_ = n.abortFrame(f)
 				return nil, fmt.Errorf("%w: invalid starting position for entity %d", ErrNavigationFrameFault, id)
 			}
 			n.ensureStagedSupport(a, position)
@@ -272,14 +277,18 @@ func (f *NavigationFrame) SafeBounds(id int64, min, max surface.Vec3) bool {
 	return a.safety == nil || a.safety.SafeBounds(min, max)
 }
 
-// ValidateNavigationFrame checks generation, lifetime and source positions before
-// simulation. It neither writes entities nor commits proposed route progress.
+// ValidateNavigationFrame checks generation, lifetime and source positions of a
+// space 0 frame before simulation. It neither writes entities nor commits
+// proposed route progress.
 func (s *Server) ValidateNavigationFrame(f *NavigationFrame) error {
+	return s.space0.navigation.validateFrame(f)
+}
+
+func (n *navigationService) validateFrame(f *NavigationFrame) error {
 	if f == nil {
 		return nil
 	}
-	n := s.navigation
-	if n == nil || f.service != n || n.frame != f || f.closed || f.tick != s.tick {
+	if n == nil || f.service != n || n.frame != f || f.closed || f.tick != n.server.tick {
 		return fmt.Errorf("%w: foreign, closed or stale frame", ErrNavigationFrameFault)
 	}
 	if n.navigationFrameBarrier() != f.barrier {
@@ -326,25 +335,30 @@ func (n *navigationService) navigationFrameBarrier() bool {
 // the physics host must fault or restore the whole interacting frame. Loss of
 // support after valid physical motion instead retains that pose and reports
 // Unsupported through the ordinary navigation state.
+// Space 0 frames only; see Space.CommitNavigationFrame.
 func (s *Server) CommitNavigationFrame(f *NavigationFrame, results []NavigationMotionResult) error {
-	accepted, err := s.validateNavigationResults(f, results)
+	return s.space0.navigation.commitFrame(f, results)
+}
+
+func (n *navigationService) commitFrame(f *NavigationFrame, results []NavigationMotionResult) error {
+	accepted, err := n.validateResults(f, results)
 	if err != nil {
 		return err
 	}
 	if f != nil {
-		s.commitNavigationResults(f, accepted)
+		n.commitResults(f, accepted)
 	}
 	return nil
 }
 
-func (s *Server) validateNavigationResults(f *NavigationFrame, results []NavigationMotionResult) (map[int64]navigationAcceptedMotion, error) {
+func (n *navigationService) validateResults(f *NavigationFrame, results []NavigationMotionResult) (map[int64]navigationAcceptedMotion, error) {
 	if f == nil {
 		if len(results) != 0 {
 			return nil, fmt.Errorf("%w: results without a navigation frame", ErrNavigationFrameFault)
 		}
 		return nil, nil
 	}
-	if err := s.ValidateNavigationFrame(f); err != nil {
+	if err := n.validateFrame(f); err != nil {
 		return nil, err
 	}
 	accepted := make(map[int64]navigationAcceptedMotion, len(results))
@@ -393,7 +407,7 @@ func (s *Server) validateNavigationResults(f *NavigationFrame, results []Navigat
 	return accepted, nil
 }
 
-func (s *Server) commitNavigationResults(f *NavigationFrame, accepted map[int64]navigationAcceptedMotion) {
+func (n *navigationService) commitResults(f *NavigationFrame, accepted map[int64]navigationAcceptedMotion) {
 	// No game callback or pose setter runs until every result has passed. Physics
 	// setters are required to be data-only, as with ordinary Position3DWriter.
 	for _, id := range f.order {
@@ -444,12 +458,16 @@ func (n *navigationService) dispatchFrameCallback(callback func()) {
 }
 
 // AbortNavigationFrame discards prepared traversal state without changing body
-// positions. It is idempotent for a frame belonging to this server.
+// positions. It is idempotent for a frame belonging to space 0.
 func (s *Server) AbortNavigationFrame(f *NavigationFrame) error {
+	return s.space0.navigation.abortFrame(f)
+}
+
+func (n *navigationService) abortFrame(f *NavigationFrame) error {
 	if f == nil {
 		return nil
 	}
-	if f.service != s.navigation {
+	if n == nil || f.service != n {
 		return errors.New("golem: foreign navigation frame")
 	}
 	if f.closed {

@@ -90,24 +90,17 @@ func (s *Server) entitySetupAllowed() error {
 	if stopping {
 		return ErrServerNotRunning
 	}
-	if s.physics != nil {
-		if err := s.physics.mutable(); err != nil {
-			return fmt.Errorf("golem: entity setup: %w", err)
-		}
-	}
-	if n := s.navigation; n != nil && (n.restoring || n.restoreErr != nil || n.frame != nil) {
-		return errors.New("golem: entity setup is unavailable during navigation frames or restoration")
-	}
-	return nil
+	return s.servicesQuiescent("entity setup")
 }
 
 func (s *Server) rollbackEntitySetup(e Entity, id int64) error {
-	err := s.DetachPhysics(id)
-	if err != nil && s.physics != nil {
-		s.physics.fault = err
+	rt := s.runtimeOf(id)
+	err := rt.phys().detachEntity(id)
+	if err != nil {
+		rt.physics.fault = err
 	}
-	s.DetachNavigation(id)
-	s.runtimeOf(id).unregisterCollider(e, id)
+	rt.nav().detach(id)
+	rt.unregisterCollider(e, id)
 	s.reg.DiscardProvisional(id)
 	return err
 }

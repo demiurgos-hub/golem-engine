@@ -56,6 +56,8 @@ type NavigationConfig struct {
 // timestamp from NavigationNow; compare timestamps with Time.Sub, not time.Since.
 // Generation identifies the accepted worker generation.
 type NavigationPathAdmissionMetrics struct {
+	// Space is the space whose navigation service admitted the route.
+	Space                           SpaceID
 	EntityID                        int64
 	Tick, Generation, WorldRevision uint64
 	// Destination is the accepted worker goal, which can be an interim target
@@ -69,6 +71,8 @@ type NavigationPathAdmissionMetrics struct {
 // NavigationTickMetrics measures navigation work on the tick goroutine. Worker
 // work and observer execution are excluded; durations include policy callbacks.
 type NavigationTickMetrics struct {
+	// Space is the space whose navigation service did this work.
+	Space                        SpaceID
 	Tick                         uint64
 	Prepare, Movement, Reconcile time.Duration
 	AgentsScheduled              int
@@ -233,6 +237,7 @@ type navigationAgent struct {
 
 type navigationService struct {
 	server                 *Server
+	space                  *spaceRuntime // owning runtime; space.physics is the sibling service
 	backend                surface.Backend
 	config                 NavigationConfig
 	paths, builds          *navigationPool
@@ -260,10 +265,16 @@ type navigationService struct {
 	frameCallbacks         []func()
 }
 
-// SetSurfaceNavigation installs a 3D navigation service before Run. Existing 2D
-// navigation remains independent. Backend snapshots must be immutable; workers
-// never read entity pointers or mutate a published navigation mesh.
+// SetSurfaceNavigation installs space 0's 3D navigation service before Run.
+// Existing 2D navigation remains independent. Backend snapshots must be
+// immutable; workers never read entity pointers or mutate a published navigation
+// mesh. Space(id).SetSurfaceNavigation configures other spaces; each space has
+// its own backend, path and build worker pools.
 func (s *Server) SetSurfaceNavigation(backend surface.Backend, cfg NavigationConfig) error {
+	return s.setSurfaceNavigation(0, backend, cfg)
+}
+
+func (s *Server) setSurfaceNavigation(space SpaceID, backend surface.Backend, cfg NavigationConfig) error {
 	if backend == nil {
 		return errors.New("golem: navigation backend is nil")
 	}
@@ -275,29 +286,42 @@ func (s *Server) SetSurfaceNavigation(backend surface.Backend, cfg NavigationCon
 	if s.life != lifecycleCreated {
 		return errors.New("golem: configure navigation before Run")
 	}
-	if s.navigation != nil {
+	if s.runtime(space).nav() != nil {
 		return errors.New("golem: navigation is already configured")
 	}
-	s.navigation = &navigationService{server: s, backend: backend, config: cfg,
+	rt := s.ensureRuntime(space)
+	rt.navigation = &navigationService{server: s, space: rt, backend: backend, config: cfg,
 		paths:  newNavigationPool(cfg.PathWorkers, cfg.PathQueueCapacity, cfg.CompletionCapacity),
 		builds: newNavigationPool(cfg.BuildWorkers, cfg.BuildQueueCapacity, cfg.CompletionCapacity),
 		agents: make(map[int64]*navigationAgent), deleting: make(map[int64]bool), buildGeneration: make(map[string]uint64),
 		buildStates: make(map[string]NavigationBuildState), buildRequests: make(map[string]*navigationBuildRequest), buildClock: NavigationNow}
-	s.space0.navigation = s.navigation
+	if space == 0 {
+		s.navigation = rt.navigation
+	} else {
+		if s.navigationBySpace == nil {
+			s.navigationBySpace = make(map[SpaceID]*navigationService)
+		}
+		s.navigationBySpace[space] = rt.navigation
+	}
 	return nil
 }
 
-// AttachNavigation attaches a 3D position reader/writer by stable entity ID.
+// AttachNavigation attaches a 3D position reader/writer by stable entity ID to
+// the surface navigation of the entity's space.
 // Call during startup or on the tick goroutine. DeleteEntity detaches it before
 // OnRemove. Attaching does not move or project an entity until it gets an intent.
 func (s *Server) AttachNavigation(id int64, cfg NavigationAgentConfig) error {
+	return s.attachNavigation(s.runtimeOf(id), id, cfg)
+}
+
+func (s *Server) attachNavigation(rt *spaceRuntime, id int64, cfg NavigationAgentConfig) error {
 	s.lifeMu.Lock()
 	stopping := s.life == lifecycleStopping || s.life == lifecycleStopped
 	s.lifeMu.Unlock()
 	if stopping {
 		return ErrServerNotRunning
 	}
-	n := s.navigation
+	n := rt.nav()
 	if n == nil {
 		return errors.New("golem: surface navigation is not configured")
 	}
@@ -320,23 +344,32 @@ func (s *Server) AttachNavigation(id int64, cfg NavigationAgentConfig) error {
 	if err := validateNavigationAgent(&cfg); err != nil {
 		return err
 	}
-	if s.physics != nil && s.physics.agents[id] != nil && !cfg.StagedPhysics {
+	if rt.physicsAttached(id) && !cfg.StagedPhysics {
 		return errors.New("golem: a physics attachment requires staged navigation")
 	}
-	if err := s.validatePhysicsNavigation(id, false); err != nil {
+	if err := rt.validatePhysicsNavigation(id, false); err != nil {
 		return err
 	}
+	n.addAgent(id, cfg)
+	return nil
+}
+
+// addAgent installs a validated idle attachment without an intent.
+func (n *navigationService) addAgent(id int64, cfg NavigationAgentConfig) {
 	n.attachment++
 	n.agents[id] = &navigationAgent{id: id, attachment: n.attachment, config: cfg,
-		state: NavigationState{Mode: NavigationIdle}, lastTick: s.tick}
+		state: NavigationState{Mode: NavigationIdle}, lastTick: n.server.tick}
 	n.order = append(n.order, id)
-	return nil
 }
 
 // DetachNavigation cancels an entity's requests and releases its route. It is
 // idempotent and runs on the tick goroutine (or before Run).
 func (s *Server) DetachNavigation(id int64) {
-	if n := s.navigation; n != nil {
+	s.runtimeOf(id).nav().detach(id)
+}
+
+func (n *navigationService) detach(id int64) {
+	if n != nil {
 		if a := n.agents[id]; a != nil {
 			n.paths.cancelKey(strconv.FormatInt(id, 10))
 			delete(n.agents, id)
@@ -375,7 +408,7 @@ func (s *Server) SetNavigationDestination(id int64, destination surface.Vec3) er
 	if err != nil {
 		return err
 	}
-	if err := s.validatePhysicsNavigation(id, true); err != nil {
+	if err := n.space.validatePhysicsNavigation(id, true); err != nil {
 		return err
 	}
 	if !n.cancelTraversal(a, "destination changed") {
@@ -406,7 +439,7 @@ func (s *Server) RetargetNavigationDestination(id int64, destination surface.Vec
 	if err != nil {
 		return err
 	}
-	if err := s.validatePhysicsNavigation(id, true); err != nil {
+	if err := n.space.validatePhysicsNavigation(id, true); err != nil {
 		return err
 	}
 	if a.state.HasDestination && a.state.Destination == destination &&
@@ -476,7 +509,7 @@ func (s *Server) ReprojectNavigation(id int64) error {
 
 // NavigationAgentState returns a copied state on the tick goroutine or before Run.
 func (s *Server) NavigationAgentState(id int64) (NavigationState, bool) {
-	if n := s.navigation; n != nil {
+	if n := s.runtimeOf(id).nav(); n != nil {
 		if a := n.agents[id]; a != nil {
 			state := a.state
 			state.RetargetPending = a.retargeting
@@ -493,10 +526,21 @@ func (s *Server) NavigationAgentState(id int64) (NavigationState, bool) {
 	return NavigationState{}, false
 }
 
-// NavigationStats reports concurrent-safe queue gauges and cumulative counters.
+// NavigationStats reports space 0's concurrent-safe queue gauges and cumulative
+// counters.
 func (s *Server) NavigationStats() NavigationStats {
+	return s.navigationStats(0)
+}
+
+// navigationStats reads the counters of a space's service concurrently. The
+// services are installed before Run under lifeMu, so the lookup avoids the
+// tick-owned runtime map.
+func (s *Server) navigationStats(space SpaceID) NavigationStats {
 	s.lifeMu.Lock()
 	n := s.navigation
+	if space != 0 {
+		n = s.navigationBySpace[space]
+	}
 	s.lifeMu.Unlock()
 	if n == nil {
 		return NavigationStats{}
@@ -506,12 +550,15 @@ func (s *Server) NavigationStats() NavigationStats {
 	return stats
 }
 
-// NavigationReady reports availability on the tick or before Run. Committed
-// regional worlds with pending edits or retiring-view quarantine remain Ready
-// and report Degraded; missing profiles, restoration and profile-wide pending
-// backends close readiness.
+// NavigationReady reports space 0's availability on the tick or before Run.
+// Committed regional worlds with pending edits or retiring-view quarantine
+// remain Ready and report Degraded; missing profiles, restoration and
+// profile-wide pending backends close readiness.
 func (s *Server) NavigationReady() NavigationReadiness {
-	n := s.navigation
+	return s.space0.navigation.readiness()
+}
+
+func (n *navigationService) readiness() NavigationReadiness {
 	if n == nil {
 		return NavigationReadiness{Err: errors.New("golem: navigation is not configured")}
 	}
@@ -548,15 +595,18 @@ func (s *Server) NavigationReady() NavigationReadiness {
 	return r
 }
 
-// BeginNavigationRestore closes the agent readiness barrier. Restore stable
-// desired world state before calling CompleteNavigationRestore.
+// BeginNavigationRestore closes space 0's agent readiness barrier. Restore
+// stable desired world state before calling CompleteNavigationRestore.
 func (s *Server) BeginNavigationRestore() error {
-	if s.navigation == nil {
+	return s.space0.navigation.beginRestore()
+}
+
+func (n *navigationService) beginRestore() error {
+	if n == nil {
 		return errors.New("golem: navigation is not configured")
 	}
-	n := s.navigation
 	if n.frame != nil {
-		_ = s.AbortNavigationFrame(n.frame)
+		_ = n.abortFrame(n.frame)
 	}
 	n.restoring, n.restoreErr = true, nil
 	for _, a := range n.agents {
@@ -572,13 +622,18 @@ func (s *Server) BeginNavigationRestore() error {
 	return nil
 }
 
-// CompleteNavigationRestore opens readiness only on success. A restoration
-// failure remains explicit and blocks movement until a new restore succeeds.
+// CompleteNavigationRestore opens space 0's readiness only on success. A
+// restoration failure remains explicit and blocks movement until a new restore
+// succeeds.
 func (s *Server) CompleteNavigationRestore(err error) error {
-	if s.navigation == nil {
+	return s.space0.navigation.completeRestore(err)
+}
+
+func (n *navigationService) completeRestore(err error) error {
+	if n == nil {
 		return errors.New("golem: navigation is not configured")
 	}
-	s.navigation.restoring, s.navigation.restoreErr = false, err
+	n.restoring, n.restoreErr = false, err
 	return nil
 }
 
@@ -589,7 +644,7 @@ func (s *Server) navigationAgent(id int64) (*navigationService, *navigationAgent
 	if stopping {
 		return nil, nil, ErrServerNotRunning
 	}
-	n := s.navigation
+	n := s.runtimeOf(id).nav()
 	if n == nil {
 		return nil, nil, errors.New("golem: navigation is not configured")
 	}
@@ -604,7 +659,7 @@ func (n *navigationService) start(ctx context.Context) { n.paths.start(ctx); n.b
 
 func (n *navigationService) stop() {
 	if n.frame != nil {
-		_ = n.server.AbortNavigationFrame(n.frame)
+		_ = n.abortFrame(n.frame)
 	}
 	n.stopBuildRequests()
 	n.paths.stop()
@@ -652,7 +707,7 @@ func (n *navigationService) cancelRetarget(a *navigationAgent) {
 }
 
 func (n *navigationService) prepare() {
-	n.tickMetrics = NavigationTickMetrics{Tick: n.server.tick}
+	n.tickMetrics = NavigationTickMetrics{Space: n.space.id, Tick: n.server.tick}
 	n.pathObservationElapsed = 0
 	if n.config.ObserveTick != nil {
 		started := NavigationNow()
@@ -1018,7 +1073,7 @@ func (n *navigationService) observePathAdmission(a *navigationAgent) {
 	a.admissionPending = false
 	if observe := n.config.ObservePathAdmission; observe != nil {
 		admittedAt := NavigationNow()
-		observe(NavigationPathAdmissionMetrics{EntityID: a.id, Tick: n.server.tick, Generation: a.admissionGeneration, WorldRevision: a.state.WorldRevision, Destination: a.admissionDestination, AdmittedAt: admittedAt, Status: a.state.Status})
+		observe(NavigationPathAdmissionMetrics{Space: n.space.id, EntityID: a.id, Tick: n.server.tick, Generation: a.admissionGeneration, WorldRevision: a.state.WorldRevision, Destination: a.admissionDestination, AdmittedAt: admittedAt, Status: a.state.Status})
 		n.pathObservationElapsed += navigationSince(admittedAt)
 	}
 }

@@ -64,11 +64,15 @@ func validatePendingPhysicsGeometry(changes []PhysicsGeometryPending) error {
 	return nil
 }
 
-func (s *Server) physicsWorldPending() bool {
-	if len(s.physics.geometryPending) != 0 {
+// physicsWorldPending reports whether space 0's physical or navigation world
+// has pending geometry; paired checkpoints cover space 0 only.
+func (s *Server) physicsWorldPending() bool { return s.space0.physicsWorldPending() }
+
+func (rt *spaceRuntime) physicsWorldPending() bool {
+	if len(rt.physics.geometryPending) != 0 {
 		return true
 	}
-	n := s.navigation
+	n := rt.navigation
 	if n == nil {
 		return false
 	}

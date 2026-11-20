@@ -28,7 +28,7 @@ func (s *Server) LoadSnapshotStrict(path, fingerprint string, restore func(snaps
 	if !created {
 		return errors.New("golem: LoadSnapshotStrict requires startup before Run")
 	}
-	if s.physics != nil {
+	if s.anyPhysics() {
 		return errors.New("golem: LoadSnapshotStrict is entity-only; use paired physics checkpoint restoration")
 	}
 	if restore == nil {

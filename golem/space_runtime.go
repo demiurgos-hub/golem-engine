@@ -2,12 +2,14 @@ package golem
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"slices"
 
 	"github.com/demiurgos-hub/golem-engine/golem/collision"
 	"github.com/demiurgos-hub/golem-engine/golem/collision3d"
 	"github.com/demiurgos-hub/golem-engine/golem/nav"
+	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
 	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
@@ -16,9 +18,13 @@ import (
 // embedded in Server (Server.space0) and always exists; other spaces get one
 // lazily when a service is first configured through their Space handle.
 //
-// physics and navigation are only ever set on space 0 for now, and
-// Server.physics / Server.navigation alias them (both are assigned together in
-// SetPhysicsWorld and SetSurfaceNavigation).
+// physics and navigation hold the space's native physics world and 3D surface
+// navigation; each service points back at its runtime (service.space) so the
+// physics step prepares its sibling navigation frame. Server.physics /
+// Server.navigation alias space 0's services (assigned together in
+// SetPhysicsWorld and SetSurfaceNavigation). Physics and surface navigation are
+// installed before Run only; an entity's attachments always live in the
+// services of its own space.
 //
 // Runtimes are created and mutated before Run or on the tick goroutine, like
 // the Server setters they back.
@@ -71,10 +77,86 @@ func (s *Server) runtimeOf(entityID int64) *spaceRuntime {
 	return s.runtime(space)
 }
 
-// physicsAttached reports whether id is bound to a physics body, in which case
-// legacy collision neither updates nor writes back its position.
-func (s *Server) physicsAttached(id int64) bool {
-	return s.physics != nil && s.physics.agents[id] != nil
+// phys returns the space's physics service, or nil (also for a nil runtime).
+func (rt *spaceRuntime) phys() *physicsService {
+	if rt == nil {
+		return nil
+	}
+	return rt.physics
+}
+
+// nav returns the space's surface navigation service, or nil (also for a nil
+// runtime).
+func (rt *spaceRuntime) nav() *navigationService {
+	if rt == nil {
+		return nil
+	}
+	return rt.navigation
+}
+
+// physicsAttached reports whether id is bound to a physics body of this space,
+// in which case legacy collision neither updates nor writes back its position.
+func (rt *spaceRuntime) physicsAttached(id int64) bool {
+	return rt.physics != nil && rt.physics.agents[id] != nil
+}
+
+// eachRuntime calls fn for space 0 and then every other runtime in ascending
+// space order, stopping at the first error.
+func (s *Server) eachRuntime(fn func(*spaceRuntime) error) error {
+	if err := fn(&s.space0); err != nil {
+		return err
+	}
+	for _, rt := range s.spaceOrder {
+		if err := fn(rt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// anyPhysics reports whether any space has a physics world.
+func (s *Server) anyPhysics() bool {
+	if s.space0.physics != nil {
+		return true
+	}
+	for _, rt := range s.spaceOrder {
+		if rt.physics != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// multiSpaceServices reports whether a space other than 0 has physics or
+// surface navigation. Paired checkpoints cover space 0 only for now.
+func (s *Server) multiSpaceServices() bool {
+	for _, rt := range s.spaceOrder {
+		if rt.physics != nil || rt.navigation != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// errMultiSpaceCheckpoint rejects paired checkpoints while another space than 0
+// has physics or surface navigation.
+var errMultiSpaceCheckpoint = errors.New("golem: multi-space physics/navigation checkpoints are not supported yet; only space 0 may have physics or surface navigation")
+
+// servicesQuiescent rejects work that must not interleave with any space's
+// physics step, accepted-frame callbacks, restoration or open navigation frame.
+// Physics errors wrap physics3d.ErrBusy (or ErrFaulted/ErrStale).
+func (s *Server) servicesQuiescent(op string) error {
+	return s.eachRuntime(func(rt *spaceRuntime) error {
+		if ps := rt.physics; ps != nil {
+			if err := ps.mutable(); err != nil {
+				return fmt.Errorf("golem: %s: %w", op, err)
+			}
+		}
+		if n := rt.navigation; n != nil && (n.restoring || n.restoreErr != nil || n.frame != nil) {
+			return fmt.Errorf("golem: %s is unavailable during navigation frames or restoration: %w", op, p.ErrBusy)
+		}
+		return nil
+	})
 }
 
 // registerCollider adds provider shapes on the layer helpers of the entity's
@@ -242,7 +324,7 @@ func (s *Server) stepCollision2D(dt float64) {
 		if spaced == nil {
 			if rt.id == 0 {
 				for _, e := range all {
-					if s.physicsAttached(e.EntityID()) {
+					if rt.physicsAttached(e.EntityID()) {
 						continue
 					}
 					x, y := e.Position()
@@ -251,7 +333,7 @@ func (s *Server) stepCollision2D(dt float64) {
 			}
 		} else {
 			for _, se := range spaced {
-				if se.Space != rt.id || s.physicsAttached(se.Entity.EntityID()) {
+				if se.Space != rt.id || rt.physicsAttached(se.Entity.EntityID()) {
 					continue
 				}
 				x, y := se.Entity.Position()
@@ -260,7 +342,7 @@ func (s *Server) stepCollision2D(dt float64) {
 		}
 		contacts := b.Step(dt)
 		b.ReadBack(func(id int64, x, y float64) {
-			if s.physicsAttached(id) || !s.inCollisionSpace(rt, id, spaced != nil) {
+			if rt.physicsAttached(id) || !s.inCollisionSpace(rt, id, spaced != nil) {
 				return
 			}
 			e, ok := s.reg.Get(id)
@@ -304,8 +386,8 @@ func (s *Server) stepCollision3D(dt float64) {
 	defer s.releaseSpacedScratch(spaced)
 	var merged []collision3d.Contact
 	scratch := false
-	update := func(b collision3d.Backend, e Entity) {
-		if s.physicsAttached(e.EntityID()) {
+	update := func(rt *spaceRuntime, b collision3d.Backend, e Entity) {
+		if rt.physicsAttached(e.EntityID()) {
 			return
 		}
 		sp, ok := e.(registry.Spatial3DEntity)
@@ -323,19 +405,19 @@ func (s *Server) stepCollision3D(dt float64) {
 		if spaced == nil {
 			if rt.id == 0 {
 				for _, e := range all {
-					update(b, e)
+					update(rt, b, e)
 				}
 			}
 		} else {
 			for _, se := range spaced {
 				if se.Space == rt.id {
-					update(b, se.Entity)
+					update(rt, b, se.Entity)
 				}
 			}
 		}
 		contacts := b.Step(dt)
 		b.ReadBack(func(id int64, x, y, z float64) {
-			if s.physicsAttached(id) || !s.inCollisionSpace(rt, id, spaced != nil) {
+			if rt.physicsAttached(id) || !s.inCollisionSpace(rt, id, spaced != nil) {
 				return
 			}
 			e, ok := s.reg.Get(id)
@@ -384,4 +466,96 @@ func (s *Server) anyCollision3D() bool {
 		}
 	}
 	return false
+}
+
+// drainPhysics runs every space's due queued physics commands, space 0 first
+// and then in ascending space order. A failing space ends the tick (and Run).
+func (s *Server) drainPhysics() error {
+	if ps := s.space0.physics; ps != nil {
+		if err := ps.drain(); err != nil {
+			return err
+		}
+	}
+	for _, rt := range s.spaceOrder {
+		if rt.physics != nil {
+			if err := rt.physics.drain(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// prepareNavigation publishes every space's completed navigation builds and
+// path results in ascending space order.
+func (s *Server) prepareNavigation() {
+	if n := s.space0.navigation; n != nil {
+		n.prepare()
+	}
+	for _, rt := range s.spaceOrder {
+		if rt.navigation != nil {
+			rt.navigation.prepare()
+		}
+	}
+}
+
+// stepSpaces advances each space once in ascending order: a space with physics
+// steps its world (preparing its own staged navigation frame), a space with only
+// surface navigation advances it. While several runtimes exist, space moves are
+// rejected for the whole loop so no entity is simulated in two spaces in one
+// tick.
+func (s *Server) stepSpaces(dt float64) error {
+	if len(s.spaceOrder) != 0 {
+		s.simulatingSpaces = true
+		defer func() { s.simulatingSpaces = false }()
+	}
+	if err := s.space0.stepServices(dt); err != nil {
+		return err
+	}
+	for _, rt := range s.spaceOrder {
+		if err := rt.stepServices(dt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (rt *spaceRuntime) stepServices(dt float64) error {
+	if rt.physics != nil {
+		return rt.physics.step(dt)
+	}
+	if rt.navigation != nil {
+		rt.navigation.advance(dt)
+	}
+	return nil
+}
+
+// reconcileNavigation reconciles every space's navigation agents with their
+// actual bodies after collision readback, in ascending space order.
+func (s *Server) reconcileNavigation() {
+	if n := s.space0.navigation; n != nil {
+		n.reconcile()
+	}
+	for _, rt := range s.spaceOrder {
+		if rt.navigation != nil {
+			rt.navigation.reconcile()
+		}
+	}
+}
+
+// stopServices stops every space's navigation service and then every space's
+// physics service, each in ascending space order.
+func (s *Server) stopServices() {
+	_ = s.eachRuntime(func(rt *spaceRuntime) error {
+		if rt.navigation != nil {
+			rt.navigation.stop()
+		}
+		return nil
+	})
+	_ = s.eachRuntime(func(rt *spaceRuntime) error {
+		if rt.physics != nil {
+			rt.physics.stop()
+		}
+		return nil
+	})
 }

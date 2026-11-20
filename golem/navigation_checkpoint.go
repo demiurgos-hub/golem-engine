@@ -36,7 +36,12 @@ type NavigationCheckpoint struct {
 // immutable desired-world bytes. JSON encoding stores these opaque bytes as base64.
 // The bytes should come from the geometry backend's
 // desired-state checkpoint, including source objects, blockers and link states.
+// It covers space 0 and is rejected while another space has physics or surface
+// navigation.
 func (s *Server) CaptureNavigationCheckpoint(id, fingerprint string, revision uint64, desiredWorld []byte) (NavigationCheckpoint, error) {
+	if s.multiSpaceServices() {
+		return NavigationCheckpoint{}, errMultiSpaceCheckpoint
+	}
 	if s.navigation == nil {
 		return NavigationCheckpoint{}, errors.New("golem: navigation is not configured")
 	}

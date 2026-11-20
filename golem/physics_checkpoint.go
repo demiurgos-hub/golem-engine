@@ -96,7 +96,13 @@ type PhysicsCheckpointOptions struct {
 // closures cannot be persisted. Direct body changes must already be synchronized.
 // Desired captures must describe the accepted world unless separate accepted
 // captures are supplied for a pending change; worker closures are never captured.
+// Checkpoints cover space 0's physics and navigation; while another space has
+// physics or surface navigation, capture is rejected (entities in other spaces
+// without services are captured with their space).
 func (s *Server) CapturePhysicsCheckpoint(options PhysicsCheckpointOptions) (PhysicsCheckpoint, error) {
+	if s.multiSpaceServices() {
+		return PhysicsCheckpoint{}, errMultiSpaceCheckpoint
+	}
 	ps := s.physics
 	if err := ps.mutable(); err != nil {
 		return PhysicsCheckpoint{}, err
@@ -352,7 +358,11 @@ type PhysicsRestored interface{ OnPhysicsRestored(*Server) }
 // visibility and avatar/session membership are reset; rebuild them in recovery hooks.
 // A preparation failure leaves accepted entities and physics untouched. A rare
 // failure after navigation publication closes readiness and requires coherent retry.
+// Like capture, restoration supports physics and navigation in space 0 only.
 func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRestoreOptions) (err error) {
+	if s.multiSpaceServices() {
+		return errMultiSpaceCheckpoint
+	}
 	ps := s.physics
 	if ps == nil || ps.closed || ps.stepping || ps.dispatching || ps.restoring && ps.fault == nil {
 		return p.ErrBusy
@@ -364,6 +374,9 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 		return errors.New("golem: disconnect clients before physics restoration")
 	}
 	if err = c.Validate(); err != nil {
+		return err
+	}
+	if err = c.validateSpaceZeroServices(); err != nil {
 		return err
 	}
 	if options.Entity == nil || c.SchemaFingerprint != options.SchemaFingerprint || c.DesiredPhysicsFingerprint != options.PhysicsFingerprint {
@@ -583,14 +596,14 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 		// Worker results were prepared against the replaced world. Invalidate every
 		// generation before readiness reopens, including completed queued results.
 		for key := range n.buildStates {
-			s.CancelNavigationBuild(key)
+			n.cancelBuild(key)
 		}
 		n.frameCallbacks = make([]func(), 0)
 		if err = s.BeginNavigationRestore(); err != nil {
 			return err
 		}
 		for len(n.order) > 0 {
-			s.DetachNavigation(n.order[0])
+			n.detach(n.order[0])
 		}
 		callbacks = n.frameCallbacks
 		n.frameCallbacks = nil
@@ -632,7 +645,7 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 		ps.write(agents[binding.EntityID], state, true)
 	}
 	for _, saved := range c.NavigationAgents {
-		if err = s.AttachNavigation(saved.EntityID, configs[saved.EntityID]); err != nil {
+		if err = s.attachNavigation(&s.space0, saved.EntityID, configs[saved.EntityID]); err != nil {
 			return err
 		}
 	}
@@ -651,6 +664,32 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 	for _, entry := range entries {
 		if restored, ok := entry.Entity.(PhysicsRestored); ok {
 			restored.OnPhysicsRestored(s)
+		}
+	}
+	return nil
+}
+
+// validateSpaceZeroServices rejects attachments and navigation agents of
+// entities recorded outside space 0: until multi-space checkpoints exist, only
+// space 0 restores physics and navigation.
+func (c PhysicsCheckpoint) validateSpaceZeroServices() error {
+	spaces := make(map[int64]SpaceID)
+	for _, e := range c.Entities {
+		if e.Record.Space != 0 {
+			spaces[e.Record.EntityID] = e.Record.Space
+		}
+	}
+	if len(spaces) == 0 {
+		return nil
+	}
+	for _, binding := range c.Attachments {
+		if space := spaces[binding.EntityID]; space != 0 {
+			return fmt.Errorf("%w: physics attachment of entity %d in space %d", errMultiSpaceCheckpoint, binding.EntityID, space)
+		}
+	}
+	for _, agent := range c.NavigationAgents {
+		if space := spaces[agent.EntityID]; space != 0 {
+			return fmt.Errorf("%w: navigation agent of entity %d in space %d", errMultiSpaceCheckpoint, agent.EntityID, space)
 		}
 	}
 	return nil

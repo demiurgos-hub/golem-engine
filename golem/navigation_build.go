@@ -51,14 +51,18 @@ type navigationBuildRequest struct {
 // queued and active keys share BuildQueueCapacity. The newest work replaces any
 // prior generation; continuous edits cannot postpone eligibility beyond
 // BuildMaxWait. Dispatch still observes worker capacity and tick budgets.
-// Call on the tick goroutine; work captures immutable source inputs.
+// Call on the tick goroutine; work captures immutable source inputs. This
+// queues on space 0's build pool; see Space.QueueNavigationBuild.
 func (s *Server) QueueNavigationBuild(key string, priority int, work func(context.Context) (NavigationBuildResult, error)) (uint64, error) {
+	return s.queueNavigationBuild(s.space0.navigation, key, priority, work)
+}
+
+func (s *Server) queueNavigationBuild(n *navigationService, key string, priority int, work func(context.Context) (NavigationBuildResult, error)) (uint64, error) {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
 	if s.life != lifecycleRunning || s.runCtx == nil || s.runCtx.Err() != nil {
 		return 0, ErrServerNotRunning
 	}
-	n := s.navigation
 	if n == nil {
 		return 0, errors.New("golem: navigation is not configured")
 	}
@@ -221,10 +225,15 @@ func (n *navigationService) removeBuildRequest(request *navigationBuildRequest) 
 	delete(n.buildRequests, request.key)
 }
 
-// CancelNavigationBuild invalidates delayed, queued and active generations. It
-// does not undo already committed geometry. Call on the tick (or before Run).
+// CancelNavigationBuild invalidates space 0's delayed, queued and active
+// generations of key. It does not undo already committed geometry. Call on the
+// tick (or before Run).
 func (s *Server) CancelNavigationBuild(key string) {
-	if n := s.navigation; n != nil {
+	s.space0.navigation.cancelBuild(key)
+}
+
+func (n *navigationService) cancelBuild(key string) {
+	if n != nil {
 		if _, known := n.buildStates[key]; !known {
 			return
 		}
@@ -243,14 +252,18 @@ func (s *Server) CancelNavigationBuild(key string) {
 
 func (n *navigationService) stopBuildRequests() {
 	for key := range n.buildRequests {
-		n.server.CancelNavigationBuild(key)
+		n.cancelBuild(key)
 	}
 }
 
-// ForgetNavigationBuild removes retained terminal status. Pending keys must
-// first be cancelled. A reused key receives a fresh global generation.
+// ForgetNavigationBuild removes space 0's retained terminal status. Pending keys
+// must first be cancelled. A reused key receives a fresh generation.
 func (s *Server) ForgetNavigationBuild(key string) error {
-	if n := s.navigation; n != nil {
+	return s.space0.navigation.forgetBuild(key)
+}
+
+func (n *navigationService) forgetBuild(key string) error {
+	if n != nil {
 		if n.buildStates[key].Pending {
 			return errors.New("golem: cannot forget a pending navigation build")
 		}
@@ -260,9 +273,14 @@ func (s *Server) ForgetNavigationBuild(key string) error {
 	return nil
 }
 
-// NavigationBuildStatus returns copied tick-owned state, including retry delay.
+// NavigationBuildStatus returns space 0's copied tick-owned state, including
+// retry delay.
 func (s *Server) NavigationBuildStatus(key string) (NavigationBuildState, bool) {
-	if n := s.navigation; n != nil {
+	return s.space0.navigation.buildStatus(key)
+}
+
+func (n *navigationService) buildStatus(key string) (NavigationBuildState, bool) {
+	if n != nil {
 		state, ok := n.buildStates[key]
 		return state, ok
 	}
