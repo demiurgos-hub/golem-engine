@@ -24,6 +24,12 @@ func (s *Server) EntitySpace(id int64) (SpaceID, bool) {
 // sessions in the old space see it exit and sessions in the new space see it
 // enter, except for sessions that move along with it (see MoveToSpace).
 //
+// Schema colliders (ColliderProvider / ColliderProvider3D) move with the
+// entity: they leave the old space's collision layers and register, with the
+// provider's current shape, on the new space's layers (none when the new space
+// has no layer helper). A collider layer the destination's helper does not
+// define rejects the move.
+//
 // Call before Run or on the tick goroutine, outside physics callbacks, active
 // frames and restoration; use Post from a contact callback. Entities attached
 // to physics or navigation, or being deleted, are rejected.
@@ -90,7 +96,9 @@ func (s *Server) checkSpaceMutable(op string) error {
 	return nil
 }
 
-// applySpaceMove validates every entity of t and then moves them together.
+// applySpaceMove validates every entity of t, including its legacy collider
+// transfer, and then moves them together: the registry move and the collider
+// moves between space layer helpers happen in the same tick-owned step.
 // interestMu makes the batch atomic for session-space readers.
 func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 	for _, id := range t.Entities {
@@ -106,12 +114,17 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 			}
 		}
 	}
+	colliders, err := s.planColliderMoves(op, t)
+	if err != nil {
+		return err
+	}
 	s.interestMu.Lock()
 	bad, moved := s.reg.SetSpaces(t.Entities, t.To)
 	s.interestMu.Unlock()
 	if !moved {
 		return fmt.Errorf("golem: %s: entity %d is not published", op, bad)
 	}
+	applyColliderMoves(colliders)
 	return nil
 }
 
@@ -162,7 +175,9 @@ func (s *Server) SessionsInSpace(space SpaceID) []int64 {
 }
 
 // Space is a lightweight handle to one space of a Server. Handles are cheap;
-// two handles for the same ID behave identically.
+// two handles for the same ID behave identically. Each space has its own
+// legacy collision backends and layer helpers, spatial queries and 2D nav
+// backend; the matching Server methods act on space 0.
 type Space struct {
 	srv *Server
 	id  SpaceID

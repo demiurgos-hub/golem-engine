@@ -74,6 +74,29 @@ func (r *Runtime) EnableCollision3D(backend golem.CollisionBackend3D) {
 	r.Server.SetCollision3DBackend(backend)
 	r.Server.SetCollisionLayers3D(layers)
 }
+
+// EnableSpaceCollision3D builds the golem.yaml 3D layer matrix for one space,
+// binds it to backend and installs both on that space, so entities created in
+// or moved into the space register their ColliderProvider3D shapes there. It
+// returns the space's layer helper (EnableSpaceCollision3D(0, b) also stores
+// it in Layers3D). Each space needs its own backend. Call before creating
+// collidable entities in the space. Panics immediately if backend is nil.
+func (r *Runtime) EnableSpaceCollision3D(space golem.SpaceID, backend golem.CollisionBackend3D) *golem.CollisionLayers3D {
+	golem.MustCollisionBackend3D(backend)
+	layers := golem.NewCollisionLayers3D().
+		Bind(backend).
+		Define({{range $i, $name := .Collision.Layers}}{{if $i}}, {{end}}"{{$name}}"{{end}})
+{{- range .Collision.Collides}}
+	layers.SetCollides("{{.A}}", "{{.B}}")
+{{- end}}
+	if space == 0 {
+		r.Layers3D = layers
+	}
+	sp := r.Server.Space(space)
+	sp.SetCollision3DBackend(backend)
+	sp.SetCollisionLayers3D(layers)
+	return layers
+}
 {{- else}}
 
 // EnableCollision builds the named 2D layer matrix from golem.yaml, binds it to
@@ -92,6 +115,29 @@ func (r *Runtime) EnableCollision(backend golem.CollisionBackend) {
 	r.Layers = layers
 	r.Server.SetCollisionBackend(backend)
 	r.Server.SetCollisionLayers(layers)
+}
+
+// EnableSpaceCollision builds the golem.yaml 2D layer matrix for one space,
+// binds it to backend and installs both on that space, so entities created in
+// or moved into the space register their ColliderProvider shapes there. It
+// returns the space's layer helper (EnableSpaceCollision(0, b) also stores it
+// in Layers). Each space needs its own backend. Call before creating
+// collidable entities in the space. Panics immediately if backend is nil.
+func (r *Runtime) EnableSpaceCollision(space golem.SpaceID, backend golem.CollisionBackend) *golem.CollisionLayers {
+	golem.MustCollisionBackend(backend)
+	layers := golem.NewCollisionLayers().
+		Bind(backend).
+		Define({{range $i, $name := .Collision.Layers}}{{if $i}}, {{end}}"{{$name}}"{{end}})
+{{- range .Collision.Collides}}
+	layers.SetCollides("{{.A}}", "{{.B}}")
+{{- end}}
+	if space == 0 {
+		r.Layers = layers
+	}
+	sp := r.Server.Space(space)
+	sp.SetCollisionBackend(backend)
+	sp.SetCollisionLayers(layers)
+	return layers
 }
 {{- end}}
 {{- end}}

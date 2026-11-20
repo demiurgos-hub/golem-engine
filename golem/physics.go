@@ -121,6 +121,7 @@ func (s *Server) SetPhysicsWorld(world p.World) error {
 		return errors.New("golem: configure physics once before Run")
 	}
 	s.physics = &physicsService{server: s, world: world, agents: make(map[int64]*physicsAttachment), bodies: make(map[p.BodyHandle]int64)}
+	s.space0.physics = s.physics
 	return nil
 }
 

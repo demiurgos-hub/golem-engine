@@ -283,6 +283,7 @@ func (s *Server) SetSurfaceNavigation(backend surface.Backend, cfg NavigationCon
 		builds: newNavigationPool(cfg.BuildWorkers, cfg.BuildQueueCapacity, cfg.CompletionCapacity),
 		agents: make(map[int64]*navigationAgent), deleting: make(map[int64]bool), buildGeneration: make(map[string]uint64),
 		buildStates: make(map[string]NavigationBuildState), buildRequests: make(map[string]*navigationBuildRequest), buildClock: NavigationNow}
+	s.space0.navigation = s.navigation
 	return nil
 }
 

@@ -651,6 +651,25 @@ func TestGenerateGoSharedTemplateIncludesEnableCollision2D(t *testing.T) {
 	if strings.Contains(content, "EnableCollision3D") || strings.Contains(content, "Layers3D") {
 		t.Fatal("2D collision config must not emit 3D helpers")
 	}
+	space := content[strings.Index(content, "func (r *Runtime) EnableSpaceCollision("):]
+	for _, want := range []string{
+		"func (r *Runtime) EnableSpaceCollision(space golem.SpaceID, backend golem.CollisionBackend) *golem.CollisionLayers {",
+		"golem.MustCollisionBackend(backend)",
+		`Define("Player", "Monster")`,
+		`layers.SetCollides("Player", "Monster")`,
+		"if space == 0 {\n\t\tr.Layers = layers\n\t}",
+		"sp := r.Server.Space(space)",
+		"sp.SetCollisionBackend(backend)",
+		"sp.SetCollisionLayers(layers)",
+		"return layers",
+	} {
+		if !strings.Contains(space, want) {
+			t.Fatalf("generated EnableSpaceCollision missing %q\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "EnableSpaceCollision3D") {
+		t.Fatal("2D collision config must not emit EnableSpaceCollision3D")
+	}
 }
 
 func TestGenerateGoSharedTemplateIncludesEnableCollision3D(t *testing.T) {
@@ -695,6 +714,23 @@ func TestGenerateGoSharedTemplateIncludesEnableCollision3D(t *testing.T) {
 	}
 	if strings.Contains(content, "func (r *Runtime) EnableCollision(") {
 		t.Fatal("3D collision config must not emit 2D EnableCollision")
+	}
+	space := content[strings.Index(content, "func (r *Runtime) EnableSpaceCollision3D("):]
+	for _, want := range []string{
+		"func (r *Runtime) EnableSpaceCollision3D(space golem.SpaceID, backend golem.CollisionBackend3D) *golem.CollisionLayers3D {",
+		"golem.MustCollisionBackend3D(backend)",
+		`Define("Player", "Wall")`,
+		"if space == 0 {\n\t\tr.Layers3D = layers\n\t}",
+		"sp.SetCollision3DBackend(backend)",
+		"sp.SetCollisionLayers3D(layers)",
+		"return layers",
+	} {
+		if !strings.Contains(space, want) {
+			t.Fatalf("generated EnableSpaceCollision3D missing %q\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "func (r *Runtime) EnableSpaceCollision(") {
+		t.Fatal("3D collision config must not emit 2D EnableSpaceCollision")
 	}
 }
 

@@ -47,17 +47,24 @@ func (a *NavAgent) Bind(e navMover) {
 }
 
 // SetDestination finds a path to (toX, toY) from the bound entity's current
-// position and stores it as the agent's route. Returns false if the agent is
-// not bound, no nav backend is configured, or no path exists.
-// Any existing path and velocity are cleared, including when the new request
-// fails. A nil server is treated as having no navigation backend.
+// position and stores it as the agent's route. The path comes from the nav
+// backend of the bound entity's space (see Space.SetNavBackend); a bound value
+// without an EntityID method, or one the server does not know, uses space 0.
+// Returns false if the agent is not bound, that space has no nav backend, or
+// no path exists. Any existing path and velocity are cleared, including when
+// the new request fails. A nil server is treated as having no navigation
+// backend.
 func (a *NavAgent) SetDestination(s *Server, toX, toY float64) bool {
 	a.ResetPath()
 	if a.entity == nil || s == nil {
 		return false
 	}
+	rt := &s.space0
+	if e, ok := a.entity.(interface{ EntityID() int64 }); ok {
+		rt = s.runtimeOf(e.EntityID())
+	}
 	fromX, fromY := a.entity.Position()
-	path, ok := s.FindPath(float64(fromX), float64(fromY), toX, toY)
+	path, ok := rt.findPath(float64(fromX), float64(fromY), toX, toY)
 	if !ok {
 		return false
 	}

@@ -107,12 +107,7 @@ func (s *Server) rollbackEntitySetup(e Entity, id int64) error {
 		s.physics.fault = err
 	}
 	s.DetachNavigation(id)
-	if _, ok := e.(ColliderProvider); ok && s.layers != nil {
-		s.layers.Remove(id)
-	}
-	if _, ok := e.(ColliderProvider3D); ok && s.layers3D != nil {
-		s.layers3D.Remove(id)
-	}
+	s.runtimeOf(id).unregisterCollider(e, id)
 	s.reg.DiscardProvisional(id)
 	return err
 }

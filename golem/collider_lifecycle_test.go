@@ -1,7 +1,9 @@
 package golem
 
 import (
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/demiurgos-hub/golem-engine/golem/collision"
@@ -404,5 +406,142 @@ func TestLoadSnapshotRegistersCollidersViaCreateEntity(t *testing.T) {
 	}
 	if _, ok := b2.added[7]; !ok {
 		t.Fatal("LoadSnapshot → CreateEntity must register restored collider")
+	}
+}
+
+// twoSpaceRecordingLayers configures recording 2D/3D layer helpers on space 0
+// and space 3; space 3's helpers define only the layers listed.
+func twoSpaceRecordingLayers(srv *Server, layers3 ...string) (b0, b3 *recordingBackend2D, c0, c3 *recordingBackend3D) {
+	b0, b3 = newRecordingBackend2D(), newRecordingBackend2D()
+	c0, c3 = newRecordingBackend3D(), newRecordingBackend3D()
+	if len(layers3) == 0 {
+		layers3 = []string{"Player"}
+	}
+	srv.SetCollisionLayers(NewCollisionLayers().Bind(b0).Define("Player"))
+	srv.SetCollisionLayers3D(NewCollisionLayers3D().Bind(c0).Define("Player"))
+	srv.Space(3).SetCollisionLayers(NewCollisionLayers().Bind(b3).Define(layers3...))
+	srv.Space(3).SetCollisionLayers3D(NewCollisionLayers3D().Bind(c3).Define(layers3...))
+	return b0, b3, c0, c3
+}
+
+func TestCreateEntityInRegistersColliderInItsSpace(t *testing.T) {
+	srv := NewServer(ServerConfig{})
+	b0, b3, c0, c3 := twoSpaceRecordingLayers(srv)
+	e := &dualColliderEntity{id: 5}
+	if err := srv.CreateEntityIn(3, e); err != nil {
+		t.Fatal(err)
+	}
+	if len(b0.added) != 0 || len(c0.added) != 0 {
+		t.Fatal("space 3 entity registered on space 0's layers")
+	}
+	if _, ok := b3.added[5]; !ok {
+		t.Fatal("2D collider missing from space 3")
+	}
+	if _, ok := c3.added[5]; !ok {
+		t.Fatal("3D collider missing from space 3")
+	}
+	srv.DeleteEntity(5)
+	if len(b3.added) != 0 || len(c3.added) != 0 || len(b0.removed) != 0 || len(c0.removed) != 0 {
+		t.Fatalf("DeleteEntity removed from the wrong space: space0 %v/%v, space3 left %v/%v", b0.removed, c0.removed, b3.added, c3.added)
+	}
+
+	// A space without layer helpers skips registration, like CreateEntity
+	// without helpers.
+	if err := srv.CreateEntityIn(8, &dualColliderEntity{id: 6}); err != nil {
+		t.Fatal(err)
+	}
+	if len(b0.added)+len(b3.added)+len(c0.added)+len(c3.added) != 0 {
+		t.Fatal("entity in a space without helpers was registered somewhere")
+	}
+	if srv.runtime(8) != nil {
+		t.Fatal("CreateEntityIn created a runtime")
+	}
+}
+
+func TestEntitySetupRollbackRemovesColliderFromItsSpace(t *testing.T) {
+	srv := NewServer(ServerConfig{})
+	b0, b3, c0, c3 := twoSpaceRecordingLayers(srv)
+	e := &dualColliderEntity{id: 4}
+	err := srv.CreateEntityWithSetupIn(3, e, func(Entity) (func() error, error) {
+		if _, ok := b3.added[4]; !ok {
+			t.Error("setup did not observe the space 3 collider")
+		}
+		return nil, errors.New("setup failed")
+	})
+	if err == nil {
+		t.Fatal("setup error was not returned")
+	}
+	if len(b3.added) != 0 || len(c3.added) != 0 || len(b3.removed) != 1 || len(c3.removed) != 1 {
+		t.Fatalf("rollback left space 3 colliders: %v %v", b3.added, c3.added)
+	}
+	if len(b0.removed) != 0 || len(c0.removed) != 0 {
+		t.Fatal("rollback touched space 0's layers")
+	}
+}
+
+func TestMoveToSpaceMovesLegacyColliders(t *testing.T) {
+	srv := NewServer(ServerConfig{})
+	b0, b3, c0, c3 := twoSpaceRecordingLayers(srv)
+	e := &dualColliderEntity{id: 1}
+	plain := &stubEntity{id: 2}
+	if err := srv.CreateEntity(e); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.CreateEntity(plain); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.MoveToSpace(SpaceTransfer{To: 3, Entities: []int64{1, 2}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b0.added[1]; ok {
+		t.Fatal("2D collider stayed in space 0")
+	}
+	if _, ok := c0.added[1]; ok {
+		t.Fatal("3D collider stayed in space 0")
+	}
+	if b3.added[1] != (CollisionCircle{R: 1}) || c3.added[1] != (CollisionSphere{R: 2}) {
+		t.Fatalf("colliders not registered in space 3: %v %v", b3.added, c3.added)
+	}
+
+	// Into a space without helpers: removed, not registered anywhere.
+	if err := srv.SetEntitySpace(1, 9); err != nil {
+		t.Fatal(err)
+	}
+	if len(b3.added)+len(c3.added)+len(b0.added)+len(c0.added) != 0 {
+		t.Fatal("collider survived a move into a space without helpers")
+	}
+	// Back into space 0: registered again.
+	if err := srv.SetEntitySpace(1, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b0.added[1]; !ok {
+		t.Fatal("moving back did not register in space 0")
+	}
+	if srv.runtime(9) != nil {
+		t.Fatal("MoveToSpace created a runtime")
+	}
+}
+
+func TestMoveToSpaceRejectsUndefinedLayerWithoutChanges(t *testing.T) {
+	srv := NewServer(ServerConfig{})
+	b0, b3, _, c3 := twoSpaceRecordingLayers(srv, "Wall")
+	ok := &stubEntity{id: 1}
+	e := &colliderSpawnEntity{id: 2, backend: b0}
+	for _, x := range []Entity{ok, e} {
+		if err := srv.CreateEntity(x); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := srv.MoveToSpace(SpaceTransfer{To: 3, Entities: []int64{1, 2}})
+	if err == nil || !strings.Contains(err.Error(), `"Player" is not defined in space 3`) {
+		t.Fatalf("err = %v, want undefined layer rejection", err)
+	}
+	for _, id := range []int64{1, 2} {
+		if space, _ := srv.EntitySpace(id); space != 0 {
+			t.Fatalf("entity %d moved to %d despite the rejection", id, space)
+		}
+	}
+	if _, ok := b0.added[2]; !ok || len(b0.removed) != 0 || len(b3.added) != 0 || len(c3.added) != 0 {
+		t.Fatal("rejected move changed colliders")
 	}
 }

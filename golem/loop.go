@@ -24,7 +24,6 @@ import (
 
 	"github.com/alitto/pond/v2"
 	"github.com/demiurgos-hub/golem-engine/golem/collision"
-	"github.com/demiurgos-hub/golem-engine/golem/nav"
 )
 
 // msgKind identifies the type of a queued session event.
@@ -135,11 +134,13 @@ type TickFunc func(dt float64, s *Server)
 type UpdateFunc func(updates [][]byte)
 
 // ContactFunc is called after each collision step with all contacts detected
-// in that tick. It is only invoked when at least one contact was found.
+// in that tick, merged across spaces in ascending space order. It is only
+// invoked when at least one contact was found.
 type ContactFunc func(contacts []collision.Contact)
 
 // Contact3DFunc is called after each 3D collision step with contacts detected
-// in that tick. It is only invoked when at least one contact was found.
+// in that tick, merged across spaces in ascending space order. It is only
+// invoked when at least one contact was found.
 type Contact3DFunc func(contacts []collision3d.Contact)
 
 // RemovalSerializer converts a removed entity ID and revision into a serialized
@@ -166,13 +167,14 @@ type Server struct {
 	sentSpace            map[int64]SpaceID            // spaces announced to clients (non-zero; interestMu)
 	spaceTransitionSeq   map[int64]uint64             // last space transition counter per session (interestMu)
 	spaceAckPending      map[int64]uint64             // latest transition awaiting SpaceAck per session (interestMu)
-	collision            collision.Backend
-	collision3D          collision3d.Backend
-	layers               *collision.Layers
-	layers3D             *collision3d.Layers
-	navBackend           nav.Backend
-	navigation           *navigationService
-	physics              *physicsService
+	space0               spaceRuntime                 // space 0's services; always present
+	spaces               map[SpaceID]*spaceRuntime    // non-zero spaces with services (tick-owned)
+	spaceOrder           []*spaceRuntime              // spaces' runtimes in ascending ID order
+	spacedScratch        []registry.SpacedEntity      // per-phase collision entity snapshot
+	contactScratch       []collision.Contact          // merged 2D contacts of several spaces
+	contactScratch3D     []collision3d.Contact        // merged 3D contacts of several spaces
+	navigation           *navigationService           // alias of space0.navigation
+	physics              *physicsService              // alias of space0.physics
 	contactEventsEnabled bool
 	triggerPairs         map[[2]int64]struct{}
 	solidPairs           map[[2]int64]struct{}
@@ -615,19 +617,21 @@ func (s *Server) SetRemovalSerializer(fn RemovalSerializer) {
 	s.removalSerializer = fn
 }
 
-// SetCollisionBackend attaches a collision backend to the server. When set,
-// each tick syncs entity positions into the backend, steps it, reads physics
-// corrections back via PositionWriter, and fires OnContact handlers.
+// SetCollisionBackend attaches space 0's collision backend to the server. When
+// set, each tick syncs space-0 entity positions into the backend, steps it,
+// reads physics corrections back via PositionWriter, and fires OnContact
+// handlers. Space(id).SetCollisionBackend configures other spaces.
 // Shape registration (Add/Remove) remains in game code.
 func (s *Server) SetCollisionBackend(b collision.Backend) {
-	s.collision = b
+	s.space0.collision = b
 }
 
-// SetCollision3DBackend attaches a 3D collision backend to the server. When set,
-// each tick syncs 3D entity positions into the backend, steps it, reads
-// corrections back via Position3DWriter, and fires OnContact3D handlers.
+// SetCollision3DBackend attaches space 0's 3D collision backend to the server.
+// When set, each tick syncs space-0 3D entity positions into the backend, steps
+// it, reads corrections back via Position3DWriter, and fires OnContact3D
+// handlers. Space(id).SetCollision3DBackend configures other spaces.
 func (s *Server) SetCollision3DBackend(b collision3d.Backend) {
-	s.collision3D = b
+	s.space0.collision3D = b
 }
 
 // OnContact registers a callback invoked after each collision step when at
@@ -1298,64 +1302,7 @@ func (s *Server) runLoop(ctx context.Context) error {
 				s.navigation.advance(dt)
 			}
 
-			if s.collision != nil {
-				for _, e := range s.reg.All() {
-					if s.physics != nil && s.physics.agents[e.EntityID()] != nil {
-						continue
-					}
-					x, y := e.Position()
-					s.collision.Update(e.EntityID(), float64(x), float64(y))
-				}
-				contacts := s.collision.Step(dt)
-				s.collision.ReadBack(func(id int64, x, y float64) {
-					if s.physics != nil && s.physics.agents[id] != nil {
-						return
-					}
-					e, ok := s.reg.Get(id)
-					if !ok {
-						return
-					}
-					if pw, ok := e.(registry.PositionWriter); ok {
-						pw.SetPosition(float32(x), float32(y))
-					}
-				})
-				if s.onContact != nil && len(contacts) > 0 {
-					s.onContact(contacts)
-				}
-				if s.contactEventsEnabled {
-					s.dispatchContactEvents(contacts)
-				}
-			}
-
-			if s.collision3D != nil {
-				for _, e := range s.reg.All() {
-					if s.physics != nil && s.physics.agents[e.EntityID()] != nil {
-						continue
-					}
-					sp, ok := e.(registry.Spatial3DEntity)
-					if !ok {
-						continue
-					}
-					x, y, z := sp.Position3D()
-					s.collision3D.Update(e.EntityID(), float64(x), float64(y), float64(z))
-				}
-				contacts := s.collision3D.Step(dt)
-				s.collision3D.ReadBack(func(id int64, x, y, z float64) {
-					if s.physics != nil && s.physics.agents[id] != nil {
-						return
-					}
-					e, ok := s.reg.Get(id)
-					if !ok {
-						return
-					}
-					if pw, ok := e.(registry.Position3DWriter); ok {
-						pw.SetPosition3D(float32(x), float32(y), float32(z))
-					}
-				})
-				if s.onContact3D != nil && len(contacts) > 0 {
-					s.onContact3D(contacts)
-				}
-			}
+			s.stepCollision(dt)
 
 			if s.navigation != nil {
 				s.navigation.reconcile()

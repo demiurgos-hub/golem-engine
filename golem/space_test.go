@@ -319,3 +319,19 @@ func TestPhysicsCheckpointOmitsSpaceZero(t *testing.T) {
 		t.Fatal("space-0 checkpoint entity recorded a space")
 	}
 }
+
+func TestSpaceZeroRuntimeAliasesPhysicsAndNavigation(t *testing.T) {
+	s := NewServer(ServerConfig{})
+	if err := s.SetPhysicsWorld(&physicsTestWorld{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSurfaceNavigation(&navigationTestBackend{revision: 1}, NavigationConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	if s.space0.physics == nil || s.space0.physics != s.physics || s.space0.navigation != s.navigation || s.navigation == nil {
+		t.Fatal("Server.physics / Server.navigation must alias space 0's runtime")
+	}
+	if s.runtimeOf(42) != &s.space0 {
+		t.Fatal("unknown entity must resolve to space 0's runtime")
+	}
+}
