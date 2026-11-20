@@ -138,13 +138,6 @@ func (s *Server) applySpaceAck(sessionID int64, transition uint64) {
 	s.releaseSpaceGate(sessionID, transition)
 }
 
-// appendSpaceWorldFrames is the world-data step of a space transition, between
-// SpaceChanged and the carried entities. Per-space world data is not
-// implemented yet, so it adds nothing.
-func (s *Server) appendSpaceWorldFrames(sessionID int64, plan sessionSpacePlan, frames [][]byte) ([][]byte, error) {
-	return frames, nil
-}
-
 // deliverSpaceTransition sends one session's replication for a pass that
 // changes its announced space. The stream carries, in order: exits, then
 // SpaceChanged, then world data, then the full state of every carried (Stayed)

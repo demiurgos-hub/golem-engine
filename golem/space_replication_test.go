@@ -24,6 +24,20 @@ func spaceToken(t testing.TB, field int, data []byte) string {
 		return string(data)
 	case serverMessageEventField:
 		return "event:" + string(data)
+	case serverMessageWorldField:
+		return "world:" + string(data)
+	case serverMessageWorldClearedField:
+		var name string
+		r := pb.NewReader(data)
+		for !r.Done() {
+			f, wire := r.Tag()
+			if f == 1 && wire == 2 {
+				name = r.String()
+				continue
+			}
+			r.Skip(wire)
+		}
+		return "cleared:" + name
 	case serverMessageSpaceChangedField, serverMessageSpaceSettledField:
 		var space, transition uint64
 		r := pb.NewReader(data)
@@ -66,11 +80,12 @@ func decodeServerTokens(t testing.TB, msg []byte) []string {
 // close the connection.
 type spaceClient struct {
 	msgs chan []byte
+	conn *websocket.Conn
 }
 
 func newSpaceClient(t *testing.T, conn *websocket.Conn) *spaceClient {
 	t.Helper()
-	c := &spaceClient{msgs: make(chan []byte, 64)}
+	c := &spaceClient{msgs: make(chan []byte, 64), conn: conn}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		cancel()
@@ -127,29 +142,52 @@ type spaceTestRig struct {
 	conns        []*spaceClient
 	ids          []int64
 	interestMode bool
+	url          string
 }
 
 func newSpaceTestRig(t *testing.T, interestMode bool, clients int) *spaceTestRig {
+	t.Helper()
+	return newSpaceTestRigWith(t, interestMode, clients, nil)
+}
+
+// newSpaceTestRigWith lets configure adjust the server config and seed the
+// server before any client connects.
+func newSpaceTestRigWith(t *testing.T, interestMode bool, clients int, configure func(*ServerConfig), seed ...func(*Server)) *spaceTestRig {
 	t.Helper()
 	cellSize := 0.0
 	if interestMode {
 		cellSize = 4
 	}
-	srv := NewServer(ServerConfig{Transport: golemnet.TransportWebSocket, StateUpdateLane: StateUpdateLaneStream, CellSize: cellSize})
+	cfg := ServerConfig{Transport: golemnet.TransportWebSocket, StateUpdateLane: StateUpdateLaneStream, CellSize: cellSize}
+	if configure != nil {
+		configure(&cfg)
+	}
+	srv := NewServer(cfg)
 	srv.SetRemovalSerializer(func(id int64, _ uint64) ([]byte, error) { return []byte(fmt.Sprintf("removed:%d", id)), nil })
+	for _, fn := range seed {
+		fn(srv)
+	}
 	httpServer := httptest.NewServer(srv.Handler())
 	t.Cleanup(httpServer.Close)
-	rig := &spaceTestRig{srv: srv, run: srv.runBroadcastTick, interestMode: interestMode}
+	rig := &spaceTestRig{srv: srv, run: srv.runBroadcastTick, interestMode: interestMode, url: "ws" + httpServer.URL[4:]}
 	if interestMode {
 		rig.run = srv.runInterestTick
 	}
 	for i := 0; i < clients; i++ {
-		rig.conns = append(rig.conns, newSpaceClient(t, mustDialGameClient(t, "ws"+httpServer.URL[4:])))
-		waitForSessionIDs(t, srv, i+1)
+		rig.connect(t)
 	}
-	// Session IDs are assigned in dial order.
-	rig.ids = sortedInt64(srv.listener.SessionIDs())
 	return rig
+}
+
+// connect dials one more client and refreshes ids, which follow dial order.
+func (r *spaceTestRig) connect(t *testing.T) *spaceClient {
+	t.Helper()
+	before := len(r.srv.listener.SessionIDs())
+	c := newSpaceClient(t, mustDialGameClient(t, r.url))
+	r.conns = append(r.conns, c)
+	waitForSessionIDs(t, r.srv, before+1)
+	r.ids = sortedInt64(r.srv.listener.SessionIDs())
+	return c
 }
 
 func (r *spaceTestRig) tick(t *testing.T) {
@@ -213,12 +251,19 @@ func indexOf(tokens []string, want string) int {
 // carried full states, entered full states, SpaceSettled, and nothing else.
 func assertTransition(t *testing.T, tokens []string, space SpaceID, transition uint64, exited, carried, entered []string) {
 	t.Helper()
+	assertTransitionWithWorld(t, tokens, space, transition, exited, nil, carried, entered)
+}
+
+// assertTransitionWithWorld also checks the exact world frames, in order,
+// right after SpaceChanged.
+func assertTransitionWithWorld(t *testing.T, tokens []string, space SpaceID, transition uint64, exited, world, carried, entered []string) {
+	t.Helper()
 	changed := indexOf(tokens, fmt.Sprintf("changed:%d:%d", space, transition))
 	settled := indexOf(tokens, fmt.Sprintf("settled:%d", transition))
 	if changed < 0 || settled != len(tokens)-1 {
 		t.Fatalf("tokens %q lack changed/settled for transition %d to space %d", tokens, transition, space)
 	}
-	want := len(exited) + 1 + len(carried) + len(entered) + 1
+	want := len(exited) + 1 + len(world) + len(carried) + len(entered) + 1
 	if len(tokens) != want {
 		t.Fatalf("tokens %q: got %d, want %d", tokens, len(tokens), want)
 	}
@@ -232,8 +277,12 @@ func assertTransition(t *testing.T, tokens []string, space SpaceID, transition u
 		}
 	}
 	section("exited", 0, changed, exited)
-	section("carried", changed+1, changed+1+len(carried), carried)
-	section("entered", changed+1+len(carried), settled, entered)
+	if got := tokens[changed+1 : changed+1+len(world)]; !slices.Equal(got, world) {
+		t.Fatalf("world = %q, want %q (tokens %q)", got, world, tokens)
+	}
+	carriedAt := changed + 1 + len(world)
+	section("carried", carriedAt, carriedAt+len(carried), carried)
+	section("entered", carriedAt+len(carried), settled, entered)
 }
 
 func TestSpaceTransitionCarriesEntitiesAndRestoresSingleSpacePath(t *testing.T) {
@@ -557,4 +606,150 @@ func TestSpaceAckGateSupersedesOlderTransitions(t *testing.T) {
 	if tracker.hasDirty() || tracker.gated != nil {
 		t.Fatal("release kept gated changes for a missing entity")
 	}
+}
+
+// seedSpaceWorlds defines world data in the global store and in spaces 0, 4
+// and 9, so a transition hits every rule: override, global fallback, clear.
+func seedSpaceWorlds(srv *Server) {
+	srv.World.Set(&sessionWorldData{name: "fog", payload: []byte("global-fog")})
+	srv.World.Set(&sessionWorldData{name: "zone", payload: []byte("global-zone")})
+	srv.World.Set(&sessionWorldData{name: "secret", payload: []byte("global-secret")})
+	srv.Space(0).World().Set(&sessionWorldData{name: "light", payload: []byte("day")})
+	srv.Space(4).World().Set(&sessionWorldData{name: "fog", payload: []byte("cave-fog")})
+	srv.Space(4).World().Set(&sessionWorldData{name: "secret", payload: []byte("cave-secret")})
+	srv.Space(9).World().Set(&sessionWorldData{name: "music", payload: []byte("arena-music")})
+	srv.Space(9).World().Set(&sessionWorldData{name: "hidden", payload: []byte("arena-hidden")})
+}
+
+func excludeSecrets(cfg *ServerConfig) { cfg.WorldSnapshotExclude = []string{"secret", "hidden"} }
+
+func TestSpaceTransitionSendsWorldDataBetweenChangedAndCarried(t *testing.T) {
+	spaceModes(t, func(t *testing.T, interestMode bool) {
+		rig := newSpaceTestRigWith(t, interestMode, 1, excludeSecrets, seedSpaceWorlds)
+		srv, conn, sid := rig.srv, rig.conns[0], rig.ids[0]
+		// Connect: Server.World merged with space 0, names only other spaces
+		// define cleared, excluded names untouched.
+		if got, want := readSpaceTokens(t, conn), []string{"world:global-fog", "world:day", "cleared:music", "world:global-zone"}; !slices.Equal(got, want) {
+			t.Fatalf("connect world = %q, want %q", got, want)
+		}
+
+		avatar := &interestTickEntity{id: 1, full: []byte("avatar-full")}
+		rig.spaceAvatar(t, sid, avatar)
+		rig.tick(t)
+		if got := readSpaceTokens(t, conn); !slices.Equal(got, []string{"avatar-full"}) {
+			t.Fatalf("space 0 entered %q", got)
+		}
+
+		if err := srv.SetEntitySpace(avatar.id, 4); err != nil {
+			t.Fatal(err)
+		}
+		rig.tick(t)
+		// fog overridden, light and music defined by no store reachable from
+		// space 4, secret excluded; zone is only global and already current.
+		assertTransitionWithWorld(t, readSpaceTokens(t, conn), 4, 1, nil,
+			[]string{"world:cave-fog", "cleared:light", "cleared:music"}, []string{"avatar-full"}, nil)
+
+		if err := srv.SetEntitySpace(avatar.id, 9); err != nil {
+			t.Fatal(err)
+		}
+		rig.tick(t)
+		assertTransitionWithWorld(t, readSpaceTokens(t, conn), 9, 2, nil,
+			[]string{"world:global-fog", "cleared:light", "world:arena-music"}, []string{"avatar-full"}, nil)
+
+		if err := srv.SetEntitySpace(avatar.id, 0); err != nil {
+			t.Fatal(err)
+		}
+		rig.tick(t)
+		assertTransitionWithWorld(t, readSpaceTokens(t, conn), 0, 3, nil,
+			[]string{"world:global-fog", "world:day", "cleared:music"}, []string{"avatar-full"}, nil)
+		rig.tick(t)
+		expectNoMessage(t, conn)
+	})
+}
+
+func TestSpaceTransitionWithoutSpaceWorldsSendsNoWorldFrames(t *testing.T) {
+	rig := newSpaceTestRigWith(t, false, 1, nil, func(srv *Server) {
+		srv.World.Set(&sessionWorldData{name: "zone", payload: []byte("global-zone")})
+		srv.Space(3).World() // an empty store defines nothing
+	})
+	srv, conn, sid := rig.srv, rig.conns[0], rig.ids[0]
+	if got := readSpaceTokens(t, conn); !slices.Equal(got, []string{"world:global-zone"}) {
+		t.Fatalf("connect world = %q", got)
+	}
+	srv.SetSessionSpace(sid, 3)
+	rig.tick(t)
+	assertTransitionWithWorld(t, readSpaceTokens(t, conn), 3, 1, nil, nil, nil, nil)
+}
+
+func TestSpaceWorldReconnectClearsPreviousSpaceData(t *testing.T) {
+	rig := newSpaceTestRigWith(t, false, 1, excludeSecrets, seedSpaceWorlds)
+	srv, conn, sid := rig.srv, rig.conns[0], rig.ids[0]
+	readSpaceTokens(t, conn)
+	srv.SetSessionSpace(sid, 9)
+	rig.tick(t)
+	assertTransitionWithWorld(t, readSpaceTokens(t, conn), 9, 1, nil,
+		[]string{"world:global-fog", "cleared:light", "world:arena-music"}, nil, nil)
+
+	// The client reconnects into space 0: the connect snapshot drops the
+	// arena's music and restores space 0's light.
+	conn.conn.CloseNow()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(srv.listener.SessionIDs()) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("session did not disconnect")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	again := rig.connect(t)
+	if got, want := readSpaceTokens(t, again), []string{"world:global-fog", "world:day", "cleared:music", "world:global-zone"}; !slices.Equal(got, want) {
+		t.Fatalf("reconnect world = %q, want %q", got, want)
+	}
+	// The first transition into a non-zero space resolves everything again.
+	srv.SetSessionSpace(rig.ids[0], 4)
+	rig.tick(t)
+	assertTransitionWithWorld(t, readSpaceTokens(t, again), 4, 1, nil,
+		[]string{"world:cave-fog", "cleared:light", "cleared:music"}, nil, nil)
+}
+
+func TestSpaceWorldExcludedNamesStayCallerDelivered(t *testing.T) {
+	rig := newSpaceTestRigWith(t, false, 2, excludeSecrets, seedSpaceWorlds)
+	srv := rig.srv
+	inCave, outside := rig.ids[1], rig.ids[0]
+	caveConn, outsideConn := rig.conns[1], rig.conns[0]
+	readSpaceTokens(t, caveConn)
+	readSpaceTokens(t, outsideConn)
+
+	srv.SetSessionSpace(inCave, 4)
+	rig.tick(t)
+	// No secret frame, neither sent nor cleared.
+	assertTransitionWithWorld(t, readSpaceTokens(t, caveConn), 4, 1, nil,
+		[]string{"world:cave-fog", "cleared:light", "cleared:music"}, nil, nil)
+	expectNoMessage(t, outsideConn)
+
+	// Explicit delivery resolves the session's announced space.
+	if err := srv.SendStoredWorldData(inCave, "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readSpaceTokens(t, caveConn); !slices.Equal(got, []string{"world:cave-secret"}) {
+		t.Fatalf("cave SendStoredWorldData = %q", got)
+	}
+	if err := srv.SendStoredWorldData(outside, "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readSpaceTokens(t, outsideConn); !slices.Equal(got, []string{"world:global-secret"}) {
+		t.Fatalf("outside SendStoredWorldData = %q", got)
+	}
+	if err := srv.Space(4).PushWorldData("secret"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readSpaceTokens(t, caveConn); !slices.Equal(got, []string{"world:cave-secret"}) {
+		t.Fatalf("cave Space.PushWorldData = %q", got)
+	}
+	expectNoMessage(t, outsideConn)
+
+	// Leaving the cave does not clear the caller-delivered value either.
+	srv.SetSessionSpace(inCave, 0)
+	rig.tick(t)
+	assertTransitionWithWorld(t, readSpaceTokens(t, caveConn), 0, 2, nil,
+		[]string{"world:global-fog", "world:day", "cleared:music"}, nil, nil)
 }

@@ -182,6 +182,13 @@ export interface EntityManagerLike {
  */
 export interface WorldManagerLike {
   applyUpdate(update: unknown): void;
+  /**
+   * Optional: drop the world data of the named world type when the server
+   * sends WorldCleared, for example after a move into a space that does not
+   * define it. Generated WorldManagers implement it; without it the message
+   * is ignored.
+   */
+  clearWorld?(name: string): void;
 }
 
 /**
@@ -1360,8 +1367,10 @@ export class GameClient {
     }
   }
 
-  /** World managers do not expose per-type clearing yet; the message is decoded and ignored. */
-  private _applyWorldCleared(_name: string): void {}
+  /** Clear one world type through the world manager's optional clearWorld. */
+  private _applyWorldCleared(name: string): void {
+    this.world?.clearWorld?.(name);
+  }
 
   private _handleCompactStateBatch(bytes: Uint8Array): void {
     if (this._spaceTransition === undefined) {

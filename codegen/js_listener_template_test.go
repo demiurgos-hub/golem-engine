@@ -85,6 +85,10 @@ func TestGenerateJSWorldManagerUsesMulticastSubscriptions(t *testing.T) {
 		"onZoneUpdate(fn: (data: ZoneData) => void): () => void",
 		"return () => { this._onZoneUpdate.delete(fn); };",
 		"for (const fn of this._onZoneUpdate) fn(update.zoneData);",
+		"private _onZoneCleared = new Set<() => void>();",
+		"onZoneCleared(fn: () => void): () => void",
+		"clearWorld(name: string): void",
+		"case \"Zone\":\n        if (this._zone === undefined) return;\n        this._zone = undefined;\n        for (const fn of this._onZoneCleared) fn();",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("generated WorldManager missing %q\n%s", want, content)

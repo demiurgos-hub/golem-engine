@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   EntityPresentationMount, PresentationBinding, createEntityViewBuilder,
-  createEntityViewRegistry, createGolemAdapter, entityCollection, spaceStore, worldStore,
+  combineUnsubscribers, createEntityViewRegistry, createGolemAdapter, entityCollection, spaceStore, worldStore,
 } from '../dist/core.js';
 import { Actor, Beacon, fixture } from './fixtures.js';
 
@@ -63,6 +63,27 @@ test('world bindings retain generated world identity and release every source li
   assert.equal(updates[1].label, 'Updated');
   unsubscribe(); binding.destroy();
   assert.equal(state.listenerCount(), 0);
+});
+
+test('world bindings refresh to undefined when the generated manager clears the world', () => {
+  // Mirrors the generated adapter: update and cleared listeners feed one store.
+  const updated = new Set();
+  const cleared = new Set();
+  const manager = { arena: { label: 'Overworld' } };
+  const on = (set) => (fn) => { set.add(fn); return () => set.delete(fn); };
+  const binding = worldStore(() => manager.arena, (listener) => combineUnsubscribers(
+    on(updated)(listener),
+    on(cleared)(() => listener(undefined)),
+  ));
+  const values = [];
+  const unsubscribe = binding.subscribe(value => values.push(value?.label));
+  manager.arena = undefined;
+  for (const fn of cleared) fn();
+  manager.arena = { label: 'Cave' };
+  for (const fn of updated) fn(manager.arena);
+  assert.deepEqual(values, ['Overworld', undefined, 'Cave']);
+  unsubscribe(); binding.destroy();
+  assert.equal(updated.size + cleared.size, 0);
 });
 
 test('a failing initial subscriber releases manager listeners and does not poison future consumers', () => {

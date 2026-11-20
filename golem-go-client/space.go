@@ -109,6 +109,10 @@ func (c *GameClient) holdCompactStateBatch(d *inboundDispatcher, data []byte) {
 	d.space.heldBytes += len(data)
 }
 
-// applyWorldCleared handles a WorldCleared message. World managers do not
-// expose per-type clearing yet, so it is decoded and otherwise ignored.
-func (c *GameClient) applyWorldCleared(string) {}
+// applyWorldCleared handles a WorldCleared message by clearing that world
+// type in the world manager when it implements WorldClearer.
+func (c *GameClient) applyWorldCleared(name string) {
+	if clearer, ok := c.world.(WorldClearer); ok {
+		clearer.ClearWorld(name)
+	}
+}

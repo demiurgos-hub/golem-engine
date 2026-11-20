@@ -28,7 +28,10 @@ function createBindings(client: Client) {
     },
     world: {
 {{- range .WorldTypes}}
-      {{.Name}}: worldStore(() => client.world.{{.LowerName}}, (listener) => client.world.on{{.Name}}Update(listener)),
+      {{.Name}}: worldStore(() => client.world.{{.LowerName}}, (listener) => combineUnsubscribers(
+        client.world.on{{.Name}}Update(listener),
+        client.world.on{{.Name}}Cleared(() => listener(undefined)),
+      )),
 {{- end}}
     },
     events: {

@@ -429,3 +429,53 @@ func TestGameClientWithoutSpaceMessagesIsUnchanged(t *testing.T) {
 		t.Fatalf("Space() = %d calls = %d sent = %d", client.Space(), calls.Load(), len(channel.sentFrames()))
 	}
 }
+
+// recordingWorld logs world updates and, as clearingWorld, clears into the
+// shared entity log so ordering with entity frames is visible.
+type recordingWorld struct{ log *fencedEntities }
+
+func (w recordingWorld) ApplyUpdate(update any) { w.log.record("world " + string(update.([]byte))) }
+
+type clearingWorld struct{ recordingWorld }
+
+func (w clearingWorld) ClearWorld(name string) { w.log.record("cleared " + name) }
+
+func worldClearedField(name string) []byte {
+	return wrapServerField(serverMessageWorldClearedField, (&pb.Writer{}).Tag(1, 2).String(name).Finish())
+}
+
+func TestGameClientWorldClearedCallsOptionalClearer(t *testing.T) {
+	for _, clearer := range []bool{true, false} {
+		channel := &spaceChannel{}
+		entities := newFencedEntities()
+		var world WorldManagerLike = recordingWorld{entities}
+		if clearer {
+			world = clearingWorld{recordingWorld{entities}}
+		}
+		client := NewGameClient(GameClientOptions{
+			EntityManager: entities,
+			DecodeEntity:  func(data []byte) (any, error) { return append([]byte(nil), data...), nil },
+			WorldManager:  world,
+			DecodeWorld:   func(data []byte) (any, error) { return append([]byte(nil), data...), nil },
+			CreateChannel: func(context.Context, ConnectOptions) (ReliableMessageChannel, error) {
+				channel.connected = true
+				return channel, nil
+			},
+		})
+		connectSpaceClient(t, client)
+		channel.callbacks.onMessage(concatFields(
+			spaceChangedField(4, 1),
+			wrapServerField(serverMessageWorldField, []byte("fog")),
+			worldClearedField("Light"),
+			entityField(2, 4, "carried"),
+			spaceSettledField(1),
+		))
+		if clearer {
+			waitForLog(t, entities, "world fog", "cleared Light", "full 2@4=carried")
+		} else {
+			// Without WorldClearer the message is ignored.
+			waitForLog(t, entities, "world fog", "full 2@4=carried")
+		}
+		client.Disconnect()
+	}
+}

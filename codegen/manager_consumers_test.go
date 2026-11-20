@@ -156,3 +156,56 @@ stopOther();events.applyRaw(new PbWriter().tag(1,2).bytes(new Uint8Array([8,1]))
 // generated framework consumers); independent listeners survive this cleanup.
 assert.deepEqual(order.slice(-2),['hook','typed']);
 `
+
+// World manager contracts: ClearWorld drops one world type by its WorldName,
+// notifies cleared listeners only when a value was held, ignores unknown
+// names and satisfies the runtimes' optional clearer contracts.
+const goWorldManagerContract = `package generated
+import("reflect";"testing";golemclient "github.com/demiurgos-hub/golem-engine/golem-go-client")
+var _ golemclient.WorldManagerLike = (*WorldManager)(nil)
+var _ golemclient.WorldClearer = (*WorldManager)(nil)
+func TestWorldManagerClear(t *testing.T) {
+ m:=NewWorldManager();var log []string
+ m.OnArenaUpdate(func(*ArenaData){log=append(log,"update")});m.OnArenaCleared(func(){log=append(log,"cleared")})
+ m.ClearWorld((&ArenaData{}).WorldName());if len(log)!=0 {t.Fatal("clear without a value notified")}
+ m.ApplyUpdate(&WorldUpdate{Payload:&WorldUpdate_ArenaData{ArenaData:&ArenaData{Counts:[]int32{1}}}})
+ m.ApplyUpdate(&WorldUpdate{Payload:&WorldUpdate_CatalogData{CatalogData:&CatalogData{}}})
+ m.ClearWorld("Unknown");m.ClearWorld("arena");if m.Arena()==nil {t.Fatal("unknown name cleared")}
+ m.ClearWorld("Arena");if m.Arena()!=nil||m.Catalog()==nil {t.Fatal("ClearWorld cleared the wrong world")}
+ if !reflect.DeepEqual(log,[]string{"update","cleared"}) {t.Fatal(log)}
+}
+`
+
+const jsWorldManagerCheck = `import type { WorldManagerLike } from 'golem-engine';
+import { WorldManager } from './WorldManager.js';
+const manager: WorldManagerLike = new WorldManager();
+export const clearThroughContract = (name: string): void => manager.clearWorld?.(name);
+`
+
+const jsWorldManagerContract = `import assert from 'node:assert/strict';
+import { WorldManager } from './out/WorldManager.js';
+import { clearThroughContract } from './out/world_check.js';
+const m=new WorldManager();const log=[];
+m.onArenaUpdate(()=>log.push('update'));const off=m.onArenaCleared(()=>log.push('cleared'));m.onArenaCleared(()=>log.push('second'));
+m.clearWorld('Arena');assert.deepEqual(log,[]);
+m.applyUpdate({arenaData:{counts:[1],items:{}}});m.applyUpdate({catalogData:{items:{}}});
+m.clearWorld('Unknown');m.clearWorld('arena');assert.ok(m.arena);
+m.clearWorld('Arena');assert.equal(m.arena,undefined);assert.ok(m.catalog);assert.deepEqual(log,['update','cleared','second']);
+off();m.applyUpdate({arenaData:{counts:[],items:{}}});m.clearWorld('Arena');assert.deepEqual(log,['update','cleared','second','update','second']);
+clearThroughContract('Catalog');
+`
+
+const csWorldManagerContract = `using System;using System.Collections.Generic;using System.Linq;using Generated;using GolemEngine.Unity;
+static class WorldContract {
+ static void Check(bool value,string message){if(!value)throw new Exception(message);}
+ public static void Run(){
+ var m=new WorldManager();IWorldClearer clearer=m;IWorldManager manager=m;var log=new List<string>();
+ m.OnArenaUpdate(_=>log.Add("update"));m.OnArenaCleared(()=>log.Add("cleared"));
+ clearer.ClearWorld("Arena");Check(log.Count==0,"clear without a value notified");
+ manager.ApplyUpdate(new WorldUpdate{ArenaData=new ArenaData()});m.ApplyUpdate(new WorldUpdate{CatalogData=new CatalogData()});
+ clearer.ClearWorld("Unknown");clearer.ClearWorld("arena");Check(m.Arena!=null,"unknown name cleared");
+ clearer.ClearWorld("Arena");Check(m.Arena==null&&m.Catalog!=null,"ClearWorld cleared the wrong world");
+ Check(log.SequenceEqual(new[]{"update","cleared"}),"cleared notification");
+ }
+}
+`

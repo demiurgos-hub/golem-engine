@@ -81,3 +81,19 @@ func (s *Store) MarshalAllExcept(exclude map[string]struct{}) ([][]byte, error) 
 	}
 	return result, nil
 }
+
+// Names returns the names of every stored world data value in sorted order.
+// It returns nil for an empty store.
+func (s *Store) Names() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.items) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(s.items))
+	for name := range s.items {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}

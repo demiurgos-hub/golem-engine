@@ -5,14 +5,17 @@ using GolemEngine.Unity;
 namespace {{.GoPackage}}
 {
     /// <summary>Manages world data state and dispatches incoming WorldUpdate messages.</summary>
-    public sealed class WorldManager : IWorldManager
+    public sealed class WorldManager : IWorldManager, IWorldClearer
     {
 {{range .WorldTypes}}
         private {{.DataName}} _{{.LowerName}};
         private Action<{{.DataName}}> _on{{.Name}}Update;
+        private Action _on{{.Name}}Cleared;
 
         public {{.DataName}} {{.Name}} => _{{.LowerName}};
         public void On{{.Name}}Update(Action<{{.DataName}}> fn) { _on{{.Name}}Update = fn; }
+        /// <summary>Called when the server clears held {{.Name}} data, for example on a move into a space without it.</summary>
+        public void On{{.Name}}Cleared(Action fn) { _on{{.Name}}Cleared = fn; }
 {{if and .IsCatalog .CatalogKeyField}}
         public {{.CatalogItemType}} Get{{.Name}}ById({{.CatalogKeyCSType}} id)
         {
@@ -35,6 +38,28 @@ namespace {{.GoPackage}}
                 return;
             }
 {{- end}}
+        }
+
+        /// <summary>
+        /// Drops the world data whose world type is <paramref name="name"/>, as the server's
+        /// WorldCleared message asks, and invokes its cleared callback when a value was held.
+        /// Unknown names are ignored.
+        /// </summary>
+        public void ClearWorld(string name)
+        {
+            switch (name)
+            {
+{{- range .WorldTypes}}
+                case {{printf "%q" .Name}}:
+                    if (_{{.LowerName}} == null)
+                    {
+                        return;
+                    }
+                    _{{.LowerName}} = null;
+                    _on{{.Name}}Cleared?.Invoke();
+                    return;
+{{- end}}
+            }
         }
     }
 }

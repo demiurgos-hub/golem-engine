@@ -1392,9 +1392,13 @@ namespace GolemEngine.Unity
             }
         }
 
-        /// <summary>World managers do not expose per-type clearing yet; the message is decoded and ignored.</summary>
+        /// <summary>Clears one world type when the world manager implements <see cref="IWorldClearer"/>.</summary>
         private void ApplyWorldCleared(string name)
         {
+            if (World is IWorldClearer clearer)
+            {
+                clearer.ClearWorld(name);
+            }
         }
 
         /// <summary>Holds a compact batch while a space transition is open, otherwise applies it.</summary>

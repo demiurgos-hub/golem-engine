@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"net/http/httptest"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -277,5 +279,185 @@ func TestSendWorldDataPropagatesMarshalError(t *testing.T) {
 	err := srv.SendWorldData(1, &sessionWorldData{name: "zone", err: boom})
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want %v", err, boom)
+	}
+}
+
+func TestSpaceWorldStorePersistsAcrossHandles(t *testing.T) {
+	srv := NewServer(ServerConfig{})
+	if srv.spaceWorld(3) != nil || srv.spaceWorldsUsed.Load() {
+		t.Fatal("a per-space store exists before first use")
+	}
+	stores := make([]any, 16)
+	var wg sync.WaitGroup
+	for i := range stores {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stores[i] = srv.Space(3).World()
+		}()
+	}
+	wg.Wait()
+	cave := srv.Space(3).World()
+	for _, store := range stores {
+		if store != any(cave) {
+			t.Fatal("handles for one space returned different stores")
+		}
+	}
+	cave.Set(&sessionWorldData{name: "fog", payload: []byte("cave")})
+	if srv.Space(3).World().Get("fog") == nil {
+		t.Fatal("value set through one handle is missing from another")
+	}
+	if srv.Space(4).World() == cave || srv.Space(0).World() == cave || srv.Space(0).World() == srv.World {
+		t.Fatal("spaces share a store, or space 0 aliases Server.World")
+	}
+	if srv.World.Get("fog") != nil {
+		t.Fatal("a per-space value leaked into Server.World")
+	}
+}
+
+func TestSpaceWorldUnusedKeepsConnectSnapshotByteIdentical(t *testing.T) {
+	build := func(seed func(*Server)) [][]byte {
+		srv := NewServer(ServerConfig{WorldSnapshotExclude: []string{"secret"}})
+		srv.World.Set(&sessionWorldData{name: "zeta", payload: []byte("z")})
+		srv.World.Set(&sessionWorldData{name: "alpha", payload: []byte("a")})
+		srv.World.Set(&sessionWorldData{name: "secret", payload: []byte("s")})
+		if seed != nil {
+			seed(srv)
+		}
+		frames, err := srv.worldSnapshotFrames()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return frames
+	}
+	want := [][]byte{WrapWorldUpdate([]byte("a")), WrapWorldUpdate([]byte("z"))}
+	for name, seed := range map[string]func(*Server){
+		"unused":      nil,
+		"empty store": func(srv *Server) { srv.Space(0).World(); srv.Space(5).World() },
+	} {
+		got := build(seed)
+		if !slices.EqualFunc(got, want, bytes.Equal) {
+			t.Fatalf("%s: snapshot = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestSpaceWorldConnectSnapshotMergesSpaceZero(t *testing.T) {
+	srv := NewServer(ServerConfig{WorldSnapshotExclude: []string{"secret"}})
+	srv.World.Set(&sessionWorldData{name: "alpha", payload: []byte("global-alpha")})
+	srv.World.Set(&sessionWorldData{name: "zone", payload: []byte("global-zone")})
+	srv.World.Set(&sessionWorldData{name: "secret", payload: []byte("global-secret")})
+	srv.Space(0).World().Set(&sessionWorldData{name: "zone", payload: []byte("space0-zone")})
+	srv.Space(0).World().Set(&sessionWorldData{name: "beta", payload: []byte("space0-beta")})
+	srv.Space(0).World().Set(&sessionWorldData{name: "secret", payload: []byte("space0-secret")})
+	srv.Space(5).World().Set(&sessionWorldData{name: "alpha", payload: []byte("cave-alpha")})
+	srv.Space(5).World().Set(&sessionWorldData{name: "cave", payload: []byte("cave-only")})
+	frames, err := srv.worldSnapshotFrames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, frame := range frames {
+		got = append(got, decodeServerTokens(t, frame)...)
+	}
+	want := []string{"world:global-alpha", "world:space0-beta", "cleared:cave", "world:space0-zone"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("snapshot = %q, want %q", got, want)
+	}
+
+	boom := errors.New("marshal failed")
+	srv.Space(0).World().Set(&sessionWorldData{name: "beta", err: boom})
+	if _, err := srv.worldSnapshotFrames(); !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want %v", err, boom)
+	}
+}
+
+func TestSpacePushWorldDataTargetsAnnouncedSessions(t *testing.T) {
+	rig := newSpaceTestRig(t, false, 2)
+	srv := rig.srv
+	inCave := rig.ids[1]
+	caveConn, outsideConn := rig.conns[1], rig.conns[0]
+	srv.SetSessionSpace(inCave, 4)
+	rig.tick(t)
+	assertTransition(t, readSpaceTokens(t, caveConn), 4, 1, nil, nil, nil)
+
+	// Missing store or name: no-op.
+	if err := srv.Space(4).PushWorldData("weather"); err != nil {
+		t.Fatal(err)
+	}
+	srv.Space(4).World().Set(&sessionWorldData{name: "weather", payload: []byte("storm")})
+	if err := srv.Space(4).PushWorldData("missing"); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Space(4).PushWorldData("weather"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readSpaceTokens(t, caveConn); !slices.Equal(got, []string{"world:storm"}) {
+		t.Fatalf("cave session = %q", got)
+	}
+	expectNoMessage(t, outsideConn)
+	// A space with a store but no session sends nothing.
+	srv.Space(7).World().Set(&sessionWorldData{name: "weather", payload: []byte("calm")})
+	if err := srv.Space(7).PushWorldData("weather"); err != nil {
+		t.Fatal(err)
+	}
+	expectNoMessage(t, caveConn)
+	expectNoMessage(t, outsideConn)
+
+	boom := errors.New("marshal failed")
+	srv.Space(4).World().Set(&sessionWorldData{name: "broken", err: boom})
+	if err := srv.Space(4).PushWorldData("broken"); !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want %v", err, boom)
+	}
+	srv.Space(4).World().Set(&sessionWorldData{name: "huge", payload: make([]byte, 300<<10)})
+	if err := srv.Space(4).PushWorldData("huge"); err == nil {
+		t.Fatal("oversized frame returned nil")
+	}
+}
+
+func TestPushWorldDataSkipsSessionsWhoseSpaceOverrides(t *testing.T) {
+	rig := newSpaceTestRig(t, false, 2)
+	srv := rig.srv
+	inCave, outside := rig.ids[1], rig.ids[0]
+	caveConn, outsideConn := rig.conns[1], rig.conns[0]
+	srv.World.Set(&sessionWorldData{name: "weather", payload: []byte("sunny")})
+	srv.World.Set(&sessionWorldData{name: "zone", payload: []byte("zone")})
+	srv.Space(4).World().Set(&sessionWorldData{name: "weather", payload: []byte("storm")})
+	srv.SetSessionSpace(inCave, 4)
+	rig.tick(t)
+	readSpaceTokens(t, caveConn)
+
+	if err := srv.PushWorldData("weather"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readSpaceTokens(t, outsideConn); !slices.Equal(got, []string{"world:sunny"}) {
+		t.Fatalf("outside session = %q", got)
+	}
+	expectNoMessage(t, caveConn)
+
+	// Names no space overrides still reach everyone.
+	if err := srv.PushWorldData("zone"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range rig.conns {
+		if got := readSpaceTokens(t, c); !slices.Equal(got, []string{"world:zone"}) {
+			t.Fatalf("zone push = %q", got)
+		}
+	}
+
+	// A space 0 override skips the space 0 session instead.
+	srv.Space(0).World().Set(&sessionWorldData{name: "zone", payload: []byte("space0-zone")})
+	if err := srv.PushWorldData("zone"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readSpaceTokens(t, caveConn); !slices.Equal(got, []string{"world:zone"}) {
+		t.Fatalf("cave zone push = %q", got)
+	}
+	expectNoMessage(t, outsideConn)
+	if err := srv.SendStoredWorldData(outside, "zone"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readSpaceTokens(t, outsideConn); !slices.Equal(got, []string{"world:space0-zone"}) {
+		t.Fatalf("outside SendStoredWorldData = %q", got)
 	}
 }

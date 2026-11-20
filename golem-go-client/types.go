@@ -99,6 +99,15 @@ type WorldManagerLike interface {
 	ApplyUpdate(any)
 }
 
+// WorldClearer is optionally implemented by a WorldManagerLike. GameClient
+// calls ClearWorld with the world type name when the server sends
+// WorldCleared, for example after a move into a space that does not define
+// that world data. Generated WorldManagers implement it; managers without it
+// keep their values.
+type WorldClearer interface {
+	ClearWorld(name string)
+}
+
 // EventManagerLike is the contract generated Go EventManagers satisfy.
 type EventManagerLike interface {
 	ApplyRaw([]byte)

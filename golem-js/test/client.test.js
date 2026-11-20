@@ -2448,3 +2448,41 @@ test("GameClient without space messages behaves as before", () => {
   assert.equal(channel.sent.length, 0);
   client.disconnect();
 });
+
+test("GameClient routes WorldCleared to the world manager's optional clearWorld in order", () => {
+  for (const withClear of [true, false]) {
+    const entities = fencedEntities();
+    const worldManager = { applyUpdate: (bytes) => entities.log.push(`world ${String.fromCharCode(...bytes)}`) };
+    if (withClear) worldManager.clearWorld = (name) => entities.log.push(`cleared ${name}`);
+    const channels = [];
+    const client = new GameClient({
+      entityManager: entities,
+      worldManager,
+      decodeWorld: (bytes) => bytes,
+      decode: (bytes) => bytes,
+      encode: () => new Uint8Array(),
+      encodePacket: packetBytes,
+      createChannel: (options) => {
+        const channel = new SpaceChannel(options.transport);
+        channels.push(channel);
+        return channel;
+      },
+    });
+    client.connect({ transport: "webtransport", url: "https://example.test" });
+    const channel = channels.at(-1);
+    channel.open();
+    entities.log.length = 0;
+    channel.stream(
+      spaceChangedField(4, 1),
+      new PbWriter().tag(2, 2).bytes(new Uint8Array([102, 111, 103])).finish(),
+      new PbWriter().tag(6, 2).bytes(new PbWriter().tag(1, 2).string("Light").finish()).finish(),
+      entityField(2, 4, "carried"),
+      spaceSettledField(1),
+    );
+    const expected = withClear
+      ? ["world fog", "cleared Light", "full 2@4=carried"]
+      : ["world fog", "full 2@4=carried"];
+    assert.deepEqual(entities.log, expected);
+    client.disconnect();
+  }
+});

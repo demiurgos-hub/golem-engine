@@ -152,6 +152,10 @@ type Server struct {
 	idCounter            int64 // atomically incremented; 0 is reserved as "unassigned"
 	reg                  *registry.Registry
 	World                *world.Store
+	worldSnapshotExclude map[string]struct{} // WorldSnapshotExclude names; immutable after NewServer
+	spaceWorldMu         sync.RWMutex
+	spaceWorlds          map[SpaceID]*world.Store // per-space world stores (spaceWorldMu)
+	spaceWorldsUsed      atomic.Bool              // set once any per-space store exists
 	config               ServerConfig
 	listener             *golemnet.Listener
 	interest             *interest.Manager
@@ -280,10 +284,10 @@ func NewServer(cfg ServerConfig) *Server {
 	cfg.WorldSnapshotExclude = normalizeWorldSnapshotExclude(cfg.WorldSnapshotExclude)
 	normalizeTaskConfig(&cfg)
 	validateStateUpdateLane(cfg)
-	worldSnapshotExclude := worldSnapshotExcludeSet(cfg.WorldSnapshotExclude)
 	s := &Server{
 		reg:                   registry.NewRegistry(),
 		World:                 world.NewStore(),
+		worldSnapshotExclude:  worldSnapshotExcludeSet(cfg.WorldSnapshotExclude),
 		config:                cfg,
 		msgQueue:              make(chan pendingMsg, msgQueueCap),
 		postQueue:             make(chan func(*Server), cfg.PostQueueCapacity),
@@ -323,17 +327,7 @@ func NewServer(cfg ServerConfig) *Server {
 		s.listener.SetEntitySnapshotFunc(s.entitySnapshotForSession)
 		s.listener.SetEntitySnapshotCompleteFunc(s.commitBroadcastSnapshotKnown)
 	}
-	s.listener.SetWorldSnapshotFunc(func() ([][]byte, error) {
-		updates, err := s.World.MarshalAllExcept(worldSnapshotExclude)
-		if err != nil {
-			return nil, err
-		}
-		wrapped := make([][]byte, len(updates))
-		for i, u := range updates {
-			wrapped[i] = WrapWorldUpdate(u)
-		}
-		return wrapped, nil
-	})
+	s.listener.SetWorldSnapshotFunc(s.worldSnapshotFrames)
 	// Wire listener session-event hooks to enqueue methods so that user
 	// callbacks always fire on the tick goroutine rather than the connection
 	// goroutine. OnConnect/OnMessage/OnDisconnect on Server only store the
@@ -925,6 +919,10 @@ func (s *Server) hasFOI(sessionID int64) bool {
 // broadcast succeeds. Returns a non-nil error if serialization fails.
 // Reliable frames are capped at 256 KiB; oversized embedded maps should
 // use map_url instead of tile_data.
+//
+// Sessions whose announced space defines name in its own store
+// (Space(id).World()) keep that space's value and are skipped; use
+// Space(id).PushWorldData for them.
 func (s *Server) PushWorldData(name string) error {
 	d := s.World.Get(name)
 	if d == nil {
@@ -934,7 +932,11 @@ func (s *Server) PushWorldData(name string) error {
 	if err != nil {
 		return err
 	}
-	return s.listener.BroadcastRaw(WrapWorldUpdate(data))
+	frame := WrapWorldUpdate(data)
+	if overriding := s.spacesOverridingWorld(name); len(overriding) > 0 {
+		return s.listener.SendRawTo(s.sessionsOutsideSpaces(overriding), frame)
+	}
+	return s.listener.BroadcastRaw(frame)
 }
 
 // SendWorldData serializes data directly, wraps it with WrapWorldUpdate, and
@@ -957,12 +959,15 @@ func (s *Server) SendWorldData(sessionID int64, data WorldData) error {
 }
 
 // SendStoredWorldData sends the currently stored world value for name to one
-// session. Returns nil when the name is missing (same no-op as PushWorldData).
+// session: the value in the store of the session's announced space
+// (Space(id).World()) when that store defines name, otherwise the value in
+// Server.World. Returns nil when the name is missing (same no-op as
+// PushWorldData).
 // Marshal failures, oversize reliable frames, and disconnected sessions
 // propagate. Prefer SendWorldData when delivering a per-session value that
 // must not replace Server.World.
 func (s *Server) SendStoredWorldData(sessionID int64, name string) error {
-	d := s.World.Get(name)
+	d := s.storedWorldForSession(sessionID, name)
 	if d == nil {
 		return nil
 	}

@@ -105,6 +105,17 @@ namespace GolemEngine.Unity
         void ApplyUpdate(object update);
     }
 
+    /// <summary>
+    /// Optional contract for world managers that can drop one world type. The client calls
+    /// <see cref="ClearWorld"/> with the world type name when the server sends WorldCleared,
+    /// for example after a move into a space that does not define that world data. Generated
+    /// world managers implement it; managers without it keep their values.
+    /// </summary>
+    public interface IWorldClearer
+    {
+        void ClearWorld(string name);
+    }
+
     /// <summary>Contract implemented by generated event managers.</summary>
     public interface IEventManager
     {

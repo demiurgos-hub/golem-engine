@@ -442,6 +442,52 @@ namespace GolemEngine.Unity.Tests
             Assert.That(transport.Sent, Is.Empty);
         }
 
+        [Test]
+        public void WorldClearedCallsOptionalWorldClearerInOrder()
+        {
+            foreach (var withClearer in new[] { true, false })
+            {
+                var manager = new FencedEntityManager();
+                var transport = new RecordingTransport(GolemDatagramProtocol.MaxWebTransportDatagramBytes);
+                IWorldManager world = withClearer ? new ClearingWorldManager(manager.Log) : new LoggingWorldManager(manager.Log);
+                var client = new GameClient(
+                    manager,
+                    bytes => bytes,
+                    cmd => (byte[])cmd,
+                    frames => ClientPacket(frames),
+                    _ => transport,
+                    world,
+                    bytes => bytes);
+                client.Connect("https://example.invalid/wt");
+
+                InvokePrivate(client, "HandleMessage", Concat(
+                    SpaceChangedField(4, 1),
+                    new PbWriter().Tag(2, 2).Bytes(System.Text.Encoding.ASCII.GetBytes("fog")).Finish(),
+                    new PbWriter().Tag(6, 2).Bytes(new PbWriter().Tag(1, 2).String("Light").Finish()).Finish(),
+                    EntityField(2, 4, "carried"),
+                    SpaceSettledField(1)));
+
+                var expected = withClearer
+                    ? new[] { "world fog", "cleared Light", "full 2@4=carried" }
+                    : new[] { "world fog", "full 2@4=carried" };
+                Assert.That(manager.Log, Is.EqualTo(expected));
+                client.Disconnect();
+            }
+        }
+
+        private class LoggingWorldManager : IWorldManager
+        {
+            protected readonly List<string> Log;
+            public LoggingWorldManager(List<string> log) { Log = log; }
+            public void ApplyUpdate(object update) { Log.Add("world " + System.Text.Encoding.ASCII.GetString((byte[])update)); }
+        }
+
+        private sealed class ClearingWorldManager : LoggingWorldManager, IWorldClearer
+        {
+            public ClearingWorldManager(List<string> log) : base(log) { }
+            public void ClearWorld(string name) { Log.Add("cleared " + name); }
+        }
+
         private static GameClient SpaceClient(FencedEntityManager manager, RecordingTransport transport)
         {
             return new GameClient(

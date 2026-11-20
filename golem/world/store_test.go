@@ -86,3 +86,28 @@ func TestMarshalAllExceptPropagatesMarshalError(t *testing.T) {
 		t.Fatalf("err = %v, want %v", err, boom)
 	}
 }
+
+func TestNamesReturnsSortedNames(t *testing.T) {
+	store := NewStore()
+	if got := store.Names(); got != nil {
+		t.Fatalf("empty Names = %v, want nil", got)
+	}
+	store.Set(&testData{name: "zeta"})
+	store.Set(&testData{name: "alpha"})
+	store.Set(&testData{name: "mid"})
+	store.Set(&testData{name: "alpha", payload: []byte("again")})
+	got := store.Names()
+	want := []string{"alpha", "mid", "zeta"}
+	if len(got) != len(want) {
+		t.Fatalf("Names = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Names = %v, want %v", got, want)
+		}
+	}
+	got[0] = "mutated"
+	if store.Names()[0] != "alpha" {
+		t.Fatal("Names returned the store's own slice")
+	}
+}

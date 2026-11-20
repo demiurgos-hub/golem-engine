@@ -232,6 +232,23 @@ func (l *Listener) BroadcastRaw(data []byte) error {
 	return nil
 }
 
+// SendRawTo sends a single pre-wrapped frame to each listed session that is
+// still connected; sessions that are gone are skipped. Like BroadcastRaw it
+// does NOT apply messageWrapper and validates the frame size first.
+func (l *Listener) SendRawTo(sessionIDs []int64, data []byte) error {
+	if err := validateReliableMessageSize(data); err != nil {
+		return err
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	for _, id := range sessionIDs {
+		if s, ok := l.sessions[id]; ok {
+			s.Send(data)
+		}
+	}
+	return nil
+}
+
 // Broadcast sends a set of serialized entity messages to every connected
 // session in a single queued batch.
 func (l *Listener) Broadcast(deltas [][]byte) error {
