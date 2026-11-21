@@ -27,11 +27,14 @@ type transferTestWorld struct {
 	// destroyErr, when set, fails DestroyBody for the handles it returns an
 	// error for.
 	destroyErr func(p.BodyHandle) error
+	// controllers holds the enabled BodyDesc.Controller of each body, reported
+	// through physics3d.CharacterControllerReader.
+	controllers map[p.BodyHandle]p.CharacterControllerConfig
 }
 
 func newTransferTestWorld(id uint64, log *[]string) *transferTestWorld {
 	return &transferTestWorld{physicsTestWorld: &physicsTestWorld{bodies: map[p.BodyHandle]p.BodyState{}},
-		id: id, name: fmt.Sprint(id), joints: map[p.JointHandle][2]p.BodyHandle{}, log: log}
+		id: id, name: fmt.Sprint(id), joints: map[p.JointHandle][2]p.BodyHandle{}, controllers: map[p.BodyHandle]p.CharacterControllerConfig{}, log: log}
 }
 
 func (w *transferTestWorld) record(event string) {
@@ -45,7 +48,18 @@ func (w *transferTestWorld) CreateBody(d p.BodyDesc) (p.BodyHandle, error) {
 	h := p.BodyHandle{World: w.id, Index: w.next, Generation: 1}
 	w.bodies[h] = p.BodyState{Handle: h, ID: d.ID, Owner: d.Owner, Mode: d.Mode, Pose: d.Pose, Anchor: d.Pose.Compose(d.Anchor),
 		LinearVelocity: d.LinearVelocity, AngularVelocity: d.AngularVelocity, Mass: d.Mass, Enabled: d.Enabled, Awake: d.Awake}
+	if d.Controller.Enabled {
+		w.controllers[h] = d.Controller
+	}
 	return h, nil
+}
+
+func (w *transferTestWorld) CharacterController(h p.BodyHandle) (p.CharacterControllerConfig, bool, error) {
+	if _, err := w.Body(h); err != nil {
+		return p.CharacterControllerConfig{}, false, err
+	}
+	c, ok := w.controllers[h]
+	return c, ok, nil
 }
 
 func (w *transferTestWorld) CreateJoint(d p.JointDesc) (p.JointHandle, error) {
@@ -70,6 +84,7 @@ func (w *transferTestWorld) DestroyBody(h p.BodyHandle, reason p.CleanupReason) 
 	if err := w.physicsTestWorld.DestroyBody(h, reason); err != nil {
 		return err
 	}
+	delete(w.controllers, h)
 	for j, pair := range w.joints {
 		if pair[0] == h || pair[1] == h {
 			delete(w.joints, j)
@@ -379,6 +394,111 @@ func TestSpaceTransferRollsBackOnRebuildFailure(t *testing.T) {
 	unchanged("validation")
 	if calls != 4 {
 		t.Fatalf("RebuildPhysics calls = %d, want 4 (validation failures must not call it)", calls)
+	}
+}
+
+func TestSpaceTransferKeepsCharacterControllerSettings(t *testing.T) {
+	s, a, b := newTransferTestServer(t)
+	avatar := transferTestEntity(t, s, 0, 1, surface.Vec3{X: 1})
+	crate := transferTestEntity(t, s, 0, 2, surface.Vec3{X: 2})
+	ctrl := p.DefaultCharacterController(p.DrivenCharacter)
+	ctrl.MaxSlopeDegrees, ctrl.Iterations, ctrl.Velocity = 30, 5, p.Vec3{X: 2}
+	pose := p.Identity()
+	pose.Position = physicsPoint(avatar.position)
+	avatarBody, err := a.CreateBody(p.BodyDesc{Owner: 1, Mode: p.DrivenCharacter, Pose: pose, Anchor: p.Identity(), Mass: 1, Enabled: true, Awake: true, Controller: ctrl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AttachPhysics(1, avatarBody, PhysicsAttachmentConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	transferTestAttach(t, s, a, crate, p.FreeDynamic, PhysicsAttachmentConfig{})
+	startTestSpaces(t, s)
+
+	// rebuild recreates every source body offset by 100 with the controller
+	// edit returns for it.
+	var seen []PhysicsTransferSource
+	rebuild := func(edit func(PhysicsTransferSource) p.CharacterControllerConfig) func(p.World, []PhysicsTransferSource) (map[int64]p.BodyHandle, error) {
+		return func(dst p.World, src []PhysicsTransferSource) (map[int64]p.BodyHandle, error) {
+			seen = append(seen[:0], src...)
+			out := make(map[int64]p.BodyHandle, len(src))
+			for _, source := range src {
+				pose := source.Body.Pose
+				pose.Position = pose.Position.Add(p.Vec3{X: 100})
+				h, err := dst.CreateBody(p.BodyDesc{Mode: source.Body.Mode, Pose: pose, Anchor: source.Body.Pose.Inverse().Compose(source.Body.Anchor),
+					Mass: source.Body.Mass, Enabled: true, Awake: true, Controller: edit(source)})
+				if err != nil {
+					return out, err
+				}
+				out[source.Entity] = h
+			}
+			return out, nil
+		}
+	}
+	unchanged := func(label string) {
+		t.Helper()
+		for _, id := range []int64{1, 2} {
+			if space, _ := s.EntitySpace(id); space != 0 || s.physics.agents[id] == nil {
+				t.Fatalf("%s: entity %d moved or lost physics", label, id)
+			}
+		}
+		if s.physics.agents[1].body != avatarBody || a.controllers[avatarBody] != ctrl || len(b.bodies) != 0 || len(b.controllers) != 0 || len(s.runtime(5).physics.agents) != 0 {
+			t.Fatalf("%s: destination bodies=%d controllers=%d", label, len(b.bodies), len(b.controllers))
+		}
+		if avatar.position.X != 1 || crate.position.X != 2 {
+			t.Fatalf("%s: positions changed", label)
+		}
+	}
+	reject := func(label, want string, edit func(PhysicsTransferSource) p.CharacterControllerConfig) {
+		t.Helper()
+		err := s.MoveToSpace(SpaceTransfer{To: 5, Entities: []int64{1, 2}, RebuildPhysics: rebuild(edit)})
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s = %v, want %q", label, err, want)
+		}
+		unchanged(label)
+	}
+	reject("changed settings", "changes its character controller settings", func(src PhysicsTransferSource) p.CharacterControllerConfig {
+		c := src.Controller
+		if c.Enabled {
+			c.StepHeight = .1
+		}
+		return c
+	})
+	reject("dropped controller", "lost the source body's character controller", func(PhysicsTransferSource) p.CharacterControllerConfig {
+		return p.CharacterControllerConfig{}
+	})
+	reject("added controller", "entity 2: source body has no character controller but the rebuilt body has one", func(src PhysicsTransferSource) p.CharacterControllerConfig {
+		if src.Controller.Enabled {
+			return src.Controller
+		}
+		return p.DefaultCharacterController(p.FreeDynamic)
+	})
+
+	// Only configuration must match: a rebuilt character may start new
+	// velocity intent.
+	if err := s.MoveToSpace(SpaceTransfer{To: 5, Entities: []int64{1, 2}, RebuildPhysics: rebuild(func(src PhysicsTransferSource) p.CharacterControllerConfig {
+		c := src.Controller
+		if c.Enabled {
+			c.Velocity = p.Vec3{Z: 1}
+		}
+		return c
+	})}); err != nil {
+		t.Fatal(err)
+	}
+	want := ctrl
+	want.Velocity = p.Vec3{}
+	if len(seen) != 2 || seen[0].Entity != 1 || seen[0].Controller != want || seen[1].Controller != (p.CharacterControllerConfig{}) {
+		t.Fatalf("rebuild sources = %+v", seen)
+	}
+	moved := s.runtime(5).physics.agents[1]
+	if space, _ := s.EntitySpace(1); space != 5 || moved == nil || avatar.position.X != 101 {
+		t.Fatalf("avatar did not move: space %d, attachment %v, position %v", space, moved, avatar.position)
+	}
+	if got, ok, err := b.CharacterController(moved.body); err != nil || !ok || got.Velocity != (p.Vec3{Z: 1}) || transferControllerConfig(got) != want {
+		t.Fatalf("destination controller = %+v, %v, %v", got, ok, err)
+	}
+	if len(a.controllers) != 0 {
+		t.Fatal("source kept the avatar controller")
 	}
 }
 

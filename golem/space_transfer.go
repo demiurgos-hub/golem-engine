@@ -19,6 +19,11 @@ type spaceTransferEntity struct {
 	navConfig NavigationAgentConfig
 	body      p.BodyHandle // admitted destination body
 	state     p.BodyState  // admitted destination body state
+	// controller is the source body's controller policy with Velocity cleared
+	// (zero without a controller); controllerKnown is false when the source
+	// world does not implement physics3d.CharacterControllerReader.
+	controller      p.CharacterControllerConfig
+	controllerKnown bool
 }
 
 // applySpaceMove validates every entity of t, including its legacy collider
@@ -259,7 +264,8 @@ func synchronizeRetired(op string, retired []*physicsService) error {
 	return errors.Join(errs...)
 }
 
-// rebuildTransferPhysics captures the source states of the moving physics
+// rebuildTransferPhysics captures the source states (and character
+// controllers, when the source world reports them) of the moving physics
 // entities, calls RebuildPhysics once on the destination world and admits each
 // returned body. On any failure every returned body is destroyed and nothing
 // else has changed. Admitted bodies are recorded in moves.
@@ -284,7 +290,17 @@ func (s *Server) rebuildTransferPhysics(op string, t SpaceTransfer, dst *spaceRu
 			return nil, fmt.Errorf("golem: %s: read entity %d body: %w", op, m.id, err)
 		}
 		m.source = state
-		sources = append(sources, PhysicsTransferSource{Entity: m.id, From: m.from.id, Body: state, Config: m.physics.config})
+		if reader, ok := ps.world.(p.CharacterControllerReader); ok {
+			ctrl, character, err := reader.CharacterController(m.physics.body)
+			if err != nil {
+				return nil, fmt.Errorf("golem: %s: read entity %d controller: %w", op, m.id, err)
+			}
+			if character {
+				m.controller = transferControllerConfig(ctrl)
+			}
+			m.controllerKnown = true
+		}
+		sources = append(sources, PhysicsTransferSource{Entity: m.id, From: m.from.id, Body: state, Config: m.physics.config, Controller: m.controller})
 	}
 	created, err := t.RebuildPhysics(dps.world, sources)
 	if err != nil {
@@ -341,6 +357,9 @@ func (s *Server) admitTransferBodies(op string, dps *physicsService, moves []spa
 		if state.Mode != m.source.Mode {
 			return fmt.Errorf("golem: %s: rebuilt body of entity %d changes its motion mode", op, m.id)
 		}
+		if err := checkTransferController(dps, m, h); err != nil {
+			return fmt.Errorf("golem: %s: rebuilt body of entity %d: %w", op, m.id, err)
+		}
 		if m.nav && !physicsNavigationMode(state.Mode) {
 			return fmt.Errorf("golem: %s: rebuilt body mode of entity %d cannot carry its navigation attachment", op, m.id)
 		}
@@ -358,6 +377,37 @@ func (s *Server) admitTransferBodies(op string, dps *physicsService, moves []spa
 			state.Owner = m.id
 		}
 		m.body, m.state = h, state
+	}
+	return nil
+}
+
+// transferControllerConfig returns the configuration part of a controller
+// policy: everything but Velocity, the retained intent that SetCharacterVelocity
+// rewrites at runtime and that transfers do not carry.
+func transferControllerConfig(c p.CharacterControllerConfig) p.CharacterControllerConfig {
+	c.Velocity = p.Vec3{}
+	return c
+}
+
+// checkTransferController rejects a rebuilt body whose controller configuration
+// differs from the source body's, including one that gains or loses a
+// controller. It is skipped when either world cannot report controllers.
+func checkTransferController(dps *physicsService, m *spaceTransferEntity, h p.BodyHandle) error {
+	reader, ok := dps.world.(p.CharacterControllerReader)
+	if !ok || !m.controllerKnown {
+		return nil
+	}
+	ctrl, character, err := reader.CharacterController(h)
+	if err != nil {
+		return err
+	}
+	switch {
+	case character && !m.controller.Enabled:
+		return errors.New("source body has no character controller but the rebuilt body has one")
+	case !character && m.controller.Enabled:
+		return errors.New("rebuilt body lost the source body's character controller")
+	case character && transferControllerConfig(ctrl) != m.controller:
+		return errors.New("rebuilt body changes its character controller settings")
 	}
 	return nil
 }

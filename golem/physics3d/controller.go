@@ -52,6 +52,17 @@ func (c CharacterControllerConfig) Validate(mode MotionMode) error {
 // tick boundary. It never advances time or changes accepted body/entity poses.
 type CharacterVelocityWriter interface{ SetCharacterVelocity(BodyHandle, Vec3) error }
 
+// CharacterControllerReader optionally reports a live body's current controller
+// policy: the BodyDesc.Controller it was created with, as later replaced by
+// MotionPolicyWorld.SetMotionPolicy, with Velocity holding the retained intent
+// last written by CharacterVelocityWriter. Velocity is runtime state; every
+// other field is configuration. ok is false, with a zero config, for a body
+// without an enabled controller. Unknown, destroyed or foreign handles return
+// ErrStale. It never mutates the world.
+type CharacterControllerReader interface {
+	CharacterController(BodyHandle) (config CharacterControllerConfig, ok bool, err error)
+}
+
 // CharacterSupport identifies current nearby physical support. LocalPoint belongs
 // to the support body origin, never its centre of mass. Handles are ephemeral and
 // must be re-probed after checkpoint restore, removal or generation replacement.

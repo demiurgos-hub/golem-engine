@@ -37,6 +37,20 @@ func (w *World) SetCharacterVelocity(h p.BodyHandle, velocity p.Vec3) error {
 	return nil
 }
 
+// CharacterController reports the body's current controller policy, including
+// its retained velocity intent, or ok=false when it has no enabled controller.
+// Like Body, it is readable while a frame awaits acceptance.
+func (w *World) CharacterController(h p.BodyHandle) (p.CharacterControllerConfig, bool, error) {
+	v, err := w.findBody(h)
+	if err != nil {
+		return p.CharacterControllerConfig{}, false, err
+	}
+	if !v.desc.Controller.Enabled {
+		return p.CharacterControllerConfig{}, false, nil
+	}
+	return v.desc.Controller, true, nil
+}
+
 func (w *World) controllerGeometry(h p.BodyHandle) (controllerGeometry, error) {
 	return w.controllerGeometryAt(h, w.bodyState(h, w.bodyForHandle(h)).Pose)
 }

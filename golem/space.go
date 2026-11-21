@@ -53,6 +53,11 @@ type SpaceTransfer struct {
 	// exist. It is called once, on the tick goroutine, with every moved physics
 	// entity's accepted source state (in Entities order), and returns the new
 	// body for each of them; joints between moved bodies are recreated here too.
+	// A rebuilt character must be created with src.Controller as its
+	// BodyDesc.Controller (adding only new velocity intent): when both worlds
+	// implement physics3d.CharacterControllerReader, admission rejects a body
+	// whose controller configuration differs from the source's, or that gains
+	// or loses a controller.
 	// It must only create bodies, colliders and joints in dst and must not call
 	// Server APIs: AttachPhysics, AttachNavigation, CreateEntityWithSetup and
 	// MoveToSpace return an error wrapping physics3d.ErrBusy, DeleteEntity is
@@ -82,6 +87,13 @@ type PhysicsTransferSource struct {
 	Body p.BodyState
 	// Config is the attachment configuration the destination attachment keeps.
 	Config PhysicsAttachmentConfig
+	// Controller is the source body's current character controller policy, to
+	// pass unchanged as the rebuilt body's BodyDesc.Controller. Its Velocity is
+	// zero: retained velocity intent is runtime state and is not carried. It is
+	// the zero (disabled) config when the source body has no enabled controller
+	// or the source world does not implement physics3d.CharacterControllerReader
+	// (Box3D does).
+	Controller p.CharacterControllerConfig
 }
 
 // MoveToSpace moves every entity of t to t.To in one step. All entities are
@@ -106,7 +118,11 @@ type PhysicsTransferSource struct {
 // runs once on the destination world and must return a body for every moved
 // physics entity; each body is admitted like AttachPhysics (owner binding,
 // complete-volume placement with the entity's PhysicsPlacementPolicy,
-// navigation mode) and must keep the source body's motion mode. When the
+// navigation mode) and must keep the source body's motion mode and, when both
+// worlds implement physics3d.CharacterControllerReader, its character
+// controller configuration (every field except velocity intent; a body may
+// neither gain nor lose a controller). Without the reader in either world the
+// controller check is skipped and the callback is trusted. When the
 // callback fails, changes a moving entity, or any body is rejected, every
 // returned body is destroyed (with its colliders and joints) and nothing
 // changes.
