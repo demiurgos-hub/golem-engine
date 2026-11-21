@@ -7,14 +7,27 @@ import (
 )
 
 // EventDelivery selects the lane that carries a server event to a session.
+//
+// The datagram lanes are bound to the space the session is in. Once a session
+// has changed space, its datagram event records name the transition that
+// brought it there, and a client drops every record of an older transition:
+// such an event describes a space the client has left. That includes records
+// on the reliable lanes: an event sent shortly before a space change whose
+// datagram is retransmitted, and so arrives after the change, is lost. Send
+// events that must survive a space change, such as inventory or chat, with
+// EventStream, which stays ordered with the transition.
 type EventDelivery uint8
 
 const (
-	// EventStream delivers on the reliable stream, ordered with snapshots, spawns and removals.
+	// EventStream delivers on the reliable stream, ordered with snapshots,
+	// spawns, removals and space transitions. It is the only delivery that is
+	// never dropped across a space change.
 	EventStream EventDelivery = iota
 	// EventReliableOrdered delivers on the reliable ordered datagram lane.
+	// Reliable within one space only; see EventDelivery.
 	EventReliableOrdered
 	// EventReliableUnordered delivers on the reliable unordered datagram lane.
+	// Reliable within one space only; see EventDelivery.
 	EventReliableUnordered
 	// EventUnreliable delivers on the lossy datagram lane.
 	EventUnreliable

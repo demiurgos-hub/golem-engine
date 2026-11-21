@@ -114,3 +114,31 @@ func TestGameClientFailedControlSendsCloseConnection(t *testing.T) {
 		})
 	}
 }
+
+// Events on a reliable datagram lane are reliable only within one space: a
+// record sent before a space change that arrives after it, such as a
+// retransmission, is dropped like any record of an older transition. An event
+// that must survive a space change belongs on the stream, which stays ordered
+// with the transition.
+func TestGameClientDropsLateReliableLaneEventsButKeepsStreamEvents(t *testing.T) {
+	channel := &spaceChannel{}
+	entities := newFencedEntities()
+	client := NewGameClient(GameClientOptions{
+		EntityManager: entities,
+		EventManager:  loggingEvents{entities},
+		DecodeEntity:  func(data []byte) (any, error) { return append([]byte(nil), data...), nil },
+		CreateChannel: func(context.Context, ConnectOptions) (ReliableMessageChannel, error) {
+			channel.connected = true
+			return channel, nil
+		},
+	})
+	connectSpaceClient(t, client)
+	defer client.Disconnect()
+
+	channel.callbacks.onMessage(concatFields(spaceChangedField(7, 1), spaceSettledField(1)))
+	channel.callbacks.onReliableOrderedMessage(eventBatch(0, "inventory-ordered-late"))
+	channel.callbacks.onReliableUnorderedMessage(eventBatch(0, "inventory-unordered-late"))
+	channel.callbacks.onMessage(wrapServerField(serverMessageEventField, []byte("inventory-stream")))
+	channel.callbacks.onReliableOrderedMessage(eventBatch(1, "current"))
+	waitForLog(t, entities, "event inventory-stream", "event current")
+}

@@ -903,6 +903,11 @@ func (s *Server) BroadcastEvent(data []byte) error {
 // this tick, before the replication pass that announces the change, is held
 // and sent on the stream right after the transition (space_events.go), and
 // datagram-lane events then use the stream until the client acknowledges it.
+//
+// A datagram-lane event sent before the tick of a space change can still be
+// in flight when the client switches; the client then drops it, also on the
+// reliable lanes (see EventDelivery). Use EventStream for events that must
+// arrive whatever space the session is in.
 func (s *Server) SendServerEvent(sessionID int64, delivery EventDelivery, event []byte) error {
 	return s.listener.SendEvent(sessionID, delivery, event, WrapServerEvent(event))
 }

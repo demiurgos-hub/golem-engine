@@ -2606,6 +2606,24 @@ test("GameClient drops datagram event records of a transition it already left", 
   client.disconnect();
 });
 
+// Events on a reliable datagram lane are reliable only within one space: a
+// record sent before a space change that arrives after it, such as a
+// retransmission, is dropped like any record of an older transition. An event
+// that must survive a space change belongs on the stream.
+test("GameClient drops a late reliable-lane event of an older transition but keeps stream events", () => {
+  const { client, entities, connect } = eventSpaceClient();
+  const channel = connect();
+  entities.log.length = 0;
+
+  channel.stream(spaceChangedField(7, 1), spaceSettledField(1));
+  channel.ordered(framedBatchBytes([eventRecord(0, "inventory-late")]));
+  const streamEvent = Uint8Array.from("inventory-stream", (c) => c.charCodeAt(0));
+  channel.stream(new PbWriter().tag(3, 2).bytes(streamEvent).finish());
+  channel.ordered(framedBatchBytes([eventRecord(1, "current")]));
+  assert.deepEqual(entities.log, ["event inventory-stream", "event current"]);
+  client.disconnect();
+});
+
 class FailingSendSpaceChannel extends SpaceChannel {
   send() { throw new Error("write failed"); }
 }

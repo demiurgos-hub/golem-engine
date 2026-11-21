@@ -565,6 +565,35 @@ namespace GolemEngine.Unity.Tests
             Assert.That(manager.Log, Is.EqualTo(new[] { "event reconnected" }));
         }
 
+        /// <summary>
+        /// Events on a reliable datagram lane are reliable only within one space: a record sent before a
+        /// space change that arrives after it, such as a retransmission, is dropped like any record of an
+        /// older transition. An event that must survive a space change belongs on the stream.
+        /// </summary>
+        [Test]
+        public void DropsLateReliableLaneEventsOfOlderTransitionsButKeepsStreamEvents()
+        {
+            var manager = new FencedEntityManager();
+            var transport = new RecordingTransport(GolemDatagramProtocol.MaxWebTransportDatagramBytes);
+            var client = new GameClient(
+                manager,
+                bytes => bytes,
+                cmd => (byte[])cmd,
+                frames => ClientPacket(frames),
+                _ => transport,
+                eventManager: new LoggingEventManager(manager.Log));
+            client.Connect("https://example.invalid/wt");
+
+            InvokePrivate(client, "HandleMessage", Concat(SpaceChangedField(7, 1), SpaceSettledField(1)));
+            // Every datagram lane, the reliable ones included, delivers through ReceiveCompactStateBatch.
+            InvokeBatch(client, "ReceiveCompactStateBatch", EventBatch(0, "inventory-late"));
+            InvokePrivate(client, "HandleMessage",
+                new PbWriter().Tag(3, 2).Bytes(System.Text.Encoding.ASCII.GetBytes("inventory-stream")).Finish());
+            InvokeBatch(client, "ReceiveCompactStateBatch", EventBatch(1, "current"));
+            Assert.That(manager.Log, Is.EqualTo(new[] { "event inventory-stream", "event current" }));
+            client.Disconnect();
+        }
+
         [Test]
         public void FailedSpaceAckOrEntityResyncSendClosesConnection()
         {
