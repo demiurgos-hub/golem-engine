@@ -169,7 +169,7 @@ func (w *World) DestroyJoint(h p.JointHandle) error {
 	}
 	v, ok := w.joints[h]
 	if !ok {
-		return p.ErrStale
+		return staleHandle(p.Handle(h))
 	}
 	v.id.Destroy(true)
 	delete(w.joints, h)
@@ -186,7 +186,7 @@ func (w *World) Joint(h p.JointHandle) (p.JointState, error) {
 	}
 	v, ok := w.joints[h]
 	if !ok {
-		return p.JointState{}, p.ErrStale
+		return p.JointState{}, staleHandle(p.Handle(h))
 	}
 	return p.JointState{Handle: h, ID: v.desc.ID, Force: pv(v.id.GetConstraintForce()), Torque: pv(v.id.GetConstraintTorque())}, nil
 }

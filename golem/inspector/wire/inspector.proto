@@ -89,13 +89,16 @@ message Batch {
   repeated EntityState spawns = 5;
   repeated EntityDelta deltas = 6;
   repeated Removal removals = 7;
+  repeated SpaceMove moves = 8; // entities whose space changed in this window
 }
 
 // type_tag is always the entity's State oneof tag from EntityUpdate.
+// space is the entity's space; it is omitted for the default space 0.
 message EntityState {
   int64 id = 1;
   uint32 type_tag = 2;
   bytes state = 3; // game XState message
+  uint32 space = 4;
 }
 
 // mask is the accumulated replication dirty mask. Receivers replace every
@@ -111,6 +114,13 @@ message EntityDelta {
 message Removal {
   int64 id = 1;
   uint64 revision = 2;
+}
+
+// SpaceMove reports an entity's new space. Spawns in the same batch carry their
+// space in EntityState instead; receivers ignore moves for unknown entities.
+message SpaceMove {
+  int64 id = 1;
+  uint32 space = 2;
 }
 
 message Ping { int64 client_time = 1; }

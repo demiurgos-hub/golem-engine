@@ -395,7 +395,7 @@ func (w *World) CreateScaledShape(source p.ShapeHandle, id p.ContentID, scale p.
 	}
 	base, ok := w.shapes[source]
 	if !ok {
-		return p.ShapeHandle{}, p.ErrStale
+		return p.ShapeHandle{}, staleHandle(p.Handle(source))
 	}
 	cooked, err := base.cooked.rescaled(id, scale)
 	if err != nil {

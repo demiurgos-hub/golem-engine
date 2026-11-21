@@ -61,7 +61,8 @@ func NewRuntime(srv *golem.Server) *Runtime {
 // backend, and stores it on the Server for automatic ColliderProvider3D
 // registration. Call before CreateEntity or LoadSnapshot for entities with
 // schema-declared colliders. Panics immediately if backend is nil so a
-// half-configured Layers3D helper is never installed.
+// half-configured Layers3D helper is never installed, and panics before
+// installing anything if backend already serves another space.
 func (r *Runtime) EnableCollision3D(backend golem.CollisionBackend3D) {
 	golem.MustCollisionBackend3D(backend)
 	layers := golem.NewCollisionLayers3D().
@@ -70,9 +71,34 @@ func (r *Runtime) EnableCollision3D(backend golem.CollisionBackend3D) {
 {{- range .Collision.Collides}}
 	layers.SetCollides("{{.A}}", "{{.B}}")
 {{- end}}
-	r.Layers3D = layers
 	r.Server.SetCollision3DBackend(backend)
 	r.Server.SetCollisionLayers3D(layers)
+	r.Layers3D = layers
+}
+
+// EnableSpaceCollision3D builds the golem.yaml 3D layer matrix for one space,
+// binds it to backend and installs both on that space, so entities created in
+// or moved into the space register their ColliderProvider3D shapes there. It
+// returns the space's layer helper (EnableSpaceCollision3D(0, b) also stores
+// it in Layers3D). Each space needs its own backend: it panics before
+// installing anything if backend already serves another space (installing it
+// again in the same space is allowed). Call before creating collidable
+// entities in the space. Panics immediately if backend is nil.
+func (r *Runtime) EnableSpaceCollision3D(space golem.SpaceID, backend golem.CollisionBackend3D) *golem.CollisionLayers3D {
+	golem.MustCollisionBackend3D(backend)
+	layers := golem.NewCollisionLayers3D().
+		Bind(backend).
+		Define({{range $i, $name := .Collision.Layers}}{{if $i}}, {{end}}"{{$name}}"{{end}})
+{{- range .Collision.Collides}}
+	layers.SetCollides("{{.A}}", "{{.B}}")
+{{- end}}
+	sp := r.Server.Space(space)
+	sp.SetCollision3DBackend(backend)
+	sp.SetCollisionLayers3D(layers)
+	if space == 0 {
+		r.Layers3D = layers
+	}
+	return layers
 }
 {{- else}}
 
@@ -80,7 +106,8 @@ func (r *Runtime) EnableCollision3D(backend golem.CollisionBackend3D) {
 // backend, and stores it on the Server for automatic ColliderProvider
 // registration. Call before CreateEntity or LoadSnapshot for entities with
 // schema-declared colliders. Panics immediately if backend is nil so a
-// half-configured Layers helper is never installed.
+// half-configured Layers helper is never installed, and panics before
+// installing anything if backend already serves another space.
 func (r *Runtime) EnableCollision(backend golem.CollisionBackend) {
 	golem.MustCollisionBackend(backend)
 	layers := golem.NewCollisionLayers().
@@ -89,16 +116,53 @@ func (r *Runtime) EnableCollision(backend golem.CollisionBackend) {
 {{- range .Collision.Collides}}
 	layers.SetCollides("{{.A}}", "{{.B}}")
 {{- end}}
-	r.Layers = layers
 	r.Server.SetCollisionBackend(backend)
 	r.Server.SetCollisionLayers(layers)
+	r.Layers = layers
+}
+
+// EnableSpaceCollision builds the golem.yaml 2D layer matrix for one space,
+// binds it to backend and installs both on that space, so entities created in
+// or moved into the space register their ColliderProvider shapes there. It
+// returns the space's layer helper (EnableSpaceCollision(0, b) also stores it
+// in Layers). Each space needs its own backend: it panics before installing
+// anything if backend already serves another space (installing it again in
+// the same space is allowed). Call before creating collidable entities in the
+// space. Panics immediately if backend is nil.
+func (r *Runtime) EnableSpaceCollision(space golem.SpaceID, backend golem.CollisionBackend) *golem.CollisionLayers {
+	golem.MustCollisionBackend(backend)
+	layers := golem.NewCollisionLayers().
+		Bind(backend).
+		Define({{range $i, $name := .Collision.Layers}}{{if $i}}, {{end}}"{{$name}}"{{end}})
+{{- range .Collision.Collides}}
+	layers.SetCollides("{{.A}}", "{{.B}}")
+{{- end}}
+	sp := r.Server.Space(space)
+	sp.SetCollisionBackend(backend)
+	sp.SetCollisionLayers(layers)
+	if space == 0 {
+		r.Layers = layers
+	}
+	return layers
 }
 {{- end}}
 {{- end}}
 
-// SaveSnapshot writes a schema-checked entity snapshot using the generated fingerprint.
+// SaveSnapshot writes a schema-checked entity snapshot using the generated
+// fingerprint. Serialization runs on the caller; only the file write is
+// asynchronous. Call it on the tick goroutine (a tick callback or Server.Post)
+// or before Run for a capture taken from a single tick; from other goroutines
+// use SaveSnapshotOnTick.
 func (r *Runtime) SaveSnapshot(path string) <-chan error {
 	return r.Server.SaveSnapshot(SchemaFingerprint, path)
+}
+
+// SaveSnapshotOnTick writes a schema-checked entity snapshot captured on the
+// tick goroutine at the end of the next tick (golem.Server.SaveSnapshotOnTick).
+// Safe from any goroutine; before Run it captures immediately, and once the
+// server stops it yields golem.ErrServerNotRunning.
+func (r *Runtime) SaveSnapshotOnTick(path string) <-chan error {
+	return r.Server.SaveSnapshotOnTick(SchemaFingerprint, path)
 }
 
 // LoadSnapshot restores a schema-checked entity snapshot using the generated restore function.
@@ -131,7 +195,9 @@ func (r *Runtime) LoadSnapshotIfExists(path string) (bool, error) {
 // races after that pre-save check may still allow that already-starting save;
 // in-flight saves are always awaited before return. It does not spawn a
 // background goroutine, log, invoke callbacks, or perform an implicit final
-// save — callers own concurrency and error policy:
+// save. Each save goes through SaveSnapshotOnTick, so it is captured on the
+// tick goroutine from a single tick; once the server stops, the save fails
+// with golem.ErrServerNotRunning. Callers own concurrency and error policy:
 //
 //	go func() {
 //		if err := rt.RunSnapshotAutosave(ctx, "world.snap", time.Minute); err != nil && !errors.Is(err, context.Canceled) {
@@ -140,7 +206,7 @@ func (r *Runtime) LoadSnapshotIfExists(path string) (bool, error) {
 //	}()
 func (r *Runtime) RunSnapshotAutosave(ctx context.Context, path string, interval time.Duration) error {
 	return startSnapshotAutosave(ctx, interval, func() <-chan error {
-		return r.SaveSnapshot(path)
+		return r.SaveSnapshotOnTick(path)
 	}, time.NewTicker)
 }
 
@@ -397,7 +463,9 @@ func (r *CommandRouter) BindAllHandlers(onError CommandErrorHandler) {
 {{- end}}
 {{- if .Events}}
 
-// EventBroadcaster sends typed server events to connected clients.
+// EventBroadcaster sends typed server events to connected clients on each
+// event's schema delivery lane, through the server event APIs so space
+// switches keep the events ordered behind their transitions.
 // FOI-filtered events must be called from the game tick goroutine when
 // interest management is active.
 type EventBroadcaster struct {
@@ -409,17 +477,12 @@ func NewEventBroadcaster(srv *golem.Server) *EventBroadcaster {
 	return &EventBroadcaster{srv: srv}
 }
 {{range .Events}}
-{{- $stream := eq .DeliveryConst "EventStream"}}
 {{- if eq .Target "session"}}
 // Send{{.Name}} sends a {{.Name}} event to a single session.
 func (b *EventBroadcaster) Send{{.Name}}(sessionID int64{{range .Fields}}, {{.FieldName}} {{.GoType}}{{end}}) error {
 	evt := &{{.Name}}Event{ {{- range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.GoName}}: {{$f.FieldName}}{{end}} }
 	se := &ServerEvent{Payload: &ServerEvent_{{.Name}}Event{ {{.Name}}Event: evt}}
-{{- if $stream}}
-	return b.srv.Send(sessionID, golem.WrapServerEvent(se.Marshal()))
-{{- else}}
 	return b.srv.SendServerEvent(sessionID, golem.{{.DeliveryConst}}, se.Marshal())
-{{- end}}
 }
 {{- else if eq .Target "entity"}}
 // Broadcast{{.Name}} sends a {{.Name}} event for the given entity.{{if .FOIOnly}}
@@ -428,27 +491,15 @@ func (b *EventBroadcaster) Send{{.Name}}(sessionID int64{{range .Fields}}, {{.Fi
 func (b *EventBroadcaster) Broadcast{{.Name}}(entityID int64{{range .Fields}}, {{.FieldName}} {{.GoType}}{{end}}) error {
 	evt := &{{.Name}}Event{EntityId: entityID{{range .Fields}}, {{.GoName}}: {{.FieldName}}{{end}}}
 	se := &ServerEvent{Payload: &ServerEvent_{{.Name}}Event{ {{.Name}}Event: evt}}
-{{- if $stream}}
-	data := golem.WrapServerEvent(se.Marshal())
-{{- else}}
 	data := se.Marshal()
-{{- end}}
 {{- if .FOIOnly}}
 	for _, sid := range b.srv.SessionsKnowing(entityID) {
-{{- if $stream}}
-		if err := b.srv.Send(sid, data); err != nil {
-{{- else}}
 		if err := b.srv.SendServerEvent(sid, golem.{{.DeliveryConst}}, data); err != nil {
-{{- end}}
 			if errors.Is(err, golem.ErrSessionNotFound) {
 				continue
 			}
 			return err
 		}
-	}
-{{- else if $stream}}
-	if err := b.srv.BroadcastEvent(data); err != nil {
-		return err
 	}
 {{- else}}
 	if err := b.srv.BroadcastServerEvent(golem.{{.DeliveryConst}}, data); err != nil {
@@ -462,11 +513,7 @@ func (b *EventBroadcaster) Broadcast{{.Name}}(entityID int64{{range .Fields}}, {
 func (b *EventBroadcaster) Broadcast{{.Name}}({{range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.FieldName}} {{$f.GoType}}{{end}}) error {
 	evt := &{{.Name}}Event{ {{- range $i, $f := .Fields}}{{if $i}}, {{end}}{{$f.GoName}}: {{$f.FieldName}}{{end}} }
 	se := &ServerEvent{Payload: &ServerEvent_{{.Name}}Event{ {{.Name}}Event: evt}}
-{{- if $stream}}
-	return b.srv.BroadcastEvent(golem.WrapServerEvent(se.Marshal()))
-{{- else}}
 	return b.srv.BroadcastServerEvent(golem.{{.DeliveryConst}}, se.Marshal())
-{{- end}}
 }
 {{- end}}
 {{end}}

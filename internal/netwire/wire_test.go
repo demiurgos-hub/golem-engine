@@ -37,6 +37,61 @@ func TestEventRecordGoldenBytes(t *testing.T) {
 	}
 }
 
+func TestEventRecordTransitionTagging(t *testing.T) {
+	event := []byte{0x0a, 0x01}
+	// Transition 0 keeps the untagged golden bytes.
+	if got, want := AppendEventRecordTransition(nil, event, 0), AppendEventRecord(nil, event); !bytes.Equal(got, want) {
+		t.Fatalf("transition 0 record = %x; want untagged %x", got, want)
+	}
+	if EventRecordTransitionBytes(event, 0) != EventRecordBytes(event) {
+		t.Fatal("transition 0 size differs from the untagged size")
+	}
+	got := AppendEventRecordTransition([]byte{0xff}, event, 300)
+	if want := unhex(t, "ff000000060000ac020a01"); !bytes.Equal(got, want) {
+		t.Fatalf("tagged record = %x; want %x", got, want)
+	}
+	if len(got)-1 != EventRecordTransitionBytes(event, 300) {
+		t.Fatalf("tagged record size %d differs from EventRecordTransitionBytes", len(got)-1)
+	}
+	frame := got[1+FrameHeaderBytes:]
+	if transition, decoded, ok := EventRecordTransition(frame); !ok || transition != 300 || !bytes.Equal(decoded, event) {
+		t.Fatalf("decoded = %d, %x, %v", transition, decoded, ok)
+	}
+	if decoded, ok := EventRecord(frame); !ok || !bytes.Equal(decoded, event) {
+		t.Fatalf("EventRecord on a tagged frame = %x, %v", decoded, ok)
+	}
+	if transition, decoded, ok := EventRecordTransition(unhex(t, "000a01")); !ok || transition != 0 || !bytes.Equal(decoded, event) {
+		t.Fatalf("untagged decode = %d, %x, %v", transition, decoded, ok)
+	}
+
+	// Empty events stay unambiguous in both forms.
+	emptyUntagged := AppendEventRecord(nil, nil)[FrameHeaderBytes:]
+	if transition, decoded, ok := EventRecordTransition(emptyUntagged); !ok || transition != 0 || len(decoded) != 0 {
+		t.Fatalf("empty untagged = %x: %d, %x, %v", emptyUntagged, transition, decoded, ok)
+	}
+	emptyTagged := AppendEventRecordTransition(nil, nil, 7)[FrameHeaderBytes:]
+	if !bytes.Equal(emptyTagged, []byte{0, 0, 7}) {
+		t.Fatalf("empty tagged = %x", emptyTagged)
+	}
+	if transition, decoded, ok := EventRecordTransition(emptyTagged); !ok || transition != 7 || len(decoded) != 0 {
+		t.Fatalf("empty tagged decode = %d, %x, %v", transition, decoded, ok)
+	}
+
+	// Malformed tagged records and non-event frames are rejected.
+	for _, frame := range [][]byte{
+		nil,
+		{},
+		{0, 0},
+		{0, 0, 0x80},
+		{0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01},
+		{0x01, 0x00},
+	} {
+		if transition, decoded, ok := EventRecordTransition(frame); ok {
+			t.Fatalf("frame %x decoded as %d, %x", frame, transition, decoded)
+		}
+	}
+}
+
 func TestPacketGoldenBytes(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
@@ -173,6 +228,55 @@ func TestControlGoldenBytesAndOwnership(t *testing.T) {
 	close1[0] = 1
 	if !IsCloseControl(close2) {
 		t.Fatal("close bytes share mutable storage")
+	}
+}
+
+func TestSpaceAckControlGoldenBytes(t *testing.T) {
+	want := unhex(t, "004f4753030102030405060708")
+	got := AppendSpaceAckControl([]byte{}, 0x0102030405060708)
+	if !bytes.Equal(got, want) || len(got) != SpaceAckControlBytes {
+		t.Fatalf("SpaceAck control = %x", got)
+	}
+	transition, matched, err := DecodeSpaceAckControl(want)
+	if err != nil || !matched || transition != 0x0102030405060708 {
+		t.Fatalf("decoded = %d %v %v", transition, matched, err)
+	}
+	for _, other := range [][]byte{[]byte("plain"), AppendCloseControl(nil), AppendACKControl(nil, ACK{}, nil)} {
+		if _, matched, err := DecodeSpaceAckControl(other); matched || err != nil {
+			t.Fatalf("unrelated frame %x matched=%v err=%v", other, matched, err)
+		}
+	}
+	for _, bad := range [][]byte{want[:len(want)-1], append(append([]byte(nil), want...), 0)} {
+		var size SizeError
+		if _, matched, err := DecodeSpaceAckControl(bad); !matched || !errors.As(err, &size) {
+			t.Fatalf("wrong-length SpaceAck %x matched=%v err=%v", bad, matched, err)
+		}
+	}
+}
+
+func TestEntityResyncControlGoldenBytes(t *testing.T) {
+	want := unhex(t, "004f4753040102030405060708")
+	got := AppendEntityResyncControl([]byte{}, 0x0102030405060708)
+	if !bytes.Equal(got, want) || len(got) != EntityResyncControlBytes {
+		t.Fatalf("EntityResync control = %x", got)
+	}
+	id, matched, err := DecodeEntityResyncControl(want)
+	if err != nil || !matched || id != 0x0102030405060708 {
+		t.Fatalf("decoded = %d %v %v", id, matched, err)
+	}
+	for _, other := range [][]byte{[]byte("plain"), AppendCloseControl(nil), AppendACKControl(nil, ACK{}, nil), AppendSpaceAckControl(nil, 4)} {
+		if _, matched, err := DecodeEntityResyncControl(other); matched || err != nil {
+			t.Fatalf("unrelated frame %x matched=%v err=%v", other, matched, err)
+		}
+	}
+	if _, matched, _ := DecodeSpaceAckControl(want); matched {
+		t.Fatal("EntityResync matched the SpaceAck prefix")
+	}
+	for _, bad := range [][]byte{want[:len(want)-1], want[:len(EntityResyncControlPrefix)], append(append([]byte(nil), want...), 0)} {
+		var size SizeError
+		if _, matched, err := DecodeEntityResyncControl(bad); !matched || !errors.As(err, &size) {
+			t.Fatalf("wrong-length EntityResync %x matched=%v err=%v", bad, matched, err)
+		}
 	}
 }
 

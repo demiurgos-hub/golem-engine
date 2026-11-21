@@ -80,7 +80,10 @@ replace github.com/demiurgos-hub/golem-engine/golem/physics3d => %q
 			schema.BuildWorldTypeData(schema.WorldSchemaFile{World: "LDtkMap", Source: &schema.WorldSourceDef{Format: "ldtk", URLPrefix: "/maps/", Extract: []schema.WorldExtractDef{{Name: "limit", Type: "int64"}}}}, types),
 			schema.BuildWorldTypeData(schema.WorldSchemaFile{World: "ItemList", Source: &schema.WorldSourceDef{Format: "catalog", Type: "Item"}}, types),
 		)
-		pd = schema.BuildProtoData(&schema.Config{Simulation: schema.SimulationConfig{Dimensions: 2}}, pd.Entities, pd.Commands, worlds, pd.CustomTypes, pd.Events)
+		// Badge's var "id" shares its name with no generated member; NewSyncedBadge
+		// must still compile with it as a parameter.
+		entities := append(pd.Entities, schema.BuildEntityData(schema.SchemaFile{Entity: "Badge", Vars: map[string]schema.SchemaVarDef{"id": {Type: "int32", Tag: 1}}}, 2, types))
+		pd = schema.BuildProtoData(&schema.Config{Simulation: schema.SimulationConfig{Dimensions: 2}}, entities, pd.Commands, worlds, pd.CustomTypes, pd.Events)
 		out := filepath.Join(dir, target)
 		imp := "github.com/demiurgos-hub/golem-engine/golem"
 		if target == "client" {
@@ -103,8 +106,12 @@ replace github.com/demiurgos-hub/golem-engine/golem/physics3d => %q
 			renderConsumerTemplate(t, out, "go_client/manager.go.tmpl", "manager.go", schema.SharedData{GoPackage: "generated", GolemImport: imp, Entities: pd.Entities})
 			writeConsumerFile(t, out, "client_test.go", goClientContract)
 			writeConsumerFile(t, out, "manager_test.go", goManagerContract)
+			writeConsumerFile(t, out, "owner_revision_test.go", goOwnerRevisionContract)
+			renderConsumerTemplate(t, out, "go_client/world_manager.go.tmpl", "world_manager.go", schema.SharedData{GoPackage: "generated", WorldTypes: pd.WorldTypes})
+			writeConsumerFile(t, out, "world_manager_test.go", goWorldManagerContract)
 		} else {
 			writeConsumerFile(t, out, "state_test.go", goFullStateContract)
+			writeConsumerFile(t, out, "badge_test.go", goBadgeContract)
 		}
 	}
 	runConsumer(t, dir, "go", "mod", "tidy")
@@ -114,6 +121,21 @@ replace github.com/demiurgos-hub/golem-engine/golem/physics3d => %q
 	}
 	runConsumer(t, dir, "go", args...)
 }
+
+const goBadgeContract = `package generated
+
+import "testing"
+
+func TestVarNamedIDConstructor(t *testing.T) {
+	b := NewSyncedBadge(1, 2, 7, 42)
+	if b.EntityID() != 42 || b.Id() != 7 {
+		t.Fatalf("NewSyncedBadge: entity %d id %d", b.EntityID(), b.Id())
+	}
+	if NewSyncedBadge(1, 2, 7).EntityID() != 0 {
+		t.Fatal("NewSyncedBadge without entity ID")
+	}
+}
+`
 
 func TestResolutionGeneratedJSConsumer(t *testing.T) {
 	root, err := filepath.Abs("..")
@@ -150,6 +172,9 @@ func TestResolutionGeneratedJSConsumer(t *testing.T) {
 	renderConsumerTemplate(t, dir, "js/manager.ts.tmpl", "EntityManager.ts", schema.SharedData{GolemImport: "golem-engine", Entities: pd.Entities})
 	renderConsumerTemplate(t, dir, "js/event_manager.ts.tmpl", "EventManager.ts", schema.SharedData{GolemImport: "golem-engine", Entities: pd.Entities, Events: pd.Events})
 	writeConsumerFile(t, dir, "events.mjs", jsEventManagerContract)
+	renderConsumerTemplate(t, dir, "js/world_manager.ts.tmpl", "WorldManager.ts", schema.SharedData{WorldTypes: pd.WorldTypes, WorldCatalogCustomTypes: schema.WorldCatalogCustomTypeNames(pd.WorldTypes)})
+	writeConsumerFile(t, dir, "world_check.ts", jsWorldManagerCheck)
+	writeConsumerFile(t, dir, "world.mjs", jsWorldManagerContract)
 
 	writeConsumerFile(t, dir, "manager.mjs", jsManagerContract)
 	writeConsumerFile(t, dir, "contract.mjs", jsCodecContract)
@@ -157,6 +182,7 @@ func TestResolutionGeneratedJSConsumer(t *testing.T) {
 	runConsumer(t, dir, "node", "contract.mjs")
 	runConsumer(t, dir, "node", "manager.mjs")
 	runConsumer(t, dir, "node", "events.mjs")
+	runConsumer(t, dir, "node", "world.mjs")
 }
 
 func TestResolutionGeneratedCSharpConsumer(t *testing.T) {
@@ -194,6 +220,8 @@ func TestResolutionGeneratedCSharpConsumer(t *testing.T) {
 	}
 	writeConsumerFile(t, dir, "ClientContracts.cs", string(contracts))
 	writeConsumerFile(t, dir, "ManagerContract.cs", csManagerContract)
+	renderConsumerTemplate(t, dir, "csharp/world_manager.cs.tmpl", "WorldManager.cs", schema.SharedData{GoPackage: "Generated", WorldTypes: pd.WorldTypes})
+	writeConsumerFile(t, dir, "WorldContract.cs", csWorldManagerContract)
 	writeConsumerFile(t, dir, "Program.cs", csCodecContract)
 	runConsumer(t, dir, "dotnet", "run", "--project", "consumer.csproj", "--nologo")
 }
@@ -338,6 +366,7 @@ class Program {
  static void Check(bool condition,string message){if(!condition)throw new Exception(message);}
  static void Main(){
  ManagerContract.Run();
+ WorldContract.Run();
  var d=new ActorDelta{EntityId=7,Revision=11,PosX=0,Health=-3,Items=new List<Item>(),Scores=new Dictionary<string,int>()};
  var want=new byte[]{8,7,21,0,0,0,0,192,62,11,32,5,82,0,90,0};Check(ActorDelta.Encode(d).SequenceEqual(want),"delta bytes");
  var decoded=ActorDelta.Decode(want);Check(decoded.Secret==null&&decoded.PosX==0&&decoded.Items.Count==0&&decoded.Scores.Count==0,"presence");

@@ -90,7 +90,7 @@ type world struct {
 	seq      uint64 // last applied agent seq
 	tick     uint64
 	ready    bool
-	entities map[int64]*wire.EntityFields
+	entities map[int64]*entity
 	pending  *pendingSnapshot
 
 	snapshotStartedAt       time.Time
@@ -105,8 +105,14 @@ type pendingSnapshot struct {
 	seq       uint64
 	tick      uint64
 	count     uint64
-	entities  map[int64]*wire.EntityFields
+	entities  map[int64]*entity
 	startedAt time.Time
+}
+
+// entity is one stored entity: its merged state fields and its space.
+type entity struct {
+	*wire.EntityFields
+	space uint32
 }
 
 // New validates cfg and returns a running Hub.
@@ -353,7 +359,7 @@ func (h *Hub) snapshotBeginLocked(t *target, m *wire.SnapshotBegin, now time.Tim
 	if !t.wantObserve {
 		return // late frames after a stop
 	}
-	t.world.pending = &pendingSnapshot{epoch: m.Epoch, seq: m.Seq, tick: m.Tick, count: m.EntityCount, entities: map[int64]*wire.EntityFields{}, startedAt: now}
+	t.world.pending = &pendingSnapshot{epoch: m.Epoch, seq: m.Seq, tick: m.Tick, count: m.EntityCount, entities: map[int64]*entity{}, startedAt: now}
 	t.world.snapshotStartedAt = now
 }
 
@@ -377,7 +383,7 @@ func (h *Hub) snapshotChunkLocked(t *target, m *wire.SnapshotChunk, now time.Tim
 			h.snapshotFailedLocked(t, "invalid_entity_state", now)
 			return
 		}
-		p.entities[e.ID] = f
+		p.entities[e.ID] = &entity{EntityFields: f, space: e.Space}
 	}
 }
 
@@ -445,7 +451,7 @@ func (h *Hub) batchLocked(t *target, b *wire.Batch, now time.Time) {
 		if err != nil || t.schema.EntityByTag(s.TypeTag) == nil {
 			continue
 		}
-		w.entities[s.ID] = f
+		w.entities[s.ID] = &entity{EntityFields: f, space: s.Space}
 		out.Spawns = append(out.Spawns, s)
 	}
 	for _, d := range b.Deltas {
@@ -458,6 +464,12 @@ func (h *Hub) batchLocked(t *target, b *wire.Batch, now time.Time) {
 			continue
 		}
 		out.Deltas = append(out.Deltas, d)
+	}
+	for _, m := range b.Moves {
+		if e := w.entities[m.ID]; e != nil {
+			e.space = m.Space
+			out.Moves = append(out.Moves, m)
+		}
 	}
 	for _, r := range b.Removals {
 		if _, ok := w.entities[r.ID]; ok {
@@ -621,8 +633,8 @@ func (h *Hub) snapshotItemLocked(c *clientConn, t *target) [][]byte {
 		end := min(start+snapshotChunkEntities, len(ids))
 		chunk := &wire.SnapshotChunk{TargetID: t.id, Epoch: w.epoch}
 		for _, id := range ids[start:end] {
-			f := w.entities[id]
-			chunk.Entities = append(chunk.Entities, wire.EntityState{ID: id, TypeTag: f.TypeTag, State: f.EncodeState()})
+			e := w.entities[id]
+			chunk.Entities = append(chunk.Entities, wire.EntityState{ID: id, TypeTag: e.TypeTag, State: e.EncodeState(), Space: e.space})
 		}
 		c.seq++
 		chunk.Seq = c.seq

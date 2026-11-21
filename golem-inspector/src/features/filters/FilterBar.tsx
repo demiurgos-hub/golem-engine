@@ -1,16 +1,20 @@
 import type { CSSProperties } from 'react';
 import { useEntityStore, useInspector } from '../../hooks/useInspector';
 import { legend } from '../../lib/entityTypes';
-import { EMPTY_FILTERS, type ClientFilters } from '../../lib/filters';
+import { EMPTY_FILTERS, spaceFilterOptions, toggleFilterSpace, type ClientFilters } from '../../lib/filters';
 
 export function FilterBar() {
-  const { filters, setFilters, client } = useInspector();
+  const { filters, effectiveFilters, setFilters, client, spaces } = useInspector();
   const { schema } = useEntityStore();
   const types = legend(schema);
+  // Space toggles show the present spaces, only when there are several, so
+  // single-space games see no extra controls and an emptied space disappears.
+  const spaceOptions = spaceFilterOptions(spaces);
 
   const patch = (partial: Partial<ClientFilters>) => setFilters({ ...filters, ...partial });
   const toggleType = (name: string) =>
     patch({ typeNames: filters.typeNames.includes(name) ? filters.typeNames.filter((t) => t !== name) : [...filters.typeNames, name] });
+  const toggleSpace = (space: number) => setFilters(toggleFilterSpace(filters, effectiveFilters, space));
 
   return (
     <div className="filter-bar">
@@ -41,6 +45,26 @@ export function FilterBar() {
           );
         })}
       </div>
+      {spaceOptions.length > 0 ? (
+        <div className="filter-types" role="group" aria-label="Spaces">
+          {spaceOptions.map((space) => {
+            const selected = effectiveFilters.spaces.includes(space);
+            const active = effectiveFilters.spaces.length === 0 || selected;
+            return (
+              <button
+                key={space}
+                type="button"
+                className={`type-toggle${selected ? ' type-toggle--on' : ''}`}
+                style={{ opacity: active ? 1 : 0.35 }}
+                aria-pressed={selected}
+                onClick={() => toggleSpace(space)}
+              >
+                Space {space}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
       <div className="filter-actions">
         <button type="button" className="btn" onClick={() => setFilters(EMPTY_FILTERS)}>
           Clear

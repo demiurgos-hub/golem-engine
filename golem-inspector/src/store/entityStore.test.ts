@@ -94,6 +94,7 @@ describe('entityStore', () => {
       spawns: [{ id: 3, typeTag: 1, state: state(3, 9, 1) }],
       deltas: [{ id: 1, typeTag: 1, revision: 1, mask: 1n, delta: xDelta(1, 7.5) }],
       removals: [{ id: 2, revision: 2 }],
+      moves: [],
     });
     const s = store.getState();
     expect([...s.entities.keys()].sort()).toEqual([1, 3]);
@@ -103,10 +104,54 @@ describe('entityStore', () => {
     expect(s.tick).toBe(11);
   });
 
+  it('records spaces from snapshots, spawns and moves', () => {
+    const store = storeFor();
+    const [schemaMsg, begin, , end] = snapshot(1, 1, [1, 2]);
+    store.apply(schemaMsg!);
+    store.apply(begin!);
+    store.apply({
+      type: 'snapshotChunk',
+      targetId: T,
+      epoch: 1,
+      seq: 2,
+      entities: [
+        { id: 1, typeTag: 1, state: state(1, 1, 5), space: 0 },
+        { id: 2, typeTag: 1, state: state(2, 2, 5), space: 3 },
+      ],
+    });
+    store.apply(end!);
+    expect(store.getState().entities.get(1)?.space).toBe(0);
+    expect(store.getState().entities.get(2)?.space).toBe(3);
+
+    const before = store.getState().entities.get(1);
+    store.apply({
+      type: 'batch',
+      targetId: T,
+      epoch: 1,
+      seq: 4,
+      tick: 11,
+      spawns: [{ id: 3, typeTag: 1, state: state(3, 9, 1), space: 4 }],
+      deltas: [{ id: 1, typeTag: 1, revision: 1, mask: 1n, delta: xDelta(1, 7.5) }],
+      removals: [],
+      moves: [
+        { id: 1, space: 5 },
+        { id: 2, space: 0 },
+        { id: 99, space: 7 },
+      ],
+    });
+    const s = store.getState();
+    expect(s.entities.get(1)).toMatchObject({ space: 5, position: { x: 7.5 } });
+    expect(s.entities.get(2)?.space).toBe(0);
+    expect(s.entities.get(3)?.space).toBe(4);
+    expect(s.entities.has(99)).toBe(false);
+    expect(s.needsResync).toBe(false);
+    expect(before?.space).toBe(0);
+  });
+
   it('resyncs on a sequence gap, a batch during a snapshot, or an unknown delta', () => {
     let store = storeFor();
     snapshot(1, 1, [1]).forEach(store.apply);
-    store.apply({ type: 'batch', targetId: T, epoch: 1, seq: 9, tick: 0, spawns: [], deltas: [], removals: [] });
+    store.apply({ type: 'batch', targetId: T, epoch: 1, seq: 9, tick: 0, spawns: [], deltas: [], removals: [], moves: [] });
     expect(store.getState().needsResync).toBe(true);
     expect(store.getState().resyncReason).toMatch(/seq_gap expected=4 got=9/);
     expect(store.getState().entities.size).toBe(0);
@@ -115,12 +160,12 @@ describe('entityStore', () => {
     const [s0, begin] = snapshot(1, 1, [1]);
     store.apply(s0!);
     store.apply(begin!);
-    store.apply({ type: 'batch', targetId: T, epoch: 1, seq: 2, tick: 0, spawns: [], deltas: [], removals: [] });
+    store.apply({ type: 'batch', targetId: T, epoch: 1, seq: 2, tick: 0, spawns: [], deltas: [], removals: [], moves: [] });
     expect(store.getState().resyncReason).toBe('batch_during_snapshot');
 
     store = storeFor();
     snapshot(1, 1, [1]).forEach(store.apply);
-    store.apply({ type: 'batch', targetId: T, epoch: 1, seq: 4, tick: 0, spawns: [], deltas: [{ id: 77, typeTag: 1, revision: 0, mask: 1n, delta: xDelta(77, 1) }], removals: [] });
+    store.apply({ type: 'batch', targetId: T, epoch: 1, seq: 4, tick: 0, spawns: [], deltas: [{ id: 77, typeTag: 1, revision: 0, mask: 1n, delta: xDelta(77, 1) }], removals: [], moves: [] });
     expect(store.getState().resyncReason).toMatch(/unknown_entity 77/);
   });
 

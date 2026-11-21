@@ -169,7 +169,7 @@ func dialWebTransportSession(t *testing.T, transportURL string) *webtransport.Se
 	return nil
 }
 
-func waitForSessionIDs(t *testing.T, srv *Server, want int) []int64 {
+func waitForSessionIDs(t testing.TB, srv *Server, want int) []int64 {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {

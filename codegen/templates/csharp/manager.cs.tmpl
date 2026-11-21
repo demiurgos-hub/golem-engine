@@ -12,13 +12,32 @@ namespace {{.GoPackage}}
     }
 
     /// <summary>Manages all synced entities and dispatches incoming EntityUpdate messages.</summary>
-    public sealed class EntityManager : IEntityManager, ICompactEntityManager
+    public sealed class EntityManager : IEntityManager, ICompactEntityManager, IEntityResyncNotifier
     {
         private readonly Dictionary<long, object> _entities = new Dictionary<long, object>();
         private readonly Dictionary<long, ulong> _lastRevisions = new Dictionary<long, ulong>();
+        // Compact records that arrived before their entity's spawn, bounded by MaxHeldCompactUpdates. At the cap,
+        // every record of the entity held longest is evicted and reported through OnResyncNeeded.
+        private const int MaxHeldCompactUpdates = 256;
+        private readonly Dictionary<long, List<byte[]>> _heldCompact = new Dictionary<long, List<byte[]>>();
+        // IDs with held records, in the order their first record was held.
+        private readonly List<long> _heldOrder = new List<long>();
+        private int _heldCount;
+        // Advanced by Clear so a callback that clears stops a replay.
+        private ulong _clearEpoch;
+        // How often one pending resync is requested again after its recovery full state was rejected as stale.
+        private const int MaxResyncRetries = 3;
+        // Entities whose evicted records still need a full state of at least Revision.
+        private sealed class PendingResync
+        {
+            public ulong Revision;
+            public int Retries;
+        }
+        private readonly Dictionary<long, PendingResync> _pendingResync = new Dictionary<long, PendingResync>();
         private Action<object> _onSpawn;
         private Action<object> _onUpdate;
         private Action<long> _onRemove;
+        private Action<long> _onResyncNeeded;
 {{range .Entities}}
         private Func<long, Synced{{.Name}}> _{{.LowerName}}Factory = id => new Synced{{.Name}}(id);
 {{- end}}
@@ -39,18 +58,33 @@ namespace {{.GoPackage}}
         public void OnRemove(Action<long> fn) { _onRemove = fn; }
 
         /// <summary>
+        /// Registers a callback fired with an entity id when the compact records held for that entity are evicted
+        /// before its spawn arrived. Those datagrams were already acknowledged, so the server will not resend them;
+        /// GameClient registers a callback that requests a full state of the entity. The manager remembers the request
+        /// until a full state at least as new as the evicted records applies, or the entity is removed or cleared; when
+        /// a full state for it is rejected as stale (a newer datagram overtook it), the callback fires again, at most
+        /// three times.
+        /// </summary>
+        public void OnResyncNeeded(Action<long> fn) { _onResyncNeeded = fn; }
+
+        /// <summary>
         /// Remove every known entity, fire OnRemove for each, and clear revision
         /// tracking. Call on disconnect / before reconnect so stale views cannot
         /// linger when remove frames were lost with the transport.
         /// </summary>
         public void Clear()
         {
+            _clearEpoch++;
             var ids = new List<long>(_entities.Keys);
             foreach (var id in ids)
             {
                 RemoveEntity(id);
             }
             _lastRevisions.Clear();
+            _heldCompact.Clear();
+            _heldOrder.Clear();
+            _heldCount = 0;
+            _pendingResync.Clear();
         }
 {{range .Entities}}
         public void Register{{.Name}}(Func<long, Synced{{.Name}}> factory) { _{{.LowerName}}Factory = factory; }
@@ -81,10 +115,16 @@ namespace {{.GoPackage}}
                 var revision = update.EntityRemoved.Revision;
                 if (IsStale(id, revision)) return;
                 _lastRevisions[id] = revision;
+                _pendingResync.Remove(id);
                 RemoveEntity(id);
+                DropHeldCompact(id);
             }
         }
 
+        /// <summary>
+        /// Apply a compact datagram state record. A record for an entity that is not known yet is held until
+        /// its full state arrives, because datagrams can overtake the reliable stream that carries the spawn.
+        /// </summary>
         public void ApplyCompactUpdate(byte[] frame)
         {
             var reader = new PbReader(frame);
@@ -92,7 +132,11 @@ namespace {{.GoPackage}}
             var revision = reader.Uint64();
             var mask = reader.Uint64();
             if (mask == 0 || IsStale(id, revision)) return;
-            if (!_entities.TryGetValue(id, out var existing)) return;
+            if (!_entities.TryGetValue(id, out var existing))
+            {
+                HoldCompact(id, frame);
+                return;
+            }
             var body = reader.Remaining();
 {{range .Entities}}
             if (existing is Synced{{.Name}})
@@ -113,6 +157,94 @@ namespace {{.GoPackage}}
             _onRemove?.Invoke(id);
         }
 
+        // Keep a copy of frame until the entity spawns; at the cap, evict the entity held longest and report it.
+        private void HoldCompact(long id, byte[] frame)
+        {
+            var epoch = _clearEpoch;
+            while (_heldCount >= MaxHeldCompactUpdates && _heldOrder.Count > 0)
+            {
+                var evicted = _heldOrder[0];
+                var revision = HeldRevision(_heldCompact[evicted]);
+                DropHeldCompact(evicted);
+                if (_onResyncNeeded != null)
+                {
+                    if (!_pendingResync.TryGetValue(evicted, out var pending))
+                    {
+                        pending = new PendingResync();
+                        _pendingResync[evicted] = pending;
+                    }
+                    if (revision > pending.Revision) pending.Revision = revision;
+                    _onResyncNeeded(evicted);
+                    if (_clearEpoch != epoch) return;
+                }
+            }
+            if (!_heldCompact.TryGetValue(id, out var held))
+            {
+                held = new List<byte[]>();
+                _heldCompact[id] = held;
+                _heldOrder.Add(id);
+            }
+            held.Add((byte[])frame.Clone());
+            _heldCount++;
+        }
+
+        // The newest revision among held compact records.
+        private static ulong HeldRevision(List<byte[]> held)
+        {
+            ulong newest = 0;
+            foreach (var frame in held)
+            {
+                var reader = new PbReader(frame);
+                reader.Int64();
+                var revision = reader.Uint64();
+                if (revision > newest) newest = revision;
+            }
+            return newest;
+        }
+
+        // Request a resync again when a full state for an entity with a pending resync is rejected as stale, up to
+        // MaxResyncRetries times.
+        private void StaleFullState(long id)
+        {
+            if (!_pendingResync.TryGetValue(id, out var pending)) return;
+            if (pending.Retries >= MaxResyncRetries || _onResyncNeeded == null)
+            {
+                _pendingResync.Remove(id);
+                return;
+            }
+            pending.Retries++;
+            _onResyncNeeded(id);
+        }
+
+        // Forget a pending resync once a full state at least as new as the evicted records applied.
+        private void AppliedFullState(long id, ulong revision)
+        {
+            if (_pendingResync.TryGetValue(id, out var pending) && revision >= pending.Revision) _pendingResync.Remove(id);
+        }
+
+        // Discard the records held for id and its place in the eviction order.
+        private void DropHeldCompact(long id)
+        {
+            if (!_heldCompact.TryGetValue(id, out var held)) return;
+            _heldCount -= held.Count;
+            _heldCompact.Remove(id);
+            _heldOrder.Remove(id);
+        }
+
+        // Apply records held for a newly spawned entity; the revision check skips those older than its full state.
+        // A callback that calls Clear stops the replay.
+        private void ReplayHeldCompact(long id)
+        {
+            if (!_heldCompact.TryGetValue(id, out var held)) return;
+            DropHeldCompact(id);
+            var epoch = _clearEpoch;
+            foreach (var frame in held)
+            {
+                if (_clearEpoch != epoch) return;
+                ApplyCompactUpdate(frame);
+            }
+        }
+
         private bool IsStale(long entityId, ulong revision)
         {
             return _lastRevisions.TryGetValue(entityId, out var last) && revision < last;
@@ -122,16 +254,23 @@ namespace {{.GoPackage}}
         {
             var id = state.EntityId;
             var revision = state.Revision;
-            if (IsStale(id, revision)) return;
+            if (IsStale(id, revision))
+            {
+                StaleFullState(id);
+                return;
+            }
             var isNew = !_entities.TryGetValue(id, out var existing);
             var entity = isNew ? _{{.LowerName}}Factory(id) : (Synced{{.Name}})existing;
             if (isNew) _entities[id] = entity;
             entity.ApplyState(state);
             _lastRevisions[id] = revision;
+            AppliedFullState(id, revision);
             if (isNew)
             {
+                var epoch = _clearEpoch;
                 if (entity is IEntityLifecycle lifecycle) lifecycle.OnSpawn();
                 _onSpawn?.Invoke(entity);
+                if (_clearEpoch == epoch) ReplayHeldCompact(id);
             }
             else
             {

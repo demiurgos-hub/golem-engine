@@ -30,8 +30,8 @@ func TestGenerateThrelteAdapterUsesGeneratedManagersAndTypedComponents(t *testin
 		`import { SyncedActor } from "../protocol/ActorSynced.js";`,
 		`import type { HitEvent, NoticeEvent } from "../protocol/events_pb.js";`,
 		"Actor: entityCollection(client.entities, (entity): entity is SyncedActor => entity instanceof SyncedActor)",
-		"Arena: worldStore(() => client.world.arena, (listener) => client.world.onArenaUpdate(listener))",
-		"Species: worldStore(() => client.world.species, (listener) => client.world.onSpeciesUpdate(listener))",
+		"Arena: worldStore(() => client.world.arena, (listener) => combineUnsubscribers(\n        client.world.onArenaUpdate(listener),\n        client.world.onArenaCleared(() => listener(undefined)),\n      ))",
+		"Species: worldStore(() => client.world.species, (listener) => combineUnsubscribers(\n        client.world.onSpeciesUpdate(listener),\n        client.world.onSpeciesCleared(() => listener(undefined)),\n      ))",
 		"Hit: (listener: (entity: SyncedActor, event: HitEvent) => void) => client.events.onHit(listener)",
 		"Notice: (listener: (event: NoticeEvent) => void) => client.events.onNotice(listener)",
 		`client.events.subscribeEntityEvents(dispatch)`,
@@ -201,5 +201,34 @@ func TestThrelteCrossVolumeRelErrorPolicy(t *testing.T) {
 	}
 	if err := validateThrelteIntegration("", cfg); err != nil {
 		t.Fatal("Threlte must preserve its existing Rel error policy", err)
+	}
+}
+
+// A world type whose generated world-manager accessor would duplicate a
+// manager method (ClearWorld, added with space transitions) is rejected by
+// the bake before anything is written, instead of producing client code that
+// does not compile.
+func TestBakeRejectsWorldTypeNamedLikeAWorldManagerMethod(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "golem.yaml"), []byte("proto:\n  out: generated/entities.proto\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for dir, source := range map[string]string{
+		filepath.Join("schemas", "entities"): "entity: Crate\n",
+		filepath.Join("schemas", "world"):    "world: ClearWorld\nfields:\n  x:\n    type: int32\n",
+	} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, dir, "schema.yaml"), []byte(source), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := Bake(root)
+	if err == nil || !strings.Contains(err.Error(), `world type "ClearWorld" generates the world manager accessor ClearWorld, which clashes with the generated world manager method ClearWorld`) {
+		t.Fatalf("bake error = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "generated")); !os.IsNotExist(statErr) {
+		t.Fatalf("the rejected bake wrote output (%v)", statErr)
 	}
 }

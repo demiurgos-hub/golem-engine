@@ -16,7 +16,9 @@ The root export contains Svelte context and stores, `/core` contains framework-n
 
 `GolemProvider` takes a generated adapter and exactly one discriminated source: borrowed client, borrowed already-started lifecycle, or explicitly owned lifecycle configuration. Owned startup occurs in `onMount`; only its provider closes it. Source/adapter identity is fixed per provider; use a keyed remount to replace it. Canvas/entity lifetime must never change shared connection ownership.
 
-Entity stores emit fresh notification envelopes containing unchanged generated instance references. Collections/lookups consult the generated manager; the integration owns only projections and presentation records. Do not proxy models or introduce an authoritative replica. Entity removal/reconnect clears presentation; the core's retained world values remain until replaced. Generated command helpers are the command boundary.
+The context's `space` store (`spaceStore` in core) reads `client.space`. It refreshes on `subscribeSpaceChanged` and on connection-state changes, because connect and disconnect reset the space silently, and it notifies only when the value changes. `disposeGolemContext` destroys it.
+
+Entity stores emit fresh notification envelopes containing unchanged generated instance references. Collections/lookups consult the generated manager; the integration owns only projections and presentation records. Do not proxy models or introduce an authoritative replica. Entity removal/reconnect clears presentation; the core's retained world values remain until replaced or cleared; generated world stores refresh on both the manager's update and cleared listeners, so a `WorldCleared` makes them read `undefined`. Generated command helpers are the command boundary.
 
 The `threlte` target emits one raw `GolemThrelte.ts`, with typed adapters, component props/events and complete component/headless definitions. It depends on `js-client`; outputs must not overlap JS recursive compilation. No codec or model duplication, authored component paths, or visual schema settings. Retirement uses the shared-only removal contract.
 

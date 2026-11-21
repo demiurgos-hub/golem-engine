@@ -20,9 +20,13 @@ type stream struct {
 	seq       uint64
 	pending   map[int64]*pendingEntity
 	removals  []wire.Removal
+	moves     map[int64]uint32 // latest space per moved entity in the window
 	lastFlush time.Time
 	warned    map[uint32]bool
 }
+
+// spaceMoveSize bounds one encoded SpaceMove inside a Batch.
+const spaceMoveSize = 20
 
 type pendingEntity struct {
 	mask    uint64
@@ -60,6 +64,7 @@ func (s *stream) reset() {
 	s.live = false
 	s.cooldown = false
 	clear(s.pending)
+	clear(s.moves)
 	s.removals = s.removals[:0]
 }
 
@@ -87,6 +92,7 @@ func (s *stream) snapshot(tick uint64) {
 	s.reset()
 	if s.pending == nil {
 		s.pending = map[int64]*pendingEntity{}
+		s.moves = map[int64]uint32{}
 	}
 	s.epoch = a.epoch.Add(1)
 	s.seq = 0
@@ -155,7 +161,11 @@ func (s *stream) accumulate(f golem.ReplicationFrame) {
 			p.full = true
 		}
 	}
+	for _, m := range f.Moved {
+		s.moves[m.ID] = uint32(m.To)
+	}
 	for _, r := range f.Removed {
+		delete(s.moves, r.ID)
 		if p := s.pending[r.ID]; p != nil && p.spawned {
 			delete(s.pending, r.ID)
 			continue
@@ -168,7 +178,7 @@ func (s *stream) accumulate(f golem.ReplicationFrame) {
 func (s *stream) flush(tick uint64) {
 	a := s.agent
 	s.lastFlush = time.Now()
-	if len(s.pending) == 0 && len(s.removals) == 0 {
+	if len(s.pending) == 0 && len(s.removals) == 0 && len(s.moves) == 0 {
 		return
 	}
 	ids := make([]int64, 0, len(s.pending))
@@ -205,12 +215,36 @@ func (s *stream) flush(tick uint64) {
 		if d, ok := s.entityDelta(e, p.mask); ok {
 			batch.Deltas = append(batch.Deltas, d)
 			size += d.EncodedSize()
+			// A delta and its space move travel in the same batch, so viewers
+			// never apply the new position in the old space.
+			if space, moved := s.moves[id]; moved {
+				batch.Moves = append(batch.Moves, wire.SpaceMove{ID: id, Space: space})
+				size += spaceMoveSize
+				delete(s.moves, id)
+			}
 		}
 	}
 	batch.Removals = append(batch.Removals, s.removals...)
+	// Full states already carry the entity's current space; moves that rode
+	// with a delta were sent above.
+	moved := make([]int64, 0, len(s.moves))
+	for id := range s.moves {
+		if p := s.pending[id]; p == nil || !p.full {
+			moved = append(moved, id)
+		}
+	}
+	slices.Sort(moved)
+	for _, id := range moved {
+		if size >= a.opts.MaxFrameBytes {
+			emit()
+		}
+		batch.Moves = append(batch.Moves, wire.SpaceMove{ID: id, Space: s.moves[id]})
+		size += spaceMoveSize
+	}
 	clear(s.pending)
+	clear(s.moves)
 	s.removals = s.removals[:0]
-	if len(batch.Spawns) > 0 || len(batch.Deltas) > 0 || len(batch.Removals) > 0 {
+	if len(batch.Spawns) > 0 || len(batch.Deltas) > 0 || len(batch.Removals) > 0 || len(batch.Moves) > 0 {
 		emit()
 	}
 	if len(frames) > 0 {
@@ -232,7 +266,8 @@ func (s *stream) entityState(e golem.Entity) (wire.EntityState, bool) {
 		s.warnUnknown(tag, e)
 		return wire.EntityState{}, false
 	}
-	return wire.EntityState{ID: e.EntityID(), TypeTag: ent.StateTag, State: payload}, true
+	space, _ := s.agent.srv.EntitySpace(e.EntityID())
+	return wire.EntityState{ID: e.EntityID(), TypeTag: ent.StateTag, State: payload, Space: uint32(space)}, true
 }
 
 func (s *stream) entityDelta(e golem.Entity, mask uint64) (wire.EntityDelta, bool) {

@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react';
 import { useEntityStore, useInspector } from '../../hooks/useInspector';
 import { typeColor, typeShape, type EntityShape, type Plane } from '../../lib/entityTypes';
+import { effectiveMapSpace, mapEntities, mapSpaces as mapSpacesFor, type MapSpace } from '../../lib/filters';
 import type { EntityRecord } from '../../store/entityStore';
 
 /** Camera over the map plane: a is world X, b is world Z or Y (screen down). */
@@ -115,8 +116,16 @@ function pickEntity(entities: EntityRecord[], plane: Plane, a: number, b: number
 }
 
 export function WorldMap() {
-  const { filteredEntities, selectedId, selectEntity, plane, setPlane, selectedTargetId } = useInspector();
+  const { filteredEntities: listEntities, selectedId, selectEntity, plane, setPlane, selectedTargetId, spaces, effectiveFilters } = useInspector();
   const { schema } = useEntityStore();
+  // Spaces share coordinates, so the map shows one space at a time by default,
+  // chosen among the spaces the space filter lets through.
+  const [spaceChoice, setSpaceChoice] = useState<{ target: string | null; space: MapSpace } | null>(null);
+  const chosenSpace = spaceChoice?.target === selectedTargetId ? spaceChoice.space : null;
+  const mapSpaces = useMemo(() => mapSpacesFor(spaces, effectiveFilters.spaces), [spaces, effectiveFilters.spaces]);
+  const mapSpace = effectiveMapSpace(chosenSpace, mapSpaces);
+  const filteredEntities = useMemo(() => mapEntities(listEntities, mapSpace), [listEntities, mapSpace]);
+  const spaceFilterKey = effectiveFilters.spaces.join(',');
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const [camera, setCamera] = useState<Camera>(DEFAULT_CAMERA);
@@ -273,15 +282,16 @@ export function WorldMap() {
 
   const fit = () => setCamera(fitCamera(entitiesRef.current, plane, sizeRef.current.w, sizeRef.current.h));
 
-  // Fit once per target (and plane) when entities first appear.
+  // Fit once per target, plane, chosen map space and space filter when
+  // entities first appear; a second space appearing does not move the camera.
   const fittedFor = useRef<string | null>(null);
   useEffect(() => {
-    const key = `${selectedTargetId}:${plane}`;
+    const key = `${selectedTargetId}:${plane}:${chosenSpace ?? 'default'}:${spaceFilterKey}`;
     if (fittedFor.current !== key && filteredEntities.length > 0 && size.w > 1) {
       fittedFor.current = key;
       setCamera(fitCamera(filteredEntities, plane, size.w, size.h));
     }
-  }, [filteredEntities, size, plane, selectedTargetId]);
+  }, [filteredEntities, size, plane, selectedTargetId, chosenSpace, spaceFilterKey]);
 
   const hud = cursor == null ? '—' : `X ${formatHud(cursor.a, camera.scale)}  ·  ${bName} ${formatHud(cursor.b, camera.scale)}`;
 
@@ -292,6 +302,22 @@ export function WorldMap() {
         <span className="map-cursor-hud" aria-live="polite">
           {hud}
         </span>
+        {mapSpaces.length > 1 ? (
+          <label className="map-space">
+            <span>Space</span>
+            <select
+              value={String(mapSpace)}
+              onChange={(e) => setSpaceChoice({ target: selectedTargetId, space: e.target.value === 'all' ? 'all' : Number(e.target.value) })}
+            >
+              {mapSpaces.map((sp) => (
+                <option key={sp} value={sp}>
+                  {sp}
+                </option>
+              ))}
+              <option value="all">All</option>
+            </select>
+          </label>
+        ) : null}
         <div className="plane-toggle" role="group" aria-label="Map plane">
           {(['xz', 'xy'] as const).map((p) => (
             <button key={p} type="button" className={`btn btn--small${plane === p ? ' btn--on' : ''}`} aria-pressed={plane === p} onClick={() => setPlane(p)}>

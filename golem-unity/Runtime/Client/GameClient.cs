@@ -11,6 +11,16 @@ namespace GolemEngine.Unity
     {
         public const int MaxReliableMessageBytes = 256 * 1024;
         public const int WebTransportFallbackTimeoutMilliseconds = 5000;
+        /// <summary>Compact datagram batches held while a space transition is open before the connection fails.</summary>
+        public const int MaxHeldSpaceTransitionBatches = 1024;
+        /// <summary>Total bytes of compact datagram batches held while a space transition is open.</summary>
+        public const int MaxHeldSpaceTransitionBytes = 4 * 1024 * 1024;
+
+        private const int ServerMessageSpaceChangedField = 4;
+        private const int ServerMessageSpaceSettledField = 5;
+        private const int ServerMessageWorldClearedField = 6;
+        private static readonly byte[] SpaceAckControlPrefix = { 0x00, 0x4f, 0x47, 0x53, 0x03 };
+        private static readonly byte[] EntityResyncControlPrefix = { 0x00, 0x4f, 0x47, 0x53, 0x04 };
 
         private readonly Func<byte[], object> _decodeEntityUpdate;
         private readonly Func<object, byte[]> _encodeCommand;
@@ -30,6 +40,15 @@ namespace GolemEngine.Unity
         private string _connectedTransport;
         private string _stickyPlanKey;
         private bool _preferFallback;
+        private readonly object _spaceGate = new object();
+        private uint _space;
+        private bool _spaceTransitionOpen;
+        private ulong _spaceTransition;
+        // Latest transition announced on this connection; survives SpaceSettled. Datagram event records of an
+        // older transition (untagged ones count as 0) are dropped.
+        private ulong _currentTransition;
+        private List<byte[]> _heldBatches = new List<byte[]>();
+        private int _heldBytes;
 
         public GameClient(
             IEntityManager entityManager,
@@ -52,6 +71,7 @@ namespace GolemEngine.Unity
             World = worldManager;
             Events = eventManager;
             _decodeWorldUpdate = decodeWorldUpdate;
+            RegisterEntityResync();
         }
 
         /// <summary>
@@ -88,9 +108,46 @@ namespace GolemEngine.Unity
             World = worldManager;
             Events = eventManager;
             _decodeWorldUpdate = decodeWorldUpdate;
+            RegisterEntityResync();
         }
 
         public IEntityManager Entities { get; }
+
+        /// <summary>
+        /// Lets a manager implementing <see cref="IEntityResyncNotifier"/> request a full state of an entity whose
+        /// held compact records it evicted.
+        /// </summary>
+        private void RegisterEntityResync()
+        {
+            if (Entities is IEntityResyncNotifier notifier)
+            {
+                notifier.OnResyncNeeded(RequestEntityResync);
+            }
+        }
+
+        /// <summary>
+        /// Sends the EntityResync control frame for entityId on the current connection, if any. A failed send fails
+        /// the connection: the entity would otherwise stay without state.
+        /// </summary>
+        private void RequestEntityResync(long entityId)
+        {
+            IGolemTransport transport;
+            lock (_connectionGate)
+            {
+                transport = _transport;
+            }
+            if (transport != null && transport.Connected)
+            {
+                try
+                {
+                    transport.Send(EncodeEntityResync(entityId));
+                }
+                catch (Exception)
+                {
+                    FailControlSend("entity_resync_send_failed", "golem-unity: EntityResync send failed");
+                }
+            }
+        }
         public IWorldManager World { get; }
         public IEventManager Events { get; }
         public bool Connected
@@ -116,6 +173,27 @@ namespace GolemEngine.Unity
         }
         public event Action ConnectedEvent;
         public event Action<GolemDisconnectInfo> DisconnectedEvent;
+
+        /// <summary>
+        /// Space announced by the server for the current connection. It is 0 before the first space change
+        /// and resets to 0 on connect and disconnect without raising <see cref="SpaceChanged"/>.
+        /// </summary>
+        public uint Space
+        {
+            get
+            {
+                lock (_spaceGate)
+                {
+                    return _space;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Raised on the main thread with (old, new) when the server moves this session to another space,
+        /// before any entity, world or event frame that follows the SpaceChanged message is applied.
+        /// </summary>
+        public event Action<uint, uint> SpaceChanged;
 
         /// <summary>
         /// Connects using the configured transport factory.
@@ -634,10 +712,10 @@ namespace GolemEngine.Unity
         private void WireMessages(int generation, IGolemTransport transport)
         {
             transport.MessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => HandleMessage(bytes));
-            transport.UnreliableStateMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => HandleCompactStateBatch(bytes));
-            transport.ReliableUnorderedMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => HandleCompactStateBatch(bytes));
-            transport.ReliableOrderedMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => HandleCompactStateBatch(bytes));
-            transport.EventualStateMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => HandleCompactStateBatch(bytes));
+            transport.UnreliableStateMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => ReceiveCompactStateBatch(bytes, generation));
+            transport.ReliableUnorderedMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => ReceiveCompactStateBatch(bytes, generation));
+            transport.ReliableOrderedMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => ReceiveCompactStateBatch(bytes, generation));
+            transport.EventualStateMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => ReceiveCompactStateBatch(bytes, generation));
         }
 
         private void EnqueueIfCurrent(int generation, IGolemTransport transport, Action action)
@@ -668,6 +746,7 @@ namespace GolemEngine.Unity
                 }
                 GolemUnityLog.LogDisconnect(info.Transport ?? "unknown", info);
                 ClearQueuedFrames();
+                ResetSpace();
                 DisconnectedEvent?.Invoke(info);
             });
         }
@@ -709,6 +788,7 @@ namespace GolemEngine.Unity
                     _preferFallback = false;
                 }
             }
+            ResetSpace();
             previous?.Cancel();
             previous?.Dispose();
             if (pending != null && pending != active)
@@ -1233,10 +1313,33 @@ namespace GolemEngine.Unity
 
         private void HandleMessage(byte[] bytes)
         {
+            // Event handlers may disconnect or reconnect; later fields belong to the old connection.
+            var generation = CurrentGeneration();
             var reader = new PbReader(bytes);
             while (!reader.Done)
             {
+                if (generation != CurrentGeneration())
+                {
+                    return;
+                }
                 var tag = reader.Tag();
+                if (tag.Wire == 2 && tag.Field >= ServerMessageSpaceChangedField && tag.Field <= ServerMessageWorldClearedField)
+                {
+                    var payload = reader.Bytes();
+                    switch (tag.Field)
+                    {
+                        case ServerMessageSpaceChangedField:
+                            ApplySpaceChanged(payload);
+                            break;
+                        case ServerMessageSpaceSettledField:
+                            ApplySpaceSettled(payload, generation);
+                            break;
+                        default:
+                            ApplyWorldCleared(DecodeWorldCleared(payload));
+                            break;
+                    }
+                    continue;
+                }
                 switch (tag.Field)
                 {
                     case 1:
@@ -1269,7 +1372,274 @@ namespace GolemEngine.Unity
             }
         }
 
-        private void HandleCompactStateBatch(byte[] bytes)
+        private int CurrentGeneration()
+        {
+            lock (_connectionGate)
+            {
+                return _connectionGeneration;
+            }
+        }
+
+        /// <summary>Opens or supersedes a transition and raises <see cref="SpaceChanged"/> before the following frames.</summary>
+        private void ApplySpaceChanged(byte[] payload)
+        {
+            DecodeSpaceChanged(payload, out var space, out var transition);
+            uint oldSpace;
+            lock (_spaceGate)
+            {
+                _spaceTransitionOpen = true;
+                _spaceTransition = transition;
+                _currentTransition = transition;
+                oldSpace = _space;
+                _space = space;
+            }
+            if (oldSpace != space)
+            {
+                SpaceChanged?.Invoke(oldSpace, space);
+            }
+        }
+
+        /// <summary>
+        /// Closes the matching transition, applies batches held during it in arrival order (the generated
+        /// managers' revision fence drops superseded state, and event records of an older transition are dropped)
+        /// and acknowledges it with SpaceAck. A failed SpaceAck send fails the connection, since the server would
+        /// keep the session gated.
+        /// </summary>
+        private void ApplySpaceSettled(byte[] payload, int generation)
+        {
+            var transition = DecodeSpaceSettled(payload);
+            List<byte[]> held;
+            lock (_spaceGate)
+            {
+                if (!_spaceTransitionOpen || _spaceTransition != transition)
+                {
+                    return;
+                }
+                held = _heldBatches;
+                ClearSpaceTransitionLocked();
+            }
+            foreach (var batch in held)
+            {
+                if (generation != CurrentGeneration())
+                {
+                    return;
+                }
+                HandleCompactStateBatch(batch, generation);
+            }
+            IGolemTransport transport;
+            lock (_connectionGate)
+            {
+                transport = _connectionGeneration == generation ? _transport : null;
+            }
+            if (transport != null && transport.Connected)
+            {
+                try
+                {
+                    transport.Send(EncodeSpaceAck(transition));
+                }
+                catch (Exception)
+                {
+                    FailControlSend("space_ack_send_failed", "golem-unity: SpaceAck send failed");
+                }
+            }
+        }
+
+        /// <summary>Clears one world type when the world manager implements <see cref="IWorldClearer"/>.</summary>
+        private void ApplyWorldCleared(string name)
+        {
+            if (World is IWorldClearer clearer)
+            {
+                clearer.ClearWorld(name);
+            }
+        }
+
+        /// <summary>
+        /// Holds a compact batch while a space transition is open, otherwise applies it. <paramref name="generation"/>
+        /// is the connection the batch arrived on.
+        /// </summary>
+        private void ReceiveCompactStateBatch(byte[] bytes, int generation)
+        {
+            var overflow = false;
+            lock (_spaceGate)
+            {
+                if (_spaceTransitionOpen)
+                {
+                    if (_heldBatches.Count >= MaxHeldSpaceTransitionBatches ||
+                        _heldBytes + bytes.Length > MaxHeldSpaceTransitionBytes)
+                    {
+                        overflow = true;
+                    }
+                    else
+                    {
+                        _heldBatches.Add(bytes);
+                        _heldBytes += bytes.Length;
+                        return;
+                    }
+                }
+            }
+            if (overflow)
+            {
+                FailConnection(
+                    "space_transition_overflow",
+                    new InvalidOperationException("golem-unity: datagram batches held during a space transition exceed the limit"),
+                    GolemDisconnectPhase.Receive,
+                    GolemDisconnectCategory.Protocol);
+                return;
+            }
+            HandleCompactStateBatch(bytes, generation);
+        }
+
+        /// <summary>
+        /// Fails the connection after a SpaceAck or EntityResync control frame could not be sent. The transport's
+        /// exception is not forwarded, since its text may repeat the connection URL.
+        /// </summary>
+        private void FailControlSend(string reason, string message)
+        {
+            FailConnection(reason, new InvalidOperationException(message), GolemDisconnectPhase.Send, GolemDisconnectCategory.TransportBackend);
+        }
+
+        /// <summary>Closes the established connection after a client protocol failure and reports it once.</summary>
+        private void FailConnection(string reason, Exception error, GolemDisconnectPhase phase, GolemDisconnectCategory category)
+        {
+            string transportName;
+            lock (_connectionGate)
+            {
+                if (_transport == null)
+                {
+                    return;
+                }
+                transportName = _connectedTransport;
+            }
+            ClearQueuedFrames();
+            ReplaceConnection(default, resetAffinity: false);
+            var info = new GolemDisconnectInfo(
+                false,
+                reason: reason,
+                error: error,
+                transport: transportName,
+                phase: phase,
+                category: category);
+            GolemUnityLog.LogDisconnect(transportName ?? "unknown", info);
+            DisconnectedEvent?.Invoke(info);
+        }
+
+        private ulong CurrentTransition()
+        {
+            lock (_spaceGate)
+            {
+                return _currentTransition;
+            }
+        }
+
+        private void ResetSpace()
+        {
+            lock (_spaceGate)
+            {
+                _space = 0;
+                _currentTransition = 0;
+                ClearSpaceTransitionLocked();
+            }
+        }
+
+        private void ClearSpaceTransitionLocked()
+        {
+            _spaceTransitionOpen = false;
+            _spaceTransition = 0;
+            _heldBatches = new List<byte[]>();
+            _heldBytes = 0;
+        }
+
+        private static void DecodeSpaceChanged(byte[] payload, out uint space, out ulong transition)
+        {
+            space = 0;
+            transition = 0;
+            var reader = new PbReader(payload);
+            while (!reader.Done)
+            {
+                var tag = reader.Tag();
+                if (tag.Field == 1 && tag.Wire == 0)
+                {
+                    space = reader.Uint32();
+                }
+                else if (tag.Field == 2 && tag.Wire == 0)
+                {
+                    transition = reader.Uint64();
+                }
+                else
+                {
+                    reader.Skip(tag.Wire);
+                }
+            }
+        }
+
+        private static ulong DecodeSpaceSettled(byte[] payload)
+        {
+            ulong transition = 0;
+            var reader = new PbReader(payload);
+            while (!reader.Done)
+            {
+                var tag = reader.Tag();
+                if (tag.Field == 1 && tag.Wire == 0)
+                {
+                    transition = reader.Uint64();
+                }
+                else
+                {
+                    reader.Skip(tag.Wire);
+                }
+            }
+            return transition;
+        }
+
+        private static string DecodeWorldCleared(byte[] payload)
+        {
+            var name = string.Empty;
+            var reader = new PbReader(payload);
+            while (!reader.Done)
+            {
+                var tag = reader.Tag();
+                if (tag.Field == 1 && tag.Wire == 2)
+                {
+                    name = reader.String();
+                }
+                else
+                {
+                    reader.Skip(tag.Wire);
+                }
+            }
+            return name;
+        }
+
+        /// <summary>Encodes the EntityResync control frame: <c>00 'O' 'G' 'S' 04</c> plus the big-endian entity id.</summary>
+        internal static byte[] EncodeEntityResync(long entityId)
+        {
+            var frame = new byte[EntityResyncControlPrefix.Length + 8];
+            Buffer.BlockCopy(EntityResyncControlPrefix, 0, frame, 0, EntityResyncControlPrefix.Length);
+            var value = (ulong)entityId;
+            for (var i = 0; i < 8; i++)
+            {
+                frame[EntityResyncControlPrefix.Length + i] = (byte)(value >> (56 - 8 * i));
+            }
+            return frame;
+        }
+
+        /// <summary>Encodes the SpaceAck control frame: <c>00 'O' 'G' 'S' 03</c> plus the big-endian transition.</summary>
+        internal static byte[] EncodeSpaceAck(ulong transition)
+        {
+            var frame = new byte[SpaceAckControlPrefix.Length + 8];
+            Buffer.BlockCopy(SpaceAckControlPrefix, 0, frame, 0, SpaceAckControlPrefix.Length);
+            for (var i = 0; i < 8; i++)
+            {
+                frame[SpaceAckControlPrefix.Length + i] = (byte)(transition >> (56 - 8 * i));
+            }
+            return frame;
+        }
+
+        /// <summary>
+        /// Applies every frame of one compact batch received on connection <paramref name="generation"/>. A callback
+        /// that disconnects or replaces the connection stops the remaining frames.
+        /// </summary>
+        private void HandleCompactStateBatch(byte[] bytes, int generation)
         {
             if (Entities is not ICompactEntityManager compactEntities)
             {
@@ -1277,9 +1647,18 @@ namespace GolemEngine.Unity
             }
             GolemDatagramProtocol.DecodeLengthPrefixedFrames(bytes, frame =>
             {
-                if (GolemDatagramProtocol.TryGetEventRecord(frame, out var serverEvent))
+                if (generation != CurrentGeneration())
                 {
-                    Events?.ApplyRaw(serverEvent);
+                    return;
+                }
+                if (frame.Length > 0 && frame[0] == GolemDatagramProtocol.EventRecordTag)
+                {
+                    // Records of a transition the session already left, and malformed records, are dropped.
+                    if (GolemDatagramProtocol.TryGetEventRecord(frame, out var transition, out var serverEvent) &&
+                        transition >= CurrentTransition())
+                    {
+                        Events?.ApplyRaw(serverEvent);
+                    }
                     return;
                 }
                 compactEntities.ApplyCompactUpdate(frame);

@@ -38,12 +38,17 @@ type PhysicsGeometryActivation struct {
 // then queues navigation preparation. Quarantine remains until successful navigation
 // publication. A failed/unqueued build retains the new physical state and can retry
 // with the same identity without recreating bodies. New identities supersede workers.
+// It acts on space 0's physics world and navigation; see Space.ActivatePhysicsGeometry.
 func (s *Server) ActivatePhysicsGeometry(change PhysicsGeometryActivation) (uint64, error) {
-	if err := s.physics.mutable(); err != nil {
+	return s.activatePhysicsGeometry(&s.space0, change)
+}
+
+func (s *Server) activatePhysicsGeometry(rt *spaceRuntime, change PhysicsGeometryActivation) (uint64, error) {
+	if err := rt.phys().mutable(); err != nil {
 		return 0, err
 	}
 	r := PhysicsGeometryRequest{Identity: change.Identity, Profiles: append([]surface.ProfileID(nil), change.Profiles...), Bounds: change.Bounds, Priority: change.Priority, Quarantine: change.Quarantine}
-	if s.navigation == nil || r.Identity.Key == "" || len(r.Identity.Key) > 4096 || r.Identity.Revision == 0 || r.Identity.PhysicsFingerprint == "" || len(r.Identity.PhysicsFingerprint) > 4096 || r.Identity.NavigationFingerprint == "" || len(r.Identity.NavigationFingerprint) > 4096 || len(r.Profiles) == 0 || len(r.Profiles) > 256 || !validTraversalBounds(r.Bounds) || r.Quarantine == nil || change.PrepareNavigation == nil || change.Source != nil && change.Source.Fingerprint() != r.Identity.PhysicsFingerprint {
+	if rt.navigation == nil || r.Identity.Key == "" || len(r.Identity.Key) > 4096 || r.Identity.Revision == 0 || r.Identity.PhysicsFingerprint == "" || len(r.Identity.PhysicsFingerprint) > 4096 || r.Identity.NavigationFingerprint == "" || len(r.Identity.NavigationFingerprint) > 4096 || len(r.Profiles) == 0 || len(r.Profiles) > 256 || !validTraversalBounds(r.Bounds) || r.Quarantine == nil || change.PrepareNavigation == nil || change.Source != nil && change.Source.Fingerprint() != r.Identity.PhysicsFingerprint {
 		return 0, p.ErrInvalid
 	}
 	for _, profile := range r.Profiles {
@@ -51,26 +56,26 @@ func (s *Server) ActivatePhysicsGeometry(change PhysicsGeometryActivation) (uint
 			return 0, p.ErrInvalid
 		}
 	}
-	if err := s.physicsGeometryCapacity(r.Identity.Key); err != nil {
+	if err := rt.physicsGeometryCapacity(r.Identity.Key); err != nil {
 		return 0, err
 	}
 	if err := r.Quarantine(); err != nil {
 		return 0, err
 	}
-	if !s.physicsGeometryQuarantined(r) {
+	if !rt.physicsGeometryQuarantined(r) {
 		return 0, errors.New("golem: physics activation requires navigation quarantine")
 	}
 	key := "physics/" + r.Identity.Key
-	s.CancelNavigationBuild(key)
-	s.rememberPhysicsGeometry(r, false)
-	if s.physics.geometryIdentities[r.Identity.Key] != r.Identity {
-		build := &physicsGeometryBuild{server: s, request: r, activation: true, prepared: PreparedPhysicsGeometry{Identity: r.Identity, Source: change.Source, ResolveOwner: change.ResolveOwner, Navigation: physicsActivationBoundary{}}}
+	rt.navigation.cancelBuild(key)
+	rt.rememberPhysicsGeometry(r, false)
+	if rt.physics.geometryIdentities[r.Identity.Key] != r.Identity {
+		build := &physicsGeometryBuild{space: rt, request: r, activation: true, prepared: PreparedPhysicsGeometry{Identity: r.Identity, Source: change.Source, ResolveOwner: change.ResolveOwner, Navigation: physicsActivationBoundary{}}}
 		if err := build.Commit(); err != nil {
 			return 0, err
 		}
 	}
-	s.rememberPhysicsGeometry(r, true)
-	return s.QueueNavigationBuild(key, r.Priority, func(ctx context.Context) (NavigationBuildResult, error) {
+	rt.rememberPhysicsGeometry(r, true)
+	return s.queueNavigationBuild(rt.navigation, key, r.Priority, func(ctx context.Context) (NavigationBuildResult, error) {
 		prepared, err := change.PrepareNavigation(ctx)
 		if err != nil {
 			if prepared != nil {
@@ -81,35 +86,42 @@ func (s *Server) ActivatePhysicsGeometry(change PhysicsGeometryActivation) (uint
 		if prepared == nil {
 			return nil, p.ErrInvalid
 		}
-		return &physicsActivatedNavigation{server: s, request: r, navigation: prepared}, nil
+		return &physicsActivatedNavigation{space: rt, request: r, navigation: prepared}, nil
 	})
 }
 
-func (s *Server) rememberPhysicsGeometry(r PhysicsGeometryRequest, activated bool) {
-	if s.physics.geometryPending == nil {
-		s.physics.geometryPending = map[string]PhysicsGeometryPending{}
+func (rt *spaceRuntime) rememberPhysicsGeometry(r PhysicsGeometryRequest, activated bool) {
+	ps := rt.physics
+	if ps.geometryPending == nil {
+		ps.geometryPending = map[string]PhysicsGeometryPending{}
 	}
-	s.physics.geometryPending[r.Identity.Key] = PhysicsGeometryPending{Identity: r.Identity, Profiles: append([]surface.ProfileID(nil), r.Profiles...), Bounds: r.Bounds, Activated: activated}
+	ps.geometryPending[r.Identity.Key] = PhysicsGeometryPending{Identity: r.Identity, Profiles: append([]surface.ProfileID(nil), r.Profiles...), Bounds: r.Bounds, Activated: activated}
 }
 
-func (s *Server) physicsGeometryCapacity(key string) error {
-	if _, exists := s.physics.geometryPending[key]; !exists && len(s.physics.geometryPending) >= s.navigation.config.BuildHistoryCapacity {
+func (rt *spaceRuntime) physicsGeometryCapacity(key string) error {
+	ps, n := rt.physics, rt.navigation
+	if _, exists := ps.geometryPending[key]; !exists && len(ps.geometryPending) >= n.config.BuildHistoryCapacity {
 		return p.ErrBusy
 	}
-	if _, exists := s.navigation.buildStates["physics/"+key]; !exists && len(s.navigation.buildStates) >= s.navigation.config.BuildHistoryCapacity {
+	if _, exists := n.buildStates["physics/"+key]; !exists && len(n.buildStates) >= n.config.BuildHistoryCapacity {
 		return p.ErrBusy
 	}
 	return nil
 }
 
-// PendingPhysicsGeometry returns copied stable changes still under quarantine.
-// It is tick-owned and includes failed changes awaiting an explicit retry.
+// PendingPhysicsGeometry returns space 0's copied stable changes still under
+// quarantine. It is tick-owned and includes failed changes awaiting an explicit
+// retry.
 func (s *Server) PendingPhysicsGeometry() []PhysicsGeometryPending {
-	if s.physics == nil {
+	return s.space0.physics.pendingGeometry()
+}
+
+func (ps *physicsService) pendingGeometry() []PhysicsGeometryPending {
+	if ps == nil {
 		return nil
 	}
 	var result []PhysicsGeometryPending
-	for _, pending := range s.physics.geometryPending {
+	for _, pending := range ps.geometryPending {
 		pending.Profiles = append([]surface.ProfileID(nil), pending.Profiles...)
 		result = append(result, pending)
 	}
@@ -123,7 +135,7 @@ func (physicsActivationBoundary) Commit() error { return nil }
 func (physicsActivationBoundary) Discard()      {}
 
 type physicsActivatedNavigation struct {
-	server     *Server
+	space      *spaceRuntime
 	request    PhysicsGeometryRequest
 	navigation NavigationBuildResult
 	done       bool
@@ -133,19 +145,20 @@ func (b *physicsActivatedNavigation) Commit() error {
 	if b.done {
 		return p.ErrStale
 	}
-	if err := b.server.physics.mutable(); err != nil {
+	rt := b.space
+	if err := rt.physics.mutable(); err != nil {
 		return err
 	}
-	if b.server.physics.geometryIdentities[b.request.Identity.Key] != b.request.Identity || b.server.navigation.frame != nil || !b.server.physicsGeometryQuarantined(b.request) {
+	if rt.physics.geometryIdentities[b.request.Identity.Key] != b.request.Identity || rt.navigation.frame != nil || !rt.physicsGeometryQuarantined(b.request) {
 		return p.ErrStale
 	}
-	if pending, ok := b.server.physics.geometryPending[b.request.Identity.Key]; !ok || pending.Identity != b.request.Identity || !pending.Activated {
+	if pending, ok := rt.physics.geometryPending[b.request.Identity.Key]; !ok || pending.Identity != b.request.Identity || !pending.Activated {
 		return p.ErrStale
 	}
 	if err := b.navigation.Commit(); err != nil {
 		return err
 	}
-	delete(b.server.physics.geometryPending, b.request.Identity.Key)
+	delete(rt.physics.geometryPending, b.request.Identity.Key)
 	b.done = true
 	return nil
 }

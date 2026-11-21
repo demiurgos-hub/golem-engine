@@ -7,6 +7,8 @@ export interface EntityRecord {
   id: number;
   typeTag: number;
   typeName: string;
+  /** Spaces overlap in coordinates; 0 is the default space. */
+  space: number;
   position: Position;
   fields: EntityFields;
 }
@@ -56,7 +58,7 @@ interface PendingSnapshot {
 export function makeRecord(schema: Schema | null, e: EntityState): EntityRecord {
   const fields = EntityFields.parse(e.typeTag, e.state);
   const entity = entityByTag(schema, e.typeTag);
-  return { id: e.id, typeTag: e.typeTag, typeName: entity?.name ?? `type ${e.typeTag}`, position: readPosition(entity, fields), fields };
+  return { id: e.id, typeTag: e.typeTag, typeName: entity?.name ?? `type ${e.typeTag}`, space: e.space ?? 0, position: readPosition(entity, fields), fields };
 }
 
 export function createEntityStore(): EntityStore {
@@ -213,6 +215,10 @@ export function createEntityStore(): EntityStore {
           const entity = entityFor(d.typeTag);
           const fields = existing.fields.withDelta(entity, d.mask, d.delta);
           next.set(d.id, { ...existing, fields, position: readPosition(entity, fields) });
+        }
+        for (const m of msg.moves) {
+          const existing = next.get(m.id);
+          if (existing && existing.space !== m.space) next.set(m.id, { ...existing, space: m.space });
         }
         for (const r of msg.removals) next.delete(r.id);
         entities = next;

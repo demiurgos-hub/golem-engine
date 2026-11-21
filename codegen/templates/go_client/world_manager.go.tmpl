@@ -6,6 +6,7 @@ type WorldManager struct {
 {{- range .WorldTypes}}
 	{{.LowerName}} *{{.DataName}}
 	on{{.Name}}Update func(*{{.DataName}})
+	on{{.Name}}Cleared func()
 {{- end}}
 }
 
@@ -15,11 +16,15 @@ func NewWorldManager() *WorldManager {
 }
 {{range .WorldTypes}}
 
-// {{.Name}} returns the latest {{.Name}} world data.
+// {{.Name}} returns the latest {{.Name}} world data, or nil when none is held.
 func (m *WorldManager) {{.Name}}() *{{.DataName}} { return m.{{.LowerName}} }
 
 // On{{.Name}}Update registers a callback for {{.Name}} world data updates.
 func (m *WorldManager) On{{.Name}}Update(fn func(*{{.DataName}})) { m.on{{.Name}}Update = fn }
+
+// On{{.Name}}Cleared registers a callback fired when the server clears held
+// {{.Name}} world data, for example on a move into a space without it.
+func (m *WorldManager) On{{.Name}}Cleared(fn func()) { m.on{{.Name}}Cleared = fn }
 {{end}}
 
 // ApplyUpdate processes a decoded WorldUpdate from the server.
@@ -40,6 +45,24 @@ func (m *WorldManager) ApplyWorldUpdate(update *WorldUpdate) {
 		m.{{.LowerName}} = p.{{.DataName}}
 		if m.on{{.Name}}Update != nil {
 			m.on{{.Name}}Update(p.{{.DataName}})
+		}
+{{- end}}
+	}
+}
+
+// ClearWorld drops the world data whose world type is name, as the server's
+// WorldCleared message asks, and fires its cleared callback when a value was
+// held. Unknown names are ignored.
+func (m *WorldManager) ClearWorld(name string) {
+	switch name {
+{{- range .WorldTypes}}
+	case {{printf "%q" .Name}}:
+		if m.{{.LowerName}} == nil {
+			return
+		}
+		m.{{.LowerName}} = nil
+		if m.on{{.Name}}Cleared != nil {
+			m.on{{.Name}}Cleared()
 		}
 {{- end}}
 	}

@@ -10,10 +10,28 @@ import { Synced{{.Name}} } from "./{{.Name}}Synced.js";
 {{end}}
 export type SyncedEntity = {{if .Entities}}{{range $i, $e := .Entities}}{{if $i}} | {{end}}Synced{{$e.Name}}{{end}}{{else}}never{{end}};
 
+/**
+ * Bounds compact records held for entities whose spawn has not arrived yet. When
+ * it is reached, all records of the entity held longest are evicted and the
+ * resync listeners are told about that entity.
+ */
+const maxHeldCompactUpdates = 256;
+
+/** Bounds how often one pending resync is requested again after its recovery full state was rejected as stale. */
+const maxResyncRetries = 3;
+
 /** Manages all synced entities and dispatches incoming EntityUpdate messages. */
 export class EntityManager {
   private _entities = new Map<number, SyncedEntity>();
   private _lastRevisions = new Map<number, number>();
+  /** Compact records that arrived before their entity's spawn, in hold order. */
+  private _heldCompact = new Map<number, Uint8Array[]>();
+  private _heldCount = 0;
+  /** Advanced by clear() so a callback that clears stops a replay. */
+  private _clearEpoch = 0;
+  /** Entities whose evicted records still need a full state of at least `revision`. */
+  private _pendingResync = new Map<number, { revision: number; retries: number }>();
+  private _onResyncNeeded = new Set<(entityId: number) => void>();
   private _onSpawn = new Set<(entity: SyncedEntity) => void>();
   private _onUpdate = new Set<(entity: SyncedEntity) => void>();
   private _onRemove = new Set<(entityId: number) => void>();
@@ -55,16 +73,35 @@ export class EntityManager {
   }
 
   /**
+   * Register a listener fired with an entity id when the compact records held
+   * for that entity are evicted before its spawn arrived. Those datagrams were
+   * already acknowledged, so the server will not resend them; GameClient
+   * registers a listener that requests a full state of the entity. The manager
+   * remembers the request until a full state at least as new as the evicted
+   * records applies, or the entity is removed or cleared; when a full state for
+   * it is rejected as stale (a newer datagram overtook it), the listeners fire
+   * again, at most three times. Returns an unsubscribe function.
+   */
+  onResyncNeeded(fn: (entityId: number) => void): () => void {
+    this._onResyncNeeded.add(fn);
+    return () => { this._onResyncNeeded.delete(fn); };
+  }
+
+  /**
    * Remove every known entity, fire onRemove for each, and clear revision
    * tracking. Call on disconnect / before reconnect so stale sprites cannot
    * linger when remove frames were lost with the transport.
    */
   clear(): void {
+    this._clearEpoch++;
     const ids = [...this._entities.keys()];
     for (const id of ids) {
       this._removeEntity(id);
     }
     this._lastRevisions.clear();
+    this._heldCompact.clear();
+    this._heldCount = 0;
+    this._pendingResync.clear();
   }
 {{range .Entities}}
   /**
@@ -94,11 +131,17 @@ export class EntityManager {
       const revision = Number(update.entityRemoved.revision);
       if (this._isStale(id, revision)) return;
       this._lastRevisions.set(id, revision);
+      this._pendingResync.delete(id);
       this._removeEntity(id);
+      this._dropHeldCompact(id);
     }
   }
 
-  /** Process a compact datagram state record for an already-known entity. */
+  /**
+   * Process a compact datagram state record. A record for an entity that is not
+   * known yet is held until its full state arrives, because datagrams can
+   * overtake the reliable stream that carries the spawn.
+   */
   applyCompactUpdate(frame: Uint8Array) {
     const r = new PbReader(frame);
     const id = Number(r.int64());
@@ -106,7 +149,10 @@ export class EntityManager {
     const mask = Number(r.uint64());
     if (mask === 0 || this._isStale(id, revision)) return;
     const entity = this._entities.get(id);
-    if (!entity) return;
+    if (!entity) {
+      this._holdCompact(id, frame);
+      return;
+    }
     const body = r.remaining();
 {{- range .Entities}}
     if (entity instanceof Synced{{.Name}}) {
@@ -126,6 +172,83 @@ export class EntityManager {
     for (const fn of this._onRemove) fn(id);
   }
 
+  /**
+   * Keep a copy of frame until the entity spawns. At the cap, evict every record
+   * of the entity held longest (Map insertion order) and report it for a resync.
+   */
+  private _holdCompact(id: number, frame: Uint8Array): void {
+    const epoch = this._clearEpoch;
+    while (this._heldCount >= maxHeldCompactUpdates) {
+      const oldest = this._heldCompact.keys().next();
+      if (oldest.done) break;
+      const revision = heldRevision(this._heldCompact.get(oldest.value)!);
+      this._dropHeldCompact(oldest.value);
+      const listeners = [...this._onResyncNeeded];
+      if (listeners.length > 0) {
+        const pending = this._pendingResync.get(oldest.value);
+        this._pendingResync.set(oldest.value, { revision: Math.max(pending?.revision ?? 0, revision), retries: pending?.retries ?? 0 });
+      }
+      for (const fn of listeners) {
+        fn(oldest.value);
+        if (this._clearEpoch !== epoch) return;
+      }
+    }
+    let held = this._heldCompact.get(id);
+    if (!held) {
+      held = [];
+      this._heldCompact.set(id, held);
+    }
+    held.push(frame.slice());
+    this._heldCount++;
+  }
+
+  /**
+   * Request a resync again when a full state for an entity with a pending
+   * resync is rejected as stale, up to maxResyncRetries times.
+   */
+  private _staleFullState(id: number): void {
+    const pending = this._pendingResync.get(id);
+    if (!pending) return;
+    if (pending.retries >= maxResyncRetries || this._onResyncNeeded.size === 0) {
+      this._pendingResync.delete(id);
+      return;
+    }
+    pending.retries++;
+    const epoch = this._clearEpoch;
+    for (const fn of [...this._onResyncNeeded]) {
+      fn(id);
+      if (this._clearEpoch !== epoch) return;
+    }
+  }
+
+  /** Forget a pending resync once a full state at least as new as the evicted records applied. */
+  private _appliedFullState(id: number, revision: number): void {
+    const pending = this._pendingResync.get(id);
+    if (pending && revision >= pending.revision) this._pendingResync.delete(id);
+  }
+
+  private _dropHeldCompact(id: number): void {
+    const held = this._heldCompact.get(id);
+    if (!held) return;
+    this._heldCount -= held.length;
+    this._heldCompact.delete(id);
+  }
+
+  /**
+   * Apply records held for a newly spawned entity; older ones fail the revision
+   * check. A callback that calls clear() stops the replay.
+   */
+  private _replayHeldCompact(id: number): void {
+    const held = this._heldCompact.get(id);
+    if (!held) return;
+    this._dropHeldCompact(id);
+    const epoch = this._clearEpoch;
+    for (const frame of held) {
+      if (this._clearEpoch !== epoch) return;
+      this.applyCompactUpdate(frame);
+    }
+  }
+
   private _isStale(entityId: number, revision: number): boolean {
     const last = this._lastRevisions.get(entityId);
     return last !== undefined && revision < last;
@@ -134,7 +257,10 @@ export class EntityManager {
   private _applyState{{.Name}}(s: {{.Name}}State) {
     const id = Number(s.entityId);
     const revision = Number(s.revision);
-    if (this._isStale(id, revision)) return;
+    if (this._isStale(id, revision)) {
+      this._staleFullState(id);
+      return;
+    }
     let e = this._entities.get(id) as Synced{{.Name}} | undefined;
     const isNew = !e;
     if (isNew) {
@@ -143,9 +269,12 @@ export class EntityManager {
     }
     e!.applyState(s);
     this._lastRevisions.set(id, revision);
+    this._appliedFullState(id, revision);
     if (isNew) {
+      const epoch = this._clearEpoch;
       (e as EntityLifecycle).onSpawn?.();
       for (const fn of this._onSpawn) fn(e!);
+      if (this._clearEpoch === epoch) this._replayHeldCompact(id);
     } else {
       for (const fn of this._onUpdate) fn(e!);
     }
@@ -163,6 +292,17 @@ export class EntityManager {
     }
   }
 {{- end}}
+}
+
+/** Return the newest revision among held compact records. */
+function heldRevision(held: Uint8Array[]): number {
+  let newest = 0;
+  for (const frame of held) {
+    const r = new PbReader(frame);
+    r.int64();
+    newest = Math.max(newest, Number(r.uint64()));
+  }
+  return newest;
 }
 {{- if .Commands}}
 

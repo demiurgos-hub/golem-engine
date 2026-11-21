@@ -99,10 +99,32 @@ namespace GolemEngine.Unity
         void ApplyCompactUpdate(byte[] frame);
     }
 
+    /// <summary>
+    /// Optional contract for entity managers that hold compact records arriving before their entity's spawn. The
+    /// manager calls the registered callback with an entity id when the records held for it are evicted; the
+    /// datagrams were already acknowledged, so <c>GameClient</c> registers a callback that asks the server for
+    /// a full state of that entity. Generated managers implement it.
+    /// </summary>
+    public interface IEntityResyncNotifier
+    {
+        void OnResyncNeeded(Action<long> fn);
+    }
+
     /// <summary>Contract implemented by generated world managers.</summary>
     public interface IWorldManager
     {
         void ApplyUpdate(object update);
+    }
+
+    /// <summary>
+    /// Optional contract for world managers that can drop one world type. The client calls
+    /// <see cref="ClearWorld"/> with the world type name when the server sends WorldCleared,
+    /// for example after a move into a space that does not define that world data. Generated
+    /// world managers implement it; managers without it keep their values.
+    /// </summary>
+    public interface IWorldClearer
+    {
+        void ClearWorld(string name);
     }
 
     /// <summary>Contract implemented by generated event managers.</summary>

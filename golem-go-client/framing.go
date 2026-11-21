@@ -15,11 +15,26 @@ const (
 	reliableFrameHeaderBytes     = netwire.FrameHeaderBytes
 )
 
-// ServerMessage contains one decoded server envelope.
+// ServerMessage field numbers. One stream frame may concatenate many fields;
+// clients apply them in order.
+const (
+	serverMessageEntityField       = 1
+	serverMessageWorldField        = 2
+	serverMessageEventField        = 3
+	serverMessageSpaceChangedField = 4
+	serverMessageSpaceSettledField = 5
+	serverMessageWorldClearedField = 6
+)
+
+// ServerMessage contains one decoded server envelope field. A stream frame
+// decodes into one of these per field, so the type stays small: the field
+// number says what Payload is.
 type ServerMessage struct {
-	EntityUpdate []byte
-	WorldUpdate  []byte
-	ServerEvent  []byte
+	// Field is the ServerMessage field number: 1 entity update, 2 world update,
+	// 3 server event, 4 space changed, 5 space settled, 6 world cleared.
+	Field int
+	// Payload is the field's length-delimited payload, which may be empty.
+	Payload []byte
 }
 
 func decodeServerMessages(data []byte) ([]ServerMessage, error) {
@@ -27,25 +42,62 @@ func decodeServerMessages(data []byte) ([]ServerMessage, error) {
 	r := pb.NewReader(data)
 	for !r.Done() {
 		field, wire := r.Tag()
-		if wire != 2 {
+		if wire != 2 || field < serverMessageEntityField || field > serverMessageWorldClearedField {
 			r.Skip(wire)
 			continue
 		}
-		msg := ServerMessage{}
-		switch field {
-		case 1:
-			msg.EntityUpdate = r.Bytes()
-		case 2:
-			msg.WorldUpdate = r.Bytes()
-		case 3:
-			msg.ServerEvent = r.Bytes()
-		default:
-			r.Skip(wire)
-			continue
-		}
-		out = append(out, msg)
+		out = append(out, ServerMessage{Field: field, Payload: r.Bytes()})
 	}
 	return out, nil
+}
+
+// decodeSpaceChanged decodes SpaceChanged{uint32 space = 1; uint64 transition = 2}.
+func decodeSpaceChanged(data []byte) (SpaceID, uint64) {
+	var space SpaceID
+	var transition uint64
+	r := pb.NewReader(data)
+	for !r.Done() {
+		field, wire := r.Tag()
+		switch {
+		case field == 1 && wire == 0:
+			space = SpaceID(r.Uint32())
+		case field == 2 && wire == 0:
+			transition = r.Uint64()
+		default:
+			r.Skip(wire)
+		}
+	}
+	return space, transition
+}
+
+// decodeSpaceSettled decodes SpaceSettled{uint64 transition = 1}.
+func decodeSpaceSettled(data []byte) uint64 {
+	var transition uint64
+	r := pb.NewReader(data)
+	for !r.Done() {
+		field, wire := r.Tag()
+		if field == 1 && wire == 0 {
+			transition = r.Uint64()
+			continue
+		}
+		r.Skip(wire)
+	}
+	return transition
+}
+
+// decodeWorldCleared decodes WorldCleared{string name = 1}.
+func decodeWorldCleared(data []byte) string {
+	var name string
+	r := pb.NewReader(data)
+	for !r.Done() {
+		field, wire := r.Tag()
+		if field == 1 && wire == 2 {
+			name = r.String()
+			continue
+		}
+		r.Skip(wire)
+	}
+	return name
 }
 
 func appendLengthPrefixedFrame(dst, data []byte) []byte { return netwire.AppendFrame(dst, data) }

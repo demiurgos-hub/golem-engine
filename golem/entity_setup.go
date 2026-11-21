@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 
+	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
 	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
@@ -23,11 +24,19 @@ type EntitySetup func(Entity) (rollback func() error, err error)
 // panic rolls back server resources and then continues unwinding unchanged.
 //
 // Call before Run or on the tick goroutine, outside physics callbacks, active
-// frames and restoration. Setup must not advance simulation, change the entity
+// frames, restoration, the per-space simulation phase and space transfers
+// (those return an error wrapping physics3d.ErrBusy). Setup must not advance simulation, change the entity
 // identity, publish it itself, or mutate unrelated entities. Unattached resources
 // acquired before a panic remain the callback's responsibility. Assigned IDs are
-// consumed even on failure. Existing CreateEntity behavior is unchanged.
-func (s *Server) CreateEntityWithSetup(e Entity, setup EntitySetup, owner ...int64) (err error) {
+// consumed even on failure. Existing CreateEntity behavior is unchanged. The
+// entity is placed in space 0; use CreateEntityWithSetupIn for another space.
+func (s *Server) CreateEntityWithSetup(e Entity, setup EntitySetup, owner ...int64) error {
+	return s.CreateEntityWithSetupIn(0, e, setup, owner...)
+}
+
+// CreateEntityWithSetupIn is CreateEntityWithSetup with the entity placed in
+// space. EntitySpace resolves the provisional entity's space during setup.
+func (s *Server) CreateEntityWithSetupIn(space SpaceID, e Entity, setup EntitySetup, owner ...int64) (err error) {
 	if len(owner) > 1 {
 		return fmt.Errorf("golem: CreateEntityWithSetup expects 0 or 1 owner session ID, got %d", len(owner))
 	}
@@ -47,7 +56,7 @@ func (s *Server) CreateEntityWithSetup(e Entity, setup EntitySetup, owner ...int
 	if binder, ok := e.(ServerBinder); ok {
 		binder.BindServer(s)
 	}
-	if err := s.reg.AddProvisional(e, owner...); err != nil {
+	if err := s.reg.AddProvisionalIn(space, e, owner...); err != nil {
 		return err
 	}
 	id := e.EntityID()
@@ -83,29 +92,20 @@ func (s *Server) entitySetupAllowed() error {
 	if stopping {
 		return ErrServerNotRunning
 	}
-	if s.physics != nil {
-		if err := s.physics.mutable(); err != nil {
-			return fmt.Errorf("golem: entity setup: %w", err)
-		}
+	if s.transferring || s.simulatingSpaces {
+		return fmt.Errorf("golem: entity setup is unavailable while spaces simulate or transfer: %w", p.ErrBusy)
 	}
-	if n := s.navigation; n != nil && (n.restoring || n.restoreErr != nil || n.frame != nil) {
-		return errors.New("golem: entity setup is unavailable during navigation frames or restoration")
-	}
-	return nil
+	return s.servicesQuiescent("entity setup")
 }
 
 func (s *Server) rollbackEntitySetup(e Entity, id int64) error {
-	err := s.DetachPhysics(id)
-	if err != nil && s.physics != nil {
-		s.physics.fault = err
+	rt := s.runtimeOf(id)
+	err := rt.phys().detachEntity(id)
+	if err != nil {
+		rt.physics.fault = err
 	}
-	s.DetachNavigation(id)
-	if _, ok := e.(ColliderProvider); ok && s.layers != nil {
-		s.layers.Remove(id)
-	}
-	if _, ok := e.(ColliderProvider3D); ok && s.layers3D != nil {
-		s.layers3D.Remove(id)
-	}
+	rt.nav().detach(id)
+	rt.unregisterCollider(e, id)
 	s.reg.DiscardProvisional(id)
 	return err
 }

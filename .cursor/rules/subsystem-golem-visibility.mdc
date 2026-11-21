@@ -10,4 +10,6 @@ alwaysApply: false
 
 **Not thread-safe.** The parent **`golem`** `Server` always constructs one manager in `NewServer` and serializes access under `interestMu` (shared with interest / broadcast known-set bookkeeping). Visibility mutations never wait on network I/O; replication/snapshot decisions are point-in-time under `interestMu`, and later mutations apply on the next pass via known-set transitions. Do not mirror policy state into `interest.Manager`.
 
+**Independent of spaces:** groups hide entities within a space (e.g. invisibility); they do not separate maps. The server replicates an entity only when it is in the session's space *and* `Allows` passes; space membership lives in `golem/registry`, and this package stays unaware of spaces.
+
 **Boundaries:** stdlib only. Does **not** import `golem`, `golem/net`, `golem/registry`, or `golem/interest`. Consumers use `Server.JoinVisibilityGroup` / `LeaveVisibilityGroup` / `SetEntityVisibilityGroup` rather than the lower-level manager.

@@ -51,6 +51,8 @@ type PhysicsContactFunc func([]p.ContactEvent)
 // frame is rejected. Continuation participant/row totals are additive, not peaks;
 // see physics3d.FrameResult. Microsteps counts native calls, not path samples.
 type PhysicsFrameMetrics struct {
+	// Space is the space whose physics world attempted this frame.
+	Space                                                                      SpaceID
 	Frame                                                                      uint64
 	RequestedDelta                                                             float64
 	Elapsed                                                                    float32
@@ -71,8 +73,9 @@ type PhysicsFrameMetrics struct {
 type PhysicsCommand func(p.World) error
 
 type queuedPhysicsCommand struct {
-	tick uint64
-	run  PhysicsCommand
+	tick  uint64
+	epoch uint64 // retireEpoch when queued
+	run   PhysicsCommand
 }
 
 type physicsAttachment struct {
@@ -87,10 +90,14 @@ type physicsAttachment struct {
 	activation       PhysicsActivationWriter
 	config           PhysicsAttachmentConfig
 	localAnchor      p.Pose
+	// incarnation is the registry incarnation of entity when it attached; the
+	// step compares it instead of the Entity value, which may be non-comparable.
+	incarnation uint64
 }
 
 type physicsService struct {
 	server               *Server
+	space                *spaceRuntime // owning runtime; space.navigation is the sibling service
 	world                p.World
 	agents               map[int64]*physicsAttachment
 	bodies               map[p.BodyHandle]int64
@@ -107,20 +114,46 @@ type physicsService struct {
 	geometryPending      map[string]PhysicsGeometryPending
 	trajectories         map[int64]*physicsTrajectory
 	trajectoryGeneration uint64
+	// retireEpoch advances whenever MoveToSpace destroys bodies of this world.
+	retireEpoch uint64
+	// retired maps each source body handle a transfer destroyed to the
+	// retireEpoch that destruction started. A queued command whose error
+	// consists only of physics3d.StaleHandleErrors for such bodies, and that
+	// was queued before that epoch, is dropped instead of faulting. An entry
+	// goes once no queued command predates it (drain), on restore and on stop.
+	retired map[p.Handle]uint64
+	// pendingDeletes maps the entities whose DeleteEntity was deferred to a
+	// queued command to the registry incarnation that command deletes;
+	// transfers reject them.
+	pendingDeletes map[int64]uint64
 }
 
-// SetPhysicsWorld installs a tick-owned physics world before Run. The server
-// closes it on shutdown. Legacy collision backends may coexist for other entities.
+// SetPhysicsWorld installs space 0's tick-owned physics world before Run; it
+// fails once Run has started, when space 0 already has a world, or when the
+// world already serves another space. The server closes it on shutdown. Legacy
+// collision backends may coexist for other entities.
+// Space(id).SetPhysicsWorld configures other spaces.
 func (s *Server) SetPhysicsWorld(world p.World) error {
+	return s.setPhysicsWorld(0, world)
+}
+
+func (s *Server) setPhysicsWorld(space SpaceID, world p.World) error {
 	if world == nil || reflect.ValueOf(world).Kind() == reflect.Pointer && reflect.ValueOf(world).IsNil() {
 		return errors.New("golem: physics requires a non-nil world")
 	}
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
-	if s.life != lifecycleCreated || s.physics != nil {
+	if s.life != lifecycleCreated || s.runtime(space).phys() != nil {
 		return errors.New("golem: configure physics once before Run")
 	}
-	s.physics = &physicsService{server: s, world: world, agents: make(map[int64]*physicsAttachment), bodies: make(map[p.BodyHandle]int64)}
+	if owner, shared := s.serviceOwner(space, world, physicsWorldOf); shared {
+		return fmt.Errorf("golem: physics world already serves space %d", owner)
+	}
+	rt := s.ensureRuntime(space)
+	rt.physics = &physicsService{server: s, space: rt, world: world, agents: make(map[int64]*physicsAttachment), bodies: make(map[p.BodyHandle]int64)}
+	if space == 0 {
+		s.physics = rt.physics
+	}
 	return nil
 }
 
@@ -131,10 +164,19 @@ func (s *Server) SetPhysicsWorld(world p.World) error {
 // synchronous navigation cannot share pose authority with this attachment.
 // The world must implement physics3d.PlacementValidator; the complete solid volume
 // is validated before ownership or bindings change, using cfg.Placement.
+// The entity attaches in its own space's physics world; a body attached in, or
+// issued by, another space's world is rejected.
 // Call before Run or on the tick goroutine, outside physics callbacks.
 func (s *Server) AttachPhysics(id int64, body p.BodyHandle, cfg PhysicsAttachmentConfig) error {
-	ps := s.physics
+	return s.attachPhysics(s.runtimeOf(id), id, body, cfg)
+}
+
+func (s *Server) attachPhysics(rt *spaceRuntime, id int64, body p.BodyHandle, cfg PhysicsAttachmentConfig) error {
+	ps := rt.phys()
 	if err := ps.mutable(); err != nil {
+		return err
+	}
+	if err := s.transferBusy("AttachPhysics"); err != nil {
 		return err
 	}
 	s.lifeMu.Lock()
@@ -148,6 +190,9 @@ func (s *Server) AttachPhysics(id int64, body p.BodyHandle, cfg PhysicsAttachmen
 	}
 	if _, exists := ps.bodies[body]; exists {
 		return errors.New("golem: physics body already attached")
+	}
+	if err := s.foreignPhysicsBody(ps, body); err != nil {
+		return err
 	}
 	e, exists := s.Get(id)
 	if !exists {
@@ -164,7 +209,7 @@ func (s *Server) AttachPhysics(id int64, body p.BodyHandle, cfg PhysicsAttachmen
 	if _, conflict := e.(ColliderProvider3D); conflict {
 		return errors.New("golem: physics cannot share a legacy 3D collider entity")
 	}
-	if n := s.navigation; n != nil {
+	if n := rt.nav(); n != nil {
 		if a := n.agents[id]; a != nil && !a.config.StagedPhysics {
 			return errors.New("golem: physics requires staged navigation")
 		}
@@ -182,7 +227,7 @@ func (s *Server) AttachPhysics(id int64, body p.BodyHandle, cfg PhysicsAttachmen
 	if err != nil {
 		return err
 	}
-	if n := s.navigation; n != nil {
+	if n := rt.nav(); n != nil {
 		if agent := n.agents[id]; agent != nil && (!physicsNavigationMode(state.Mode) || agent.state.HasDestination && state.Mode == p.FreeDynamic) {
 			return errors.New("golem: body mode cannot consume this navigation attachment or intent")
 		}
@@ -191,7 +236,8 @@ func (s *Server) AttachPhysics(id int64, body p.BodyHandle, cfg PhysicsAttachmen
 	if !validPhysicsState(state) || state.Handle != body || state.Owner != 0 && state.Owner != id || state.Anchor.Position != (p.Vec3{X: x, Y: y, Z: z}) {
 		return errors.New("golem: physics body owner or gameplay anchor does not match entity")
 	}
-	a := &physicsAttachment{id: id, body: body, entity: e, position: position, writer: writer,
+	incarnation, _ := s.reg.Incarnation(id)
+	a := &physicsAttachment{id: id, body: body, entity: e, incarnation: incarnation, position: position, writer: writer,
 		config: cfg, localAnchor: state.Pose.Inverse().Compose(state.Anchor)}
 	if cfg.BindRotation {
 		a.rotation, _ = e.(PhysicsRotationWriter)
@@ -229,16 +275,48 @@ func (s *Server) AttachPhysics(id int64, body p.BodyHandle, cfg PhysicsAttachmen
 	return nil
 }
 
+// foreignPhysicsBody rejects a body that is attached in another space or that
+// another space's world recognizes as its own. Backends such as Box3D also
+// reject handles issued by another world (Handle.World) in World.Body; this
+// covers backends that cannot tell their handles apart. Servers whose only
+// runtime is space 0 skip the check.
+func (s *Server) foreignPhysicsBody(ps *physicsService, body p.BodyHandle) error {
+	if len(s.spaceOrder) == 0 {
+		return nil
+	}
+	return s.eachRuntime(func(rt *spaceRuntime) error {
+		other := rt.physics
+		if other == nil || other == ps {
+			return nil
+		}
+		if _, attached := other.bodies[body]; attached {
+			return fmt.Errorf("golem: physics body is attached in space %d", rt.id)
+		}
+		if state, err := other.world.Body(body); err == nil && state.Handle == body {
+			return fmt.Errorf("golem: physics body belongs to the world of space %d", rt.id)
+		}
+		return nil
+	})
+}
+
 // DetachPhysics destroys an attachment and its owned body. It is idempotent.
-// During accepted-frame callbacks it queues removal for the next tick.
+// During accepted-frame callbacks of the entity's space it queues removal for
+// the next tick. It returns an error wrapping physics3d.ErrBusy during a space
+// transfer (SpaceTransfer.RebuildPhysics and MoveShapes).
 func (s *Server) DetachPhysics(id int64) error {
-	ps := s.physics
+	if err := s.transferBusy("DetachPhysics"); err != nil {
+		return err
+	}
+	return s.runtimeOf(id).phys().detachEntity(id)
+}
+
+func (ps *physicsService) detachEntity(id int64) error {
 	if ps == nil || ps.agents[id] == nil {
 		return nil
 	}
 	if ps.dispatching {
 		body := ps.agents[id].body
-		return s.QueuePhysicsCommand(func(p.World) error {
+		return ps.queue(func(p.World) error {
 			if a := ps.agents[id]; a != nil && a.body == body {
 				return ps.detach(id, p.Deleted)
 			}
@@ -262,23 +340,27 @@ func (ps *physicsService) detach(id int64, reason p.CleanupReason) error {
 	delete(ps.agents, id)
 	delete(ps.bodies, a.body)
 	delete(ps.trajectories, id)
-	ps.server.DetachNavigation(id)
+	ps.space.nav().detach(id)
 	return nil
 }
 
 // PhysicsBody returns the accepted state of an attached body on the tick goroutine.
 func (s *Server) PhysicsBody(id int64) (p.BodyState, error) {
-	if s.physics == nil || s.physics.agents[id] == nil {
+	return s.runtimeOf(id).phys().body(id)
+}
+
+func (ps *physicsService) body(id int64) (p.BodyState, error) {
+	if ps == nil || ps.agents[id] == nil {
 		return p.BodyState{}, p.ErrStale
 	}
-	return s.physics.world.Body(s.physics.agents[id].body)
+	return ps.world.Body(ps.agents[id].body)
 }
 
 // SetPhysicsControllerVelocity changes retained physical character intent. An
 // active staged-navigation Motion takes precedence for its frame. Call on the
 // tick outside accepted-frame callbacks; use Post there for a later tick.
 func (s *Server) SetPhysicsControllerVelocity(id int64, velocity p.Vec3) error {
-	ps := s.physics
+	ps := s.runtimeOf(id).phys()
 	if err := ps.mutable(); err != nil {
 		return err
 	}
@@ -314,7 +396,7 @@ func (s *Server) TeleportPhysics(id int64, anchor p.Pose) error {
 // intent, and does not sweep intervening space. ExternalPose movement should use
 // StartPhysicsTrajectory. Rejection changes neither body/entity poses nor intent.
 func (s *Server) TeleportPhysicsWithPolicy(id int64, anchor p.Pose, policy PhysicsPlacementPolicy) error {
-	ps := s.physics
+	ps := s.runtimeOf(id).phys()
 	if err := ps.mutable(); err != nil {
 		return err
 	}
@@ -369,42 +451,62 @@ func (ps *physicsService) validatePlacement(body p.BodyHandle, pose p.Pose, poli
 	return nil
 }
 
-// OnPhysicsContact registers the accepted-frame and terminal shutdown callback.
-// Call at startup. Shutdown callbacks cannot queue further commands.
+// OnPhysicsContact registers space 0's accepted-frame and terminal shutdown
+// callback. Call at startup. Shutdown callbacks cannot queue further commands.
 func (s *Server) OnPhysicsContact(fn PhysicsContactFunc) error {
-	if err := s.physics.mutable(); err != nil {
+	return s.space0.physics.setContactCallback(fn)
+}
+
+func (ps *physicsService) setContactCallback(fn PhysicsContactFunc) error {
+	if err := ps.mutable(); err != nil {
 		return err
 	}
-	s.physics.onContact = fn
+	ps.onContact = fn
 	return nil
 }
 
-// ObservePhysicsFrames installs a read-only, tick-owned observation callback.
-// It runs once per attempted physics frame, including failures; it must not mutate
-// server/world state. No timing evidence is implied by enabling this observer.
+// ObservePhysicsFrames installs a read-only, tick-owned observation callback for
+// space 0's frames. It runs once per attempted physics frame, including failures;
+// it must not mutate server/world state. No timing evidence is implied by
+// enabling this observer.
 func (s *Server) ObservePhysicsFrames(fn func(PhysicsFrameMetrics)) error {
-	if err := s.physics.mutable(); err != nil {
+	return s.space0.physics.setFrameObserver(fn)
+}
+
+func (ps *physicsService) setFrameObserver(fn func(PhysicsFrameMetrics)) error {
+	if err := ps.mutable(); err != nil {
 		return err
 	}
-	s.physics.observe = fn
+	ps.observe = fn
 	return nil
 }
 
-// QueuePhysicsCommand schedules a command for the next tick's input boundary.
-// The queue is bounded by PostQueueCapacity and never executes recursively.
-// It is tick-owned; use Server.Post when submitting from another goroutine.
+// QueuePhysicsCommand schedules a command on space 0's world for the next tick's
+// input boundary. The queue is bounded by PostQueueCapacity and never executes
+// recursively. It is tick-owned; use Server.Post when submitting from another
+// goroutine. A command error faults the space (Run ends), except a
+// *physics3d.StaleHandleError naming a body that MoveToSpace removed from this
+// world after the command was queued: that command addressed a moved body and
+// is dropped. Any other error, including a stale handle the transfer did not
+// retire, an ErrStale without a handle, or such a stale handle joined with
+// another failure (errors.Join, several %w), still faults. Collider and joint
+// handles destroyed with a moved body are not recognized: a command that fails
+// on one of those alone still faults.
 func (s *Server) QueuePhysicsCommand(command PhysicsCommand) error {
-	ps := s.physics
+	return s.space0.physics.queue(command)
+}
+
+func (ps *physicsService) queue(command PhysicsCommand) error {
 	if ps == nil || ps.closed || command == nil {
 		return p.ErrInvalid
 	}
 	if ps.fault != nil {
 		return fmt.Errorf("%w: %v", p.ErrFaulted, ps.fault)
 	}
-	if len(ps.commands) >= s.config.PostQueueCapacity {
+	if len(ps.commands) >= ps.server.config.PostQueueCapacity {
 		return ErrPostQueueFull
 	}
-	ps.commands = append(ps.commands, queuedPhysicsCommand{tick: s.tick, run: command})
+	ps.commands = append(ps.commands, queuedPhysicsCommand{tick: ps.server.tick, epoch: ps.retireEpoch, run: command})
 	return nil
 }
 
@@ -424,11 +526,51 @@ func (ps *physicsService) mutable() error {
 	return nil
 }
 
+// queueDelete defers DeleteEntity(id) to the command queue. Repeated calls
+// queue once, an unknown entity queues nothing, and the queued command deletes
+// only the incarnation it was queued for, sparing a replacement registered
+// with the same ID before the queue drains.
 func (ps *physicsService) queueDelete(id int64) error {
-	return ps.server.QueuePhysicsCommand(func(p.World) error {
-		ps.server.DeleteEntity(id)
+	incarnation, exists := ps.server.reg.Incarnation(id)
+	if !exists {
+		return nil
+	}
+	if pending, ok := ps.pendingDeletes[id]; ok && pending == incarnation {
+		return nil
+	}
+	if err := ps.queue(func(p.World) error {
+		if pending, ok := ps.pendingDeletes[id]; ok && pending == incarnation {
+			delete(ps.pendingDeletes, id)
+		}
+		if current, ok := ps.server.reg.Incarnation(id); ok && current == incarnation {
+			ps.server.DeleteEntity(id)
+		}
 		return ps.fault
-	})
+	}); err != nil {
+		return err
+	}
+	if ps.pendingDeletes == nil {
+		ps.pendingDeletes = make(map[int64]uint64)
+	}
+	ps.pendingDeletes[id] = incarnation
+	return nil
+}
+
+// clearPendingDelete forgets a deferred deletion once id was deleted another
+// way; the queued command then finds a different (or no) incarnation.
+func (ps *physicsService) clearPendingDelete(id int64) {
+	if ps != nil && len(ps.pendingDeletes) != 0 {
+		delete(ps.pendingDeletes, id)
+	}
+}
+
+// deletePending reports whether DeleteEntity(id) waits in the command queue.
+func (ps *physicsService) deletePending(id int64) bool {
+	if ps == nil || len(ps.pendingDeletes) == 0 {
+		return false
+	}
+	_, ok := ps.pendingDeletes[id]
+	return ok
 }
 
 func (ps *physicsService) drain() error {
@@ -443,6 +585,10 @@ func (ps *physicsService) drain() error {
 	ps.commands = ps.commands[count:]
 	for _, command := range commands {
 		if err := command.run(ps.world); err != nil {
+			if ps.retiredBefore(err, command.epoch) {
+				// Addressed a body a transfer removed after it was queued.
+				continue
+			}
 			ps.fault = err
 			return fmt.Errorf("golem: queued physics command: %w", err)
 		}
@@ -450,11 +596,70 @@ func (ps *physicsService) drain() error {
 			return ps.fault
 		}
 	}
+	ps.forgetRetired()
 	return nil
 }
 
+// forgetRetired drops the retired bodies no queued command can still address:
+// all of them when the queue is empty, else those retired no later than the
+// oldest queued command's epoch (commands are queued in epoch order). A game
+// that queues a command every tick never empties the queue, so waiting for
+// that would keep every handle ever retired.
+func (ps *physicsService) forgetRetired() {
+	if len(ps.retired) == 0 {
+		return
+	}
+	if len(ps.commands) == 0 {
+		clear(ps.retired)
+		return
+	}
+	oldest := ps.commands[0].epoch
+	for handle, retiredAt := range ps.retired {
+		if retiredAt <= oldest {
+			delete(ps.retired, handle)
+		}
+	}
+}
+
+// retire records that a transfer destroyed body; synchronizeRetired advances
+// retireEpoch to the recorded value once per transfer.
+func (ps *physicsService) retire(body p.BodyHandle) {
+	if ps.retired == nil {
+		ps.retired = make(map[p.Handle]uint64)
+	}
+	ps.retired[p.Handle(body)] = ps.retireEpoch + 1
+}
+
+// retiredBefore reports whether err consists only of stale-handle errors for
+// bodies a transfer destroyed after a command queued at epoch. Every failure
+// in err's tree must qualify: an error that joins such a stale handle with an
+// unrelated failure is a real failure and must still fault.
+func (ps *physicsService) retiredBefore(err error, epoch uint64) bool {
+	if len(ps.retired) == 0 || err == nil {
+		return false
+	}
+	// Check the type before unwrapping: StaleHandleError unwraps to ErrStale.
+	if stale, ok := err.(*p.StaleHandleError); ok {
+		retiredAt, known := ps.retired[stale.Handle]
+		return known && retiredAt > epoch
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		parts := wrapped.Unwrap()
+		for _, part := range parts {
+			if !ps.retiredBefore(part, epoch) {
+				return false
+			}
+		}
+		return len(parts) != 0
+	case interface{ Unwrap() error }:
+		return ps.retiredBefore(wrapped.Unwrap(), epoch)
+	}
+	return false
+}
+
 func (ps *physicsService) step(dt float64) (stepErr error) {
-	metrics := PhysicsFrameMetrics{Frame: ps.server.tick, RequestedDelta: dt}
+	metrics := PhysicsFrameMetrics{Space: ps.space.id, Frame: ps.server.tick, RequestedDelta: dt}
 	started := NavigationNow()
 	defer func() {
 		if ps.observe != nil {
@@ -465,12 +670,12 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 	if err := ps.mutable(); err != nil {
 		return err
 	}
-	s := ps.server
-	f, err := s.PrepareNavigationFrame(dt)
+	s, n := ps.server, ps.space.nav()
+	f, err := n.prepareFrame(dt)
 	if err != nil {
 		return err
 	}
-	defer s.AbortNavigationFrame(f)
+	defer n.abortFrame(f)
 	if f != nil {
 		for _, id := range f.order {
 			if ps.agents[id] == nil {
@@ -492,9 +697,9 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 		if readErr != nil {
 			return readErr
 		}
-		entity, exists := s.Get(id)
+		incarnation, exists := s.reg.Incarnation(id)
 		x, y, z := a.position.Position3D()
-		if !exists || entity != a.entity || !validPhysicsState(state) || state.Anchor.Position != (p.Vec3{X: x, Y: y, Z: z}) {
+		if !exists || incarnation != a.incarnation || !validPhysicsState(state) || state.Anchor.Position != (p.Vec3{X: x, Y: y, Z: z}) {
 			return fmt.Errorf("golem: physics entity %d was changed outside its pose authority", id)
 		}
 		if f.Contains(id) && !physicsNavigationMode(state.Mode) {
@@ -526,7 +731,7 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 		frame.Motions = append(frame.Motions, motion)
 		submitted[a.body] = true
 	}
-	if err := s.ValidateNavigationFrame(f); err != nil {
+	if err := n.validateFrame(f); err != nil {
 		return err
 	}
 	ps.stepping = true
@@ -594,7 +799,7 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 			navResults = append(navResults, NavigationMotionResult{EntityID: id, Position: physicsNavPoint(state.Anchor.Position), Path: paths[a.body], RejectionReason: reason})
 		}
 	}
-	accepted, err := s.validateNavigationResults(f, navResults)
+	accepted, err := n.validateResults(f, navResults)
 	if err != nil {
 		return reject(err)
 	}
@@ -614,7 +819,7 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 	}
 	ps.dispatching = true
 	if f != nil {
-		s.commitNavigationResults(f, accepted)
+		n.commitResults(f, accepted)
 	}
 	if ps.onContact != nil && len(result.Events) > 0 {
 		ps.onContact(append([]p.ContactEvent(nil), result.Events...))
@@ -652,7 +857,7 @@ func (ps *physicsService) stop() {
 		return
 	}
 	ps.closed = true
-	ps.commands = nil
+	ps.commands, ps.pendingDeletes, ps.retired = nil, nil, nil
 	ps.trajectories = nil
 	ps.geometry, ps.geometryIdentities, ps.geometryPending = nil, nil, nil
 	if world, ok := ps.world.(p.ShutdownWorld); ok {
@@ -676,14 +881,15 @@ func physicsNavigationMode(mode p.MotionMode) bool {
 	return mode == p.DrivenCharacter || mode == p.Kinematic || mode == p.ScriptedAction || mode == p.FreeDynamic
 }
 
-func (s *Server) validatePhysicsNavigation(id int64, drive bool) error {
-	if s.physics == nil || s.physics.agents[id] == nil {
+func (rt *spaceRuntime) validatePhysicsNavigation(id int64, drive bool) error {
+	ps := rt.phys()
+	if ps == nil || ps.agents[id] == nil {
 		return nil
 	}
-	if drive && s.physics.trajectories[id].active() {
+	if drive && ps.trajectories[id].active() {
 		return fmt.Errorf("%w: scripted trajectory owns body movement", p.ErrBusy)
 	}
-	state, err := s.PhysicsBody(id)
+	state, err := ps.body(id)
 	if err != nil {
 		return err
 	}

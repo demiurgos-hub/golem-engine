@@ -162,3 +162,83 @@ func TestControllerRejectsUnapprovedStairPathBeforePhysicalMotion(t *testing.T) 
 		t.Fatalf("unsafe proposed stair was not rejected privately: state=%+v rejections=%v fault=%v", s, r.RejectedMotions, w.Metrics().Fault)
 	}
 }
+
+var _ p.CharacterControllerReader = (*box.World)(nil)
+
+// TestCharacterControllerReaderReportsCurrentPolicy covers the reader the root
+// space transfer uses: a rebuilt character created from another world's
+// reported policy (velocity intent cleared) reports the same configuration.
+func TestCharacterControllerReaderReportsCurrentPolicy(t *testing.T) {
+	src, dst := world(t), world(t)
+	createCharacter := func(w *box.World, cfg p.CharacterControllerConfig) p.BodyHandle {
+		t.Helper()
+		s, err := w.CreateShape(p.ShapeDesc{ID: "capsule", Kind: p.Capsule, Radius: .4, PointA: p.Vec3{Y: -.5}, PointB: p.Vec3{Y: .5}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := p.DefaultBody(p.Kinematic)
+		d.ID, d.Controller = "character", cfg
+		h, err := w.CreateBody(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = w.CreateCollider(p.DefaultCollider(h, s)); err != nil {
+			t.Fatal(err)
+		}
+		if err = w.Synchronize(); err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	cfg := p.DefaultCharacterController(p.Kinematic)
+	cfg.StepHeight, cfg.MaxSlopeDegrees, cfg.Iterations, cfg.Velocity = .2, 30, 5, p.Vec3{X: 1}
+	h := createCharacter(src, cfg)
+	if got, ok, err := src.CharacterController(h); err != nil || !ok || got != cfg {
+		t.Fatalf("created controller = %+v, %v, %v; want %+v", got, ok, err, cfg)
+	}
+	if err := src.SetCharacterVelocity(h, p.Vec3{Z: 3}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := src.CharacterController(h)
+	if err != nil || !ok || got.Velocity != (p.Vec3{Z: 3}) {
+		t.Fatalf("controller after velocity write = %+v, %v, %v", got, ok, err)
+	}
+
+	got.Velocity = p.Vec3{}
+	rebuilt := createCharacter(dst, got)
+	again, ok, err := dst.CharacterController(rebuilt)
+	want := cfg
+	want.Velocity = p.Vec3{}
+	if err != nil || !ok || again != want {
+		t.Fatalf("rebuilt controller = %+v, %v, %v; want %+v", again, ok, err, want)
+	}
+	if _, ok, err := dst.CharacterController(h); h.World == rebuilt.World || !errors.Is(err, p.ErrStale) || ok {
+		t.Fatalf("foreign handle = %v, %v; want ErrStale", ok, err)
+	}
+
+	scripted := p.MotionPolicy{Mode: p.ScriptedAction, Controller: p.DefaultCharacterController(p.ScriptedAction), Velocity: p.VelocityClear}
+	scripted.Controller.MaxHits = 7
+	if err := src.SetMotionPolicy(h, scripted); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, err := src.CharacterController(h); err != nil || !ok || got != scripted.Controller {
+		t.Fatalf("controller after policy change = %+v, %v, %v", got, ok, err)
+	}
+	if err := src.SetMotionPolicy(h, p.MotionPolicy{Mode: p.Kinematic, Velocity: p.VelocityClear}); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, err := src.CharacterController(h); err != nil || ok || got != (p.CharacterControllerConfig{}) {
+		t.Fatalf("controller removed by policy = %+v, %v, %v", got, ok, err)
+	}
+
+	crate, _ := add(t, src, p.FreeDynamic, p.Vec3{X: 5}, p.ShapeDesc{ID: "box", Kind: p.Box, HalfExtents: p.Vec3{X: .5, Y: .5, Z: .5}})
+	if got, ok, err := src.CharacterController(crate); err != nil || ok || got != (p.CharacterControllerConfig{}) {
+		t.Fatalf("non-character controller = %+v, %v, %v", got, ok, err)
+	}
+	if err := src.DestroyBody(crate, p.Deleted); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := src.CharacterController(crate); !errors.Is(err, p.ErrStale) || ok {
+		t.Fatalf("destroyed body = %v, %v; want ErrStale", ok, err)
+	}
+}

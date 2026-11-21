@@ -651,6 +651,34 @@ func TestGenerateGoSharedTemplateIncludesEnableCollision2D(t *testing.T) {
 	if strings.Contains(content, "EnableCollision3D") || strings.Contains(content, "Layers3D") {
 		t.Fatal("2D collision config must not emit 3D helpers")
 	}
+	space := content[strings.Index(content, "func (r *Runtime) EnableSpaceCollision("):]
+	for _, want := range []string{
+		"func (r *Runtime) EnableSpaceCollision(space golem.SpaceID, backend golem.CollisionBackend) *golem.CollisionLayers {",
+		"golem.MustCollisionBackend(backend)",
+		`Define("Player", "Monster")`,
+		`layers.SetCollides("Player", "Monster")`,
+		"if space == 0 {\n\t\tr.Layers = layers\n\t}",
+		"sp := r.Server.Space(space)",
+		"sp.SetCollisionBackend(backend)",
+		"sp.SetCollisionLayers(layers)",
+		"return layers",
+	} {
+		if !strings.Contains(space, want) {
+			t.Fatalf("generated EnableSpaceCollision missing %q\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "EnableSpaceCollision3D") {
+		t.Fatal("2D collision config must not emit EnableSpaceCollision3D")
+	}
+	// A setter that panics (backend already serving another space) must leave
+	// Runtime.Layers untouched.
+	if strings.Index(space, "sp.SetCollisionLayers(layers)") > strings.Index(space, "r.Layers = layers") {
+		t.Fatal("EnableSpaceCollision must install the space's services before storing Layers")
+	}
+	enable := content[strings.Index(content, "func (r *Runtime) EnableCollision("):]
+	if strings.Index(enable, "r.Server.SetCollisionLayers(layers)") > strings.Index(enable, "r.Layers = layers") {
+		t.Fatal("EnableCollision must install the server's services before storing Layers")
+	}
 }
 
 func TestGenerateGoSharedTemplateIncludesEnableCollision3D(t *testing.T) {
@@ -695,6 +723,23 @@ func TestGenerateGoSharedTemplateIncludesEnableCollision3D(t *testing.T) {
 	}
 	if strings.Contains(content, "func (r *Runtime) EnableCollision(") {
 		t.Fatal("3D collision config must not emit 2D EnableCollision")
+	}
+	space := content[strings.Index(content, "func (r *Runtime) EnableSpaceCollision3D("):]
+	for _, want := range []string{
+		"func (r *Runtime) EnableSpaceCollision3D(space golem.SpaceID, backend golem.CollisionBackend3D) *golem.CollisionLayers3D {",
+		"golem.MustCollisionBackend3D(backend)",
+		`Define("Player", "Wall")`,
+		"if space == 0 {\n\t\tr.Layers3D = layers\n\t}",
+		"sp.SetCollision3DBackend(backend)",
+		"sp.SetCollisionLayers3D(layers)",
+		"return layers",
+	} {
+		if !strings.Contains(space, want) {
+			t.Fatalf("generated EnableSpaceCollision3D missing %q\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "func (r *Runtime) EnableSpaceCollision(") {
+		t.Fatal("3D collision config must not emit 2D EnableSpaceCollision")
 	}
 }
 
@@ -782,6 +827,9 @@ func TestGenerateGoSharedTemplateRoutesDatagramEventDeliveries(t *testing.T) {
 			{Name: "Cast", Target: "entity", Delivery: "reliable_ordered"},
 			{Name: "Toast", Target: "session", Delivery: "reliable_unordered"},
 			{Name: "Weather", Target: "broadcast"},
+			{Name: "Ping", Target: "entity", FOIOnly: true},
+			{Name: "Notice", Target: "session"},
+			{Name: "Quake", Target: "entity"},
 		},
 	}
 
@@ -795,13 +843,20 @@ func TestGenerateGoSharedTemplateRoutesDatagramEventDeliveries(t *testing.T) {
 		"if err := b.srv.SendServerEvent(sid, golem.EventUnreliable, data); err != nil {",
 		"if err := b.srv.BroadcastServerEvent(golem.EventReliableOrdered, data); err != nil {",
 		"return b.srv.SendServerEvent(sessionID, golem.EventReliableUnordered, se.Marshal())",
-		"return b.srv.BroadcastEvent(golem.WrapServerEvent(se.Marshal()))",
+		"return b.srv.BroadcastServerEvent(golem.EventStream, se.Marshal())",
+		"if err := b.srv.SendServerEvent(sid, golem.EventStream, data); err != nil {",
+		"return b.srv.SendServerEvent(sessionID, golem.EventStream, se.Marshal())",
+		"if err := b.srv.BroadcastServerEvent(golem.EventStream, data); err != nil {",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("generated event senders missing %q\n%s", want, content)
 		}
 	}
-	if got := strings.Count(content, "golem.WrapServerEvent("); got != 1 {
-		t.Fatalf("stream-wrapped event senders = %d, want only the stream event", got)
+	// Stream events use the server event APIs too, so a space switch can hold
+	// them behind its transition instead of raw sends bypassing it.
+	for _, bypass := range []string{"golem.WrapServerEvent(", "b.srv.Send(", "b.srv.BroadcastEvent("} {
+		if strings.Contains(content, bypass) {
+			t.Fatalf("generated event senders still use %q\n%s", bypass, content)
+		}
 	}
 }

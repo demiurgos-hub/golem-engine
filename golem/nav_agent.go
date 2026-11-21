@@ -36,6 +36,15 @@ type NavAgent struct {
 	path   []NavPoint
 	velX   float64
 	velY   float64
+
+	// srv, pathEntity, pathSpace and pathMoveGen record where SetDestination
+	// computed the path (srv is nil when the bound value has no EntityID), so a
+	// path planned on another space's nav backend is dropped after a space
+	// move, including a round trip back to the same space.
+	srv         *Server
+	pathEntity  int64
+	pathSpace   SpaceID
+	pathMoveGen uint64
 }
 
 // Bind attaches a position-aware entity to the agent. Call this from OnSpawn
@@ -47,17 +56,40 @@ func (a *NavAgent) Bind(e navMover) {
 }
 
 // SetDestination finds a path to (toX, toY) from the bound entity's current
-// position and stores it as the agent's route. Returns false if the agent is
-// not bound, no nav backend is configured, or no path exists.
-// Any existing path and velocity are cleared, including when the new request
-// fails. A nil server is treated as having no navigation backend.
+// position and stores it as the agent's route. The path comes from the nav
+// backend of the bound entity's space (see Space.SetNavBackend); a bound value
+// without an EntityID method, or one the server does not know, uses space 0.
+// Returns false if the agent is not bound, that space has no nav backend, or
+// no path exists. Any existing path and velocity are cleared, including when
+// the new request fails. A nil server is treated as having no navigation
+// backend.
+//
+// The agent remembers the space the path was computed in: once the entity has
+// moved to another space (MoveToSpace), Tick, HasPath, NextWaypoint and
+// RemainingDistance drop the old path, so the agent stops instead of walking a
+// route of the previous space. Any space move since SetDestination drops it,
+// even one that returned the entity to the same space before the next Tick.
+// Call SetDestination again to path in the new space.
 func (a *NavAgent) SetDestination(s *Server, toX, toY float64) bool {
 	a.ResetPath()
 	if a.entity == nil || s == nil {
 		return false
 	}
+	rt := &s.space0
+	a.srv, a.pathEntity, a.pathSpace, a.pathMoveGen = nil, 0, 0, 0
+	if e, ok := a.entity.(interface{ EntityID() int64 }); ok {
+		id := e.EntityID()
+		rt = s.runtimeOf(id)
+		a.srv, a.pathEntity = s, id
+		if s.reg != nil {
+			a.pathMoveGen = s.reg.SpaceMoveGeneration(id)
+		}
+		if rt != nil { // nil: the space has no nav backend, so no path follows
+			a.pathSpace = rt.id
+		}
+	}
 	fromX, fromY := a.entity.Position()
-	path, ok := s.FindPath(float64(fromX), float64(fromY), toX, toY)
+	path, ok := rt.findPath(float64(fromX), float64(fromY), toX, toY)
 	if !ok {
 		return false
 	}
@@ -65,14 +97,33 @@ func (a *NavAgent) SetDestination(s *Server, toX, toY float64) bool {
 	return true
 }
 
+// dropMovedPath clears the path when the entity changed space since the path
+// was computed (its space or move generation differs). While no entity is
+// outside space 0 and none ever moved this is two atomic loads.
+func (a *NavAgent) dropMovedPath() {
+	s := a.srv
+	if s == nil || len(a.path) == 0 || s.reg == nil {
+		return
+	}
+	var space SpaceID
+	if s.reg.SpacesInUse() {
+		space, _ = s.reg.Space(a.pathEntity)
+	}
+	if space != a.pathSpace || s.reg.SpaceMoveGeneration(a.pathEntity) != a.pathMoveGen {
+		a.ResetPath()
+	}
+}
+
 // Tick advances the agent one tick along its current path, reading position
 // from the bound entity and writing the updated position back via SetPosition.
 // No-op if the agent is not bound or has no path. Call this from the entity's
-// Tick method to drive automatic movement.
+// Tick method to drive automatic movement. A path computed in a space the
+// entity has since left is dropped first (see SetDestination).
 func (a *NavAgent) Tick(dt float64) {
 	if a.entity == nil {
 		return
 	}
+	a.dropMovedPath()
 	x, y := a.entity.Position()
 	nx, ny := a.Step(dt, float64(x), float64(y))
 	a.entity.SetPosition(float32(nx), float32(ny))
@@ -91,6 +142,10 @@ func (a *NavAgent) Tick(dt float64) {
 //
 //	npc.X, npc.Y = npc.Agent.Step(dt, npc.X, npc.Y)
 //	npc.SetPosition(npc.X, npc.Y)
+//
+// Step cannot detect that the entity moved to another space: it follows the
+// stored path as is. Call ResetPath (or SetDestination) after MoveToSpace when
+// driving the agent with Step.
 func (a *NavAgent) Step(dt, x, y float64) (float64, float64) {
 	for len(a.path) > 0 {
 		next := a.path[0]
@@ -121,8 +176,10 @@ func (a *NavAgent) Step(dt, x, y float64) (float64, float64) {
 	return x, y
 }
 
-// HasPath reports whether the agent has a path to follow.
+// HasPath reports whether the agent has a path to follow. A path computed in a
+// space the entity has since left is dropped first.
 func (a *NavAgent) HasPath() bool {
+	a.dropMovedPath()
 	return len(a.path) > 0
 }
 
@@ -143,8 +200,10 @@ func (a *NavAgent) Velocity() (float64, float64) {
 
 // RemainingDistance returns the total length of the path from (x, y) to the
 // goal, summing straight-line distances to each remaining waypoint.
-// Returns 0 when the agent has no path.
+// Returns 0 when the agent has no path (including one dropped after a space
+// move).
 func (a *NavAgent) RemainingDistance(x, y float64) float64 {
+	a.dropMovedPath()
 	if len(a.path) == 0 {
 		return 0
 	}
@@ -156,8 +215,10 @@ func (a *NavAgent) RemainingDistance(x, y float64) float64 {
 }
 
 // NextWaypoint returns the next world-space position the agent is heading
-// toward, and true. Returns the zero value and false when no path is set.
+// toward, and true. Returns the zero value and false when no path is set,
+// including one dropped after a space move.
 func (a *NavAgent) NextWaypoint() (NavPoint, bool) {
+	a.dropMovedPath()
 	if len(a.path) == 0 {
 		return NavPoint{}, false
 	}

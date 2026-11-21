@@ -7,6 +7,41 @@ namespace GolemEngine.Unity.Tests
     public sealed partial class GolemDatagramProtocolTests
     {
         [Test]
+        public void TryGetEventRecordReadsTransitionTagsLikeTheServer()
+        {
+            // Server golden bytes (internal/netwire): untagged 00 0a 01; tagged with 300: 00 00 ac 02 0a 01.
+            Assert.That(GolemDatagramProtocol.TryGetEventRecord(new byte[] { 0, 0x0a, 0x01 }, out ulong transition, out var serverEvent), Is.True);
+            Assert.That(transition, Is.EqualTo(0UL));
+            Assert.That(serverEvent, Is.EqualTo(new byte[] { 0x0a, 0x01 }));
+            Assert.That(GolemDatagramProtocol.TryGetEventRecord(new byte[] { 0, 0, 0xac, 0x02, 0x0a, 0x01 }, out transition, out serverEvent), Is.True);
+            Assert.That(transition, Is.EqualTo(300UL));
+            Assert.That(serverEvent, Is.EqualTo(new byte[] { 0x0a, 0x01 }));
+            Assert.That(GolemDatagramProtocol.TryGetEventRecord(new byte[] { 0, 0, 0xac, 0x02, 0x0a, 0x01 }, out byte[] untaggedView), Is.True);
+            Assert.That(untaggedView, Is.EqualTo(new byte[] { 0x0a, 0x01 }));
+
+            // Empty events stay unambiguous in both forms.
+            Assert.That(GolemDatagramProtocol.TryGetEventRecord(new byte[] { 0 }, out transition, out serverEvent), Is.True);
+            Assert.That(transition, Is.EqualTo(0UL));
+            Assert.That(serverEvent, Is.Empty);
+            Assert.That(GolemDatagramProtocol.TryGetEventRecord(new byte[] { 0, 0, 7 }, out transition, out serverEvent), Is.True);
+            Assert.That(transition, Is.EqualTo(7UL));
+            Assert.That(serverEvent, Is.Empty);
+
+            // Malformed tagged records and compact state frames are rejected.
+            foreach (var frame in new[]
+            {
+                Array.Empty<byte>(),
+                new byte[] { 0, 0 },
+                new byte[] { 0, 0, 0x80 },
+                new byte[] { 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01 },
+                new byte[] { 1, 0 },
+            })
+            {
+                Assert.That(GolemDatagramProtocol.TryGetEventRecord(frame, out transition, out serverEvent), Is.False, BitConverter.ToString(frame));
+            }
+        }
+
+        [Test]
         public void SendUnreliableEncodesLaneAndPayload()
         {
             var sent = new List<byte[]>();

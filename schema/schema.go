@@ -432,19 +432,6 @@ func LoadSchemas(schemasDir string, dimensions int, customTypes map[string]Custo
 	return entities, nil
 }
 
-// checkReservedGeneratedMethodVars returns an error when any var key's
-// SnakeToPascal form collides with generated Synced* methods Server or BindServer
-// (e.g. server, bind_server, Server, BindServer).
-func checkReservedGeneratedMethodVars(entity string, vars map[string]SchemaVarDef) error {
-	for _, k := range SortedKeys(vars) {
-		switch SnakeToPascal(k) {
-		case "Server", "BindServer":
-			return fmt.Errorf("entity %q: var name %q is reserved because it collides with generated Server/BindServer methods", entity, k)
-		}
-	}
-	return nil
-}
-
 // normalizeVarVisibility validates a var's visibility attribute.
 // Empty and "all" mean public; "owner" means owner-only replication.
 // Any other value is rejected.
@@ -481,7 +468,7 @@ func BuildEntityData(sf SchemaFile, dimensions int, customTypes map[string]Custo
 			log.Fatalf("entity %q: var name %q is reserved for implicit entity metadata", sf.Entity, reserved)
 		}
 	}
-	if err := checkReservedGeneratedMethodVars(sf.Entity, sf.Vars); err != nil {
+	if err := checkReservedGeneratedNames(sf.Entity, dimensions, sf.Vars); err != nil {
 		log.Fatal(err)
 	}
 
@@ -960,6 +947,9 @@ func LoadWorldSchemas(worldDir string, customTypes map[string]CustomTypeData) ([
 			wt.UpdateTag = lw.wf.Tag
 		}
 		worldTypes = append(worldTypes, wt)
+	}
+	if err := validateWorldManagerNames(worldTypes); err != nil {
+		return nil, err
 	}
 	return worldTypes, nil
 }

@@ -9,6 +9,12 @@ import (
 // Get and Owner can resolve it, but enumeration, ticking, snapshots and lifecycle
 // output exclude it until CommitProvisional. An optional owner matches AddOwned.
 func (r *Registry) AddProvisional(e Entity, owner ...int64) error {
+	return r.AddProvisionalIn(0, e, owner...)
+}
+
+// AddProvisionalIn is AddProvisional with the entity placed in space. Space
+// resolves the prepared entity and CommitProvisional publishes it there.
+func (r *Registry) AddProvisionalIn(space SpaceID, e Entity, owner ...int64) error {
 	if len(owner) > 1 {
 		return fmt.Errorf("registry: expected at most one provisional owner")
 	}
@@ -25,11 +31,14 @@ func (r *Registry) AddProvisional(e Entity, owner ...int64) error {
 	if len(owner) == 1 {
 		r.owners[id] = owner[0]
 	}
+	r.setSpaceLocked(id, space)
+	r.assignIncarnationLocked(id)
 	return nil
 }
 
 // CommitProvisional publishes the specified prepared entities atomically and
-// queues their full spawn states. It does not call OnSpawn. Invalid or changed
+// queues their full spawn states, keeping their incarnations. It does not call
+// OnSpawn. Invalid or changed
 // identities leave every entry provisional and all lifecycle queues unchanged.
 func (r *Registry) CommitProvisional(ids ...int64) error {
 	r.mu.Lock()
@@ -51,14 +60,16 @@ func (r *Registry) CommitProvisional(ids ...int64) error {
 	return nil
 }
 
-// DiscardProvisional removes a prepared entity and its owner without lifecycle
-// hooks or replication output. Published entities are left unchanged.
+// DiscardProvisional removes a prepared entity, its owner, space and
+// incarnation without lifecycle hooks or replication output. Published entities are left unchanged.
 func (r *Registry) DiscardProvisional(id int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.provisional[id]; ok {
 		delete(r.provisional, id)
 		delete(r.owners, id)
+		delete(r.incarnation, id)
+		r.setSpaceLocked(id, 0)
 	}
 }
 

@@ -29,6 +29,12 @@ type inboundDispatcher struct {
 	done    chan struct{}
 	stopped chan struct{}
 	once    sync.Once
+	// space is this connection's open space transition (dispatcher-only).
+	space spaceTransitionState
+	// transition is the latest space transition announced on this connection
+	// (dispatcher-only). It survives SpaceSettled; datagram event records
+	// tagged with an older transition (untagged ones count as 0) are dropped.
+	transition uint64
 }
 
 // newInboundDispatcher creates a paused serialized inbound event dispatcher.
@@ -65,6 +71,16 @@ func (d *inboundDispatcher) stop() {
 	d.once.Do(func() { close(d.done) })
 }
 
+// isDone reports whether the dispatcher has been stopped.
+func (d *inboundDispatcher) isDone() bool {
+	select {
+	case <-d.done:
+		return true
+	default:
+		return false
+	}
+}
+
 // run processes inbound events until the dispatcher is stopped.
 func (d *inboundDispatcher) run(c *GameClient) {
 	defer close(d.stopped)
@@ -97,6 +113,8 @@ type GameClient struct {
 	inbound            *inboundDispatcher
 	onOpen             func()
 	onClose            func(DisconnectInfo)
+	onSpaceChanged     func(oldSpace, newSpace SpaceID)
+	space              SpaceID
 	lastErr            error
 	closedCh           chan struct{}
 	generation         uint64
@@ -116,7 +134,7 @@ func NewGameClient(options GameClientOptions) *GameClient {
 	if supports == nil {
 		supports = builtinSupportsTransport
 	}
-	return &GameClient{
+	c := &GameClient{
 		entities:      options.EntityManager,
 		world:         options.WorldManager,
 		events:        options.EventManager,
@@ -127,6 +145,27 @@ func NewGameClient(options GameClientOptions) *GameClient {
 		createChannel: create,
 		supports:      supports,
 		closedCh:      make(chan struct{}),
+	}
+	if notifier, ok := options.EntityManager.(EntityResyncNotifier); ok {
+		notifier.OnResyncNeeded(c.requestEntityResync)
+	}
+	return c
+}
+
+// requestEntityResync asks the server for a full state of entityID after the
+// entity manager evicted compact records held for it. It runs on the inbound
+// dispatcher goroutine and does nothing while disconnected. A failed send
+// fails the connection: the entity would otherwise stay without state.
+func (c *GameClient) requestEntityResync(entityID int64) {
+	c.mu.Lock()
+	channel := c.channel
+	d := c.inbound
+	c.mu.Unlock()
+	if channel == nil {
+		return
+	}
+	if err := channel.Send(netwire.AppendEntityResyncControl(nil, entityID)); err != nil {
+		c.failConnection(d, sanitizeURLError(err))
 	}
 }
 
@@ -321,6 +360,7 @@ func (c *GameClient) installChannel(generation uint64, channel ReliableMessageCh
 				c.inbound = nil
 			}
 			c.connectedTransport = ""
+			c.space = 0
 			shouldNotify = true
 			c.lastErr = info.Err
 			closeOnce(&c.closedCh)
@@ -384,6 +424,7 @@ func (c *GameClient) installChannel(generation uint64, channel ReliableMessageCh
 	c.channel = channel
 	c.inbound = inbound
 	c.connectedTransport = options.Transport
+	c.space = 0
 	c.lastErr = nil
 	c.closedCh = make(chan struct{})
 	installed = true
@@ -420,6 +461,7 @@ func (c *GameClient) Disconnect() {
 	c.channel = nil
 	c.inbound = nil
 	c.connectedTransport = ""
+	c.space = 0
 	shouldNotify := channel != nil
 	onClose := c.onClose
 	if shouldNotify {
@@ -442,6 +484,38 @@ func (c *GameClient) Disconnect() {
 			log.Printf("golem-go-client: disconnect was_clean=%v error=%v", true, nil)
 			onClose(DisconnectInfo{WasClean: true})
 		}
+	}
+}
+
+// failConnection closes the connection served by dispatcher d with err and
+// reports one unclean OnDisconnect. It runs on the dispatcher goroutine.
+func (c *GameClient) failConnection(d *inboundDispatcher, err error) {
+	c.mu.Lock()
+	channel := c.channel
+	if c.inbound != d || channel == nil {
+		c.mu.Unlock()
+		return
+	}
+	c.generation++
+	cancel := c.attemptCancel
+	c.attemptCancel = nil
+	c.channel = nil
+	c.inbound = nil
+	c.connectedTransport = ""
+	c.space = 0
+	c.lastErr = err
+	closeOnce(&c.closedCh)
+	onClose := c.onClose
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	d.stop()
+	_ = channel.Close()
+	c.clearEntities()
+	log.Printf("golem-go-client: disconnect was_clean=%v error=%v", false, err)
+	if onClose != nil {
+		onClose(DisconnectInfo{Err: err})
 	}
 }
 
@@ -530,44 +604,78 @@ func (c *GameClient) dispatchInboundEvent(dispatcher *inboundDispatcher, event i
 	}
 	switch event.kind {
 	case inboundEventStream:
-		c.handleMessage(event.data)
+		c.handleMessage(dispatcher, event.data)
 	case inboundEventCompactState:
-		c.handleCompactStateBatch(event.data)
+		if dispatcher.space.open {
+			c.holdCompactStateBatch(dispatcher, event.data)
+			return
+		}
+		c.handleCompactStateBatch(dispatcher, event.data)
 	}
 }
 
-func (c *GameClient) handleMessage(data []byte) {
+// handleMessage applies every ServerMessage field of one stream frame in order.
+// Space fields are identified by field number; their payloads may be empty.
+func (c *GameClient) handleMessage(d *inboundDispatcher, data []byte) {
 	messages, err := decodeServerMessages(data)
 	if err != nil {
 		c.setLastErr(err)
 		return
 	}
 	for _, msg := range messages {
-		if len(msg.EntityUpdate) > 0 && c.decodeEntity != nil && c.entities != nil {
-			update, err := c.decodeEntity(msg.EntityUpdate)
-			if err == nil {
-				c.entities.ApplyUpdate(update)
-			} else {
-				c.setLastErr(err)
-			}
+		if d.isDone() {
+			return
 		}
-		if len(msg.WorldUpdate) > 0 && c.decodeWorld != nil && c.world != nil {
-			update, err := c.decodeWorld(msg.WorldUpdate)
-			if err == nil {
-				c.world.ApplyUpdate(update)
-			} else {
-				c.setLastErr(err)
+		switch msg.Field {
+		case serverMessageSpaceChangedField:
+			space, transition := decodeSpaceChanged(msg.Payload)
+			c.applySpaceChanged(d, space, transition)
+		case serverMessageSpaceSettledField:
+			c.applySpaceSettled(d, decodeSpaceSettled(msg.Payload))
+		case serverMessageWorldClearedField:
+			c.applyWorldCleared(decodeWorldCleared(msg.Payload))
+		case serverMessageEntityField:
+			// Entity, world and event fields with an empty payload carry nothing.
+			if len(msg.Payload) > 0 && c.decodeEntity != nil && c.entities != nil {
+				update, err := c.decodeEntity(msg.Payload)
+				if err == nil {
+					c.entities.ApplyUpdate(update)
+				} else {
+					c.setLastErr(err)
+				}
 			}
-		}
-		if len(msg.ServerEvent) > 0 && c.events != nil {
-			c.events.ApplyRaw(msg.ServerEvent)
+		case serverMessageWorldField:
+			if len(msg.Payload) > 0 && c.decodeWorld != nil && c.world != nil {
+				update, err := c.decodeWorld(msg.Payload)
+				if err == nil {
+					c.world.ApplyUpdate(update)
+				} else {
+					c.setLastErr(err)
+				}
+			}
+		case serverMessageEventField:
+			if len(msg.Payload) > 0 && c.events != nil {
+				c.events.ApplyRaw(msg.Payload)
+			}
 		}
 	}
 }
 
-func (c *GameClient) handleCompactStateBatch(data []byte) {
+// handleCompactStateBatch applies every frame of one datagram batch. A callback
+// that disconnects stops dispatcher d, and the remaining frames are skipped.
+// Event records tagged with a transition older than the connection's current
+// one belong to a space the session already left and are dropped, as are
+// malformed event records.
+func (c *GameClient) handleCompactStateBatch(d *inboundDispatcher, data []byte) {
 	_ = decodeLengthPrefixedFrames(data, func(frame []byte) {
-		if event, ok := netwire.EventRecord(frame); ok {
+		if d != nil && d.isDone() {
+			return
+		}
+		if len(frame) > 0 && frame[0] == netwire.EventRecordTag {
+			transition, event, ok := netwire.EventRecordTransition(frame)
+			if !ok || (d != nil && transition < d.transition) {
+				return
+			}
 			if c.events != nil {
 				c.events.ApplyRaw(event)
 			}

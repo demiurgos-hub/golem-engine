@@ -9,6 +9,7 @@ export class WorldManager {
 {{- range .WorldTypes}}
   private _{{.LowerName}}?: {{.DataName}};
   private _on{{.Name}}Update = new Set<(data: {{.DataName}}) => void>();
+  private _on{{.Name}}Cleared = new Set<() => void>();
 {{- end}}
 {{range .WorldTypes}}
   get {{.LowerName}}(): {{.DataName}} | undefined {
@@ -19,6 +20,12 @@ export class WorldManager {
   on{{.Name}}Update(fn: (data: {{.DataName}}) => void): () => void {
     this._on{{.Name}}Update.add(fn);
     return () => { this._on{{.Name}}Update.delete(fn); };
+  }
+
+  /** Register a listener for the server clearing held {{.Name}} data, for example on a move into a space without it. Returns an unsubscribe function. */
+  on{{.Name}}Cleared(fn: () => void): () => void {
+    this._on{{.Name}}Cleared.add(fn);
+    return () => { this._on{{.Name}}Cleared.delete(fn); };
   }
 {{if and .IsCatalog .CatalogKeyField}}
   /** Returns the {{.CatalogItemType}} with the given key, or undefined if not loaded or not found. */
@@ -35,5 +42,18 @@ export class WorldManager {
       return;
     }
 {{- end}}
+  }
+
+  /** Drop the world data whose world type is `name`, as the server's WorldCleared message asks, notifying its cleared listeners when a value was held. Unknown names are ignored. */
+  clearWorld(name: string): void {
+    switch (name) {
+{{- range .WorldTypes}}
+      case {{printf "%q" .Name}}:
+        if (this._{{.LowerName}} === undefined) return;
+        this._{{.LowerName}} = undefined;
+        for (const fn of this._on{{.Name}}Cleared) fn();
+        return;
+{{- end}}
+    }
   }
 }

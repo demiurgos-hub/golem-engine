@@ -21,8 +21,11 @@ func (w *World) ColliderMotionIntervals(a, z ColliderMotion, tolerance float32, 
 	}
 	ca, aok := w.colliders[a.Collider]
 	cz, zok := w.colliders[z.Collider]
-	if !aok || !zok {
-		return p.QueryResult{Incomplete: true}, p.ErrStale
+	if !aok {
+		return p.QueryResult{Incomplete: true}, staleHandle(p.Handle(a.Collider))
+	}
+	if !zok {
+		return p.QueryResult{Incomplete: true}, staleHandle(p.Handle(z.Collider))
 	}
 	if !a.Start.Valid() || !a.End.Valid() || !z.Start.Valid() || !z.End.Valid() || !p.Finite(tolerance) || tolerance <= 0 {
 		return p.QueryResult{Incomplete: true}, p.ErrInvalid

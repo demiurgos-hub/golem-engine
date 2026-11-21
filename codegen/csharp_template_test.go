@@ -148,3 +148,30 @@ func TestUnityPlayModeBridgeFixtureMatchesTemplate(t *testing.T) {
 		t.Fatal("Unity Play Mode bridge fixture differs from the emitted template; regenerate it before running lifecycle tests")
 	}
 }
+
+func TestGenerateCSharpWorldManagerClearsByWorldName(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/csharp/world_manager.cs.tmpl")
+	if err != nil {
+		t.Fatalf("loadEmbeddedTemplate: %v", err)
+	}
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, schema.SharedData{
+		GoPackage:  "Golem.Generated",
+		WorldTypes: []schema.WorldTypeData{{Name: "Zone", LowerName: "zone", DataName: "ZoneData"}},
+	}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := out.String()
+	for _, want := range []string{
+		"public sealed class WorldManager : IWorldManager, IWorldClearer",
+		"private Action _onZoneCleared;",
+		"public void OnZoneCleared(Action fn) { _onZoneCleared = fn; }",
+		"public void ClearWorld(string name)",
+		"case \"Zone\":",
+		"_zone = null;\n                    _onZoneCleared?.Invoke();",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("generated C# WorldManager missing %q\n%s", want, content)
+		}
+	}
+}

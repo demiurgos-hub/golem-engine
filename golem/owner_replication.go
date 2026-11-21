@@ -52,6 +52,40 @@ func (s *Server) wrappedFullForView(e Entity, view recipientView, cache *fullFra
 	return frame, nil
 }
 
+// wrappedFullForRecipient is wrappedFullForView for one recipient session. An
+// authoritative frame of an owner-scoped entity is returned only while the
+// session still owns the entity after the frame was serialized; otherwise the
+// public frame is returned (with publicView). Server.SetOwner changes the
+// registry owner before it bumps the state revision, so owner-view bytes that
+// carry the bumped revision always fail this re-check, while bytes serialized
+// before the bump carry an older revision that the following public refresh
+// supersedes on the client. Authoritative bytes that fail the re-check are not
+// cached.
+func (s *Server) wrappedFullForRecipient(e Entity, sessionID int64, view recipientView, cache *fullFrameCache) ([]byte, recipientView, error) {
+	if view == publicView || !entityIsOwnerScoped(e) {
+		frame, err := s.wrappedFullForView(e, view, cache)
+		return frame, view, err
+	}
+	id := e.EntityID()
+	frame, hit := cache.authoritative[id]
+	if !hit {
+		raw, err := fullUpdateForView(e, authoritativeView)
+		if err != nil {
+			return nil, view, err
+		}
+		frame = s.listener.Wrap(raw)
+	}
+	if !s.sessionOwnsEntity(sessionID, id) {
+		// Ownership moved after the view was chosen.
+		frame, err := s.wrappedFullForView(e, publicView, cache)
+		return frame, publicView, err
+	}
+	if !hit {
+		cache.authoritative[id] = frame
+	}
+	return frame, authoritativeView, nil
+}
+
 // ownershipRefresh tracks a coalesced confidentiality transition for one entity
 // until the next replication pass. clearOwner is the pre-change owner that may
 // still hold private client state; newOwner is the final owner after coalescing.
@@ -123,9 +157,17 @@ func (s *Server) hasPendingOwnershipRefreshLocked() bool {
 }
 
 // fullUpdateForSession returns authoritative FullUpdate for the owner (and for
-// entities without owner-only vars), or PublicFullUpdate for non-owners.
+// entities without owner-only vars), or PublicFullUpdate for non-owners. Like
+// wrappedFullForRecipient it re-checks ownership after serializing the owner
+// view and falls back to the public view when the session lost the entity
+// meanwhile.
 func (s *Server) fullUpdateForSession(e Entity, sessionID int64) ([]byte, error) {
-	return fullUpdateForView(e, s.viewForSession(sessionID, e))
+	view := s.viewForSession(sessionID, e)
+	raw, err := fullUpdateForView(e, view)
+	if err != nil || view == publicView || !entityIsOwnerScoped(e) || s.sessionOwnsEntity(sessionID, e.EntityID()) {
+		return raw, err
+	}
+	return fullUpdateForView(e, publicView)
 }
 
 // eventualChangeForSession adapts an authoritative eventual change for a
@@ -203,7 +245,8 @@ func (s *Server) streamDeltaForSession(sessionID, entityID int64, authDelta []by
 }
 
 // wrappedFullForSession returns a wrapped full-state frame for sessionID,
-// caching authoritative and public variants separately.
+// caching authoritative and public variants separately. The owner view is
+// re-checked after serialization (wrappedFullForRecipient).
 func (s *Server) wrappedFullForSession(
 	sessionID, entityID int64,
 	spawnData map[int64][]byte,
@@ -222,7 +265,7 @@ func (s *Server) wrappedFullForSession(
 			}
 		}
 	}
-	frame, err := s.wrappedFullForView(e, view, &cache)
+	frame, view, err := s.wrappedFullForRecipient(e, sessionID, view, &cache)
 	if err != nil {
 		if view == publicView {
 			return nil, false, fmt.Errorf("public full update for entity %d: %w", entityID, err)
@@ -235,7 +278,8 @@ func (s *Server) wrappedFullForSession(
 // appendOwnershipRefreshFrames appends public/auth full-state frames for a
 // coalesced ownership transition when the recipient still knows the entity.
 // Only stayed recipients are refreshed: entered already got the correct
-// owner/public full state, and exited receive EntityRemoved instead.
+// owner/public full state, and exited receive EntityRemoved instead. The
+// grant goes to the new owner only while it still owns the entity.
 func (s *Server) appendOwnershipRefreshFrames(
 	sessionID int64,
 	pending map[int64]ownershipRefresh,
@@ -267,9 +311,12 @@ func (s *Server) appendOwnershipRefreshFrames(
 			}
 			streamFrames = append(streamFrames, frame)
 		}
-		if ref.newOwner == sessionID && ref.newOwner != 0 {
+		// The grant follows the current owner, not the snapshot: ownership may
+		// have moved on off the tick goroutine since the refresh was taken, and
+		// that later change queued its own refresh for the next pass.
+		if ref.newOwner == sessionID && ref.newOwner != 0 && s.sessionOwnsEntity(sessionID, entityID) {
 			s.clearEventualEntity(sessionID, entityID)
-			frame, err := s.wrappedFullForView(e, authoritativeView, &cache)
+			frame, _, err := s.wrappedFullForRecipient(e, sessionID, authoritativeView, &cache)
 			if err != nil {
 				return streamFrames, fmt.Errorf("ownership grant full for entity %d: %w", entityID, err)
 			}

@@ -49,6 +49,22 @@ type Session struct {
 	closeOnce  sync.Once
 	abortOnce  sync.Once
 
+	// eventLane packs the session's server event lane state so off-tick
+	// senders never see a torn pair: eventStreamOnlyBit sends datagram-lane
+	// events as their stream frame instead, keeping them ordered with the
+	// reliable stream while the server waits for a space transition
+	// acknowledgement; the low 63 bits hold the session's latest space
+	// transition, which tags datagram event records once non-zero.
+	eventLane atomic.Uint64
+
+	// eventHolding queues server events in eventHeld instead of sending them
+	// while the session may be about to change space; FlushSessionEvents
+	// sends them in order. eventHoldMu guards eventHeld and serializes the
+	// flush with senders that saw eventHolding set.
+	eventHolding atomic.Bool
+	eventHoldMu  sync.Mutex
+	eventHeld    []heldEvent
+
 	// Cumulative successful writes (for LogReplicationStats deltas).
 	wireDatagramOK atomic.Uint64
 	streamBatchOK  atomic.Uint64
@@ -415,6 +431,8 @@ func (s *Session) readPump(
 	onReliableUnordered func(*Session, []byte),
 	onReliableOrdered func(*Session, []byte),
 	onEventualStateFeedback func(*Session, []EventualStateDelivery),
+	onSpaceAck func(*Session, uint64),
+	onEntityResync func(*Session, int64),
 ) {
 	defer s.closeNow()
 	ctx, cancel := context.WithCancel(ctx)
@@ -514,6 +532,34 @@ func (s *Session) readPump(
 			onEventualStateFeedback(s, feedback)
 		}
 		if len(data) == 0 {
+			return
+		}
+		// SpaceAck and EntityResync control frames may arrive alone or as the
+		// payload of an ACK control frame.
+		transition, isSpaceAck, err := decodeClientSpaceAckControlFrame(data)
+		if err != nil {
+			readPumpErr = err
+			s.closeNow()
+			cancel()
+			return
+		}
+		if isSpaceAck {
+			if !s.isClosing() && onSpaceAck != nil {
+				onSpaceAck(s, transition)
+			}
+			return
+		}
+		entityID, isResync, err := decodeClientEntityResyncControlFrame(data)
+		if err != nil {
+			readPumpErr = err
+			s.closeNow()
+			cancel()
+			return
+		}
+		if isResync {
+			if !s.isClosing() && onEntityResync != nil {
+				onEntityResync(s, entityID)
+			}
 			return
 		}
 		if !s.isClosing() && onMsg != nil {

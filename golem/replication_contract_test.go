@@ -2,12 +2,18 @@ package golem
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http/httptest"
+	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,13 +26,21 @@ import (
 // after the tick sender returns and reuses its scratch.
 func replicationTestPeer(t testing.TB, cellSize float64) (*Server, *webtransport.Session, io.Reader, int64) {
 	t.Helper()
+	return replicationTestPeerWith(t, ServerConfig{CellSize: cellSize})
+}
+
+// replicationTestPeerWith is replicationTestPeer with a caller config; Addr and
+// DevSelfSignedCert are filled in.
+func replicationTestPeerWith(t testing.TB, cfg ServerConfig) (*Server, *webtransport.Session, io.Reader, int64) {
+	t.Helper()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	addr := pc.LocalAddr().String()
 	_ = pc.Close()
-	s := NewServer(ServerConfig{Addr: addr, CellSize: cellSize, DevSelfSignedCert: true})
+	cfg.Addr, cfg.DevSelfSignedCert = addr, true
+	s := NewServer(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- s.listener.ListenAndServe(ctx) }()
@@ -404,5 +418,888 @@ func BenchmarkSendEventualConnected(b *testing.B) {
 			b.Fatal("feedback timed out")
 		}
 		b.StartTimer()
+	}
+}
+
+func expectNoReplicationDatagram(t testing.TB, peer *webtransport.Session) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if data, err := peer.ReceiveDatagram(ctx); err == nil {
+		t.Fatalf("unexpected datagram %q", data)
+	}
+}
+
+// TestSpaceTransitionGatesDatagramsUntilSpaceAck uses a real WebTransport peer
+// in datagram mode: after a transition, deltas use the ordered stream until the
+// client acknowledges it, then datagrams resume and first resend what the
+// stream carried meanwhile.
+func TestSpaceTransitionGatesDatagramsUntilSpaceAck(t *testing.T) {
+	for _, interestMode := range []bool{false, true} {
+		name, cellSize := "broadcast", 0.0
+		if interestMode {
+			name, cellSize = "interest", 8
+		}
+		t.Run(name, func(t *testing.T) {
+			s, peer, stream, sid := replicationTestPeer(t, cellSize)
+			s.SetRemovalSerializer(func(id int64, _ uint64) ([]byte, error) { return []byte("removed"), nil })
+			writer := stream.(io.Writer)
+			avatar := &replicationContractEntity{interestTickEntity: interestTickEntity{id: 1, full: []byte("avatar-full"), revision: 1}}
+			crate := &replicationContractEntity{interestTickEntity: interestTickEntity{id: 2, x: 1, full: []byte("crate-full"), revision: 1}}
+			opts := AvatarOptions{}
+			if interestMode {
+				opts.FOIRadius, opts.FOIMargin = 10, 1
+			}
+			if err := s.SpawnAvatar(&Session{ID: sid}, avatar, opts); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.CreateEntity(crate); err != nil {
+				t.Fatal(err)
+			}
+			run := s.runBroadcastTick
+			if interestMode {
+				run = s.runInterestTick
+			}
+			tick := func() {
+				t.Helper()
+				if err := run(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tick()
+			spawned := append(decodeServerTokens(t, mustReadReliableFrame(t, stream)), decodeServerTokens(t, mustReadReliableFrame(t, stream))...)
+			if slices.Sort(spawned); !slices.Equal(spawned, []string{"avatar-full", "crate-full"}) {
+				t.Fatalf("spawn frames = %q", spawned)
+			}
+			crate.flush, crate.revision = []byte("d0"), 2
+			tick()
+			if got := receiveReplicationDatagram(t, peer); !bytes.Contains(got, []byte("d0")) {
+				t.Fatalf("datagram before transition = %q", got)
+			}
+
+			crate.flush = nil
+			if err := s.MoveToSpace(SpaceTransfer{To: 3, Entities: []int64{avatar.id, crate.id}}); err != nil {
+				t.Fatal(err)
+			}
+			tick()
+			// The whole transition arrives as one logical stream frame.
+			got := decodeServerTokens(t, mustReadReliableFrame(t, stream))
+			if len(got) != 4 || got[0] != "changed:3:1" || got[3] != "settled:1" || !slices.Contains(got, "avatar-full") || !slices.Contains(got, "crate-full") {
+				t.Fatalf("transition frame = %q", got)
+			}
+
+			crate.flush, crate.revision = []byte("d1"), 3
+			tick()
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"d1"}) {
+				t.Fatalf("gated delta = %q", got)
+			}
+			expectNoReplicationDatagram(t, peer)
+
+			// A stale acknowledgement keeps the gate closed.
+			if _, err := writer.Write(netwire.AppendFrame(nil, golemnet.ClientSpaceAckControlFrame(7))); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := writer.Write(netwire.AppendFrame(nil, golemnet.ClientSpaceAckControlFrame(1))); err != nil {
+				t.Fatal(err)
+			}
+			waitForSpaceAck(t, s, sid, 1)
+			s.applySpaceAcks()
+			s.interestMu.Lock()
+			_, pending := s.spaceAckPending[sid]
+			s.interestMu.Unlock()
+			if pending {
+				t.Fatal("SpaceAck did not release the gate")
+			}
+
+			// No new change: the first datagram resends the field the stream
+			// carried while gated, with its current value.
+			crate.flush, crate.compact = nil, []byte("current")
+			tick()
+			if got := receiveReplicationDatagram(t, peer); !bytes.Contains(got, []byte("current")) {
+				t.Fatalf("post-ack datagram = %q", got)
+			}
+			crate.flush, crate.compact, crate.revision = []byte("d3"), nil, 4
+			tick()
+			if got := receiveReplicationDatagram(t, peer); !bytes.Contains(got, []byte("d3")) {
+				t.Fatalf("datagram after ack = %q", got)
+			}
+
+			// Back to space 0: a new transition closes the gate again.
+			crate.flush = nil
+			if err := s.MoveToSpace(SpaceTransfer{To: 0, Entities: []int64{avatar.id, crate.id}}); err != nil {
+				t.Fatal(err)
+			}
+			tick()
+			got = decodeServerTokens(t, mustReadReliableFrame(t, stream))
+			if len(got) != 4 || got[0] != "changed:0:2" || got[3] != "settled:2" {
+				t.Fatalf("return transition frame = %q", got)
+			}
+			crate.flush, crate.revision = []byte("d4"), 5
+			tick()
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"d4"}) {
+				t.Fatalf("gated delta after return = %q", got)
+			}
+			expectNoReplicationDatagram(t, peer)
+		})
+	}
+}
+
+// waitForSpaceAck waits until the SpaceAck inbox holds transition for sid.
+func waitForSpaceAck(t *testing.T, s *Server, sid int64, transition uint64) {
+	t.Helper()
+	for deadline := time.Now().Add(3 * time.Second); ; {
+		s.spaceAckMu.Lock()
+		got := s.spaceAckInbox[sid]
+		s.spaceAckMu.Unlock()
+		if got == transition {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("SpaceAck %d was not delivered (inbox has %d)", transition, got)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// eventRecord is one datagram event record: its transition tag (0 when
+// untagged) and ServerEvent bytes.
+type eventRecord struct {
+	transition uint64
+	event      string
+}
+
+// receiveEventRecords receives one datagram and decodes its event records.
+func receiveEventRecords(t testing.TB, peer *webtransport.Session) []eventRecord {
+	t.Helper()
+	packet, err := netwire.DecodePacket(receiveReplicationDatagram(t, peer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []eventRecord
+	for payload := packet.Payload; len(payload) > 0; {
+		if len(payload) < netwire.FrameHeaderBytes {
+			t.Fatalf("truncated datagram frame %x", payload)
+		}
+		n := int(binary.BigEndian.Uint32(payload))
+		frame := payload[netwire.FrameHeaderBytes : netwire.FrameHeaderBytes+n]
+		payload = payload[netwire.FrameHeaderBytes+n:]
+		transition, event, ok := netwire.EventRecordTransition(frame)
+		if !ok {
+			t.Fatalf("datagram frame %x is not an event record", frame)
+		}
+		out = append(out, eventRecord{transition, string(event)})
+	}
+	return out
+}
+
+// TestSpaceTransitionKeepsDatagramEventsOnStreamUntilSpaceAck uses a real
+// WebTransport peer in datagram mode: while a transition is unacknowledged,
+// datagram-lane events for the session use the ordered stream, so they arrive
+// after SpaceSettled; after the ack they use datagrams again, tagged with the
+// acknowledged transition. An event sent from OnUpdates on the switch tick
+// follows the transition too, whether the session is planned before OnUpdates
+// (interest mode with an FOI) or after it (broadcast mode, interest mode
+// without an FOI). Events before any switch are untagged.
+func TestSpaceTransitionKeepsDatagramEventsOnStreamUntilSpaceAck(t *testing.T) {
+	for _, mode := range []string{"broadcast", "interest", "interest-no-foi"} {
+		t.Run(mode, func(t *testing.T) {
+			cellSize := 0.0
+			if mode != "broadcast" {
+				cellSize = 8
+			}
+			s, peer, stream, sid := replicationTestPeer(t, cellSize)
+			s.SetRemovalSerializer(func(id int64, _ uint64) ([]byte, error) { return []byte("removed"), nil })
+			avatar := &replicationContractEntity{interestTickEntity: interestTickEntity{id: 1, full: []byte("avatar-full"), revision: 1}}
+			opts := AvatarOptions{}
+			if mode == "interest" {
+				opts.FOIRadius, opts.FOIMargin = 10, 1
+			}
+			if err := s.SpawnAvatar(&Session{ID: sid}, avatar, opts); err != nil {
+				t.Fatal(err)
+			}
+			run := s.runBroadcastTick
+			if cellSize > 0 {
+				run = s.runInterestTick
+			}
+			tick := func() {
+				t.Helper()
+				if err := run(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tick()
+			if mode != "interest-no-foi" {
+				if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"avatar-full"}) {
+					t.Fatalf("spawn frame = %q", got)
+				}
+			}
+			if err := s.SendServerEvent(sid, EventUnreliable, []byte("evt-before")); err != nil {
+				t.Fatal(err)
+			}
+			if got := receiveEventRecords(t, peer); !slices.Equal(got, []eventRecord{{0, "evt-before"}}) {
+				t.Fatalf("event before transition = %+v", got)
+			}
+
+			if err := s.MoveToSpace(SpaceTransfer{To: 3, Entities: []int64{avatar.id}}); err != nil {
+				t.Fatal(err)
+			}
+			// A spawn nobody sees makes OnUpdates run on the switch tick.
+			if err := s.CreateEntityIn(9, &interestTickEntity{id: 50, full: []byte("hidden-full")}); err != nil {
+				t.Fatal(err)
+			}
+			s.OnUpdates(func([][]byte) {
+				if err := s.SendServerEvent(sid, EventUnreliable, []byte("evt-on-updates")); err != nil {
+					t.Error(err)
+				}
+			})
+			tick()
+			s.OnUpdates(nil)
+			want := []string{"changed:3:1", "avatar-full", "settled:1"}
+			if mode == "interest-no-foi" {
+				want = []string{"changed:3:1", "settled:1"}
+			}
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, want) {
+				t.Fatalf("transition frame = %q", got)
+			}
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"event:evt-on-updates"}) {
+				t.Fatalf("OnUpdates event on the switch tick = %q", got)
+			}
+			if err := s.SendServerEvent(sid, EventUnreliable, []byte("evt-gated")); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Space(3).BroadcastServerEvent(EventReliableOrdered, []byte("evt-space")); err != nil {
+				t.Fatal(err)
+			}
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"event:evt-gated"}) {
+				t.Fatalf("gated event = %q", got)
+			}
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"event:evt-space"}) {
+				t.Fatalf("gated space event = %q", got)
+			}
+			expectNoReplicationDatagram(t, peer)
+
+			if _, err := stream.(io.Writer).Write(netwire.AppendFrame(nil, golemnet.ClientSpaceAckControlFrame(1))); err != nil {
+				t.Fatal(err)
+			}
+			waitForSpaceAck(t, s, sid, 1)
+			s.drainMessages()
+			if err := s.SendServerEvent(sid, EventUnreliable, []byte("evt-after")); err != nil {
+				t.Fatal(err)
+			}
+			if got := receiveEventRecords(t, peer); !slices.Equal(got, []eventRecord{{1, "evt-after"}}) {
+				t.Fatalf("event after ack = %+v", got)
+			}
+			s.eventHoldMu.Lock()
+			holds := len(s.eventHolds)
+			s.eventHoldMu.Unlock()
+			if holds != 0 {
+				t.Fatalf("%d sessions still hold events after the pass", holds)
+			}
+		})
+	}
+}
+
+// eventPeer is one WebTransport client of a running server.
+type eventPeer struct {
+	peer   *webtransport.Session
+	stream *webtransport.Stream
+	sess   *Session
+}
+
+// TestSpaceSwitchHoldsEventsSentBeforePlanning runs a real Server.Run with
+// WebTransport peers in datagram mode: unreliable events sent from a Post and
+// from OnTick right after MoveToSpace of the session's avatar, on the same
+// tick, arrive on the stream after SpaceSettled, while a session that does not
+// switch keeps its datagram lane in that tick. Space-scoped events sent on that
+// tick go to the space the mover is moving to. After the SpaceAck, datagram
+// events carry the new transition; single-space sessions stay untagged.
+func TestSpaceSwitchHoldsEventsSentBeforePlanning(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := pc.LocalAddr().String()
+	_ = pc.Close()
+	s := NewServer(ServerConfig{Addr: addr, DevSelfSignedCert: true, TickRate: 100})
+	s.SetRemovalSerializer(func(id int64, _ uint64) ([]byte, error) { return []byte("removed"), nil })
+	connected := make(chan *Session, 2)
+	s.OnConnect(func(sess *Session) { connected <- sess })
+	var onTick atomic.Pointer[func()]
+	s.OnTick(func(float64, *Server) {
+		if fn := onTick.Swap(nil); fn != nil {
+			(*fn)()
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- s.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-runDone:
+		case <-time.After(5 * time.Second):
+			t.Error("Run did not stop")
+		}
+	})
+	readyCtx, readyCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer readyCancel()
+	if err := s.WaitReady(readyCtx); err != nil {
+		t.Fatal(err)
+	}
+	dialer := &webtransport.Dialer{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	t.Cleanup(func() { _ = dialer.Close() })
+	connect := func() eventPeer {
+		t.Helper()
+		_, peer, err := dialer.Dial(readyCtx, "https://"+addr+"/wt", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = peer.CloseWithError(0, "") })
+		stream, err := peer.OpenStreamSync(readyCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := stream.Write(nil); err != nil {
+			t.Fatal(err)
+		}
+		_ = stream.SetReadDeadline(time.Now().Add(10 * time.Second))
+		select {
+		case sess := <-connected:
+			return eventPeer{peer, stream, sess}
+		case <-readyCtx.Done():
+			t.Fatal("session was not admitted")
+		}
+		return eventPeer{}
+	}
+	mover, bystander := connect(), connect()
+	post := func(fn func()) {
+		t.Helper()
+		done := make(chan struct{})
+		if err := s.Post(func(*Server) { fn(); close(done) }); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Post callback did not run")
+		}
+	}
+	send := func(sid int64, name string) {
+		if err := s.SendServerEvent(sid, EventUnreliable, []byte(name)); err != nil {
+			t.Error(err)
+		}
+	}
+
+	avatar := &interestTickEntity{id: 1, full: []byte("avatar-full"), revision: 1}
+	post(func() {
+		if err := s.SpawnAvatar(mover.sess, avatar, AvatarOptions{}); err != nil {
+			t.Error(err)
+		}
+	})
+	for _, p := range []eventPeer{mover, bystander} {
+		if got := decodeServerTokens(t, mustReadReliableFrame(t, p.stream)); !slices.Equal(got, []string{"avatar-full"}) {
+			t.Fatalf("spawn frame = %q", got)
+		}
+	}
+	post(func() { send(mover.sess.ID, "evt-single-space") })
+	if got := receiveEventRecords(t, mover.peer); !slices.Equal(got, []eventRecord{{0, "evt-single-space"}}) {
+		t.Fatalf("single-space event = %+v", got)
+	}
+
+	post(func() {
+		if err := s.MoveToSpace(SpaceTransfer{To: 3, Entities: []int64{avatar.id}}); err != nil {
+			t.Error(err)
+		}
+		send(mover.sess.ID, "evt-post")
+		send(bystander.sess.ID, "evt-bystander")
+		// Space-scoped events follow the mover to the space it is moving to.
+		for space, name := range map[SpaceID]string{0: "evt-overworld", 3: "evt-cave"} {
+			if err := s.Space(space).BroadcastServerEvent(EventUnreliable, []byte(name)); err != nil {
+				t.Error(err)
+			}
+		}
+		fn := func() { send(mover.sess.ID, "evt-tick") }
+		onTick.Store(&fn)
+	})
+	// The bystander's events are not held: they leave on its datagram lane,
+	// including the event of the space the mover is leaving.
+	var bystanderEvents []eventRecord
+	for len(bystanderEvents) < 2 {
+		bystanderEvents = append(bystanderEvents, receiveEventRecords(t, bystander.peer)...)
+	}
+	slices.SortFunc(bystanderEvents, func(a, b eventRecord) int { return cmp.Compare(a.event, b.event) })
+	if !slices.Equal(bystanderEvents, []eventRecord{{0, "evt-bystander"}, {0, "evt-overworld"}}) {
+		t.Fatalf("bystander events = %+v", bystanderEvents)
+	}
+	if got := decodeServerTokens(t, mustReadReliableFrame(t, mover.stream)); !slices.Equal(got, []string{"changed:3:1", "avatar-full", "settled:1"}) {
+		t.Fatalf("transition frame = %q", got)
+	}
+	var held []string
+	for len(held) < 3 {
+		held = append(held, decodeServerTokens(t, mustReadReliableFrame(t, mover.stream))...)
+	}
+	// The mover gets the cave's event and never the overworld's.
+	if !slices.Equal(held, []string{"event:evt-post", "event:evt-cave", "event:evt-tick"}) {
+		t.Fatalf("events sent before planning = %q", held)
+	}
+	if got := decodeServerTokens(t, mustReadReliableFrame(t, bystander.stream)); !slices.Equal(got, []string{"removed"}) {
+		t.Fatalf("bystander exit = %q", got)
+	}
+	expectNoReplicationDatagram(t, mover.peer)
+
+	if _, err := mover.stream.Write(netwire.AppendFrame(nil, golemnet.ClientSpaceAckControlFrame(1))); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(3 * time.Second); ; {
+		s.interestMu.Lock()
+		_, pending := s.spaceAckPending[mover.sess.ID]
+		s.interestMu.Unlock()
+		if !pending {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("SpaceAck did not release the gate")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	post(func() {
+		send(mover.sess.ID, "evt-after")
+		send(bystander.sess.ID, "evt-bystander-after")
+	})
+	if got := receiveEventRecords(t, mover.peer); !slices.Equal(got, []eventRecord{{1, "evt-after"}}) {
+		t.Fatalf("event after ack = %+v", got)
+	}
+	if got := receiveEventRecords(t, bystander.peer); !slices.Equal(got, []eventRecord{{0, "evt-bystander-after"}}) {
+		t.Fatalf("bystander event after ack = %+v", got)
+	}
+}
+
+// TestSpaceTransitionStreamLaneWebTransportKeepsGateUntilSpaceAck: a
+// WebTransport session whose state updates use the stream still has datagram
+// event lanes, so the gate and stream-only events last until its SpaceAck.
+func TestSpaceTransitionStreamLaneWebTransportKeepsGateUntilSpaceAck(t *testing.T) {
+	s, peer, stream, sid := replicationTestPeerWith(t, ServerConfig{Transport: golemnet.TransportWebTransport, StateUpdateLane: StateUpdateLaneStream})
+	avatar := &interestTickEntity{id: 1, full: []byte("avatar-full"), revision: 1}
+	if err := s.SpawnAvatar(&Session{ID: sid}, avatar, AvatarOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.runBroadcastTick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"avatar-full"}) {
+		t.Fatalf("spawn frame = %q", got)
+	}
+	if err := s.SetEntitySpace(avatar.id, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.runBroadcastTick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"changed:2:1", "avatar-full", "settled:1"}) {
+		t.Fatalf("transition frame = %q", got)
+	}
+	s.interestMu.Lock()
+	_, pending := s.spaceAckPending[sid]
+	s.interestMu.Unlock()
+	if !pending {
+		t.Fatal("stream-lane WebTransport session released the gate before its SpaceAck")
+	}
+	if err := s.SendServerEvent(sid, EventReliableUnordered, []byte("evt-gated")); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"event:evt-gated"}) {
+		t.Fatalf("gated event = %q", got)
+	}
+	expectNoReplicationDatagram(t, peer)
+
+	if _, err := stream.(io.Writer).Write(netwire.AppendFrame(nil, golemnet.ClientSpaceAckControlFrame(1))); err != nil {
+		t.Fatal(err)
+	}
+	waitForSpaceAck(t, s, sid, 1)
+	s.drainMessages()
+	s.interestMu.Lock()
+	_, pending = s.spaceAckPending[sid]
+	s.interestMu.Unlock()
+	if pending {
+		t.Fatal("SpaceAck did not release the gate")
+	}
+	if err := s.SendServerEvent(sid, EventUnreliable, []byte("evt-after")); err != nil {
+		t.Fatal(err)
+	}
+	if got := receiveReplicationDatagram(t, peer); !bytes.Contains(got, []byte("evt-after")) {
+		t.Fatalf("event after ack = %q", got)
+	}
+}
+
+// TestSpaceSwitchEventHoldReleasesUnswitchedAndKeepsUnplannedOnce uses a real
+// WebTransport peer in interest mode: a session that was marked as switching
+// but ends the tick in its announced space gets its held events at the end of
+// the pass on their datagram lane; a session that changes space after its pass
+// was planned (from OnUpdates) keeps holding until the next pass queues its
+// transition, so events sent in between follow SpaceSettled.
+func TestSpaceSwitchEventHoldReleasesUnswitchedAndKeepsUnplannedOnce(t *testing.T) {
+	s, peer, stream, sid := replicationTestPeer(t, 8)
+	s.SetRemovalSerializer(func(id int64, _ uint64) ([]byte, error) { return []byte("removed"), nil })
+	avatar := &interestTickEntity{id: 1, full: []byte("avatar-full"), revision: 1}
+	if err := s.SpawnAvatar(&Session{ID: sid}, avatar, AvatarOptions{FOIRadius: 10, FOIMargin: 1}); err != nil {
+		t.Fatal(err)
+	}
+	tick := func() {
+		t.Helper()
+		if err := s.runInterestTick(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	holds := func() map[int64]bool {
+		s.eventHoldMu.Lock()
+		defer s.eventHoldMu.Unlock()
+		return maps.Clone(s.eventHolds)
+	}
+	tick()
+	if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"avatar-full"}) {
+		t.Fatalf("spawn frame = %q", got)
+	}
+
+	// There and back within one tick: held, then released on its lane.
+	if err := s.MoveToSpace(SpaceTransfer{To: 3, Entities: []int64{avatar.id}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SendServerEvent(sid, EventUnreliable, []byte("evt-unswitched")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MoveToSpace(SpaceTransfer{To: 0, Entities: []int64{avatar.id}}); err != nil {
+		t.Fatal(err)
+	}
+	expectNoReplicationDatagram(t, peer)
+	tick()
+	if got := receiveEventRecords(t, peer); !slices.Equal(got, []eventRecord{{0, "evt-unswitched"}}) {
+		t.Fatalf("event of a session that did not switch = %+v", got)
+	}
+	if h := holds(); len(h) != 0 {
+		t.Fatalf("holds after an unswitched pass = %v", h)
+	}
+
+	// A move from OnUpdates comes after this pass planned the session.
+	if err := s.CreateEntityIn(9, &interestTickEntity{id: 50, full: []byte("hidden-full")}); err != nil {
+		t.Fatal(err)
+	}
+	s.OnUpdates(func([][]byte) {
+		if err := s.MoveToSpace(SpaceTransfer{To: 4, Entities: []int64{avatar.id}}); err != nil {
+			t.Error(err)
+		}
+		if err := s.SendServerEvent(sid, EventUnreliable, []byte("evt-late")); err != nil {
+			t.Error(err)
+		}
+	})
+	tick()
+	s.OnUpdates(nil)
+	if h := holds(); len(h) != 1 || !h[sid] {
+		t.Fatalf("holds after an unplanned switch = %v, want the session kept once", h)
+	}
+	expectNoReplicationDatagram(t, peer)
+	// As from a Post on the next tick, before replication.
+	if err := s.SendServerEvent(sid, EventUnreliable, []byte("evt-next-tick")); err != nil {
+		t.Fatal(err)
+	}
+	tick()
+	if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"changed:4:1", "avatar-full", "settled:1"}) {
+		t.Fatalf("transition frame = %q", got)
+	}
+	var held []string
+	for len(held) < 2 {
+		held = append(held, decodeServerTokens(t, mustReadReliableFrame(t, stream))...)
+	}
+	if !slices.Equal(held, []string{"event:evt-late", "event:evt-next-tick"}) {
+		t.Fatalf("events held across the unplanned switch = %q", held)
+	}
+	if h := holds(); len(h) != 0 {
+		t.Fatalf("holds after the transition = %v", h)
+	}
+}
+
+// entityResyncInbox returns the IDs stored for sid, sorted.
+func entityResyncInbox(s *Server, sid int64) []int64 {
+	s.entityResyncMu.Lock()
+	defer s.entityResyncMu.Unlock()
+	var ids []int64
+	for id := range s.entityResyncInbox[sid] {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// entityResyncSentinel is a SpaceAck transition no test plans.
+const entityResyncSentinel = 1 << 40
+
+// sendEntityResyncs writes EntityResync control frames for ids on the client
+// stream, then a SpaceAck sentinel, and waits for the sentinel: the connection
+// goroutine handles control frames in order, so every request has been stored
+// or dropped by then. The sentinel is consumed (and ignored) right away.
+func sendEntityResyncs(t *testing.T, s *Server, stream io.Reader, sid int64, ids ...int64) {
+	t.Helper()
+	writer := stream.(io.Writer)
+	for _, id := range ids {
+		if _, err := writer.Write(netwire.AppendFrame(nil, golemnet.ClientEntityResyncControlFrame(id))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := writer.Write(netwire.AppendFrame(nil, golemnet.ClientSpaceAckControlFrame(entityResyncSentinel))); err != nil {
+		t.Fatal(err)
+	}
+	waitForSpaceAck(t, s, sid, entityResyncSentinel)
+	s.applySpaceAcks()
+}
+
+// expectStreamMarker queues a marker frame and checks it is the next frame
+// the client reads, so nothing else was sent before it.
+func expectStreamMarker(t *testing.T, s *Server, stream io.Reader, sid int64) {
+	t.Helper()
+	if err := s.listener.SendBatch(sid, [][]byte{s.listener.Wrap([]byte("marker"))}); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"marker"}) {
+		t.Fatalf("frame before the marker = %q", got)
+	}
+}
+
+// TestEntityResyncAnsweredByReplicationPass uses a real WebTransport peer in
+// datagram mode: an EntityResync request is stored only for an entity the
+// session knows, and the next replication pass answers it on the ordered
+// stream with the entity's full state in the session's current owner or
+// public view; unknown and other-space entities are dropped on receipt.
+func TestEntityResyncAnsweredByReplicationPass(t *testing.T) {
+	for _, interestMode := range []bool{false, true} {
+		name, cellSize := "broadcast", 0.0
+		if interestMode {
+			name, cellSize = "interest", 8
+		}
+		t.Run(name, func(t *testing.T) {
+			s, _, stream, sid := replicationTestPeer(t, cellSize)
+			avatar := &interestTickEntity{id: 1, full: []byte("avatar-full"), revision: 1}
+			crate := &ownerScopedTickEntity{interestTickEntity: interestTickEntity{id: 2, x: 1, full: []byte("crate-full"), revision: 1}, publicFull: []byte("crate-public")}
+			elsewhere := &interestTickEntity{id: 3, full: []byte("elsewhere-full"), revision: 1}
+			opts := AvatarOptions{}
+			if interestMode {
+				opts.FOIRadius, opts.FOIMargin = 10, 1
+			}
+			if err := s.SpawnAvatar(&Session{ID: sid}, avatar, opts); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.CreateEntity(crate, sid+100); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.CreateEntityIn(5, elsewhere); err != nil {
+				t.Fatal(err)
+			}
+			run := s.runBroadcastTick
+			if interestMode {
+				run = s.runInterestTick
+			}
+			tick := func() {
+				t.Helper()
+				if err := run(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tick()
+			spawned := append(decodeServerTokens(t, mustReadReliableFrame(t, stream)), decodeServerTokens(t, mustReadReliableFrame(t, stream))...)
+			if slices.Sort(spawned); !slices.Equal(spawned, []string{"avatar-full", "crate-public"}) {
+				t.Fatalf("spawn frames = %q", spawned)
+			}
+
+			// Only the known crate is stored; drainMessages does not answer.
+			sendEntityResyncs(t, s, stream, sid, 2, 3, 99)
+			if got := entityResyncInbox(s, sid); !slices.Equal(got, []int64{2}) {
+				t.Fatalf("stored requests = %v, want [2]", got)
+			}
+			s.drainMessages()
+			tick()
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"crate-public"}) {
+				t.Fatalf("resync frame = %q", got)
+			}
+			if got := entityResyncInbox(s, sid); len(got) != 0 {
+				t.Fatalf("requests left after the pass = %v", got)
+			}
+			sendEntityResyncs(t, s, stream, sid, 1, 2)
+			tick()
+			// In ID order, one logical frame each.
+			if got := append(decodeServerTokens(t, mustReadReliableFrame(t, stream)), decodeServerTokens(t, mustReadReliableFrame(t, stream))...); !slices.Equal(got, []string{"avatar-full", "crate-public"}) {
+				t.Fatalf("resync frames = %q", got)
+			}
+			// The view follows the current owner (the grant comes first).
+			if !s.SetOwner(crate.id, sid) {
+				t.Fatal("SetOwner")
+			}
+			tick()
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"crate-full"}) {
+				t.Fatalf("ownership grant = %q", got)
+			}
+			sendEntityResyncs(t, s, stream, sid, 2)
+			tick()
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"crate-full"}) {
+				t.Fatalf("owner resync frame = %q", got)
+			}
+			tick()
+			expectStreamMarker(t, s, stream, sid)
+		})
+	}
+}
+
+// TestEntityResyncBurstBeyondHeldRecordCap: a burst of more than 256
+// requests (one per evicted entity) is stored and answered in full by one
+// pass, which leaves the blind broadcast path for it.
+func TestEntityResyncBurstBeyondHeldRecordCap(t *testing.T) {
+	s, _, stream, sid := replicationTestPeer(t, 0)
+	const n = 300
+	want := make([]string, 0, n)
+	ids := make([]int64, 0, n)
+	for i := int64(1); i <= n; i++ {
+		full := fmt.Sprintf("e%d-full", i)
+		if err := s.CreateEntity(&interestTickEntity{id: i, full: []byte(full), revision: 1}); err != nil {
+			t.Fatal(err)
+		}
+		want, ids = append(want, full), append(ids, i)
+	}
+	readAll := func(count int) []string {
+		t.Helper()
+		var got []string
+		for len(got) < count {
+			got = append(got, decodeServerTokens(t, mustReadReliableFrame(t, stream))...)
+		}
+		slices.Sort(got)
+		return got
+	}
+	slices.Sort(want)
+	if err := s.runBroadcastTick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readAll(n); !slices.Equal(got, want) {
+		t.Fatalf("spawned %d frames", len(got))
+	}
+	s.interestMu.Lock()
+	blind := !s.shouldFilterBroadcastLocked(s.listener.SessionIDs(), s.reg.All(), false)
+	s.interestMu.Unlock()
+	if !blind {
+		t.Fatal("setup: the quiet pass should be blind-eligible")
+	}
+	sendEntityResyncs(t, s, stream, sid, ids...)
+	if got := entityResyncInbox(s, sid); len(got) != n {
+		t.Fatalf("stored %d requests, want %d", len(got), n)
+	}
+	if err := s.runBroadcastTick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readAll(n); !slices.Equal(got, want) {
+		t.Fatalf("resync answered %d frames, want %d", len(got), n)
+	}
+	if err := s.runBroadcastTick(); err != nil {
+		t.Fatal(err)
+	}
+	expectStreamMarker(t, s, stream, sid)
+}
+
+// TestEntityResyncNotAnsweredAcrossSpaceBoundary: a request for an entity
+// that moves to another space before the pass (as from a Post) is not
+// answered; the session gets the entity's exit instead.
+func TestEntityResyncNotAnsweredAcrossSpaceBoundary(t *testing.T) {
+	for _, interestMode := range []bool{false, true} {
+		name, cellSize := "broadcast", 0.0
+		if interestMode {
+			name, cellSize = "interest", 8
+		}
+		t.Run(name, func(t *testing.T) {
+			s, _, stream, sid := replicationTestPeer(t, cellSize)
+			s.SetRemovalSerializer(func(id int64, _ uint64) ([]byte, error) { return []byte(fmt.Sprintf("removed:%d", id)), nil })
+			avatar := &interestTickEntity{id: 1, full: []byte("avatar-full"), revision: 1}
+			crate := &interestTickEntity{id: 2, x: 1, full: []byte("crate-full"), revision: 1}
+			opts := AvatarOptions{}
+			if interestMode {
+				opts.FOIRadius, opts.FOIMargin = 10, 1
+			}
+			if err := s.SpawnAvatar(&Session{ID: sid}, avatar, opts); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.CreateEntity(crate); err != nil {
+				t.Fatal(err)
+			}
+			run := s.runBroadcastTick
+			if interestMode {
+				run = s.runInterestTick
+			}
+			if err := run(); err != nil {
+				t.Fatal(err)
+			}
+			decodeServerTokens(t, mustReadReliableFrame(t, stream))
+			decodeServerTokens(t, mustReadReliableFrame(t, stream))
+			sendEntityResyncs(t, s, stream, sid, crate.id)
+			if got := entityResyncInbox(s, sid); !slices.Equal(got, []int64{crate.id}) {
+				t.Fatalf("stored requests = %v", got)
+			}
+			if err := s.SetEntitySpace(crate.id, 5); err != nil {
+				t.Fatal(err)
+			}
+			if err := run(); err != nil {
+				t.Fatal(err)
+			}
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"removed:2"}) {
+				t.Fatalf("pass after the move = %q", got)
+			}
+			if err := run(); err != nil {
+				t.Fatal(err)
+			}
+			expectStreamMarker(t, s, stream, sid)
+		})
+	}
+}
+
+// TestEntityResyncIgnoredOnStreamStateLane: sessions that never receive
+// compact datagram records have their resync requests dropped on receipt.
+func TestEntityResyncIgnoredOnStreamStateLane(t *testing.T) {
+	s, _, stream, sid := replicationTestPeerWith(t, ServerConfig{Transport: golemnet.TransportWebTransport, StateUpdateLane: StateUpdateLaneStream})
+	avatar := &interestTickEntity{id: 1, full: []byte("avatar-full"), revision: 1}
+	if err := s.SpawnAvatar(&Session{ID: sid}, avatar, AvatarOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.runBroadcastTick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"avatar-full"}) {
+		t.Fatalf("spawn frame = %q", got)
+	}
+	sendEntityResyncs(t, s, stream, sid, avatar.id)
+	if got := entityResyncInbox(s, sid); len(got) != 0 {
+		t.Fatalf("stored requests = %v", got)
+	}
+	if err := s.runBroadcastTick(); err != nil {
+		t.Fatal(err)
+	}
+	expectStreamMarker(t, s, stream, sid)
+}
+
+// revisionBumpEntity counts BumpStateRevision calls.
+type revisionBumpEntity struct {
+	interestTickEntity
+	bumps int
+}
+
+func (e *revisionBumpEntity) BumpStateRevision() { e.bumps++; e.revision++ }
+
+func TestSetOwnerBumpsStateRevisionOnChange(t *testing.T) {
+	s := NewServer(ServerConfig{})
+	e := &revisionBumpEntity{interestTickEntity: interestTickEntity{id: 1, revision: 4}}
+	if err := s.CreateEntity(e, 7); err != nil {
+		t.Fatal(err)
+	}
+	for _, owner := range []int64{7, 8, 8, 0, 0} {
+		if !s.SetOwner(e.id, owner) {
+			t.Fatalf("SetOwner(%d)", owner)
+		}
+	}
+	if e.bumps != 2 || e.revision != 6 {
+		t.Fatalf("bumps=%d revision=%d, want one bump per owner change", e.bumps, e.revision)
+	}
+	if s.SetOwner(99, 1) || e.bumps != 2 {
+		t.Fatal("unknown entity changed revisions")
 	}
 }

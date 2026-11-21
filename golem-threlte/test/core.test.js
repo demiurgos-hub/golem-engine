@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   EntityPresentationMount, PresentationBinding, createEntityViewBuilder,
-  createEntityViewRegistry, createGolemAdapter, entityCollection, worldStore,
+  combineUnsubscribers, createEntityViewRegistry, createGolemAdapter, entityCollection, spaceStore, worldStore,
 } from '../dist/core.js';
 import { Actor, Beacon, fixture } from './fixtures.js';
 
@@ -63,6 +63,27 @@ test('world bindings retain generated world identity and release every source li
   assert.equal(updates[1].label, 'Updated');
   unsubscribe(); binding.destroy();
   assert.equal(state.listenerCount(), 0);
+});
+
+test('world bindings refresh to undefined when the generated manager clears the world', () => {
+  // Mirrors the generated adapter: update and cleared listeners feed one store.
+  const updated = new Set();
+  const cleared = new Set();
+  const manager = { arena: { label: 'Overworld' } };
+  const on = (set) => (fn) => { set.add(fn); return () => set.delete(fn); };
+  const binding = worldStore(() => manager.arena, (listener) => combineUnsubscribers(
+    on(updated)(listener),
+    on(cleared)(() => listener(undefined)),
+  ));
+  const values = [];
+  const unsubscribe = binding.subscribe(value => values.push(value?.label));
+  manager.arena = undefined;
+  for (const fn of cleared) fn();
+  manager.arena = { label: 'Cave' };
+  for (const fn of updated) fn(manager.arena);
+  assert.deepEqual(values, ['Overworld', undefined, 'Cave']);
+  unsubscribe(); binding.destroy();
+  assert.equal(updated.size + cleared.size, 0);
 });
 
 test('a failing initial subscriber releases manager listeners and does not poison future consumers', () => {
@@ -247,4 +268,28 @@ test('events queued for a removed binding are dropped', () => {
   binding.destroy();
   binding.activate();
   assert.equal(binding.active, false);
+});
+
+test('space store follows space changes and silent connection resets, then releases the client', () => {
+  const state = fixture();
+  state.client.connect('ws://localhost/game');
+  state.channels[0].open();
+  const space = spaceStore(state.client);
+  const values = [];
+  const unsubscribe = space.subscribe(value => values.push(value));
+  state.changeSpace(4);
+  state.changeSpace(4, 2);
+  state.channels[0].fail();
+  state.client.connect('ws://localhost/game');
+  state.channels[1].open();
+  state.changeSpace(2);
+  assert.deepEqual(values, [0, 4, 0, 2]);
+  unsubscribe();
+  state.changeSpace(9, 2);
+  assert.deepEqual(values, [0, 4, 0, 2]);
+  const late = [];
+  const again = space.subscribe(value => late.push(value));
+  assert.deepEqual(late, [9]);
+  again(); space.destroy();
+  state.client.disconnect();
 });

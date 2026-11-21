@@ -1,7 +1,7 @@
 import { getContext, onDestroy } from 'svelte';
 import type { GameClient, GolemConnectionConfig, GolemConnectionLifecycle, GolemConnectionSnapshot } from 'golem-engine';
 import type { Readable } from 'svelte/store';
-import { entityCollection, type EntityCollection, type EntityIdentity, type EntityViewBinding, type GolemAdapter, type Unsubscribe } from './core.js';
+import { entityCollection, spaceStore, type EntityCollection, type EntityIdentity, type EntityViewBinding, type GolemAdapter, type ManagedReadable, type Unsubscribe } from './core.js';
 
 export type GolemSource<C extends GameClient> =
   | { kind: 'client'; client: C; lifecycle?: never; config?: never }
@@ -12,6 +12,8 @@ export type GolemContext<C extends GameClient, B = {}, E extends EntityIdentity 
   readonly client: C;
   readonly connection?: GolemConnectionLifecycle<C>;
   readonly status: Readable<GolemConnectionSnapshot>;
+  /** The client's current space; 0 until the server announces another and after connect/disconnect. */
+  readonly space: ManagedReadable<number>;
   readonly entities: EntityCollection<E>;
 };
 export interface ContextHolder { current?: GolemContext<any, any, any> }
@@ -44,12 +46,16 @@ export function useEntityEvent<E extends EntityIdentity, Events extends object, 
 export function createGolemContext<C extends GameClient, B, E extends EntityIdentity>(
   adapter: GolemAdapter<C, B, E>, client: C, status: Readable<GolemConnectionSnapshot>, connection?: GolemConnectionLifecycle<C>
 ): GolemContext<C, B, E> {
-  return { ...adapter.createBindings(client), client, status, connection, entities: entityCollection(adapter.entities(client)) };
+  return {
+    ...adapter.createBindings(client), client, status, connection,
+    space: spaceStore(client), entities: entityCollection(adapter.entities(client))
+  };
 }
 
 /** Release only generated binding groups, never model or renderer resources. */
 export function disposeGolemContext(context: GolemContext<any, any, any>): void {
   context.entities.destroy();
+  context.space.destroy();
   for (const group of [context.world, context.entityTypes]) {
     if (group) for (const binding of Object.values(group) as { destroy(): void }[]) binding.destroy();
   }

@@ -3,6 +3,7 @@ package pb
 import (
 	"encoding/binary"
 	"math"
+	"slices"
 )
 
 // Writer is a minimal protobuf wire-format encoder supporting the scalar
@@ -89,6 +90,13 @@ func (w *Writer) Bytes(v []byte) *Writer {
 // Raw appends pre-encoded bytes directly without any framing.
 func (w *Writer) Raw(v []byte) *Writer {
 	w.buf = append(w.buf, v...)
+	return w
+}
+
+// Grow reserves room for at least n more bytes, so a writer whose output
+// size is known does not reallocate while it encodes.
+func (w *Writer) Grow(n int) *Writer {
+	w.buf = slices.Grow(w.buf, n)
 	return w
 }
 

@@ -3,11 +3,17 @@ package world
 import (
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 // Data is the interface that generated world data types implement.
 // Each type represents a single category of static, server-authoritative
 // world information (e.g. zone metadata, map parameters).
+//
+// MarshalUpdate may take the game's own locks and call server APIs such as
+// event broadcasts: the server never calls it while holding the lock that
+// orders sends with space transitions. It must not set world data (a Store
+// may hold its own read lock while it serializes).
 type Data interface {
 	WorldName() string
 	MarshalUpdate() ([]byte, error) // returns WorldUpdate oneof bytes
@@ -17,8 +23,9 @@ type Data interface {
 // data types are plain structs with exported fields; Store owns the lock.
 // Do not mutate a Data value after passing it to Set — create a new one.
 type Store struct {
-	mu    sync.RWMutex
-	items map[string]Data
+	mu      sync.RWMutex
+	items   map[string]Data
+	version atomic.Uint64
 }
 
 // NewStore creates an empty world data store.
@@ -31,6 +38,15 @@ func (s *Store) Set(d Data) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.items[d.WorldName()] = d
+	s.version.Add(1)
+}
+
+// Version returns a counter that advances on every Set. Two equal readings
+// mean the store held the same values at both moments, which lets a caller
+// serialize values without a lock and check afterwards that none was
+// replaced.
+func (s *Store) Version() uint64 {
+	return s.version.Load()
 }
 
 // Get returns the stored world data for the given name, or nil if not set.
@@ -80,4 +96,20 @@ func (s *Store) MarshalAllExcept(exclude map[string]struct{}) ([][]byte, error) 
 		result = append(result, data)
 	}
 	return result, nil
+}
+
+// Names returns the names of every stored world data value in sorted order.
+// It returns nil for an empty store.
+func (s *Store) Names() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.items) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(s.items))
+	for name := range s.items {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }

@@ -570,7 +570,7 @@ func TestGameClientRoutesCompactStateBatches(t *testing.T) {
 	client := NewGameClient(GameClientOptions{EntityManager: entities})
 	frame := []byte("compact")
 	batch := appendLengthPrefixedFrame(nil, frame)
-	client.handleCompactStateBatch(batch)
+	client.handleCompactStateBatch(nil, batch)
 	_, compact, lastFrame := entities.snapshot()
 	if compact != 1 {
 		t.Fatalf("compact updates = %d, want 1", compact)

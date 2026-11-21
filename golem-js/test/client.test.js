@@ -2186,3 +2186,485 @@ test("stream framing accepts the maximum and rejects an oversized header before 
     transport.streamReadable.push(header);await flushMicrotasks();assert.equal(closed.length,1);assert.match(closed[0].error.message,/stream read failed/);
   } finally {channel.close();globalThis.WebTransport=previous;FakeWebTransport.instances.length=0;}
 });
+
+// Space transitions. fencedEntities mimics the generated managers' revision
+// fence: older revisions are rejected, equal revisions apply. Full and compact
+// records share a test encoding: [id, revision, ...value bytes].
+function fencedEntities() {
+  const last = new Map();
+  const log = [];
+  const apply = (kind, frame) => {
+    const id = frame[0];
+    const revision = frame[1];
+    const value = String.fromCharCode(...frame.subarray(2));
+    if (last.has(id) && revision < last.get(id)) {
+      log.push(`reject ${kind} ${id}@${revision}`);
+      return;
+    }
+    last.set(id, revision);
+    log.push(`${kind} ${id}@${revision}=${value}`);
+  };
+  return {
+    log,
+    applyUpdate: (frame) => apply("full", frame),
+    applyCompactUpdate: (frame) => apply("compact", frame),
+    get() { return undefined; },
+    clear() { log.push("clear"); last.clear(); },
+  };
+}
+
+function fencedRecord(id, revision, value) {
+  return new Uint8Array([id, revision, ...Array.from(value, (c) => c.charCodeAt(0))]);
+}
+
+function entityField(id, revision, value) {
+  return new PbWriter().tag(1, 2).bytes(fencedRecord(id, revision, value)).finish();
+}
+
+function spaceChangedField(space, transition) {
+  const inner = new PbWriter();
+  if (space !== 0) inner.tag(1, 0).int32(space);
+  if (transition !== 0) inner.tag(2, 0).int64(transition);
+  return new PbWriter().tag(4, 2).bytes(inner.finish()).finish();
+}
+
+function spaceSettledField(transition) {
+  const inner = new PbWriter();
+  if (transition !== 0) inner.tag(1, 0).int64(transition);
+  return new PbWriter().tag(5, 2).bytes(inner.finish()).finish();
+}
+
+function concatFields(...fields) {
+  const out = new Uint8Array(fields.reduce((sum, field) => sum + field.byteLength, 0));
+  let offset = 0;
+  for (const field of fields) {
+    out.set(field, offset);
+    offset += field.byteLength;
+  }
+  return out;
+}
+
+function spaceAckBytes(transition) {
+  const out = new Uint8Array(13);
+  out.set([0x00, 0x4f, 0x47, 0x53, 0x03]);
+  new DataView(out.buffer).setBigUint64(5, BigInt(transition), false);
+  return Array.from(out);
+}
+
+class SpaceChannel extends ControlledChannel {
+  onUnreliableStateMessage(fn) { this.unreliable = fn; }
+  onReliableOrderedMessage(fn) { this.ordered = fn; }
+  onEventualStateMessage(fn) { this.eventual = fn; }
+  stream(...fields) { this._onMessage(concatFields(...fields)); }
+  datagram(lane, id, revision, value) { this[lane](framedBatchBytes([fencedRecord(id, revision, value)])); }
+}
+
+function spaceClient() {
+  const entities = fencedEntities();
+  const channels = [];
+  const client = new GameClient({
+    entityManager: entities,
+    decode: (bytes) => bytes,
+    encode: () => new Uint8Array(),
+    encodePacket: packetBytes,
+    createChannel: (options) => {
+      const channel = new SpaceChannel(options.transport);
+      channels.push(channel);
+      return channel;
+    },
+  });
+  const connect = () => {
+    client.connect({ transport: "webtransport", url: "https://example.test" });
+    channels.at(-1).open();
+    return channels.at(-1);
+  };
+  return { client, entities, channels, connect };
+}
+
+test("space messages use the server's golden bytes", () => {
+  assert.deepEqual(Array.from(spaceChangedField(5, 1)), [0x22, 0x04, 0x08, 0x05, 0x10, 0x01]);
+  assert.deepEqual(Array.from(spaceSettledField(1)), [0x2a, 0x02, 0x08, 0x01]);
+});
+
+test("GameClient notifies a space change before the frames that follow it and acknowledges the settle", () => {
+  const { client, entities, connect } = spaceClient();
+  const changes = [];
+  client.subscribeSpaceChanged((oldSpace, newSpace) => {
+    assert.equal(client.space, newSpace);
+    entities.log.push(`space ${oldSpace}->${newSpace}`);
+    changes.push([oldSpace, newSpace]);
+  });
+  const channel = connect();
+  entities.log.length = 0;
+
+  channel.stream(
+    entityField(1, 3, "exit"),
+    spaceChangedField(5, 1),
+    entityField(2, 4, "carried"),
+    entityField(3, 1, "entered"),
+    spaceSettledField(1),
+  );
+  assert.deepEqual(entities.log, ["full 1@3=exit", "space 0->5", "full 2@4=carried", "full 3@1=entered"]);
+  assert.equal(client.space, 5);
+  assert.deepEqual(channel.sent.map((bytes) => Array.from(bytes)), [spaceAckBytes(1)]);
+
+  // Returning to space 0 omits the space field; the shorter message is still recognized.
+  channel.stream(spaceChangedField(0, 2), spaceSettledField(2));
+  assert.equal(client.space, 0);
+  assert.deepEqual(changes, [[0, 5], [5, 0]]);
+  assert.deepEqual(channel.sent.map((bytes) => Array.from(bytes)), [spaceAckBytes(1), spaceAckBytes(2)]);
+  client.disconnect();
+});
+
+test("GameClient holds datagram batches until SpaceSettled and lets the revision fence reject late state", () => {
+  const { client, entities, connect } = spaceClient();
+  const channel = connect();
+  entities.log.length = 0;
+
+  channel.stream(entityField(1, 8, "old"));
+  channel.stream(spaceChangedField(7, 3));
+  channel.datagram("eventual", 1, 9, "late");
+  channel.datagram("ordered", 1, 10, "carried");
+  channel.datagram("unreliable", 1, 11, "next");
+  assert.deepEqual(entities.log, ["full 1@8=old"]);
+  assert.equal(channel.sent.length, 0);
+
+  channel.stream(entityField(1, 10, "carried"), spaceSettledField(3));
+  assert.deepEqual(entities.log, [
+    "full 1@8=old",
+    "full 1@10=carried",
+    "reject compact 1@9",
+    "compact 1@10=carried",
+    "compact 1@11=next",
+  ]);
+  assert.deepEqual(channel.sent.map((bytes) => Array.from(bytes)), [spaceAckBytes(3)]);
+
+  channel.datagram("eventual", 1, 12, "live");
+  assert.equal(entities.log.at(-1), "compact 1@12=live");
+  client.disconnect();
+});
+
+test("GameClient lets a newer SpaceChanged supersede an open transition", () => {
+  const { client, entities, connect } = spaceClient();
+  const changes = [];
+  client.subscribeSpaceChanged((oldSpace, newSpace) => changes.push([oldSpace, newSpace]));
+  const channel = connect();
+  entities.log.length = 0;
+
+  channel.stream(spaceChangedField(1, 1));
+  channel.datagram("eventual", 1, 1, "held");
+  channel.stream(spaceChangedField(2, 2), spaceSettledField(1));
+  assert.deepEqual(entities.log, []);
+  assert.equal(channel.sent.length, 0);
+  channel.stream(spaceSettledField(2));
+  assert.deepEqual(entities.log, ["compact 1@1=held"]);
+  assert.deepEqual(channel.sent.map((bytes) => Array.from(bytes)), [spaceAckBytes(2)]);
+  assert.deepEqual(changes, [[0, 1], [1, 2]]);
+  assert.equal(client.space, 2);
+  client.disconnect();
+});
+
+test("GameClient closes the connection with an error when the space hold-back overflows", () => {
+  const { client, entities, connect } = spaceClient();
+  const disconnects = [];
+  const states = [];
+  client.onDisconnect((info) => disconnects.push(info));
+  const channel = connect();
+  client.subscribeConnectionState((state) => states.push(state.type));
+  entities.log.length = 0;
+  const previousError = console.error;
+  console.error = () => {};
+  try {
+    channel.stream(spaceChangedField(4, 1));
+    for (let i = 0; i <= 1024; i++) channel.datagram("eventual", 1, 1, "x");
+  } finally {
+    console.error = previousError;
+  }
+  assert.equal(disconnects.length, 1);
+  assert.equal(disconnects[0].wasClean, false);
+  assert.match(disconnects[0].error.message, /space transition hold-back overflow/);
+  assert.deepEqual(states, ["connected", "disconnected"]);
+  assert.equal(channel.closeCalls, 1);
+  assert.equal(client.connected, false);
+  assert.equal(client.space, 0);
+  assert.deepEqual(entities.log, ["clear"]);
+
+  // Late callbacks from the failed channel are fenced.
+  channel.datagram("eventual", 1, 2, "late");
+  channel.stream(spaceSettledField(1));
+  assert.deepEqual(entities.log, ["clear"]);
+  client.disconnect();
+  assert.equal(disconnects.length, 1);
+});
+
+test("GameClient resets the space silently on disconnect and reconnect", () => {
+  const { client, entities, connect } = spaceClient();
+  let calls = 0;
+  client.subscribeSpaceChanged(() => calls++);
+  const first = connect();
+  first.stream(spaceChangedField(3, 1));
+  first.datagram("eventual", 1, 1, "held");
+  assert.equal(client.space, 3);
+
+  first.fail();
+  assert.equal(client.space, 0);
+  const second = connect();
+  assert.equal(client.space, 0);
+  assert.equal(calls, 1);
+  entities.log.length = 0;
+  second.datagram("eventual", 1, 2, "fresh");
+  assert.deepEqual(entities.log, ["compact 1@2=fresh"]);
+
+  second.stream(spaceChangedField(6, 1));
+  assert.equal(client.space, 6);
+  client.disconnect();
+  assert.equal(client.space, 0);
+  assert.equal(calls, 2);
+});
+
+test("GameClient stops applying a frame after a space listener disconnects", () => {
+  const { client, entities, connect } = spaceClient();
+  const unsubscribe = client.subscribeSpaceChanged(() => client.disconnect());
+  const channel = connect();
+  entities.log.length = 0;
+  channel.stream(spaceChangedField(2, 1), entityField(1, 1, "after"), spaceSettledField(1));
+  assert.deepEqual(entities.log, ["clear"]);
+  assert.equal(channel.sent.length, 0);
+  assert.equal(client.space, 0);
+  unsubscribe();
+});
+
+test("GameClient without space messages behaves as before", () => {
+  const { client, entities, connect } = spaceClient();
+  let calls = 0;
+  client.subscribeSpaceChanged(() => calls++);
+  const channel = connect();
+  entities.log.length = 0;
+  channel.stream(entityField(1, 1, "a"), new PbWriter().tag(9, 2).bytes(new Uint8Array([7])).finish(), entityField(2, 1, "b"));
+  channel.datagram("eventual", 1, 2, "c");
+  assert.deepEqual(entities.log, ["full 1@1=a", "full 2@1=b", "compact 1@2=c"]);
+  assert.equal(client.space, 0);
+  assert.equal(calls, 0);
+  assert.equal(channel.sent.length, 0);
+  client.disconnect();
+});
+
+test("GameClient routes WorldCleared to the world manager's optional clearWorld in order", () => {
+  for (const withClear of [true, false]) {
+    const entities = fencedEntities();
+    const worldManager = { applyUpdate: (bytes) => entities.log.push(`world ${String.fromCharCode(...bytes)}`) };
+    if (withClear) worldManager.clearWorld = (name) => entities.log.push(`cleared ${name}`);
+    const channels = [];
+    const client = new GameClient({
+      entityManager: entities,
+      worldManager,
+      decodeWorld: (bytes) => bytes,
+      decode: (bytes) => bytes,
+      encode: () => new Uint8Array(),
+      encodePacket: packetBytes,
+      createChannel: (options) => {
+        const channel = new SpaceChannel(options.transport);
+        channels.push(channel);
+        return channel;
+      },
+    });
+    client.connect({ transport: "webtransport", url: "https://example.test" });
+    const channel = channels.at(-1);
+    channel.open();
+    entities.log.length = 0;
+    channel.stream(
+      spaceChangedField(4, 1),
+      new PbWriter().tag(2, 2).bytes(new Uint8Array([102, 111, 103])).finish(),
+      new PbWriter().tag(6, 2).bytes(new PbWriter().tag(1, 2).string("Light").finish()).finish(),
+      entityField(2, 4, "carried"),
+      spaceSettledField(1),
+    );
+    const expected = withClear
+      ? ["world fog", "cleared Light", "full 2@4=carried"]
+      : ["world fog", "full 2@4=carried"];
+    assert.deepEqual(entities.log, expected);
+    client.disconnect();
+  }
+});
+
+test("GameClient stops applying a compact batch after a callback disconnects", () => {
+  for (const held of [false, true]) {
+    const { client, entities, connect } = spaceClient();
+    const channel = connect();
+    entities.log.length = 0;
+    const apply = entities.applyCompactUpdate;
+    entities.applyCompactUpdate = (frame) => {
+      apply(frame);
+      client.disconnect();
+    };
+    const batch = framedBatchBytes([fencedRecord(1, 1, "first"), fencedRecord(2, 1, "second"), fencedRecord(3, 1, "third")]);
+    if (held) channel.stream(spaceChangedField(4, 1));
+    channel.eventual(batch);
+    if (held) channel.stream(spaceSettledField(1));
+    assert.deepEqual(entities.log, ["compact 1@1=first", "clear"], held ? "held batch" : "live batch");
+    assert.equal(channel.sent.length, 0);
+    entities.applyCompactUpdate = apply;
+  }
+});
+
+test("GameClient sends EntityResync when the entity manager reports evicted records", () => {
+  const entities = fencedEntities();
+  let resync;
+  entities.onResyncNeeded = (fn) => {
+    resync = fn;
+    return () => { resync = undefined; };
+  };
+  const channels = [];
+  new GameClient({
+    entityManager: entities,
+    decode: (bytes) => bytes,
+    encode: () => new Uint8Array(),
+    encodePacket: packetBytes,
+    createChannel: (options) => {
+      const channel = new SpaceChannel(options.transport);
+      channels.push(channel);
+      return channel;
+    },
+  }).connect({ transport: "webtransport", url: "https://example.test" });
+  assert.equal(typeof resync, "function");
+  const channel = channels.at(-1);
+  resync(5);
+  assert.equal(channel.sent.length, 0, "no resync before the channel opens");
+  channel.open();
+  resync(0x0102030405);
+  assert.deepEqual(channel.sent.map((bytes) => Array.from(bytes)), [[0x00, 0x4f, 0x47, 0x53, 0x04, 0, 0, 0, 1, 2, 3, 4, 5]]);
+});
+
+// Datagram event records: `00 <event>` untagged (transition 0) or
+// `00 00 <uvarint transition> <event>`.
+function eventRecord(transition, text) {
+  const event = Array.from(text, (c) => c.charCodeAt(0));
+  if (transition === 0) return new Uint8Array([0, ...event]);
+  const varint = [];
+  for (let v = transition; ; v = Math.floor(v / 128)) {
+    if (v < 128) { varint.push(v); break; }
+    varint.push((v % 128) | 0x80);
+  }
+  return new Uint8Array([0, 0, ...varint, ...event]);
+}
+
+function eventSpaceClient(channelClass = SpaceChannel) {
+  const entities = fencedEntities();
+  const channels = [];
+  const client = new GameClient({
+    entityManager: entities,
+    eventManager: { applyRaw: (bytes) => entities.log.push(`event ${String.fromCharCode(...bytes)}`) },
+    decode: (bytes) => bytes,
+    encode: () => new Uint8Array(),
+    encodePacket: packetBytes,
+    createChannel: (options) => {
+      const channel = new channelClass(options.transport);
+      channels.push(channel);
+      return channel;
+    },
+  });
+  const connect = () => {
+    client.connect({ transport: "webtransport", url: "https://example.test" });
+    channels.at(-1).open();
+    return channels.at(-1);
+  };
+  return { client, entities, connect };
+}
+
+test("GameClient drops datagram event records of a transition it already left", () => {
+  const { client, entities, connect } = eventSpaceClient();
+  const channel = connect();
+  entities.log.length = 0;
+
+  // Untagged events apply before any switch.
+  channel.unreliable(framedBatchBytes([eventRecord(0, "pre")]));
+  assert.deepEqual(entities.log, ["event pre"]);
+
+  // Held during the transition: the pre-switch event is dropped on replay.
+  channel.stream(spaceChangedField(7, 1));
+  channel.unreliable(framedBatchBytes([eventRecord(0, "held-old")]));
+  channel.ordered(framedBatchBytes([eventRecord(1, "held-current")]));
+  channel.stream(spaceSettledField(1));
+  assert.deepEqual(entities.log, ["event pre", "event held-current"]);
+
+  // Live after the settle.
+  channel.unreliable(framedBatchBytes([eventRecord(0, "live-old"), eventRecord(1, "live-current")]));
+  assert.deepEqual(entities.log, ["event pre", "event held-current", "event live-current"]);
+
+  // A newer transition makes transition 1 stale; malformed records are dropped
+  // rather than read as compact state.
+  channel.stream(spaceChangedField(8, 300), spaceSettledField(300));
+  channel.unreliable(framedBatchBytes([eventRecord(1, "stale"), new Uint8Array([0, 0, 0x80]), eventRecord(300, "fresh")]));
+  assert.deepEqual(entities.log, ["event pre", "event held-current", "event live-current", "event fresh"]);
+
+  // Reconnecting resets the transition: untagged events apply again.
+  client.disconnect();
+  const next = connect();
+  entities.log.length = 0;
+  next.unreliable(framedBatchBytes([eventRecord(0, "reconnected")]));
+  assert.deepEqual(entities.log, ["event reconnected"]);
+  client.disconnect();
+});
+
+// Events on a reliable datagram lane are reliable only within one space: a
+// record sent before a space change that arrives after it, such as a
+// retransmission, is dropped like any record of an older transition. An event
+// that must survive a space change belongs on the stream.
+test("GameClient drops a late reliable-lane event of an older transition but keeps stream events", () => {
+  const { client, entities, connect } = eventSpaceClient();
+  const channel = connect();
+  entities.log.length = 0;
+
+  channel.stream(spaceChangedField(7, 1), spaceSettledField(1));
+  channel.ordered(framedBatchBytes([eventRecord(0, "inventory-late")]));
+  const streamEvent = Uint8Array.from("inventory-stream", (c) => c.charCodeAt(0));
+  channel.stream(new PbWriter().tag(3, 2).bytes(streamEvent).finish());
+  channel.ordered(framedBatchBytes([eventRecord(1, "current")]));
+  assert.deepEqual(entities.log, ["event inventory-stream", "event current"]);
+  client.disconnect();
+});
+
+class FailingSendSpaceChannel extends SpaceChannel {
+  send() { throw new Error("write failed"); }
+}
+
+test("GameClient closes the connection when a SpaceAck or EntityResync send fails", () => {
+  for (const control of ["space ack", "entity resync"]) {
+    const entities = fencedEntities();
+    let resync;
+    entities.onResyncNeeded = (fn) => { resync = fn; return () => {}; };
+    const disconnects = [];
+    const channels = [];
+    const client = new GameClient({
+      entityManager: entities,
+      decode: (bytes) => bytes,
+      encode: () => new Uint8Array(),
+      encodePacket: packetBytes,
+      createChannel: (options) => {
+        const channel = new FailingSendSpaceChannel(options.transport);
+        channels.push(channel);
+        return channel;
+      },
+    });
+    client.onDisconnect((info) => disconnects.push(info));
+    client.connect({ transport: "webtransport", url: "https://example.test" });
+    const channel = channels.at(-1);
+    channel.open();
+    const previousError = console.error;
+    console.error = () => {};
+    try {
+      if (control === "space ack") {
+        channel.stream(spaceChangedField(3, 1), spaceSettledField(1));
+      } else {
+        resync(5);
+      }
+    } finally {
+      console.error = previousError;
+    }
+    assert.equal(disconnects.length, 1, control);
+    assert.equal(disconnects[0].wasClean, false, control);
+    assert.match(disconnects[0].error.message, new RegExp(`${control} send failed`), control);
+    assert.equal(channel.closeCalls, 1, control);
+    assert.equal(client.connected, false, control);
+  }
+});

@@ -31,6 +31,17 @@ type StateRevisioner interface {
 	StateRevision() uint64
 }
 
+// StateRevisionBumper is optionally implemented by entities whose state
+// revision can advance without a field change. golem.Server.SetOwner calls it
+// when an entity's owner changes, so the owner or public full state sent for
+// the new ownership carries a newer revision than any record serialized for
+// the previous view, and clients reject such late records as stale.
+// Implementations must be safe for concurrent use with their setters and must
+// not mark any field dirty.
+type StateRevisionBumper interface {
+	BumpStateRevision()
+}
+
 // ReplicationDeltaEntity is optionally implemented by generated entities that
 // can remarshal selected current fields for ACK-aware eventual replication.
 type ReplicationDeltaEntity interface {

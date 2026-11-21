@@ -25,7 +25,8 @@ type contentSnapshotManifest struct {
 
 // SaveContentSnapshot captures entity-only state synchronously, then writes an
 // immutable snapshot and a content-pinned manifest asynchronously, manifest last.
-// Call at startup or on the tick owner. The channel yields exactly one error.
+// Call at startup or on the tick owner; before Run, a concurrent Run waits for
+// the capture before its first tick. The channel yields exactly one error.
 // Save calls sharing a manifest path must be serialized by the host. Old data
 // files remain available; this helper never deletes previous checkpoint evidence.
 // Physics-configured hosts must use paired physics recovery and pin their content
@@ -36,13 +37,16 @@ func (s *Server) SaveContentSnapshot(fingerprint, contentHash, manifestPath stri
 	if !validContentHash(contentHash) || fingerprint == "" || manifestPath == "" {
 		return fail(errors.New("golem: content snapshot requires fingerprint, SHA-256 content hash and manifest path"))
 	}
-	if s.physics != nil {
+	if s.anyPhysics() {
 		return fail(errors.New("golem: content snapshot is entity-only; use paired physics checkpoints"))
+	}
+	if s.enterPreRunCapture() {
+		defer s.preRunCaptureMu.RUnlock()
 	}
 	if err := s.entitySetupAllowed(); err != nil {
 		return fail(err)
 	}
-	data, err := snapshot.Capture(s.reg.All(), fingerprint)
+	data, err := snapshot.CaptureSpaced(s.reg.AppendSpaced(nil), fingerprint)
 	if err != nil {
 		return fail(err)
 	}
@@ -122,7 +126,7 @@ func (s *Server) LoadContentSnapshot(manifestPath, fingerprint, contentHash stri
 	s.lifeMu.Lock()
 	created := s.life == lifecycleCreated
 	s.lifeMu.Unlock()
-	if !created || s.physics != nil {
+	if !created || s.anyPhysics() {
 		return errors.New("golem: LoadContentSnapshot requires entity-only startup before Run")
 	}
 	if restore == nil || !validContentHash(contentHash) {

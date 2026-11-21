@@ -322,3 +322,35 @@ func TestLayers_Remove_panicWithNoBackend(t *testing.T) {
 	}()
 	NewLayers().Remove(1)
 }
+
+func TestLayers_Bound(t *testing.T) {
+	var nilLayers *Layers
+	if nilLayers.Bound() {
+		t.Fatal("nil Layers reported bound")
+	}
+	l := NewLayers().Define("A")
+	if l.Bound() {
+		t.Fatal("Layers without Bind reported bound")
+	}
+	if !l.Bind(&stubBackend{}).Bound() {
+		t.Fatal("Layers after Bind reported unbound")
+	}
+}
+
+func TestLayersBindTypedNilLeavesFacadeUnbound(t *testing.T) {
+	l := NewLayers().Bind((*stubBackend)(nil))
+	if l.Bound() || l.Backend() != nil {
+		t.Fatalf("typed-nil backend bound: Bound=%v Backend=%v", l.Bound(), l.Backend())
+	}
+	b := &stubBackend{}
+	if l.Bind(b); !l.Bound() || l.Backend() != b {
+		t.Fatal("real backend not bound")
+	}
+	if l.Bind(nil); l.Bound() || l.Backend() != nil {
+		t.Fatal("nil Bind did not unbind")
+	}
+	var none *Layers
+	if none.Backend() != nil {
+		t.Fatal("nil receiver reported a backend")
+	}
+}

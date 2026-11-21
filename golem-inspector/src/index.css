@@ -394,6 +394,37 @@ button {
   margin-left: auto;
 }
 
+.map-space {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.map-space select {
+  padding: 0.15rem 0.35rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--bg-1);
+  color: var(--text);
+  font-size: 0.75rem;
+  letter-spacing: 0;
+}
+
+.map-space select:focus {
+  outline: 1px solid var(--accent);
+  border-color: var(--accent);
+}
+
+.space-badge {
+  padding: 0 0.3rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+}
+
 .map-title {
   font-size: 0.75rem;
   letter-spacing: 0.1em;

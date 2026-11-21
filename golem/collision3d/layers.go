@@ -1,6 +1,10 @@
 package collision3d
 
-import "github.com/demiurgos-hub/golem-engine/golem/collision/layerpolicy"
+import (
+	"reflect"
+
+	"github.com/demiurgos-hub/golem-engine/golem/collision/layerpolicy"
+)
 
 // Layers maps named layers to bit indices, maintains a symmetric collision
 // matrix, and — when bound to a backend via Bind — acts as a registration
@@ -18,10 +22,47 @@ func NewLayers() *Layers {
 }
 
 // Bind attaches a 3D collision backend. Required before calling Add, Set, or Remove.
+// A nil or typed-nil backend unbinds the facade (Bound reports false).
 // Returns the receiver for method chaining.
 func (l *Layers) Bind(b Backend) *Layers {
+	if nilBackend(b) {
+		// A typed nil (such as a nil *SimpleBackend) would otherwise pass Bound
+		// and panic in Add.
+		b = nil
+	}
 	l.backend = b
 	return l
+}
+
+// Backend returns the backend bound with Bind, or nil when none is bound or
+// the receiver is nil. The runtime uses it to keep one backend from serving
+// helpers or backends of different spaces.
+func (l *Layers) Backend() Backend {
+	if l == nil {
+		return nil
+	}
+	return l.backend
+}
+
+// nilBackend reports whether b is nil or a typed nil of a nillable kind.
+func nilBackend(b Backend) bool {
+	if b == nil {
+		return true
+	}
+	v := reflect.ValueOf(b)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
+// Bound reports whether a backend has been bound with Bind, which Add, Set
+// and Remove require. It is false for a nil receiver. Check it before calling
+// those methods to avoid their panic.
+func (l *Layers) Bound() bool {
+	return l != nil && l.backend != nil
 }
 
 // Define registers one or more layer names, assigning them consecutive bit

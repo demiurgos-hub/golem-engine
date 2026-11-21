@@ -16,9 +16,11 @@ type AvatarOptions struct {
 	FOIRadius float64
 	// FOIMargin is the hysteresis margin passed to AssignFOI when FOIRadius > 0.
 	FOIMargin float64
+	// Space is the space the avatar is created in. The zero value is space 0.
+	Space SpaceID
 }
 
-// SpawnAvatar registers e as sess's avatar: CreateEntity(e, sess.ID), optional FOI
+// SpawnAvatar registers e as sess's avatar: CreateEntityIn(opts.Space, e, sess.ID), optional FOI
 // when opts.FOIRadius > 0, and session↔entity avatar indexes.
 //
 // Duplicate calls for a session that already has a live avatar return an error;
@@ -39,7 +41,7 @@ func (s *Server) SpawnAvatar(sess *Session, e Entity, opts AvatarOptions) error 
 		return err
 	}
 
-	if err := s.CreateEntity(e, sess.ID); err != nil {
+	if err := s.CreateEntityIn(opts.Space, e, sess.ID); err != nil {
 		s.releaseAvatarReservation(sess.ID)
 		return err
 	}
@@ -58,7 +60,7 @@ func (s *Server) SpawnAvatar(sess *Session, e Entity, opts AvatarOptions) error 
 
 	if err := s.commitAvatar(sess.ID, entityID); err != nil {
 		if foiAssigned {
-			s.RemoveFOI(sess.ID)
+			s.removeFOI(sess.ID, false)
 		}
 		s.DeleteEntity(entityID)
 		s.releaseAvatarReservation(sess.ID)
@@ -132,8 +134,26 @@ func (s *Server) releaseAvatarReservation(sessionID int64) {
 	}
 }
 
-// commitAvatar binds sessionID to entityID after a successful spawn.
+// commitAvatar binds sessionID to entityID after a successful spawn. The
+// avatar may move the session to its space, so the session then holds its
+// server events until that transition is queued.
 func (s *Server) commitAvatar(sessionID, entityID int64) error {
+	if err := s.bindAvatar(sessionID, entityID); err != nil {
+		return err
+	}
+	// The new avatar decides the session's space; forget the last one's.
+	s.interestMu.Lock()
+	delete(s.sessionSpaceKept, sessionID)
+	pending := s.switchPendingLocked(sessionID)
+	s.interestMu.Unlock()
+	if pending {
+		s.holdSessionEvents(sessionID)
+	}
+	return nil
+}
+
+// bindAvatar records the avatar indexes of a pending reservation.
+func (s *Server) bindAvatar(sessionID, entityID int64) error {
 	s.avatarMu.Lock()
 	defer s.avatarMu.Unlock()
 	id, ok := s.sessionAvatar[sessionID]
@@ -148,16 +168,58 @@ func (s *Server) commitAvatar(sessionID, entityID int64) error {
 	return nil
 }
 
-// clearAvatarByEntity removes avatar index entries for entityID in O(1).
-// Safe under concurrent SpawnAvatar / Avatar / disconnect; does not touch the registry.
+// clearAvatarByEntity removes avatar index entries for entityID in O(1), for
+// an avatar that is about to be deleted. Safe under concurrent SpawnAvatar /
+// Avatar / disconnect; does not touch the registry. The session stays in the
+// avatar's last space (sessionSpaceKept) unless it has an explicit space, so
+// the death of an avatar does not move its player; when the explicit space
+// differs, the session holds its server events until that transition is
+// queued. That last space is where the avatar is now, also when it moved
+// since the last replication pass: a session whose FOI is anchored on the
+// avatar gets the interest manager's missing-anchor space updated too, so
+// both replication modes agree. (An FOI anchored on another entity keeps the
+// space of the last pass when that entity is deleted.) Call while the entity
+// is still registered and without interestMu.
 func (s *Server) clearAvatarByEntity(entityID int64) {
 	s.avatarMu.Lock()
-	defer s.avatarMu.Unlock()
-	sessionID, ok := s.avatarSession[entityID]
+	_, ok := s.avatarSession[entityID]
+	s.avatarMu.Unlock()
 	if !ok {
 		return
 	}
-	s.unlinkAvatarLocked(sessionID, entityID)
+	space, _ := s.reg.PublishedSpace(entityID)
+	// Unlink and remember the space under interestMu, so no reader of the
+	// session's space sees one without the other.
+	s.interestMu.Lock()
+	s.avatarMu.Lock()
+	sessionID, ok := s.avatarSession[entityID]
+	if ok {
+		s.unlinkAvatarLocked(sessionID, entityID)
+	}
+	s.avatarMu.Unlock()
+	pending := false
+	if ok {
+		_, closed := s.closedSessions[sessionID]
+		if space != 0 && !closed {
+			s.sessionSpaceKept[sessionID] = space
+		} else {
+			delete(s.sessionSpaceKept, sessionID)
+		}
+		// With an FOI anchored on the avatar, the interest manager supplies
+		// the space while the anchor is missing. It only knows the space of
+		// the last replication pass, which is stale when the avatar moved
+		// since, so tell it where the avatar was when it went.
+		if s.interest != nil && !closed {
+			if foi, anchored := s.interest.SessionFOI(sessionID); anchored && foi.EntityID == entityID {
+				s.interest.SetSessionSpace(sessionID, space)
+			}
+		}
+		pending = s.switchPendingLocked(sessionID)
+	}
+	s.interestMu.Unlock()
+	if pending {
+		s.holdSessionEvents(sessionID)
+	}
 }
 
 // takeAvatarBySession removes and returns the avatar entity ID for sessionID.
@@ -193,7 +255,7 @@ func (s *Server) unlinkAvatarLocked(sessionID, entityID int64) {
 // either mutex across registry hooks.
 func (s *Server) cleanupAvatarOnDisconnect(sessionID int64) {
 	if s.interest != nil {
-		s.RemoveFOI(sessionID)
+		s.removeFOI(sessionID, false)
 	}
 
 	entityID, had := s.takeAvatarBySession(sessionID)

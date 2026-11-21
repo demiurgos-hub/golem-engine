@@ -13,11 +13,12 @@ import (
 // or removing transferred momentum. Call on the tick owner outside frames and
 // contact callbacks; QueuePhysicsMotionPolicy defers callback requests.
 func (s *Server) SetPhysicsMotionPolicy(id int64, policy p.MotionPolicy) error {
-	ps := s.physics
+	rt := s.runtimeOf(id)
+	ps := rt.phys()
 	if err := ps.mutable(); err != nil {
 		return err
 	}
-	if s.navigation != nil && s.navigation.frame != nil {
+	if n := rt.nav(); n != nil && n.frame != nil {
 		return p.ErrBusy
 	}
 	a := ps.agents[id]
@@ -34,7 +35,7 @@ func (s *Server) SetPhysicsMotionPolicy(id int64, policy p.MotionPolicy) error {
 	if ps.trajectoryGeneration == math.MaxUint64 || a.policyGeneration == math.MaxUint64 {
 		return p.ErrInvalid
 	}
-	if n := s.navigation; n != nil {
+	if n := rt.nav(); n != nil {
 		if agent := n.agents[id]; agent != nil && (!physicsNavigationMode(policy.Mode) || agent.state.HasDestination && policy.Mode == p.FreeDynamic) {
 			return fmt.Errorf("%w: motion policy conflicts with navigation attachment or intent", p.ErrUnsupported)
 		}
@@ -63,7 +64,7 @@ func (s *Server) SetPhysicsMotionPolicy(id int64, policy p.MotionPolicy) error {
 // invalid or unsupported policies otherwise follow queued-command error handling.
 // This method is tick-owned and is safe inside accepted contact callbacks.
 func (s *Server) QueuePhysicsMotionPolicy(id int64, policy p.MotionPolicy) error {
-	ps := s.physics
+	ps := s.runtimeOf(id).phys()
 	if ps == nil || ps.agents[id] == nil {
 		return p.ErrStale
 	}
@@ -72,7 +73,7 @@ func (s *Server) QueuePhysicsMotionPolicy(id int64, policy p.MotionPolicy) error
 	}
 	a := ps.agents[id]
 	generation := a.policyGeneration
-	return s.QueuePhysicsCommand(func(p.World) error {
+	return ps.queue(func(p.World) error {
 		if ps.agents[id] != a || a.policyGeneration != generation {
 			return nil
 		}

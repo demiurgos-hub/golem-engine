@@ -37,6 +37,20 @@ func (w *World) SetCharacterVelocity(h p.BodyHandle, velocity p.Vec3) error {
 	return nil
 }
 
+// CharacterController reports the body's current controller policy, including
+// its retained velocity intent, or ok=false when it has no enabled controller.
+// Like Body, it is readable while a frame awaits acceptance.
+func (w *World) CharacterController(h p.BodyHandle) (p.CharacterControllerConfig, bool, error) {
+	v, err := w.findBody(h)
+	if err != nil {
+		return p.CharacterControllerConfig{}, false, err
+	}
+	if !v.desc.Controller.Enabled {
+		return p.CharacterControllerConfig{}, false, nil
+	}
+	return v.desc.Controller, true, nil
+}
+
 func (w *World) controllerGeometry(h p.BodyHandle) (controllerGeometry, error) {
 	return w.controllerGeometryAt(h, w.bodyState(h, w.bodyForHandle(h)).Pose)
 }
@@ -92,11 +106,11 @@ func (w *World) probeController(h p.BodyHandle) (controllerGeometry, character.S
 	if grounded {
 		collider, ok := w.colliders[support.Collider]
 		if !ok {
-			return g, support, p.ErrStale
+			return g, support, staleHandle(p.Handle(support.Collider))
 		}
 		body, ok := w.bodies[collider.desc.Body]
 		if !ok {
-			return g, support, p.ErrStale
+			return g, support, staleHandle(p.Handle(collider.desc.Body))
 		}
 		pose := w.bodyState(collider.desc.Body, body).Pose
 		v.support = p.CharacterSupport{Grounded: true, Collider: support.Collider, Body: collider.desc.Body, Feature: support.Feature, Point: support.Point, LocalPoint: pose.Inverse().Transform(support.Point), Normal: support.Normal}
@@ -213,7 +227,7 @@ func (w *World) controllerPath(h p.BodyHandle, velocity p.Vec3, dt float32) (kin
 	if v.support.Grounded && v.desc.Controller.FollowSupport {
 		platform := w.bodyForHandle(v.support.Body)
 		if platform == nil {
-			return kinematicPath{}, nil, p.ErrStale
+			return kinematicPath{}, nil, staleHandle(p.Handle(v.support.Body))
 		}
 		now := w.bodyState(v.support.Body, platform).Pose
 		carry := predictSupportPose(platform, dt).Transform(v.support.LocalPoint).Sub(now.Transform(v.support.LocalPoint))

@@ -317,6 +317,58 @@
       }
     },
     {
+      "name": "snapshot_chunk_spaces",
+      "file": "snapshot_chunk_spaces.bin",
+      "type": "SnapshotChunk",
+      "want": {
+        "targetId": "cave-7",
+        "epoch": 2,
+        "seq": 2,
+        "entities": [
+          {
+            "id": 42,
+            "typeTag": 1,
+            "state": "CCoVAADAPx0AAADAJQAAJEEqA0FkYTD5//////////8BOGNCBANyZWRCAQBKBwoDc3RyEAxSCQoFc3dvcmQQAcA+Aw=="
+          },
+          {
+            "id": 43,
+            "typeTag": 3,
+            "state": "CCs=",
+            "space": 3
+          }
+        ]
+      }
+    },
+    {
+      "name": "batch_spaces",
+      "file": "batch_spaces.bin",
+      "type": "Batch",
+      "want": {
+        "targetId": "cave-7",
+        "epoch": 2,
+        "seq": 5,
+        "tick": 906,
+        "spawns": [
+          {
+            "id": 44,
+            "typeTag": 3,
+            "state": "CCw=",
+            "space": 2
+          }
+        ],
+        "moves": [
+          {
+            "id": 42,
+            "space": 3
+          },
+          {
+            "id": 43,
+            "space": 0
+          }
+        ]
+      }
+    },
+    {
       "name": "ping",
       "file": "ping.bin",
       "type": "Ping",

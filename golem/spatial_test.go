@@ -1,6 +1,9 @@
 package golem
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // overlapMob mimics a generated Synced* pointer entity.
 type overlapMob struct {
@@ -136,5 +139,85 @@ func TestOverlapOfType_NilServerPanics(t *testing.T) {
 			}()
 			_ = OverlapOfType[*overlapMob](nil, ids)
 		}()
+	}
+}
+
+func TestSpaceQueriesOnlySeeTheirSpace(t *testing.T) {
+	s, _, _ := twoSpaceCollisionServer(t)
+	createIn(t, s, 0, newSpaceCollider(1))
+	createIn(t, s, 3, newSpaceCollider(2))
+	s.stepCollision(0.05)
+
+	if got := s.OverlapCircle(0, 0, 1, ^uint32(0)); len(got) != 1 || got[0] != 1 {
+		t.Fatalf("Server.OverlapCircle = %v, want space 0's entity 1", got)
+	}
+	if got := s.Space(0).OverlapBox(0, 0, 1, 1, ^uint32(0)); len(got) != 1 || got[0] != 1 {
+		t.Fatalf("Space(0).OverlapBox = %v, want entity 1", got)
+	}
+	if got := s.Space(3).OverlapCircle(0, 0, 1, ^uint32(0)); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("Space(3).OverlapCircle = %v, want only entity 2", got)
+	}
+	if got := s.Space(3).OverlapBox(0, 0, 1, 1, ^uint32(0)); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("Space(3).OverlapBox = %v, want only entity 2", got)
+	}
+	mobs := OverlapOfType[*spaceCollider](s, s.Space(3).OverlapCircle(0, 0, 1, ^uint32(0)))
+	if len(mobs) != 1 || mobs[0].id != 2 {
+		t.Fatalf("OverlapOfType over a space query = %v", mobs)
+	}
+}
+
+func TestQueriesOnSpacesWithoutServicesCreateNothing(t *testing.T) {
+	s := NewServer(ServerConfig{})
+	sp := s.Space(9)
+	if sp.OverlapBox(0, 0, 1, 1, 1) != nil || sp.OverlapCircle(0, 0, 1, 1) != nil {
+		t.Fatal("overlap on a space without backend returned hits")
+	}
+	if _, ok := sp.Raycast(0, 0, 1, 1, 1); ok {
+		t.Fatal("raycast hit")
+	}
+	if sp.RaycastAll(0, 0, 1, 1, 1) != nil || sp.BoxCastAll(0, 0, 1, 1, 1, 1, 1) != nil || sp.CircleCastAll(0, 0, 1, 1, 1, 1) != nil {
+		t.Fatal("cast-all hit")
+	}
+	if _, ok := sp.BoxCast(0, 0, 1, 1, 1, 1, 1); ok {
+		t.Fatal("box cast hit")
+	}
+	if _, ok := sp.CircleCast(0, 0, 1, 1, 1, 1); ok {
+		t.Fatal("circle cast hit")
+	}
+	if sp.OverlapBox3D(0, 0, 0, 1, 1, 1, 1) != nil || sp.OverlapSphere(0, 0, 0, 1, 1) != nil || sp.RaycastAll3D(CollisionVec3{}, CollisionVec3{X: 1}, 1) != nil {
+		t.Fatal("3D query hit")
+	}
+	if _, ok := sp.Raycast3D(CollisionVec3{}, CollisionVec3{X: 1}, 1); ok {
+		t.Fatal("3D raycast hit")
+	}
+	if _, ok := sp.FindPath(0, 0, 1, 1); ok {
+		t.Fatal("FindPath without backend succeeded")
+	}
+	sp.SetNavWalkable(0, 0, false)
+	sp.SetCollisionBackend(nil)
+	sp.SetCollisionLayers(nil)
+	sp.SetCollision3DBackend(nil)
+	sp.SetCollisionLayers3D(nil)
+	sp.SetNavBackend(nil)
+	if len(s.spaces) != 0 || len(s.spaceOrder) != 0 {
+		t.Fatalf("queries or nil setters created runtimes: %v", s.spaces)
+	}
+}
+
+func TestSpaceRuntimesStayInAscendingOrder(t *testing.T) {
+	s := NewServer(ServerConfig{})
+	for _, id := range []SpaceID{7, 2, 9, 4} {
+		s.Space(id).SetCollisionBackend(newPointBackend2D())
+	}
+	s.Space(4).SetNavBackend(&navAgentBackend{})
+	var got []SpaceID
+	for _, rt := range s.spaceOrder {
+		got = append(got, rt.id)
+	}
+	if want := []SpaceID{2, 4, 7, 9}; !slices.Equal(got, want) || len(s.spaces) != 4 {
+		t.Fatalf("runtime order %v, want %v", got, want)
+	}
+	if s.runtime(0) != &s.space0 || s.Space(0).OverlapBox(0, 0, 1, 1, 1) != nil {
+		t.Fatal("space 0 runtime is not the embedded one")
 	}
 }

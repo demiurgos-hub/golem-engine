@@ -43,6 +43,8 @@ type Listener struct {
 	onReliableUnordered     func(*Session, []byte)
 	onReliableOrdered       func(*Session, []byte)
 	onEventualStateFeedback func(*Session, []EventualStateDelivery)
+	onSpaceAck              func(*Session, uint64)
+	onEntityResync          func(*Session, int64)
 	onDisconnect            func(*Session)
 	messageWrapper          func([]byte) []byte      // wraps outgoing entity frames (ServerMessage tag 1)
 	worldSnapshotFunc       func() ([][]byte, error) // returns fully-wrapped ServerMessage bytes for world data
@@ -161,6 +163,20 @@ func (l *Listener) OnEventualStateFeedback(fn func(*Session, []EventualStateDeli
 	l.onEventualStateFeedback = fn
 }
 
+// OnSpaceAck registers a hook called with the transition counter when a client
+// acknowledges a space transition with the SpaceAck control frame
+// (netwire.SpaceAckControlPrefix plus a big-endian uint64). The frame is
+// consumed by the session and never reaches OnMessage.
+func (l *Listener) OnSpaceAck(fn func(*Session, uint64)) { l.onSpaceAck = fn }
+
+// OnEntityResync registers a hook called with the entity ID when a client
+// requests a full state of one entity with the EntityResync control frame
+// (netwire.EntityResyncControlPrefix plus a big-endian uint64). Clients send
+// it after evicting compact datagram records held for an entity whose spawn
+// had not arrived yet. The frame is consumed by the session and never reaches
+// OnMessage.
+func (l *Listener) OnEntityResync(fn func(*Session, int64)) { l.onEntityResync = fn }
+
 // OnDisconnect registers a hook called when a client disconnects.
 func (l *Listener) OnDisconnect(fn func(*Session)) { l.onDisconnect = fn }
 
@@ -221,6 +237,23 @@ func (l *Listener) BroadcastRaw(data []byte) error {
 	defer l.mu.RUnlock()
 	for _, s := range l.sessions {
 		s.Send(data)
+	}
+	return nil
+}
+
+// SendRawTo sends a single pre-wrapped frame to each listed session that is
+// still connected; sessions that are gone are skipped. Like BroadcastRaw it
+// does NOT apply messageWrapper and validates the frame size first.
+func (l *Listener) SendRawTo(sessionIDs []int64, data []byte) error {
+	if err := validateReliableMessageSize(data); err != nil {
+		return err
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	for _, id := range sessionIDs {
+		if s, ok := l.sessions[id]; ok {
+			s.Send(data)
+		}
 	}
 	return nil
 }
@@ -962,7 +995,7 @@ func (l *Listener) serveAcceptedSession(ctx context.Context, sess *Session, r *h
 		l.onConnect(sess)
 	}
 	go sess.writePump(ctx)
-	sess.readPump(ctx, l.onMessage, l.onDatagram, l.onReliableUnordered, l.onReliableOrdered, l.onEventualStateFeedback)
+	sess.readPump(ctx, l.onMessage, l.onDatagram, l.onReliableUnordered, l.onReliableOrdered, l.onEventualStateFeedback, l.onSpaceAck, l.onEntityResync)
 	log.Printf("golem/net: session %d disconnected remote=%q transport=%q", sess.ID, sess.RemoteAddr, sess.transportKind())
 	if l.onDisconnect != nil {
 		l.onDisconnect(sess)

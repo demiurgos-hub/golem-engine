@@ -34,6 +34,95 @@ func TestManagerLifecycle(t *testing.T) {
  func(){defer func(){if recover()==nil {t.Fatal("missing panic")}}();m.Clear()}()
  if called||m.Get(7)!=nil {t.Fatal("throw ordering")};state(7,19);if m.Get(7)!=nil {t.Fatal("throw reset tombstone")}
 }
+// A compact datagram record can overtake the stream spawn of its entity.
+func TestManagerHoldsCompactBeforeSpawn(t *testing.T) {
+ m:=NewEntityManager();updates:=0;m.OnUpdate(func(SyncedEntity){updates++})
+ state:=func(id int64,rev uint64){m.ApplyEntityUpdate(&EntityUpdate{Payload:&EntityUpdate_ActorState{ActorState:&ActorState{EntityId:id,Revision:rev,Items:[]Item{{Id:1}}}}})}
+ compact:=func(id int64,rev uint64,items []Item){m.ApplyCompactUpdate((&pb.Writer{}).Int64(id).Uint64(rev).Uint64(1).Raw((&ActorDelta{Items:items}).Marshal()).Finish())}
+ compact(5,4,[]Item{});compact(5,6,[]Item{{Id:1},{Id:2}})
+ if m.Get(5)!=nil {t.Fatal("held record created an entity")}
+ state(5,5);a:=m.Get(5).(*SyncedActor)
+ if a.Revision()!=6||len(a.Items())!=2||updates!=1 {t.Fatal("held records not replayed",a.Revision(),a.Items(),updates)}
+ compact(6,4,[]Item{{Id:1},{Id:2}});m.ApplyEntityUpdate(&EntityUpdate{Payload:&EntityUpdate_EntityRemoved{EntityRemoved:&EntityRemoved{EntityId:6,Revision:4}}})
+ state(6,4);if len(m.Get(6).(*SyncedActor).Items())!=1 {t.Fatal("removal kept held records")}
+ for i:=0;i<300;i++ {compact(int64(1000+i),1,nil)}
+ if m.heldCount!=256||len(m.heldCompact)!=256 {t.Fatal("held records unbounded",m.heldCount)}
+ m.Clear();if m.heldCount!=0||len(m.heldCompact)!=0 {t.Fatal("clear kept held records")}
+}
+// A re-held entity is the newest in the eviction order: replay and removal
+// forget its earlier place, and each eviction asks for a resync.
+func TestManagerEvictsOldestHeldEntityAndRequestsResync(t *testing.T) {
+ m:=NewEntityManager();var resyncs []int64;m.OnResyncNeeded(func(id int64){resyncs=append(resyncs,id)})
+ state:=func(id int64,rev uint64){m.ApplyEntityUpdate(&EntityUpdate{Payload:&EntityUpdate_ActorState{ActorState:&ActorState{EntityId:id,Revision:rev,Items:[]Item{{Id:1}}}}})}
+ compact:=func(id int64,rev uint64,items []Item){m.ApplyCompactUpdate((&pb.Writer{}).Int64(id).Uint64(rev).Uint64(1).Raw((&ActorDelta{Items:items}).Marshal()).Finish())}
+ compact(1000,1,nil);compact(5,1,nil);state(5,2)
+ for i:=int64(1);i<100;i++ {compact(1000+i,1,nil)}
+ m.ApplyEntityUpdate(&EntityUpdate{Payload:&EntityUpdate_EntityRemoved{EntityRemoved:&EntityRemoved{EntityId:5,Revision:3}}})
+ compact(5,4,[]Item{{Id:1},{Id:2},{Id:3}})
+ for i:=int64(100);i<255;i++ {compact(1000+i,1,nil)}
+ if m.heldCount!=256||len(resyncs)!=0 {t.Fatal("held before the cap",m.heldCount,resyncs)}
+ for i:=int64(0);i<10;i++ {compact(2000+i,1,nil)}
+ if m.heldCount!=256||len(m.heldOrder)!=256||len(resyncs)!=10||resyncs[0]!=1000||resyncs[1]!=1001||resyncs[9]!=1009 {t.Fatal("eviction order",resyncs)}
+ if len(m.heldCompact[5])!=1 {t.Fatal("evicted the newest held entity")}
+ state(5,3);if a:=m.Get(5).(*SyncedActor);a.Revision()!=4||len(a.Items())!=3 {t.Fatal("re-held record not replayed")}
+}
+// A callback that clears the manager stops the held-record replay.
+func TestManagerClearInCallbackStopsReplay(t *testing.T) {
+ for _,inSpawn:=range []bool{false,true} {
+  m:=NewEntityManager();updates:=0
+  state:=func(id int64,rev uint64){m.ApplyEntityUpdate(&EntityUpdate{Payload:&EntityUpdate_ActorState{ActorState:&ActorState{EntityId:id,Revision:rev}}})}
+  compact:=func(id int64,rev uint64){m.ApplyCompactUpdate((&pb.Writer{}).Int64(id).Uint64(rev).Uint64(1).Raw((&ActorDelta{Items:[]Item{}}).Marshal()).Finish())}
+  compact(7,2);compact(7,3);compact(7,4)
+  if inSpawn {m.OnSpawn(func(SyncedEntity){m.Clear()})}
+  m.OnUpdate(func(SyncedEntity){updates++;m.Clear()})
+  state(7,1)
+  want:=1;if inSpawn {want=0}
+  if updates!=want||m.Get(7)!=nil||m.heldCount!=0||len(m.heldCompact)!=0||len(m.heldOrder)!=0 {t.Fatal("replay continued after Clear",inSpawn,updates,m.heldCount)}
+ }
+}
+// A recovery full state rejected as stale requests the resync again, at most
+// three times; a full state at least as new as the evicted records, a removal
+// and Clear forget the request.
+func TestManagerRetriesStaleResyncFullState(t *testing.T) {
+ var m *EntityManager;var resyncs []int64;var filler int64
+ reset:=func(){m=NewEntityManager();resyncs=nil;filler=100000;m.OnResyncNeeded(func(id int64){resyncs=append(resyncs,id)})}
+ state:=func(id int64,rev uint64){m.ApplyEntityUpdate(&EntityUpdate{Payload:&EntityUpdate_ActorState{ActorState:&ActorState{EntityId:id,Revision:rev}}})}
+ compact:=func(id int64,rev uint64){m.ApplyCompactUpdate((&pb.Writer{}).Int64(id).Uint64(rev).Uint64(1).Raw((&ActorDelta{Items:[]Item{}}).Marshal()).Finish())}
+ evict:=func(id int64,revs ...uint64){for _,r:=range revs {compact(id,r)};for len(resyncs)==0 {filler++;compact(filler,1)};if !reflect.DeepEqual(resyncs,[]int64{id}) {t.Fatal("eviction",resyncs)}}
+ // The older spawn applies without settling the resync; a newer datagram then
+ // overtakes every recovery full state.
+ reset();evict(1,5,6);state(1,4);compact(1,8)
+ for i:=0;i<5;i++ {state(1,7)}
+ if !reflect.DeepEqual(resyncs,[]int64{1,1,1,1})||len(m.pendingResync)!=0 {t.Fatal("stale retries",resyncs,m.pendingResync)}
+ reset();evict(2,5);state(2,5);state(2,4);if len(resyncs)!=1 {t.Fatal("an applied full state kept the resync",resyncs)}
+ reset();evict(3,5);m.ApplyEntityUpdate(&EntityUpdate{Payload:&EntityUpdate_EntityRemoved{EntityRemoved:&EntityRemoved{EntityId:3,Revision:6}}});state(3,5)
+ if len(resyncs)!=1 {t.Fatal("a removal kept the resync",resyncs)}
+ reset();evict(4,5);m.Clear();if len(m.pendingResync)!=0 {t.Fatal("Clear kept the resync")}
+}
+`
+
+// The generated server bumps an entity's revision on an owner change, so the
+// public full state of a revoke (with a move on the same tick) outranks a late
+// owner-view datagram record and the generated client manager rejects it.
+const goOwnerRevisionContract = `package generated
+import("testing";golem "github.com/demiurgos-hub/golem-engine/golem";srv "resolutionconsumer/server")
+func TestOwnerRevokeRejectsLateOwnerRecord(t *testing.T) {
+ s:=golem.NewServer(golem.ServerConfig{});a:=&srv.SyncedActor{}
+ if err:=s.CreateEntity(a,7);err!=nil {t.Fatal(err)}
+ a.SetSecret("private");a.SetHealth(3)
+ m:=NewEntityManager()
+ apply:=func(raw []byte,err error){if err!=nil {t.Fatal(err)};var u EntityUpdate;if err:=u.Unmarshal(raw);err!=nil {t.Fatal(err)};m.ApplyEntityUpdate(&u)}
+ apply(a.FullUpdate())
+ a.FlushDelta();late,err:=a.MarshalCompactDeltaMask(a.LastFlushMask());if err!=nil {t.Fatal(err)}
+ rev:=a.StateRevision()
+ if !s.SetOwner(a.EntityID(),0) {t.Fatal("SetOwner")}
+ if a.StateRevision()!=rev+1||a.FlushDelta()!=nil {t.Fatal("owner change must bump the revision without dirty fields",a.StateRevision(),rev)}
+ if err:=s.SetEntitySpace(a.EntityID(),2);err!=nil {t.Fatal(err)}
+ if !s.SetOwner(a.EntityID(),0)||a.StateRevision()!=rev+1 {t.Fatal("unchanged owner bumped the revision")}
+ apply(a.PublicFullUpdate())
+ m.ApplyCompactUpdate(late)
+ if got:=m.Get(a.EntityID()).(*SyncedActor);got.Secret()!=""||got.Health()!=3||got.Revision()!=rev+1 {t.Fatalf("late owner record applied: %q %d %d",got.Secret(),got.Health(),got.Revision())}
+}
 `
 
 const jsManagerContract = `import assert from 'node:assert/strict';
@@ -65,6 +154,64 @@ state(7,0);assert.ok(m.get(7));m.clear();
 class ThrowingActor extends SyncedActor { onRemove(){throw new Error('hook');} }
 m.registerActor(ThrowingActor);state(7,20);let called=false;m.onRemove(()=>called=true);
 assert.throws(()=>m.clear(),/hook/);assert.equal(called,false);assert.equal(m.get(7),undefined);state(7,19);assert.equal(m.get(7),undefined);
+// A compact datagram record can overtake the stream spawn of its entity.
+const h=new EntityManager();let held=0;h.onUpdate(()=>held++);
+const hstate=(id,revision)=>h.applyUpdate({actorState:Object.assign(new ActorState(),{entityId:id,revision,items:[{id:1}]})});
+const hcompact=(id,revision,items)=>{
+ const body=ActorDelta.encode(Object.assign(new ActorDelta(),{items}));const header=new PbWriter().int64(id).uint64(revision).uint64(1).finish();
+ const bytes=new Uint8Array(header.length+body.length);bytes.set(header);bytes.set(body,header.length);h.applyCompactUpdate(bytes);
+};
+hcompact(5,4,[]);hcompact(5,6,[{id:1},{id:2}]);assert.equal(h.get(5),undefined);
+hstate(5,5);assert.equal(h.get(5).revision,6);assert.equal(h.get(5).items.length,2);assert.equal(held,1);
+hcompact(6,4,[{id:1},{id:2}]);h.applyUpdate({entityRemoved:{entityId:6,revision:4}});hstate(6,4);assert.equal(h.get(6).items.length,1);
+for(let i=0;i<300;i++)hcompact(1000+i,1,[]);assert.equal(h._heldCount,256);assert.equal(h._heldCompact.size,256);
+h.clear();assert.equal(h._heldCount,0);
+// A re-held entity is the newest in the eviction order; each eviction asks for a resync.
+const e=new EntityManager();const resyncs=[];const offResync=e.onResyncNeeded(id=>resyncs.push(id));
+const estate=(id,revision)=>e.applyUpdate({actorState:Object.assign(new ActorState(),{entityId:id,revision,items:[{id:1}]})});
+const ecompact=(id,revision,items)=>{
+ const body=ActorDelta.encode(Object.assign(new ActorDelta(),{items}));const header=new PbWriter().int64(id).uint64(revision).uint64(1).finish();
+ const bytes=new Uint8Array(header.length+body.length);bytes.set(header);bytes.set(body,header.length);e.applyCompactUpdate(bytes);
+};
+ecompact(1000,1,[]);ecompact(5,1,[]);estate(5,2);for(let i=1;i<100;i++)ecompact(1000+i,1,[]);
+e.applyUpdate({entityRemoved:{entityId:5,revision:3}});ecompact(5,4,[{id:1},{id:2},{id:3}]);
+for(let i=100;i<255;i++)ecompact(1000+i,1,[]);assert.equal(e._heldCount,256);assert.deepEqual(resyncs,[]);
+for(let i=0;i<10;i++)ecompact(2000+i,1,[]);
+assert.equal(e._heldCount,256);assert.deepEqual(resyncs,Array.from({length:10},(_,i)=>1000+i));assert.equal(e._heldCompact.get(5).length,1);
+estate(5,3);assert.equal(e.get(5).revision,4);assert.equal(e.get(5).items.length,3);
+offResync();e.clear();for(let i=0;i<257;i++)ecompact(3000+i,1,[]);assert.equal(resyncs.length,10);
+// A callback that clears the manager stops the held-record replay.
+for(const inSpawn of [false,true]){
+ const c=new EntityManager();let cupdates=0;
+ const cstate=(id,revision)=>c.applyUpdate({actorState:Object.assign(new ActorState(),{entityId:id,revision,items:[]})});
+ const ccompact=(id,revision)=>{
+  const body=ActorDelta.encode(Object.assign(new ActorDelta(),{items:[]}));const header=new PbWriter().int64(id).uint64(revision).uint64(1).finish();
+  const bytes=new Uint8Array(header.length+body.length);bytes.set(header);bytes.set(body,header.length);c.applyCompactUpdate(bytes);
+ };
+ ccompact(7,2);ccompact(7,3);ccompact(7,4);
+ if(inSpawn)c.onSpawn(()=>c.clear());
+ c.onUpdate(()=>{cupdates++;c.clear();});
+ cstate(7,1);
+ assert.equal(cupdates,inSpawn?0:1);assert.equal(c.get(7),undefined);assert.equal(c._heldCount,0);assert.equal(c._heldCompact.size,0);
+}
+// A recovery full state rejected as stale requests the resync again (at most
+// three times); a full state at least as new as the evicted records, a removal
+// and clear() forget the request.
+{
+ let r,rs,filler;
+ const reset=()=>{r=new EntityManager();rs=[];filler=100000;r.onResyncNeeded(id=>rs.push(id));};
+ const rstate=(id,revision)=>r.applyUpdate({actorState:Object.assign(new ActorState(),{entityId:id,revision,items:[]})});
+ const rcompact=(id,revision)=>{
+  const body=ActorDelta.encode(Object.assign(new ActorDelta(),{items:[]}));const header=new PbWriter().int64(id).uint64(revision).uint64(1).finish();
+  const bytes=new Uint8Array(header.length+body.length);bytes.set(header);bytes.set(body,header.length);r.applyCompactUpdate(bytes);
+ };
+ const evict=(id,...revs)=>{for(const rev of revs)rcompact(id,rev);while(rs.length===0)rcompact(++filler,1);assert.deepEqual(rs,[id]);};
+ reset();evict(1,5,6);rstate(1,4);rcompact(1,8);for(let i=0;i<5;i++)rstate(1,7);
+ assert.deepEqual(rs,[1,1,1,1]);assert.equal(r._pendingResync.size,0);
+ reset();evict(2,5);rstate(2,5);rstate(2,4);assert.equal(rs.length,1);
+ reset();evict(3,5);r.applyUpdate({entityRemoved:{entityId:3,revision:6}});rstate(3,5);assert.equal(rs.length,1);
+ reset();evict(4,5);r.clear();assert.equal(r._pendingResync.size,0);
+}
 `
 
 const csManagerContract = `using System;using System.Collections.Generic;using System.Linq;using Generated;using GolemEngine.Unity;
@@ -90,6 +237,55 @@ static class ManagerContract {
  state(7,0);Check(m.Get(7)!=null,"clear revisions");m.Clear();
  m.RegisterActor(id=>new Actor(id,()=>{throw new Exception("hook");}));state(7,20);bool called=false;m.OnRemove(_=>called=true);
  failed=false;try{m.Clear();}catch{failed=true;}Check(failed&&!called&&m.Get(7)==null,"throw ordering");state(7,19);Check(m.Get(7)==null,"throw reset revisions");
+ // A compact datagram record can overtake the stream spawn of its entity.
+ var h=new EntityManager();int held=0;h.OnUpdate(_=>held++);
+ Action<long,ulong> hstate=(id,rev)=>h.ApplyUpdate(new EntityUpdate{ActorState=new ActorState{EntityId=id,Revision=rev,Items=new List<Item>{new Item{Id=1}}}});
+ Action<long,ulong,List<Item>> hcompact=(id,rev,items)=>h.ApplyCompactUpdate(new PbWriter().Int64(id).Uint64(rev).Uint64(1).Finish().Concat(ActorDelta.Encode(new ActorDelta{Items=items})).ToArray());
+ hcompact(5,4,new List<Item>());hcompact(5,6,new List<Item>{new Item{Id=1},new Item{Id=2}});Check(h.Get(5)==null,"held record created an entity");
+ hstate(5,5);var a=(SyncedActor)h.Get(5);Check(a.Revision==6&&a.Items.Count==2&&held==1,"held records not replayed");
+ hcompact(6,4,new List<Item>{new Item{Id=1},new Item{Id=2}});h.ApplyUpdate(new EntityUpdate{EntityRemoved=new EntityRemoved{EntityId=6,Revision=4}});
+ hstate(6,4);Check(((SyncedActor)h.Get(6)).Items.Count==1,"removal kept held records");
+ for(int i=0;i<300;i++)hcompact(1000+i,1,new List<Item>());
+ for(long id=1000;id<1300;id++){hstate(id,1);}
+ Check(held==1+256,"held records unbounded");h.Clear();
+ // A re-held entity is the newest in the eviction order; each eviction asks for a resync.
+ var e=new EntityManager();IEntityResyncNotifier notifier=e;var resyncs=new List<long>();notifier.OnResyncNeeded(id=>resyncs.Add(id));int eheld=0;e.OnUpdate(_=>eheld++);
+ Action<long,ulong> estate=(id,rev)=>e.ApplyUpdate(new EntityUpdate{ActorState=new ActorState{EntityId=id,Revision=rev,Items=new List<Item>{new Item{Id=1}}}});
+ Action<long,ulong,List<Item>> ecompact=(id,rev,items)=>e.ApplyCompactUpdate(new PbWriter().Int64(id).Uint64(rev).Uint64(1).Finish().Concat(ActorDelta.Encode(new ActorDelta{Items=items})).ToArray());
+ ecompact(1000,1,new List<Item>());ecompact(5,1,new List<Item>());estate(5,2);for(int i=1;i<100;i++)ecompact(1000+i,1,new List<Item>());
+ e.ApplyUpdate(new EntityUpdate{EntityRemoved=new EntityRemoved{EntityId=5,Revision=3}});
+ ecompact(5,4,new List<Item>{new Item{Id=1},new Item{Id=2},new Item{Id=3}});
+ for(int i=100;i<255;i++)ecompact(1000+i,1,new List<Item>());Check(resyncs.Count==0,"evicted before the cap");
+ for(int i=0;i<10;i++)ecompact(2000+i,1,new List<Item>());
+ Check(resyncs.SequenceEqual(Enumerable.Range(1000,10).Select(i=>(long)i)),"eviction order");
+ eheld=0;estate(5,3);var re=(SyncedActor)e.Get(5);Check(re.Revision==4&&re.Items.Count==3&&eheld==1,"evicted the newest held entity");
+ // A callback that clears the manager stops the held-record replay.
+ foreach(var inSpawn in new[]{false,true}){
+  var c=new EntityManager();int cupdates=0;
+  Action<long,ulong> cstate=(id,rev)=>c.ApplyUpdate(new EntityUpdate{ActorState=new ActorState{EntityId=id,Revision=rev}});
+  Action<long,ulong> ccompact=(id,rev)=>c.ApplyCompactUpdate(new PbWriter().Int64(id).Uint64(rev).Uint64(1).Finish().Concat(ActorDelta.Encode(new ActorDelta{Items=new List<Item>()})).ToArray());
+  ccompact(7,2);ccompact(7,3);ccompact(7,4);
+  if(inSpawn)c.OnSpawn(_=>c.Clear());
+  c.OnUpdate(_=>{cupdates++;c.Clear();});
+  cstate(7,1);
+  Check(cupdates==(inSpawn?0:1)&&c.Get(7)==null,"replay continued after Clear");
+  var heldCount=(int)typeof(EntityManager).GetField("_heldCount",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).GetValue(c);Check(heldCount==0,"Clear left replayed records held");
+ }
+ // A recovery full state rejected as stale requests the resync again (at most three times); a full state at least
+ // as new as the evicted records, a removal and Clear forget the request.
+ {
+  EntityManager r=null;var rs=new List<long>();long filler=100000;
+  Action reset=()=>{r=new EntityManager();rs.Clear();filler=100000;((IEntityResyncNotifier)r).OnResyncNeeded(id=>rs.Add(id));};
+  Action<long,ulong> rstate=(id,rev)=>r.ApplyUpdate(new EntityUpdate{ActorState=new ActorState{EntityId=id,Revision=rev}});
+  Action<long,ulong> rcompact=(id,rev)=>r.ApplyCompactUpdate(new PbWriter().Int64(id).Uint64(rev).Uint64(1).Finish().Concat(ActorDelta.Encode(new ActorDelta{Items=new List<Item>()})).ToArray());
+  Action<long,ulong[]> evict=(id,revs)=>{foreach(var rev in revs)rcompact(id,rev);while(rs.Count==0)rcompact(++filler,1);Check(rs.SequenceEqual(new[]{id}),"eviction");};
+  Func<int> pending=()=>((System.Collections.ICollection)typeof(EntityManager).GetField("_pendingResync",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).GetValue(r)).Count;
+  reset();evict(1,new ulong[]{5,6});rstate(1,4);rcompact(1,8);for(int i=0;i<5;i++)rstate(1,7);
+  Check(rs.SequenceEqual(new long[]{1,1,1,1})&&pending()==0,"stale retries");
+  reset();evict(2,new ulong[]{5});rstate(2,5);rstate(2,4);Check(rs.Count==1,"an applied full state kept the resync");
+  reset();evict(3,new ulong[]{5});r.ApplyUpdate(new EntityUpdate{EntityRemoved=new EntityRemoved{EntityId=3,Revision=6}});rstate(3,5);Check(rs.Count==1,"a removal kept the resync");
+  reset();evict(4,new ulong[]{5});r.Clear();Check(pending()==0,"Clear kept the resync");
+ }
  }
 }
 `
@@ -117,4 +313,57 @@ stopOther();events.applyRaw(new PbWriter().tag(1,2).bytes(new Uint8Array([8,1]))
 // Global/session-only managers return a valid empty composite (covered by the
 // generated framework consumers); independent listeners survive this cleanup.
 assert.deepEqual(order.slice(-2),['hook','typed']);
+`
+
+// World manager contracts: ClearWorld drops one world type by its WorldName,
+// notifies cleared listeners only when a value was held, ignores unknown
+// names and satisfies the runtimes' optional clearer contracts.
+const goWorldManagerContract = `package generated
+import("reflect";"testing";golemclient "github.com/demiurgos-hub/golem-engine/golem-go-client")
+var _ golemclient.WorldManagerLike = (*WorldManager)(nil)
+var _ golemclient.WorldClearer = (*WorldManager)(nil)
+func TestWorldManagerClear(t *testing.T) {
+ m:=NewWorldManager();var log []string
+ m.OnArenaUpdate(func(*ArenaData){log=append(log,"update")});m.OnArenaCleared(func(){log=append(log,"cleared")})
+ m.ClearWorld((&ArenaData{}).WorldName());if len(log)!=0 {t.Fatal("clear without a value notified")}
+ m.ApplyUpdate(&WorldUpdate{Payload:&WorldUpdate_ArenaData{ArenaData:&ArenaData{Counts:[]int32{1}}}})
+ m.ApplyUpdate(&WorldUpdate{Payload:&WorldUpdate_CatalogData{CatalogData:&CatalogData{}}})
+ m.ClearWorld("Unknown");m.ClearWorld("arena");if m.Arena()==nil {t.Fatal("unknown name cleared")}
+ m.ClearWorld("Arena");if m.Arena()!=nil||m.Catalog()==nil {t.Fatal("ClearWorld cleared the wrong world")}
+ if !reflect.DeepEqual(log,[]string{"update","cleared"}) {t.Fatal(log)}
+}
+`
+
+const jsWorldManagerCheck = `import type { WorldManagerLike } from 'golem-engine';
+import { WorldManager } from './WorldManager.js';
+const manager: WorldManagerLike = new WorldManager();
+export const clearThroughContract = (name: string): void => manager.clearWorld?.(name);
+`
+
+const jsWorldManagerContract = `import assert from 'node:assert/strict';
+import { WorldManager } from './out/WorldManager.js';
+import { clearThroughContract } from './out/world_check.js';
+const m=new WorldManager();const log=[];
+m.onArenaUpdate(()=>log.push('update'));const off=m.onArenaCleared(()=>log.push('cleared'));m.onArenaCleared(()=>log.push('second'));
+m.clearWorld('Arena');assert.deepEqual(log,[]);
+m.applyUpdate({arenaData:{counts:[1],items:{}}});m.applyUpdate({catalogData:{items:{}}});
+m.clearWorld('Unknown');m.clearWorld('arena');assert.ok(m.arena);
+m.clearWorld('Arena');assert.equal(m.arena,undefined);assert.ok(m.catalog);assert.deepEqual(log,['update','cleared','second']);
+off();m.applyUpdate({arenaData:{counts:[],items:{}}});m.clearWorld('Arena');assert.deepEqual(log,['update','cleared','second','update','second']);
+clearThroughContract('Catalog');
+`
+
+const csWorldManagerContract = `using System;using System.Collections.Generic;using System.Linq;using Generated;using GolemEngine.Unity;
+static class WorldContract {
+ static void Check(bool value,string message){if(!value)throw new Exception(message);}
+ public static void Run(){
+ var m=new WorldManager();IWorldClearer clearer=m;IWorldManager manager=m;var log=new List<string>();
+ m.OnArenaUpdate(_=>log.Add("update"));m.OnArenaCleared(()=>log.Add("cleared"));
+ clearer.ClearWorld("Arena");Check(log.Count==0,"clear without a value notified");
+ manager.ApplyUpdate(new WorldUpdate{ArenaData=new ArenaData()});m.ApplyUpdate(new WorldUpdate{CatalogData=new CatalogData()});
+ clearer.ClearWorld("Unknown");clearer.ClearWorld("arena");Check(m.Arena!=null,"unknown name cleared");
+ clearer.ClearWorld("Arena");Check(m.Arena==null&&m.Catalog!=null,"ClearWorld cleared the wrong world");
+ Check(log.SequenceEqual(new[]{"update","cleared"}),"cleared notification");
+ }
+}
 `

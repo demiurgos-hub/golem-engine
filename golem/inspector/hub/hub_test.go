@@ -298,6 +298,45 @@ func TestColdObservationLifecycle(t *testing.T) {
 	}
 }
 
+func TestEntitySpacesAreStoredAndForwarded(t *testing.T) {
+	th := newTestHub(t, nil)
+	agent := th.agent("cave-1", nil)
+	b1 := th.browser(nil)
+	b1.send(&wire.Subscribe{TargetID: "cave-1"})
+	seq := streamSnapshot(t, agent, 1,
+		wire.EntityState{ID: 1, TypeTag: 1, State: actorState(1, 0, 1)},
+		wire.EntityState{ID: 2, TypeTag: 1, State: actorState(2, 0, 1), Space: 3})
+	chunk := expect[*wire.SnapshotChunk](t, b1)
+	if len(chunk.Entities) != 2 || chunk.Entities[0].Space != 0 || chunk.Entities[1].Space != 3 {
+		t.Fatalf("browser snapshot spaces = %+v", chunk.Entities)
+	}
+	expect[*wire.SnapshotEnd](t, b1)
+
+	agent.send(&wire.Batch{Epoch: 1, Seq: seq + 1, Tick: 6,
+		Spawns: []wire.EntityState{{ID: 3, TypeTag: 1, State: actorState(3, 0, 1), Space: 4}},
+		Moves:  []wire.SpaceMove{{ID: 1, Space: 5}, {ID: 2, Space: 0}, {ID: 99, Space: 7}}})
+	batch := expect[*wire.Batch](t, b1)
+	if len(batch.Spawns) != 1 || batch.Spawns[0].Space != 4 {
+		t.Fatalf("forwarded spawn = %+v", batch.Spawns)
+	}
+	want := []wire.SpaceMove{{ID: 1, Space: 5}, {ID: 2, Space: 0}}
+	if len(batch.Moves) != len(want) || batch.Moves[0] != want[0] || batch.Moves[1] != want[1] {
+		t.Fatalf("forwarded moves = %+v, want %+v (unknown entities dropped)", batch.Moves, want)
+	}
+
+	// A late joiner's snapshot reflects the moves and the spawn's space.
+	b2 := th.browser(nil)
+	b2.send(&wire.Subscribe{TargetID: "cave-1"})
+	late := expect[*wire.SnapshotChunk](t, b2)
+	got := map[int64]uint32{}
+	for _, e := range late.Entities {
+		got[e.ID] = e.Space
+	}
+	if len(got) != 3 || got[1] != 5 || got[2] != 0 || got[3] != 4 {
+		t.Fatalf("late joiner spaces = %v", got)
+	}
+}
+
 func TestSeqGapResyncsBrowsersAndRestartsAgent(t *testing.T) {
 	th := newTestHub(t, nil)
 	agent := th.agent("cave-1", nil)

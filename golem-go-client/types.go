@@ -89,6 +89,16 @@ type EntityManagerLike interface {
 	Get(int64) any
 }
 
+// EntityResyncNotifier is optionally implemented by an EntityManagerLike that
+// holds compact records arriving before their entity's spawn. The manager calls
+// the registered function with an entity ID when the records held for it are
+// evicted; those datagrams were already acknowledged, so NewGameClient
+// registers a function that asks the server for a full state of the entity.
+// Generated EntityManagers implement it.
+type EntityResyncNotifier interface {
+	OnResyncNeeded(func(entityID int64))
+}
+
 // clearableEntityManager is optionally implemented by generated EntityManagers.
 type clearableEntityManager interface {
 	Clear()
@@ -97,6 +107,15 @@ type clearableEntityManager interface {
 // WorldManagerLike is the contract generated Go WorldManagers satisfy.
 type WorldManagerLike interface {
 	ApplyUpdate(any)
+}
+
+// WorldClearer is optionally implemented by a WorldManagerLike. GameClient
+// calls ClearWorld with the world type name when the server sends
+// WorldCleared, for example after a move into a space that does not define
+// that world data. Generated WorldManagers implement it; managers without it
+// keep their values.
+type WorldClearer interface {
+	ClearWorld(name string)
 }
 
 // EventManagerLike is the contract generated Go EventManagers satisfy.

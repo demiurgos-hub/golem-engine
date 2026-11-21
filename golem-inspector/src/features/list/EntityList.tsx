@@ -7,7 +7,8 @@ import { typeColor } from '../../lib/entityTypes';
 const MAX_ROWS = 1000;
 
 export function EntityList() {
-  const { filteredEntities, selectedId, selectEntity, plane } = useInspector();
+  const { filteredEntities, selectedId, selectEntity, plane, spaces } = useInspector();
+  const showSpace = spaces.length > 1;
   const selectedRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -47,6 +48,11 @@ export function EntityList() {
                         <span className="mono">
                           {e.position.x.toFixed(1)}, {b.toFixed(1)}
                         </span>
+                        {showSpace ? (
+                          <span className="space-badge mono" title={`Space ${e.space}`}>
+                            S{e.space}
+                          </span>
+                        ) : null}
                       </span>
                     </span>
                   </button>

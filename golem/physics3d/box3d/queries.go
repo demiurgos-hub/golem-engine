@@ -69,7 +69,7 @@ func (w *World) ClosestPoint(h p.ColliderHandle, point p.Vec3) (p.Hit, error) {
 	}
 	c, ok := w.colliders[h]
 	if !ok {
-		return p.Hit{}, p.ErrStale
+		return p.Hit{}, staleHandle(p.Handle(h))
 	}
 	best := p.Hit{Distance: 4 * p.CoordinateLimit}
 	found := false
@@ -107,11 +107,11 @@ func (w *World) Penetration(a, z p.ColliderHandle) (p.PenetrationResult, error) 
 	}
 	ca, ok := w.colliders[a]
 	if !ok {
-		return p.PenetrationResult{}, p.ErrStale
+		return p.PenetrationResult{}, staleHandle(p.Handle(a))
 	}
 	cz, ok := w.colliders[z]
 	if !ok {
-		return p.PenetrationResult{}, p.ErrStale
+		return p.PenetrationResult{}, staleHandle(p.Handle(z))
 	}
 	r := p.PenetrationResult{A: a, B: z, Revision: w.revision}
 	for _, ia := range ca.shapes {

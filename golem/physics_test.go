@@ -46,7 +46,7 @@ func (w *physicsTestWorld) ValidatePlacement(h p.BodyHandle, pose p.Pose, tolera
 func (w *physicsTestWorld) Body(h p.BodyHandle) (p.BodyState, error) {
 	s, ok := w.bodies[h]
 	if !ok {
-		return p.BodyState{}, p.ErrStale
+		return p.BodyState{}, &p.StaleHandleError{Handle: p.Handle(h)}
 	}
 	return s, nil
 }

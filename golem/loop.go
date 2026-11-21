@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,7 +25,6 @@ import (
 
 	"github.com/alitto/pond/v2"
 	"github.com/demiurgos-hub/golem-engine/golem/collision"
-	"github.com/demiurgos-hub/golem-engine/golem/nav"
 )
 
 // msgKind identifies the type of a queued session event.
@@ -133,11 +133,13 @@ type TickFunc func(dt float64, s *Server)
 type UpdateFunc func(updates [][]byte)
 
 // ContactFunc is called after each collision step with all contacts detected
-// in that tick. It is only invoked when at least one contact was found.
+// in that tick, merged across spaces in ascending space order. It is only
+// invoked when at least one contact was found.
 type ContactFunc func(contacts []collision.Contact)
 
 // Contact3DFunc is called after each 3D collision step with contacts detected
-// in that tick. It is only invoked when at least one contact was found.
+// in that tick, merged across spaces in ascending space order. It is only
+// invoked when at least one contact was found.
 type Contact3DFunc func(contacts []collision3d.Contact)
 
 // RemovalSerializer converts a removed entity ID and revision into a serialized
@@ -150,19 +152,32 @@ type Server struct {
 	idCounter            int64 // atomically incremented; 0 is reserved as "unassigned"
 	reg                  *registry.Registry
 	World                *world.Store
+	worldSnapshotExclude map[string]struct{} // WorldSnapshotExclude names; immutable after NewServer
+	spaceWorldMu         sync.RWMutex
+	spaceWorlds          map[SpaceID]*world.Store // per-space world stores (spaceWorldMu)
+	spaceWorldsUsed      atomic.Bool              // set once any per-space store exists
 	config               ServerConfig
 	listener             *golemnet.Listener
 	interest             *interest.Manager
 	visibility           *visibility.Manager
 	broadcastKnown       map[int64]map[int64]struct{} // sessionID → known entity IDs (broadcast mode)
 	ownershipRefresh     map[int64]ownershipRefresh   // entityID → coalesced ownership confidentiality transition
-	collision            collision.Backend
-	collision3D          collision3d.Backend
-	layers               *collision.Layers
-	layers3D             *collision3d.Layers
-	navBackend           nav.Backend
-	navigation           *navigationService
-	physics              *physicsService
+	sessionSpaceExplicit map[int64]SpaceID            // SetSessionSpace spaces (non-zero; interestMu)
+	sessionSpaceKept     map[int64]SpaceID            // last space of a session's deleted avatar (non-zero; interestMu)
+	sentSpace            map[int64]SpaceID            // spaces announced to clients (non-zero; interestMu)
+	spaceTransitionSeq   map[int64]uint64             // last space transition counter per session (interestMu)
+	spaceAckPending      map[int64]uint64             // latest transition awaiting SpaceAck per session (interestMu)
+	spaceAnnouncing      map[int64]SpaceID            // old announced space of planned, unsent transitions (interestMu)
+	foiOrphanKnown       map[int64]map[int64]uint64   // RemoveFOI known sets: entity ID → revision (interestMu)
+	closedSessions       map[int64]struct{}           // sessions cleaned up on disconnect that the listener may still list (interestMu)
+	space0               spaceRuntime                 // space 0's services; always present
+	spaces               map[SpaceID]*spaceRuntime    // non-zero spaces with services (tick-owned)
+	spaceOrder           []*spaceRuntime              // spaces' runtimes in ascending ID order
+	spacedScratch        []registry.SpacedEntity      // per-phase collision entity snapshot
+	contactScratch       []collision.Contact          // merged 2D contacts of several spaces
+	contactScratch3D     []collision3d.Contact        // merged 3D contacts of several spaces
+	navigation           *navigationService           // alias of space0.navigation
+	physics              *physicsService              // alias of space0.physics
 	contactEventsEnabled bool
 	triggerPairs         map[[2]int64]struct{}
 	solidPairs           map[[2]int64]struct{}
@@ -187,16 +202,72 @@ type Server struct {
 	eventualTrackers     map[int64]*eventualStateTracker
 	nextEventualToken    uint64
 
+	// SpaceAcks waiting for the tick: the latest acknowledged transition per
+	// session, kept outside msgQueue so none is ever dropped. spaceAckQueued
+	// is set under spaceAckMu after an insert and cleared by the take, so a
+	// quiet tick checks it without taking the lock.
+	spaceAckMu     sync.Mutex
+	spaceAckInbox  map[int64]uint64
+	spaceAckQueued atomic.Bool
+
+	// EntityResync requests waiting for the next replication pass: per
+	// session, the IDs of known entities whose held compact records the
+	// client evicted, kept outside msgQueue (entity_resync.go).
+	// entityResyncQueued follows the spaceAckQueued protocol.
+	entityResyncMu     sync.Mutex
+	entityResyncInbox  map[int64]map[int64]struct{}
+	entityResyncQueued atomic.Bool
+
+	// Sessions holding their server events because their space may change
+	// (space_events.go). The value records that an end-of-pass release kept
+	// the session once because its switch was still unplanned. eventHoldMu is
+	// a leaf lock: never take interestMu while holding it.
+	eventHoldMu sync.Mutex
+	eventHolds  map[int64]bool
+
+	// Per-space service coordination (space_runtime.go, space_transfer.go).
+	navigationBySpace map[SpaceID]*navigationService // non-zero spaces' navigation (lifeMu; written before Run)
+	simulatingSpaces  bool                           // per-space step loop running with several runtimes
+	collisionStepping bool                           // legacy collision phase, including its contact callbacks
+	transferring      bool                           // MoveToSpace rebuild/commit in progress
+	transferDeletes   []int64                        // DeleteEntity calls deferred until the transfer finishes
+	// navReattachPending holds the entities whose transfer runs traversal-cancel
+	// callbacks before reattaching their navigation; MoveToSpace rejects them.
+	navReattachPending map[int64]struct{}
+
 	// Avatar indexes (session ↔ entity). Protected by avatarMu; never hold
 	// avatarMu while calling registry hooks or interest AssignFOI/RemoveFOI.
 	avatarMu      sync.Mutex
 	sessionAvatar map[int64]int64 // sessionID → entityID (or avatarSpawnPending)
 	avatarSession map[int64]int64 // entityID → sessionID
 
-	// interestMu guards interest.Manager, visibility.Manager, and broadcastKnown
-	// through Server APIs (AssignFOI, RemoveFOI, visibility group ops,
-	// SessionsKnowing, UpdateGrid+ComputeDiffs, broadcast known-set updates).
+	// announceMu orders space-dependent sends with space transitions: a
+	// transition holds it for writing while it queues its frames and clears
+	// its announcement (queueSpaceTransition); world pushes,
+	// SendStoredWorldData and Space.BroadcastServerEvent hold it for reading
+	// across recipient (or value) selection and the enqueue. So a send from
+	// any goroutine either lands before a session's transition frames, chosen
+	// for its old space, or after them, chosen for its new space.
+	// No game code runs under it: world data is serialized before the lock is
+	// taken and worldStamp, compared under the lock, shows whether a value
+	// changed in between (then the holder unlocks and serializes again).
+	// Lock order: announceMu before interestMu. Never take it while holding
+	// interestMu, eventHoldMu or a listener lock, and never nest read locks.
+	announceMu sync.RWMutex
+	// testHookWorldPushSelected, when set by tests, runs in PushWorldData
+	// between recipient selection and the enqueue.
+	testHookWorldPushSelected func()
+	// testHookWorldFramesBuilt, when set by tests, runs in queueSpaceTransition
+	// after the world frames are serialized and before announceMu is taken.
+	testHookWorldFramesBuilt func()
+
+	// interestMu guards interest.Manager, visibility.Manager, broadcastKnown and
+	// the session space maps through Server APIs (AssignFOI, RemoveFOI,
+	// visibility group ops, SessionsKnowing, session space APIs and moves,
+	// UpdateGrid+ComputeDiffs, broadcast known-set updates).
+	// Lock order with the registry: interestMu before the registry mutex.
 	// Lock order with avatarMu: interestMu before avatarMu when both are needed.
+	// Lock order with announceMu: announceMu before interestMu.
 	// Never hold interestMu across network sends, FullUpdate, or registry hooks.
 	// Visibility policy is point-in-time: mutations after a replication/snapshot
 	// decision apply on the next pass via known-set enter/exit transitions.
@@ -212,13 +283,29 @@ type Server struct {
 
 	// lifeMu gates Run/Post/SubmitTask acceptance against the linearizable
 	// lifecycle (created → running → stopping → stopped). Hold only across
-	// state checks, non-blocking postQueue sends, TrySubmitErr, and the
-	// SubmitTask start-gate open (accepted before worker work); never across
-	// callback or work execution.
-	lifeMu          sync.Mutex
+	// state checks, non-blocking postQueue sends, snapshotRequests edits,
+	// TrySubmitErr, and the SubmitTask start-gate open (accepted before worker
+	// work); never across callback or work execution.
+	lifeMu sync.Mutex
+	// preRunCaptureMu keeps Run's first tick from overlapping a snapshot
+	// capture taken on the caller before Run. SaveSnapshot,
+	// SaveSnapshotOnTick and SaveContentSnapshot take RLock while still
+	// holding lifeMu when they observe lifecycleCreated and release it after
+	// their synchronous capture; Run takes and releases the write lock after
+	// leaving lifeMu (never under it: FullUpdate is entity code that may
+	// call Post) and before starting the listener and tick loop.
+	preRunCaptureMu sync.RWMutex
 	life            lifecycleState
 	postQueue       chan func(*Server)
 	completionQueue chan taskCompletion
+	// snapshotRequests holds SaveSnapshotOnTick requests accepted while
+	// running; guarded by lifeMu, drained by drainSnapshotRequests after each
+	// tick's replication and failed by finalizeLifecycle.
+	// snapshotRequestsQueued is set under lifeMu after an append and cleared
+	// whenever the list is taken or failed, so a tick without requests does
+	// not take lifeMu.
+	snapshotRequests       []snapshotRequest
+	snapshotRequestsQueued atomic.Bool
 	// asyncPreferCompletion is the cross-tick round-robin preference for
 	// drainAsyncCallbacks. true means try a completion first; starts true so
 	// the first drain is completion-first, then alternates across ticks.
@@ -272,10 +359,10 @@ func NewServer(cfg ServerConfig) *Server {
 	cfg.WorldSnapshotExclude = normalizeWorldSnapshotExclude(cfg.WorldSnapshotExclude)
 	normalizeTaskConfig(&cfg)
 	validateStateUpdateLane(cfg)
-	worldSnapshotExclude := worldSnapshotExcludeSet(cfg.WorldSnapshotExclude)
 	s := &Server{
 		reg:                   registry.NewRegistry(),
 		World:                 world.NewStore(),
+		worldSnapshotExclude:  worldSnapshotExcludeSet(cfg.WorldSnapshotExclude),
 		config:                cfg,
 		msgQueue:              make(chan pendingMsg, msgQueueCap),
 		postQueue:             make(chan func(*Server), cfg.PostQueueCapacity),
@@ -285,6 +372,14 @@ func NewServer(cfg ServerConfig) *Server {
 		avatarSession:         make(map[int64]int64),
 		visibility:            visibility.NewManager(),
 		broadcastKnown:        make(map[int64]map[int64]struct{}),
+		sessionSpaceExplicit:  make(map[int64]SpaceID),
+		sessionSpaceKept:      make(map[int64]SpaceID),
+		sentSpace:             make(map[int64]SpaceID),
+		spaceTransitionSeq:    make(map[int64]uint64),
+		spaceAckPending:       make(map[int64]uint64),
+		spaceAnnouncing:       make(map[int64]SpaceID),
+		foiOrphanKnown:        make(map[int64]map[int64]uint64),
+		closedSessions:        make(map[int64]struct{}),
 	}
 	if cfg.CellSize > 0 {
 		s.interest = interest.NewManager(cfg.CellSize)
@@ -311,17 +406,7 @@ func NewServer(cfg ServerConfig) *Server {
 		s.listener.SetEntitySnapshotFunc(s.entitySnapshotForSession)
 		s.listener.SetEntitySnapshotCompleteFunc(s.commitBroadcastSnapshotKnown)
 	}
-	s.listener.SetWorldSnapshotFunc(func() ([][]byte, error) {
-		updates, err := s.World.MarshalAllExcept(worldSnapshotExclude)
-		if err != nil {
-			return nil, err
-		}
-		wrapped := make([][]byte, len(updates))
-		for i, u := range updates {
-			wrapped[i] = WrapWorldUpdate(u)
-		}
-		return wrapped, nil
-	})
+	s.listener.SetWorldSnapshotFunc(s.worldSnapshotFrames)
 	// Wire listener session-event hooks to enqueue methods so that user
 	// callbacks always fire on the tick goroutine rather than the connection
 	// goroutine. OnConnect/OnMessage/OnDisconnect on Server only store the
@@ -332,6 +417,8 @@ func NewServer(cfg ServerConfig) *Server {
 	s.listener.OnReliableUnordered(s.enqueueReliableUnordered)
 	s.listener.OnReliableOrdered(s.enqueueReliableOrdered)
 	s.listener.OnEventualStateFeedback(s.enqueueEventualStateFeedback)
+	s.listener.OnSpaceAck(s.enqueueSpaceAck)
+	s.listener.OnEntityResync(s.enqueueEntityResync)
 	s.listener.OnDisconnect(s.enqueueDisconnect)
 	return s
 }
@@ -404,12 +491,22 @@ type ServerBinder interface {
 // no layer helper is set — call SetCollisionLayers / SetCollisionLayers3D
 // (or generated EnableCollision / EnableCollision3D) before spawning or
 // snapshot-loading collidable entities. Failed duplicate insertion does not
-// register a collider.
+// register a collider. Like a helper with no bound backend (Layers.Add panics),
+// a helper rebound with Bind to a backend other than its space's own collision
+// backend, or to another space's backend, panics after registry insertion and
+// before any shape is registered or OnSpawn runs.
 //
 // With no extra owner arguments the entity is unowned (e.g. world NPC); with
 // one argument that value is the owning session ID for command authority.
-// More than one owner argument is invalid.
+// More than one owner argument is invalid. The entity is placed in space 0;
+// use CreateEntityIn to place it in another space.
 func (s *Server) CreateEntity(e Entity, owner ...int64) error {
+	return s.CreateEntityIn(0, e, owner...)
+}
+
+// CreateEntityIn is CreateEntity with the entity placed in space. EntitySpace
+// reports the space as soon as the entity is registered, including in OnSpawn.
+func (s *Server) CreateEntityIn(space SpaceID, e Entity, owner ...int64) error {
 	if len(owner) > 1 {
 		return fmt.Errorf("golem: CreateEntity expects 0 or 1 owner session ID, got %d", len(owner))
 	}
@@ -428,9 +525,9 @@ func (s *Server) CreateEntity(e Entity, owner ...int64) error {
 
 	var err error
 	if len(owner) == 1 {
-		err = s.reg.AddOwnedWithoutSpawn(e, owner[0])
+		err = s.reg.AddOwnedWithoutSpawnIn(space, e, owner[0])
 	} else {
-		err = s.reg.AddWithoutSpawn(e)
+		err = s.reg.AddWithoutSpawnIn(space, e)
 	}
 	if err != nil {
 		return err
@@ -450,15 +547,24 @@ func (s *Server) CreateEntity(e Entity, owner ...int64) error {
 // before OnRemove). Safe to call repeatedly; does not hold the avatar mutex
 // while invoking registry hooks (OnRemove) or interest operations.
 // Physics attachments are destroyed before OnRemove. During accepted physics
-// callbacks deletion is deferred to the next tick's input boundary.
+// callbacks of the entity's space deletion is deferred to the next tick's input
+// boundary. Inside SpaceTransfer.RebuildPhysics, which must not call Server
+// APIs, deletion is deferred until MoveToSpace has finished (on the same tick),
+// so the transfer stays atomic.
 func (s *Server) DeleteEntity(id int64) {
-	if ps := s.physics; ps != nil && ps.dispatching {
+	if s.transferring {
+		s.transferDeletes = append(s.transferDeletes, id)
+		return
+	}
+	rt := s.runtimeOf(id)
+	ps, n := rt.phys(), rt.nav()
+	if ps != nil && ps.dispatching {
 		if err := ps.queueDelete(id); err != nil {
 			ps.fault = err
 		}
 		return
 	}
-	if n := s.navigation; n != nil {
+	if n != nil {
 		if n.deleting[id] {
 			return
 		}
@@ -466,15 +572,16 @@ func (s *Server) DeleteEntity(id int64) {
 		defer delete(n.deleting, id)
 	}
 	s.clearAvatarByEntity(id)
-	if err := s.DetachPhysics(id); err != nil {
-		s.physics.fault = err
+	if err := ps.detachEntity(id); err != nil {
+		ps.fault = err
 		return
 	}
-	s.DetachNavigation(id)
+	n.detach(id)
 	if e, ok := s.reg.Get(id); ok {
 		s.unregisterCollider(e)
 	}
 	s.reg.DeleteEntity(id)
+	ps.clearPendingDelete(id)
 }
 
 // Get returns the entity with the given ID, or (nil, false) if not found.
@@ -505,6 +612,19 @@ func (s *Server) Owner(entityID int64) (sessionID int64, owned bool) {
 // authoritative full state. Same-tick A→…→A coalesces to a no-op. Visibility:
 // owner is replication redaction only — command authorization remains the
 // separate Owner check used by generated routers.
+//
+// When the owner changes, entities implementing registry.StateRevisionBumper
+// (generated entities do) advance their state revision without marking any
+// field dirty, so the refresh or space-transition full state carries a newer
+// revision than a late datagram record serialized for the previous owner view,
+// which clients then discard as stale.
+//
+// The registry owner changes before the revision is bumped, and replication
+// depends on that order: it chooses each recipient's view and serializes
+// later, then re-checks ownership after producing owner-view bytes and sends
+// the public view instead when the recipient lost the entity meanwhile. Bytes
+// stamped with the bumped revision therefore always fail that re-check, while
+// bytes serialized before the bump are older than the refresh. Keep the order.
 func (s *Server) SetOwner(entityID, sessionID int64) bool {
 	s.interestMu.Lock()
 	defer s.interestMu.Unlock()
@@ -520,8 +640,13 @@ func (s *Server) SetOwner(entityID, sessionID int64) bool {
 	if oldOwner == sessionID {
 		return true
 	}
+	// Owner first, revision second: replication's post-serialization
+	// ownership re-check relies on this order.
 	if !s.reg.SetOwner(entityID, sessionID) {
 		return false
+	}
+	if bumper, ok := e.(registry.StateRevisionBumper); ok {
+		bumper.BumpStateRevision()
 	}
 	if entityIsOwnerScoped(e) {
 		s.queueOwnershipRefreshLocked(entityID, oldOwner, sessionID)
@@ -601,30 +726,68 @@ func (s *Server) SetRemovalSerializer(fn RemovalSerializer) {
 	s.removalSerializer = fn
 }
 
-// SetCollisionBackend attaches a collision backend to the server. When set,
-// each tick syncs entity positions into the backend, steps it, reads physics
-// corrections back via PositionWriter, and fires OnContact handlers.
-// Shape registration (Add/Remove) remains in game code.
+// SetCollisionBackend attaches space 0's collision backend to the server. When
+// set, each tick syncs space-0 entity positions into the backend, steps it,
+// reads physics corrections back via PositionWriter, and fires OnContact
+// handlers. Space(id).SetCollisionBackend configures other spaces.
+// Shape registration (Add/Remove) remains in game code. MoveToSpace moves only
+// schema colliders (ColliderProvider) registered through the layer helper;
+// move shapes the game registers on a backend itself in
+// SpaceTransfer.MoveShapes, which finds both spaces' backends through
+// CollisionBackend and Space.CollisionBackend.
+// Call before Run or on the tick goroutine (not enforced). Panics when b
+// already serves another space, as its backend or bound to its layer helper:
+// each space needs its own backend. A typed nil (such as a nil backend
+// pointer) is treated as nil.
 func (s *Server) SetCollisionBackend(b collision.Backend) {
-	s.collision = b
+	if nilService(b) {
+		b = nil
+	}
+	s.mustBackendUnshared("SetCollisionBackend", "collision backend", 0, b, collisionOf, layersBackendOf)
+	s.space0.collision = b
 }
 
-// SetCollision3DBackend attaches a 3D collision backend to the server. When set,
-// each tick syncs 3D entity positions into the backend, steps it, reads
-// corrections back via Position3DWriter, and fires OnContact3D handlers.
+// SetCollision3DBackend attaches space 0's 3D collision backend to the server.
+// When set, each tick syncs space-0 3D entity positions into the backend, steps
+// it, reads corrections back via Position3DWriter, and fires OnContact3D
+// handlers. Space(id).SetCollision3DBackend configures other spaces. As with
+// SetCollisionBackend, shapes the game registers itself move only through
+// SpaceTransfer.MoveShapes. Panics when b already serves another space, as its
+// backend or bound to its layer helper. A typed nil is treated as nil.
 func (s *Server) SetCollision3DBackend(b collision3d.Backend) {
-	s.collision3D = b
+	if nilService(b) {
+		b = nil
+	}
+	s.mustBackendUnshared("SetCollision3DBackend", "3D collision backend", 0, b, collision3DOf, layers3DBackendOf)
+	s.space0.collision3D = b
+}
+
+// CollisionBackend returns space 0's 2D collision backend, or nil. It is
+// read-only access for game code that registers its own shapes, such as a
+// SpaceTransfer.MoveShapes hook. Call on the tick goroutine or before Run.
+func (s *Server) CollisionBackend() collision.Backend {
+	return s.space0.collision
+}
+
+// CollisionBackend3D returns space 0's 3D collision backend, or nil, like
+// CollisionBackend.
+func (s *Server) CollisionBackend3D() collision3d.Backend {
+	return s.space0.collision3D
 }
 
 // OnContact registers a callback invoked after each collision step when at
 // least one contact was detected. Contacts include both solid overlaps and
-// trigger overlaps (Depth == 0 for triggers).
+// trigger overlaps (Depth == 0 for triggers). MoveToSpace and SetEntitySpace
+// return an error wrapping physics3d.ErrBusy during the collision phase,
+// including this callback and per-entity contact events; move entities with
+// Server.Post instead.
 func (s *Server) OnContact(fn ContactFunc) {
 	s.onContact = fn
 }
 
 // OnContact3D registers a callback invoked after each 3D collision step when at
-// least one contact was detected.
+// least one contact was detected. Like OnContact, it cannot move entities
+// between spaces directly; use Server.Post.
 func (s *Server) OnContact3D(fn Contact3DFunc) {
 	s.onContact3D = fn
 }
@@ -742,13 +905,22 @@ func (s *Server) BroadcastEvent(data []byte) error {
 // SendServerEvent sends one marshalled ServerEvent to a session on the chosen
 // delivery lane. Sessions without that datagram lane, such as WebSocket
 // clients, receive it on the reliable stream. Generated event senders call
-// this for events whose schema sets a datagram delivery.
+// this for every delivery. An event sent to a session whose space changes on
+// this tick, before the replication pass that announces the change, is held
+// and sent on the stream right after the transition (space_events.go), and
+// datagram-lane events then use the stream until the client acknowledges it.
+//
+// A datagram-lane event sent before the tick of a space change can still be
+// in flight when the client switches; the client then drops it, also on the
+// reliable lanes (see EventDelivery). Use EventStream for events that must
+// arrive whatever space the session is in.
 func (s *Server) SendServerEvent(sessionID int64, delivery EventDelivery, event []byte) error {
 	return s.listener.SendEvent(sessionID, delivery, event, WrapServerEvent(event))
 }
 
 // BroadcastServerEvent sends one marshalled ServerEvent to every connected
-// session on the chosen delivery lane, with the same stream fallback.
+// session on the chosen delivery lane, with the same stream fallback and
+// space-switch ordering as SendServerEvent.
 func (s *Server) BroadcastServerEvent(delivery EventDelivery, event []byte) error {
 	return s.listener.BroadcastEvent(delivery, event, WrapServerEvent(event))
 }
@@ -861,27 +1033,132 @@ func (s *Server) SetEntityVisibilityGroup(entityID int64, group string) {
 }
 
 // AssignFOI associates a session with a circular field of interest centred
-// on the given entity. Panics if interest management is not enabled (CellSize <= 0).
+// on the given entity. When the session's previous FOI was removed with
+// RemoveFOI, the next replication pass removes from the client every entity it
+// still holds from that FOI that the new field of interest does not cover;
+// those it covers get a full state. Panics if interest management is not
+// enabled (CellSize <= 0).
 // Concurrency-safe with other Server FOI APIs via interestMu.
 func (s *Server) AssignFOI(sessionID, entityID int64, radius, margin float64) {
 	if s.interest == nil {
 		panic("golem: AssignFOI called but interest management is not enabled (CellSize <= 0)")
 	}
 	s.interestMu.Lock()
-	defer s.interestMu.Unlock()
+	// Entities orphaned by an earlier RemoveFOI stay in foiOrphanKnown: the
+	// next replication pass exits those the new field of interest does not
+	// cover (takeFOIOrphansLocked).
+	hadFOI := s.interest.HasFOI(sessionID)
 	s.interest.AssignFOI(sessionID, entityID, radius, margin)
+	if !hadFOI {
+		// Kept while the anchor is missing; replaced once it resolves.
+		s.interest.SetSessionSpace(sessionID, s.fallbackSessionSpaceLocked(sessionID))
+	}
+	pending := s.switchPendingLocked(sessionID)
+	s.interestMu.Unlock()
+	if pending {
+		s.holdSessionEvents(sessionID)
+	}
 }
 
 // RemoveFOI removes a session's field of interest and clears its known set.
+// The client keeps the entities it knew, frozen, until a later space
+// transition of the session (for example after SetSessionSpace) removes them,
+// or until the first replication pass after AssignFOI removes those outside
+// the new field of interest.
 // Panics if interest management is not enabled.
 // Concurrency-safe with other Server FOI APIs via interestMu.
 func (s *Server) RemoveFOI(sessionID int64) {
+	s.removeFOI(sessionID, true)
+}
+
+// removeFOI removes a session's FOI. With keepOrphans, the entities the session
+// knew are remembered so its next space transition removes them; disconnect
+// and avatar rollback paths skip that.
+func (s *Server) removeFOI(sessionID int64, keepOrphans bool) {
 	if s.interest == nil {
 		panic("golem: RemoveFOI called but interest management is not enabled (CellSize <= 0)")
 	}
 	s.interestMu.Lock()
+	known := s.interest.RemoveFOI(sessionID)
+	pending := s.switchPendingLocked(sessionID)
+	if keepOrphans && len(known) > 0 {
+		s.keepFOIOrphansLocked(sessionID, known)
+	}
+	s.interestMu.Unlock()
+	if pending {
+		s.holdSessionEvents(sessionID)
+	}
+}
+
+// keepFOIOrphansLocked remembers the entities a session knew when its FOI was
+// removed. Caller holds interestMu.
+func (s *Server) keepFOIOrphansLocked(sessionID int64, known map[int64]struct{}) {
+	// Revisions start at 0 (use the live revision); recordOrphanRemovals
+	// stores the removal revision of orphans deleted before the transition.
+	orphans := s.foiOrphanKnown[sessionID]
+	if orphans == nil {
+		orphans = make(map[int64]uint64, len(known))
+		s.foiOrphanKnown[sessionID] = orphans
+	}
+	for id := range known {
+		orphans[id] = 0
+	}
+}
+
+// takeFOIOrphansLocked hands the RemoveFOI orphans of every session that has
+// an FOI again (a diff this pass) to that diff: each orphan the diff does not
+// enter, keep or exit is added to Exited, so the client drops what it kept
+// from the removed FOI. The returned map holds each such session's orphan
+// revisions for wrappedExitWithFallback; the sessions' orphan sets are
+// dropped. Sessions without an FOI keep theirs. Caller holds interestMu.
+func (s *Server) takeFOIOrphansLocked(diffs map[int64]*interest.Diff) map[int64]map[int64]uint64 {
+	if len(s.foiOrphanKnown) == 0 {
+		return nil
+	}
+	var taken map[int64]map[int64]uint64
+	for sid, orphans := range s.foiOrphanKnown {
+		diff := diffs[sid]
+		if diff == nil {
+			continue
+		}
+		listed := make(map[int64]struct{}, len(diff.Entered)+len(diff.Stayed)+len(diff.Exited))
+		for _, ids := range [][]int64{diff.Entered, diff.Stayed, diff.Exited} {
+			for _, id := range ids {
+				listed[id] = struct{}{}
+			}
+		}
+		start := len(diff.Exited)
+		for id := range orphans {
+			if _, ok := listed[id]; !ok {
+				diff.Exited = append(diff.Exited, id)
+			}
+		}
+		slices.Sort(diff.Exited[start:])
+		if taken == nil {
+			taken = make(map[int64]map[int64]uint64)
+		}
+		taken[sid] = orphans
+		delete(s.foiOrphanKnown, sid)
+	}
+	return taken
+}
+
+// recordOrphanRemovals stores the removal revisions of entities deleted this
+// tick that sessions still hold as RemoveFOI orphans, so their later exits are
+// not discarded by clients as stale. Tick goroutine only.
+func (s *Server) recordOrphanRemovals(result registry.FlushResult) {
+	if len(result.Removals) == 0 {
+		return
+	}
+	s.interestMu.Lock()
 	defer s.interestMu.Unlock()
-	s.interest.RemoveFOI(sessionID)
+	for _, orphans := range s.foiOrphanKnown {
+		for i, id := range result.Removals {
+			if _, ok := orphans[id]; ok {
+				orphans[id] = result.RemovalRevisions[i]
+			}
+		}
+	}
 }
 
 // hasFOI reports whether sessionID currently has an assigned FOI.
@@ -900,6 +1177,12 @@ func (s *Server) hasFOI(sessionID int64) bool {
 // broadcast succeeds. Returns a non-nil error if serialization fails.
 // Reliable frames are capped at 256 KiB; oversized embedded maps should
 // use map_url instead of tile_data.
+//
+// Sessions whose announced space defines name in its own store
+// (Space(id).World()) keep that space's value and are skipped; use
+// Space(id).PushWorldData for them. Recipient selection and the enqueue are
+// atomic with space transitions, so the push is ordered with them from any
+// goroutine.
 func (s *Server) PushWorldData(name string) error {
 	d := s.World.Get(name)
 	if d == nil {
@@ -909,7 +1192,17 @@ func (s *Server) PushWorldData(name string) error {
 	if err != nil {
 		return err
 	}
-	return s.listener.BroadcastRaw(WrapWorldUpdate(data))
+	frame := WrapWorldUpdate(data)
+	s.announceMu.RLock()
+	defer s.announceMu.RUnlock()
+	if overriding := s.spacesOverridingWorld(name); len(overriding) > 0 {
+		recipients := s.sessionsOutsideSpaces(overriding)
+		if s.testHookWorldPushSelected != nil {
+			s.testHookWorldPushSelected()
+		}
+		return s.listener.SendRawTo(recipients, frame)
+	}
+	return s.listener.BroadcastRaw(frame)
 }
 
 // SendWorldData serializes data directly, wraps it with WrapWorldUpdate, and
@@ -932,16 +1225,43 @@ func (s *Server) SendWorldData(sessionID int64, data WorldData) error {
 }
 
 // SendStoredWorldData sends the currently stored world value for name to one
-// session. Returns nil when the name is missing (same no-op as PushWorldData).
+// session: the value in the store of the session's announced space
+// (Space(id).World()) when that store defines name, otherwise the value in
+// Server.World. Returns nil when the name is missing (same no-op as
+// PushWorldData).
 // Marshal failures, oversize reliable frames, and disconnected sessions
 // propagate. Prefer SendWorldData when delivering a per-session value that
-// must not replace Server.World.
+// must not replace Server.World. Resolving the value and the enqueue are
+// atomic with space transitions, from any goroutine.
 func (s *Server) SendStoredWorldData(sessionID int64, name string) error {
-	d := s.World.Get(name)
-	if d == nil {
-		return nil
+	for attempt := 1; ; attempt++ {
+		// Serialize without announceMu (MarshalUpdate is game code), then make
+		// sure under the lock that the session is still in the space the value
+		// was resolved for and that no value changed.
+		stamp := s.worldStamp()
+		space := s.worldSpaceOf(sessionID)
+		d := s.resolveWorld(space, name)
+		var frame []byte
+		if d != nil {
+			payload, err := d.MarshalUpdate()
+			if err != nil {
+				return err
+			}
+			frame = WrapWorldUpdate(payload)
+		}
+		s.announceMu.RLock()
+		if s.worldStamp() == stamp && s.worldSpaceOf(sessionID) == space {
+			defer s.announceMu.RUnlock()
+			if d == nil {
+				return nil
+			}
+			return s.Send(sessionID, frame)
+		}
+		s.announceMu.RUnlock()
+		if attempt == worldSerializeAttempts {
+			return errWorldDataUnstable(fmt.Sprintf("session %d", sessionID))
+		}
 	}
-	return s.SendWorldData(sessionID, d)
 }
 
 // normalizeWorldSnapshotExclude copies names, dropping empties and duplicates
@@ -1056,6 +1376,13 @@ func (s *Server) enqueueEventualStateFeedback(sess *Session, feedback []golemnet
 	s.enqueue(pendingMsg{kind: msgEventualFeedback, sess: sess, eventualFeedback: feedback})
 }
 
+// enqueueSpaceAck is installed on the Listener as the SpaceAck hook. It runs on
+// the connection goroutine and stores the acknowledged transition counter for
+// tick-time dispatch outside the bounded message queue (see storeSpaceAck).
+func (s *Server) enqueueSpaceAck(sess *Session, transition uint64) {
+	s.storeSpaceAck(sess.ID, transition)
+}
+
 // enqueueDisconnect is installed on the Listener as the OnDisconnect hook. It
 // runs on the connection goroutine and pushes a disconnect event for tick-time
 // dispatch. The listener always passes a non-nil *Session (see
@@ -1065,8 +1392,10 @@ func (s *Server) enqueueDisconnect(sess *Session) {
 }
 
 // drainMessages processes all queued session events in FIFO order on the tick
-// goroutine. Called once per tick before entity ticks so that handlers such as
-// CreateEntity and DeleteEntity are safe without additional synchronization.
+// goroutine, then the SpaceAcks stored meanwhile. Called once per tick before
+// entity ticks so that handlers such as CreateEntity and DeleteEntity are safe
+// without additional synchronization. EntityResync requests are answered by
+// the replication pass instead (entity_resync.go).
 func (s *Server) drainMessages() {
 	for {
 		select {
@@ -1109,6 +1438,7 @@ func (s *Server) drainMessages() {
 				s.cleanupVisibilityOnDisconnect(m.sess.ID)
 			}
 		default:
+			s.applySpaceAcks()
 			return
 		}
 	}
@@ -1134,6 +1464,10 @@ func (s *Server) drainMessages() {
 // running tasks receive cancellation), discard queued completions/posts, and
 // mark stopped. No Post or SubmitTask completion callback runs after Run
 // returns. Work that ignores context cancellation can delay return indefinitely.
+//
+// A SaveSnapshot, SaveSnapshotOnTick or SaveContentSnapshot capture that began
+// on another goroutine before Run linearized lifecycleRunning finishes before
+// Run starts the listener or the first tick; Run waits for it.
 //
 // If the caller context is already cancelled, Run linearizes stopping under
 // lifeMu before the tick loop or Post/SubmitTask acceptance, then shuts down
@@ -1165,10 +1499,17 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	s.life = lifecycleRunning
-	if s.navigation != nil {
-		s.navigation.start(runCtx)
-	}
+	_ = s.eachRuntime(func(rt *spaceRuntime) error {
+		if rt.navigation != nil {
+			rt.navigation.start(runCtx)
+		}
+		return nil
+	})
 	s.lifeMu.Unlock()
+	// Wait for snapshot captures that started before Run (see
+	// preRunCaptureMu); later ones observe lifecycleRunning and queue.
+	s.preRunCaptureMu.Lock()
+	s.preRunCaptureMu.Unlock()
 
 	// Stop accepting before cancelling workers when the caller context ends.
 	stopAfter := context.AfterFunc(ctx, func() {
@@ -1234,93 +1575,26 @@ func (s *Server) runLoop(ctx context.Context) error {
 			for _, fn := range s.onTickStart {
 				fn(s.tick)
 			}
-			if s.physics != nil {
-				if err := s.physics.drain(); err != nil {
-					return err
-				}
+			if err := s.drainPhysics(); err != nil {
+				return err
 			}
 
 			s.drainAsyncCallbacks()
 			s.drainMessages()
-			if s.navigation != nil {
-				s.navigation.prepare()
-			}
+			s.prepareNavigation()
 
 			s.reg.TickAll(dt)
 
 			if s.onTick != nil {
 				s.onTick(dt, s)
 			}
-			if s.physics != nil {
-				if err := s.physics.step(dt); err != nil {
-					return err
-				}
-			} else if s.navigation != nil {
-				s.navigation.advance(dt)
+			if err := s.stepSpaces(dt); err != nil {
+				return err
 			}
 
-			if s.collision != nil {
-				for _, e := range s.reg.All() {
-					if s.physics != nil && s.physics.agents[e.EntityID()] != nil {
-						continue
-					}
-					x, y := e.Position()
-					s.collision.Update(e.EntityID(), float64(x), float64(y))
-				}
-				contacts := s.collision.Step(dt)
-				s.collision.ReadBack(func(id int64, x, y float64) {
-					if s.physics != nil && s.physics.agents[id] != nil {
-						return
-					}
-					e, ok := s.reg.Get(id)
-					if !ok {
-						return
-					}
-					if pw, ok := e.(registry.PositionWriter); ok {
-						pw.SetPosition(float32(x), float32(y))
-					}
-				})
-				if s.onContact != nil && len(contacts) > 0 {
-					s.onContact(contacts)
-				}
-				if s.contactEventsEnabled {
-					s.dispatchContactEvents(contacts)
-				}
-			}
+			s.stepCollision(dt)
 
-			if s.collision3D != nil {
-				for _, e := range s.reg.All() {
-					if s.physics != nil && s.physics.agents[e.EntityID()] != nil {
-						continue
-					}
-					sp, ok := e.(registry.Spatial3DEntity)
-					if !ok {
-						continue
-					}
-					x, y, z := sp.Position3D()
-					s.collision3D.Update(e.EntityID(), float64(x), float64(y), float64(z))
-				}
-				contacts := s.collision3D.Step(dt)
-				s.collision3D.ReadBack(func(id int64, x, y, z float64) {
-					if s.physics != nil && s.physics.agents[id] != nil {
-						return
-					}
-					e, ok := s.reg.Get(id)
-					if !ok {
-						return
-					}
-					if pw, ok := e.(registry.Position3DWriter); ok {
-						pw.SetPosition3D(float32(x), float32(y), float32(z))
-					}
-				})
-				if s.onContact3D != nil && len(contacts) > 0 {
-					s.onContact3D(contacts)
-				}
-			}
-
-			if s.navigation != nil {
-				s.navigation.reconcile()
-			}
+			s.reconcileNavigation()
 			if s.interest != nil {
 				if err := s.runInterestTick(); err != nil {
 					return err
@@ -1330,6 +1604,8 @@ func (s *Server) runLoop(ctx context.Context) error {
 					return err
 				}
 			}
+
+			s.drainSnapshotRequests()
 
 			wall := time.Since(start)
 			for _, fn := range s.onTickEnd {
@@ -1347,6 +1623,8 @@ func (s *Server) runLoop(ctx context.Context) error {
 // known-set diffs (enter/stay/exit). A visibility mutation after this decision
 // takes effect on the next pass; interestMu is never held across sends.
 func (s *Server) runBroadcastTick() error {
+	// Registered first so it runs last, after the replication observers.
+	defer s.releaseHeldSessionEvents()
 	result, err := s.reg.FlushAll()
 	if err != nil {
 		return err
@@ -1357,20 +1635,25 @@ func (s *Server) runBroadcastTick() error {
 	deltasFlushed := len(result.Deltas)
 	live := s.reg.All()
 	sessionIDs := s.listener.SessionIDs()
+	resyncs := s.takeEntityResyncs()
 
 	s.interestMu.Lock()
-	filter := s.shouldFilterBroadcastLocked(sessionIDs, live)
+	filter := s.shouldFilterBroadcastLocked(sessionIDs, live, len(resyncs) > 0)
 	s.interestMu.Unlock()
 
 	if filter {
-		return s.runBroadcastTickFiltered(result, deltasFlushed)
+		return s.runBroadcastTickFiltered(result, deltasFlushed, resyncs)
 	}
 	return s.runBroadcastTickBlind(result, deltasFlushed)
 }
 
 // shouldFilterBroadcastLocked reports whether broadcast replication must run
-// the per-session known-set path. Caller must hold interestMu.
-func (s *Server) shouldFilterBroadcastLocked(sessionIDs []int64, live []Entity) bool {
+// the per-session known-set path. Pending EntityResync requests force it,
+// since only per-session delivery answers them. Caller must hold interestMu.
+func (s *Server) shouldFilterBroadcastLocked(sessionIDs []int64, live []Entity, resyncsPending bool) bool {
+	if resyncsPending || s.spacesActiveLocked() {
+		return true
+	}
 	if s.visibility.HasGroupedEntities() {
 		return true
 	}
@@ -1539,12 +1822,14 @@ func (s *Server) runBroadcastTickBlind(result registry.FlushResult, deltasFlushe
 }
 
 // runBroadcastTickFiltered performs per-session known-set replication when
-// visibility groups, owner-scoped payloads, or ownership refreshes require it.
-func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlushed int) error {
+// visibility groups, owner-scoped payloads, ownership refreshes or
+// EntityResync requests require it.
+func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlushed int, resyncs map[int64]map[int64]struct{}) error {
 	tick, err := s.prepareReplicationTick(result)
 	if err != nil {
 		return err
 	}
+	tick.entityResyncs = resyncs
 	// Capture before the callback so a disconnected recipient can lose known state.
 	sessionIDs := s.listener.SessionIDs()
 	if err := s.prepareEventualFrames(tick, sessionIDs); err != nil {
@@ -1553,7 +1838,13 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 	if s.onUpdates != nil && len(tick.updates) > 0 {
 		s.onUpdates(tick.updates)
 	}
-	live := s.reg.All()
+	// Read after OnUpdates, which may create, delete or move entities. Entity
+	// spaces change only on this goroutine, so plain holds for the pass. The
+	// reused buffer keeps this read allocation-free; while every entity is in
+	// space 0 the registry fills it without space lookups.
+	tick.spaced = s.reg.AppendSpaced(tick.spaced[:0])
+	live, plain := tick.spaced, !s.reg.SpacesInUse()
+	defer tick.releaseSpaced()
 	s.interestMu.Lock()
 	ownershipPending := s.snapshotOwnershipRefreshLocked()
 	s.interestMu.Unlock()
@@ -1564,8 +1855,8 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 			s.clearBroadcastKnownSession(sid)
 			continue
 		}
-		entered, stayed, exited := s.computeBroadcastDiff(sid, live)
-		sent, disconnected, err := s.deliverReplicationDiff(sid, transport, interest.Diff{Entered: entered, Stayed: stayed, Exited: exited}, tick, ownershipPending, replicationVisibility)
+		diff, plan := s.computeBroadcastDiff(sid, live, plain)
+		sent, disconnected, err := s.deliverReplicationDiff(sid, transport, diff, tick, ownershipPending, replicationVisibility, plan)
 		total.add(sent)
 		if err != nil {
 			return err
@@ -1612,11 +1903,25 @@ func (s *Server) clearBroadcastKnownSession(sessionID int64) {
 }
 
 // computeBroadcastDiff updates broadcast known state for sessionID and returns
-// enter/stay/exit entity IDs. Known transitions are accepted here (queued sends
-// count as known), matching interest-mode semantics.
-func (s *Server) computeBroadcastDiff(sessionID int64, live []Entity) (entered, stayed, exited []int64) {
+// its enter/stay/exit diff with the session's space plan. Known transitions are
+// accepted here (queued sends count as known), matching interest-mode
+// semantics. Only entities in the session's space are desired; the announced
+// space changes under the same lock as the known set. plain reports that no
+// entity is outside space 0 (Registry.SpacesInUse was false after live was
+// read): every live entity is then in space 0, so a session planned into
+// another space desires nothing and no per-entity space is compared.
+func (s *Server) computeBroadcastDiff(sessionID int64, live []registry.SpacedEntity, plain bool) (interest.Diff, sessionSpacePlan) {
 	s.interestMu.Lock()
 	defer s.interestMu.Unlock()
+
+	var (
+		diff interest.Diff
+		plan sessionSpacePlan
+	)
+	if s.spacesActiveLocked() {
+		plan = s.planSessionSpaceLocked(sessionID, s.fallbackSessionSpaceLocked(sessionID))
+		diff.Space = plan.space
+	}
 
 	known := s.broadcastKnown[sessionID]
 	if known == nil {
@@ -1624,29 +1929,41 @@ func (s *Server) computeBroadcastDiff(sessionID int64, live []Entity) (entered, 
 		s.broadcastKnown[sessionID] = known
 	}
 
-	desired := make(map[int64]struct{}, len(live))
-	for _, e := range live {
-		id := e.EntityID()
-		if s.visibility.Allows(sessionID, id) {
-			desired[id] = struct{}{}
+	var desired map[int64]struct{}
+	switch {
+	case !plain:
+		desired = make(map[int64]struct{}, len(live))
+		for _, se := range live {
+			id := se.Entity.EntityID()
+			if se.Space == plan.space && s.visibility.Allows(sessionID, id) {
+				desired[id] = struct{}{}
+			}
+		}
+	case plan.space == 0:
+		desired = make(map[int64]struct{}, len(live))
+		for _, se := range live {
+			id := se.Entity.EntityID()
+			if s.visibility.Allows(sessionID, id) {
+				desired[id] = struct{}{}
+			}
 		}
 	}
 
 	for id := range desired {
 		if _, ok := known[id]; ok {
-			stayed = append(stayed, id)
+			diff.Stayed = append(diff.Stayed, id)
 		} else {
-			entered = append(entered, id)
+			diff.Entered = append(diff.Entered, id)
 			known[id] = struct{}{}
 		}
 	}
 	for id := range known {
 		if _, ok := desired[id]; !ok {
-			exited = append(exited, id)
+			diff.Exited = append(diff.Exited, id)
 			delete(known, id)
 		}
 	}
-	return entered, stayed, exited
+	return diff, plan
 }
 
 // applyBlindBroadcastKnown incrementally maintains broadcast known sets on the
@@ -1685,13 +2002,39 @@ func (s *Server) cleanupVisibilityForRemovals(removalIDs []int64) {
 	}
 }
 
-// cleanupVisibilityOnDisconnect clears session group membership and broadcast
-// known state. Interest FOI cleanup remains in cleanupAvatarOnDisconnect.
+// cleanupVisibilityOnDisconnect clears session group membership, broadcast
+// known state and session space state, and marks the session closed so a
+// later SetSessionSpace cannot store state for it again. Interest FOI cleanup
+// remains in cleanupAvatarOnDisconnect.
 func (s *Server) cleanupVisibilityOnDisconnect(sessionID int64) {
 	s.interestMu.Lock()
-	defer s.interestMu.Unlock()
 	s.visibility.RemoveSession(sessionID)
 	delete(s.broadcastKnown, sessionID)
+	s.clearSessionSpaceLocked(sessionID)
+	s.closedSessions[sessionID] = struct{}{}
+	closed := make([]int64, 0, len(s.closedSessions))
+	for sid := range s.closedSessions {
+		closed = append(closed, sid)
+	}
+	s.interestMu.Unlock()
+
+	// The listener drops a session after its disconnect hook, so this cleanup
+	// can run while the listener still lists it. Once the listener has dropped
+	// a session, its own lookup refuses the session and the mark can go.
+	gone := closed[:0]
+	for _, sid := range closed {
+		if _, listed := s.listener.SessionTransport(sid); !listed {
+			gone = append(gone, sid)
+		}
+	}
+	if len(gone) == 0 {
+		return
+	}
+	s.interestMu.Lock()
+	for _, sid := range gone {
+		delete(s.closedSessions, sid)
+	}
+	s.interestMu.Unlock()
 }
 
 // entitySnapshotForSession returns connect-time entity frames visible to
@@ -1703,12 +2046,38 @@ func (s *Server) cleanupVisibilityOnDisconnect(sessionID int64) {
 // successful snapshot IDs become known and can be removed on the next
 // replication pass. Provider/write failures never commit known state.
 func (s *Server) entitySnapshotForSession(sessionID int64) ([]golemnet.EntitySnapshot, error) {
-	all := s.reg.All()
-	allowed := make([]Entity, 0, len(all))
+	// While every entity is in space 0 the plain list needs no per-entity
+	// space. The recheck catches an entity that left space 0 during the read:
+	// the registry updates SpacesInUse under the lock All() reads with.
+	var (
+		plain  []Entity
+		spaced []registry.SpacedEntity
+	)
+	if !s.reg.SpacesInUse() {
+		plain = s.reg.All()
+		if s.reg.SpacesInUse() {
+			plain = nil
+		}
+	}
+	if plain == nil {
+		spaced = s.reg.AppendSpaced(nil)
+	}
+	allowed := make([]Entity, 0, len(plain)+len(spaced))
 	s.interestMu.Lock()
-	for _, e := range all {
-		if s.visibility.Allows(sessionID, e.EntityID()) {
-			allowed = append(allowed, e)
+	// The announced space is 0 at connect; later space changes arrive as a
+	// replication transition. With the plain list every entity is in space 0.
+	space := s.sentSpace[sessionID]
+	if spaced != nil {
+		for _, se := range spaced {
+			if se.Space == space && s.visibility.Allows(sessionID, se.Entity.EntityID()) {
+				allowed = append(allowed, se.Entity)
+			}
+		}
+	} else if space == 0 {
+		for _, e := range plain {
+			if s.visibility.Allows(sessionID, e.EntityID()) {
+				allowed = append(allowed, e)
+			}
 		}
 	}
 	s.interestMu.Unlock()
@@ -1750,6 +2119,7 @@ func copyInterestDiffs(in map[int64]*interest.Diff) map[int64]*interest.Diff {
 			Entered: append([]int64(nil), d.Entered...),
 			Stayed:  append([]int64(nil), d.Stayed...),
 			Exited:  append([]int64(nil), d.Exited...),
+			Space:   d.Space,
 		}
 	}
 	return out
@@ -1757,12 +2127,30 @@ func copyInterestDiffs(in map[int64]*interest.Diff) map[int64]*interest.Diff {
 
 // runInterestTick performs per-session interest-filtered sends.
 func (s *Server) runInterestTick() error {
+	// Registered first so it runs last, after the replication observers.
+	defer s.releaseHeldSessionEvents()
+	// Taken before the diffs: every request names an entity the session knew
+	// no later than this pass's known-set decision.
+	resyncs := s.takeEntityResyncs()
 	// Manager diffs are reused: copy while locked, before flushing or callbacks.
 	s.interestMu.Lock()
 	s.interest.UpdateGrid(s.reg)
-	diffs := copyInterestDiffs(s.interest.ComputeDiffsFiltered(s.visibility.Allows))
+	computed := s.interest.ComputeDiffsFiltered(s.visibility.Allows)
+	// Plans are made with the known-set decisions so the announced space and
+	// the known set change together.
+	spacesActive := s.spacesActiveLocked()
+	var spacePlans map[int64]sessionSpacePlan
+	if spacesActive {
+		spacePlans = s.planInterestSpacesLocked(computed)
+	}
+	diffs := copyInterestDiffs(computed)
+	// Sessions with an FOI again exit what they kept from a removed FOI.
+	orphanRevisions := s.takeFOIOrphansLocked(diffs)
 	ownershipPending := s.snapshotOwnershipRefreshLocked()
 	s.interestMu.Unlock()
+	// Before onUpdates can send events: switching sessions hold their events
+	// until their transition frames are queued.
+	s.beginSpaceTransitionEvents(spacePlans)
 	result, err := s.reg.FlushAll()
 	if err != nil {
 		return err
@@ -1772,6 +2160,7 @@ func (s *Server) runInterestTick() error {
 	if err != nil {
 		return err
 	}
+	tick.entityResyncs = resyncs
 	if s.onUpdates != nil && len(tick.updates) > 0 {
 		s.onUpdates(tick.updates)
 	}
@@ -1782,14 +2171,33 @@ func (s *Server) runInterestTick() error {
 	var total eventualStateSendStats
 	for _, sid := range sessionIDs {
 		transport, connected := s.listener.SessionTransport(sid)
+		plan := spacePlans[sid]
 		if !connected {
+			if plan.transition != 0 {
+				s.finishSpaceAnnouncement(sid)
+			}
 			continue
 		}
 		diff, ok := diffs[sid]
 		if !ok {
-			continue
+			if !spacesActive {
+				continue
+			}
+			// Sessions without an FOI know no entities but still learn about
+			// space changes through a transition that only removes what they
+			// knew when their FOI was removed.
+			plan = s.planSessionWithoutFOI(sid)
+			if plan.transition == 0 {
+				continue
+			}
+			diff = &interest.Diff{Space: plan.space}
+			for id := range plan.orphanRevisions {
+				diff.Exited = append(diff.Exited, id)
+			}
+		} else if revisions := orphanRevisions[sid]; revisions != nil {
+			plan.orphanRevisions = revisions
 		}
-		sent, disconnected, err := s.deliverReplicationDiff(sid, transport, *diff, tick, ownershipPending, replicationFOI)
+		sent, disconnected, err := s.deliverReplicationDiff(sid, transport, *diff, tick, ownershipPending, replicationFOI, plan)
 		total.add(sent)
 		if err != nil {
 			return err
@@ -1798,6 +2206,7 @@ func (s *Server) runInterestTick() error {
 			continue
 		}
 	}
+	s.recordOrphanRemovals(result)
 	s.cleanupVisibilityForRemovals(result.Removals)
 	s.storeReplicationSnapshot(total.streamBatchedFrames, total.streamWireMsgs, total.datagramBatchedFrames, total.datagramWirePayloads, len(result.Deltas))
 	return nil

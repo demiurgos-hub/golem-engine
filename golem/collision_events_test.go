@@ -2,7 +2,9 @@ package golem
 
 import (
 	"fmt"
+	"math"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/demiurgos-hub/golem-engine/golem/collision"
@@ -374,5 +376,338 @@ func TestTriggerAndSolidTrackedSeparately(t *testing.T) {
 	}
 	if len(eA.triggerExits) != 0 {
 		t.Errorf("tick2: unexpected TriggerExit")
+	}
+}
+
+// --- per-space legacy collision ---
+
+// pointBackend2D is a tiny 2D backend: registered entities collide when their
+// synced positions are within 1 unit and their layer masks match.
+type pointBackend2D struct {
+	shapes    map[int64]pointShape
+	pos       map[int64][2]float64
+	updated   []int64
+	steps     int
+	writeBack map[int64][2]float64
+}
+
+type pointShape struct {
+	layer, mask uint32
+	trigger     bool
+}
+
+func newPointBackend2D() *pointBackend2D {
+	return &pointBackend2D{shapes: map[int64]pointShape{}, pos: map[int64][2]float64{}, writeBack: map[int64][2]float64{}}
+}
+
+func (b *pointBackend2D) Add(id int64, _ collision.Shape, layer, mask uint32, trigger bool) {
+	b.shapes[id] = pointShape{layer, mask, trigger}
+}
+func (b *pointBackend2D) Set(id int64, _ collision.Shape, layer, mask uint32, trigger bool) {
+	b.shapes[id] = pointShape{layer, mask, trigger}
+}
+func (b *pointBackend2D) Remove(id int64) { delete(b.shapes, id); delete(b.pos, id) }
+func (b *pointBackend2D) Update(id int64, x, y float64) {
+	b.pos[id] = [2]float64{x, y}
+	b.updated = append(b.updated, id)
+}
+func (b *pointBackend2D) ids() []int64 {
+	var ids []int64
+	for id := range b.shapes {
+		if _, ok := b.pos[id]; ok {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	return ids
+}
+func (b *pointBackend2D) near(id int64, x, y, r float64) bool {
+	p := b.pos[id]
+	return math.Hypot(p[0]-x, p[1]-y) <= r
+}
+func (b *pointBackend2D) Step(float64) []collision.Contact {
+	b.steps++
+	ids := b.ids()
+	var out []collision.Contact
+	for i, a := range ids {
+		for _, c := range ids[i+1:] {
+			sa, sc := b.shapes[a], b.shapes[c]
+			if sa.layer&sc.mask == 0 && sc.layer&sa.mask == 0 {
+				continue
+			}
+			if p := b.pos[c]; !b.near(a, p[0], p[1], 1) {
+				continue
+			}
+			depth := 1.0
+			if sa.trigger || sc.trigger {
+				depth = 0
+			}
+			out = append(out, collision.Contact{A: a, B: c, Normal: collision.Vec2{X: 1}, Depth: depth})
+		}
+	}
+	return out
+}
+func (b *pointBackend2D) ReadBack(fn func(int64, float64, float64)) {
+	for id, p := range b.writeBack {
+		fn(id, p[0], p[1])
+	}
+}
+func (b *pointBackend2D) OverlapCircle(cx, cy, r float64, mask uint32) []int64 {
+	var out []int64
+	for _, id := range b.ids() {
+		if b.shapes[id].layer&mask != 0 && b.near(id, cx, cy, r) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+func (b *pointBackend2D) OverlapBox(cx, cy, hw, hh float64, mask uint32) []int64 {
+	var out []int64
+	for _, id := range b.ids() {
+		p := b.pos[id]
+		if b.shapes[id].layer&mask != 0 && math.Abs(p[0]-cx) <= hw && math.Abs(p[1]-cy) <= hh {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// spaceCollider is a ColliderProvider with a settable position that records
+// its contact events.
+type spaceCollider struct {
+	stubEntity
+	x, y  float32
+	layer string
+}
+
+func (e *spaceCollider) Position() (float32, float32) { return e.x, e.y }
+func (e *spaceCollider) SetPosition(x, y float32)     { e.x, e.y = x, y }
+func (e *spaceCollider) Collider() (CollisionShape, string, bool) {
+	return CollisionCircle{R: 0.5}, e.layer, false
+}
+
+func newSpaceCollider(id int64) *spaceCollider {
+	return &spaceCollider{stubEntity: stubEntity{id: id}, layer: "Body"}
+}
+
+// twoSpaceCollisionServer configures 2D collision on space 0 and space 3.
+func twoSpaceCollisionServer(t *testing.T) (*Server, *pointBackend2D, *pointBackend2D) {
+	t.Helper()
+	s := NewServer(ServerConfig{})
+	b0, b3 := newPointBackend2D(), newPointBackend2D()
+	s.SetCollisionBackend(b0)
+	s.SetCollisionLayers(NewCollisionLayers().Bind(b0).Define("Body").SetCollides("Body", "Body"))
+	s.Space(3).SetCollisionBackend(b3)
+	s.Space(3).SetCollisionLayers(NewCollisionLayers().Bind(b3).Define("Body").SetCollides("Body", "Body"))
+	return s, b0, b3
+}
+
+func createIn(t *testing.T, s *Server, space SpaceID, e Entity) {
+	t.Helper()
+	if err := s.CreateEntityIn(space, e); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCollisionStaysWithinEachSpace(t *testing.T) {
+	s, b0, b3 := twoSpaceCollisionServer(t)
+	a, b, c := newSpaceCollider(1), newSpaceCollider(2), newSpaceCollider(3)
+	createIn(t, s, 0, a)
+	createIn(t, s, 3, b)
+	createIn(t, s, 3, c)
+	var calls [][]collision.Contact
+	s.OnContact(func(contacts []collision.Contact) { calls = append(calls, slices.Clone(contacts)) })
+
+	s.stepCollision(0.05)
+	if !reflect.DeepEqual(b0.updated, []int64{1}) {
+		t.Fatalf("space 0 backend updated %v, want only entity 1", b0.updated)
+	}
+	if got := slices.Sorted(slices.Values(b3.updated)); !reflect.DeepEqual(got, []int64{2, 3}) {
+		t.Fatalf("space 3 backend updated %v, want entities 2 and 3", got)
+	}
+	want := []collision.Contact{{A: 2, B: 3, Normal: collision.Vec2{X: 1}, Depth: 1}}
+	if len(calls) != 1 || !reflect.DeepEqual(calls[0], want) {
+		t.Fatalf("contacts %v, want one call with %v (entity 1 shares coordinates but not the space)", calls, want)
+	}
+}
+
+func TestCollisionMergesContactsOfAllSpacesIntoOneCallback(t *testing.T) {
+	s, _, _ := twoSpaceCollisionServer(t)
+	s.EnableContactEvents()
+	es := []*spaceCollider{newSpaceCollider(1), newSpaceCollider(2), newSpaceCollider(3), newSpaceCollider(4)}
+	createIn(t, s, 3, es[0])
+	createIn(t, s, 3, es[1])
+	createIn(t, s, 0, es[2])
+	createIn(t, s, 0, es[3])
+	var calls [][]collision.Contact
+	s.OnContact(func(contacts []collision.Contact) { calls = append(calls, slices.Clone(contacts)) })
+
+	s.stepCollision(0.05)
+	want := []collision.Contact{
+		{A: 3, B: 4, Normal: collision.Vec2{X: 1}, Depth: 1},
+		{A: 1, B: 2, Normal: collision.Vec2{X: 1}, Depth: 1},
+	}
+	if len(calls) != 1 || !reflect.DeepEqual(calls[0], want) {
+		t.Fatalf("contacts %v, want one call with space 0 then space 3: %v", calls, want)
+	}
+	for _, e := range es {
+		if len(e.collisionEnters) != 1 {
+			t.Fatalf("entity %d got %d collision enters, want 1", e.id, len(e.collisionEnters))
+		}
+	}
+}
+
+func TestMovedColliderExitsOldPairsAndEntersNewOnes(t *testing.T) {
+	s, b0, b3 := twoSpaceCollisionServer(t)
+	s.EnableContactEvents()
+	a, mover, b := newSpaceCollider(1), newSpaceCollider(2), newSpaceCollider(3)
+	createIn(t, s, 0, a)
+	createIn(t, s, 0, mover)
+	createIn(t, s, 3, b)
+	s.stepCollision(0.05)
+	if len(a.collisionEnters) != 1 || a.collisionEnters[0].other != Entity(mover) {
+		t.Fatalf("space 0 pair did not enter: %+v", a.collisionEnters)
+	}
+
+	if err := s.SetEntitySpace(2, 3); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b0.shapes[2]; ok {
+		t.Fatal("moved collider stayed in space 0's backend")
+	}
+	if _, ok := b3.shapes[2]; !ok {
+		t.Fatal("moved collider is missing from space 3's backend")
+	}
+	s.stepCollision(0.05)
+	if len(a.collisionExits) != 1 || a.collisionExits[0] != Entity(mover) {
+		t.Fatalf("old pair did not exit: %+v", a.collisionExits)
+	}
+	if len(mover.collisionExits) != 1 || len(mover.collisionEnters) != 2 || mover.collisionEnters[1].other != Entity(b) {
+		t.Fatalf("mover exits %v enters %+v, want exit from 1 and enter with 3", mover.collisionExits, mover.collisionEnters)
+	}
+	if len(b.collisionEnters) != 1 || b.collisionEnters[0].other != Entity(mover) {
+		t.Fatalf("new pair did not enter: %+v", b.collisionEnters)
+	}
+}
+
+func TestCollisionReadBackOnlyWritesEntitiesOfTheSpace(t *testing.T) {
+	s, b0, b3 := twoSpaceCollisionServer(t)
+	a, b := newSpaceCollider(1), newSpaceCollider(2)
+	createIn(t, s, 0, a)
+	createIn(t, s, 3, b)
+	b3.writeBack[1] = [2]float64{9, 9} // a space-0 entity reported by space 3
+	b3.writeBack[2] = [2]float64{4, 5}
+	b0.writeBack[2] = [2]float64{7, 7} // a space-3 entity reported by space 0
+	s.stepCollision(0.05)
+	if a.x != 0 || a.y != 0 {
+		t.Fatalf("space 3 backend moved space 0 entity to (%g,%g)", a.x, a.y)
+	}
+	if b.x != 4 || b.y != 5 {
+		t.Fatalf("space 3 entity at (%g,%g), want its own backend result (4,5)", b.x, b.y)
+	}
+}
+
+func TestCollisionWithoutSpacesUsesThePlainEntityList(t *testing.T) {
+	s, b0, b3 := twoSpaceCollisionServer(t)
+	createIn(t, s, 0, newSpaceCollider(1))
+	createIn(t, s, 0, newSpaceCollider(2))
+	s.stepCollision(0.05)
+	if s.spacedScratch != nil {
+		t.Fatal("single-space tick built the spaced entity list")
+	}
+	if len(b0.updated) != 2 || len(b3.updated) != 0 {
+		t.Fatalf("updates space0=%v space3=%v", b0.updated, b3.updated)
+	}
+	if b3.steps != 1 {
+		t.Fatalf("empty space 3 stepped %d times, want 1", b3.steps)
+	}
+}
+
+func TestCollision3DStaysWithinEachSpace(t *testing.T) {
+	s := NewServer(ServerConfig{})
+	b0, b7 := NewCollisionSimple3DBackend(), NewCollisionSimple3DBackend()
+	s.SetCollision3DBackend(b0)
+	s.Space(7).SetCollision3DBackend(b7)
+	b0.Add(1, CollisionSphere{R: 1}, 1, 1, false)
+	b7.Add(2, CollisionSphere{R: 1}, 1, 1, false)
+	b7.Add(3, CollisionSphere{R: 1}, 1, 1, false)
+	createIn(t, s, 0, &entity3D{id: 1})
+	createIn(t, s, 7, &entity3D{id: 2})
+	createIn(t, s, 7, &entity3D{id: 3, x: 0.5})
+	var calls [][]CollisionContact3D
+	s.OnContact3D(func(contacts []CollisionContact3D) { calls = append(calls, slices.Clone(contacts)) })
+	s.stepCollision(0.05)
+	if len(calls) != 1 || len(calls[0]) == 0 {
+		t.Fatalf("got OnContact3D calls %v, want one call with the space 7 pair", calls)
+	}
+	for _, c := range calls[0] {
+		if c.A == 1 || c.B == 1 {
+			t.Fatalf("space 0 entity collided across spaces: %+v", calls[0])
+		}
+	}
+	if got := s.Space(7).OverlapSphere(0, 0, 0, 0.1, 1); slices.Contains(got, 1) || !slices.Contains(got, 2) {
+		t.Fatalf("space 7 OverlapSphere = %v", got)
+	}
+	if got := s.OverlapSphere(0, 0, 0, 0.1, 1); !reflect.DeepEqual(got, []int64{1}) {
+		t.Fatalf("space 0 OverlapSphere = %v", got)
+	}
+}
+
+// With many spaces, one pass over the entities feeds every backend: each
+// backend is updated with exactly its own entities, each steps once, and each
+// reads back only into its own entities. Entities in a space without a
+// backend are skipped.
+func TestCollisionManySpacesUpdateOnlyTheirOwnEntities(t *testing.T) {
+	const spaces = 7
+	s := NewServer(ServerConfig{})
+	backends := make([]*pointBackend2D, spaces)
+	for space := range backends {
+		b := newPointBackend2D()
+		backends[space] = b
+		sp := s.Space(SpaceID(space))
+		sp.SetCollisionBackend(b)
+		sp.SetCollisionLayers(NewCollisionLayers().Bind(b).Define("Body").SetCollides("Body", "Body"))
+	}
+	// Interleaved, so entities of one space do not follow each other.
+	want := make([][]int64, spaces)
+	colliders := map[int64]*spaceCollider{}
+	for id := int64(1); id <= 5*spaces; id++ {
+		space := int(id) % spaces
+		c := newSpaceCollider(id)
+		c.x = float32(id) * 10
+		colliders[id] = c
+		createIn(t, s, SpaceID(space), c)
+		want[space] = append(want[space], id)
+	}
+	stray := newSpaceCollider(1000)
+	createIn(t, s, 99, stray) // a space without collision services
+	for space, b := range backends {
+		// Each backend reports a neighbour space's entity too.
+		b.writeBack[want[space][0]] = [2]float64{float64(space), 1}
+		b.writeBack[want[(space+1)%spaces][1]] = [2]float64{-5, -5}
+	}
+
+	for tick := 1; tick <= 2; tick++ {
+		for _, b := range backends {
+			b.updated = nil
+		}
+		s.stepCollision(0.05)
+		for space, b := range backends {
+			if got := slices.Sorted(slices.Values(b.updated)); !slices.Equal(got, want[space]) {
+				t.Fatalf("tick %d: space %d backend updated %v, want %v", tick, space, got, want[space])
+			}
+			if b.steps != tick {
+				t.Fatalf("tick %d: space %d backend stepped %d times", tick, space, b.steps)
+			}
+			if first := colliders[want[space][0]]; first.x != float32(space) || first.y != 1 {
+				t.Fatalf("tick %d: space %d entity at (%g,%g), want its backend's (%d,1)", tick, space, first.x, first.y, space)
+			}
+			if second := colliders[want[space][1]]; second.x == -5 {
+				t.Fatalf("tick %d: space %d entity was moved by another space's backend", tick, space)
+			}
+		}
+	}
+	if stray.x != 0 || stray.y != 0 {
+		t.Fatal("an entity in a space without a backend was moved")
 	}
 }

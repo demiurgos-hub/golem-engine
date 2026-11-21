@@ -126,10 +126,14 @@ func bt(v p.Pose) b.Transform { return b.Transform{P: bv(v.Position), Q: bq(v.Ro
 func (w *World) findBody(h p.BodyHandle) (*body, error) {
 	v := w.bodyForHandle(h)
 	if v == nil {
-		return nil, p.ErrStale
+		return nil, staleHandle(p.Handle(h))
 	}
 	return v, nil
 }
+
+// staleHandle reports a handle lookup miss as a typed stale-handle error;
+// guard keeps a bare p.ErrStale for a closed world.
+func staleHandle(h p.Handle) error { return &p.StaleHandleError{Handle: h} }
 func copyShape(s p.ShapeDesc) p.ShapeDesc {
 	s.Vertices = append([]p.Vec3(nil), s.Vertices...)
 	s.Indices = append([]uint32(nil), s.Indices...)
@@ -165,7 +169,7 @@ func (w *World) DestroyShape(h p.ShapeHandle) error {
 	}
 	v, ok := w.shapes[h]
 	if !ok {
-		return p.ErrStale
+		return staleHandle(p.Handle(h))
 	}
 	if v.refs != 0 {
 		return fmt.Errorf("%w: shape in use", p.ErrBusy)

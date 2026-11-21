@@ -348,3 +348,28 @@ func TestReliableOrderedDatagramPayloadCount(t *testing.T) {
 		t.Fatalf("payloads = %d, want 2", n)
 	}
 }
+
+func TestConcatReliableFramesPacksUpToTheCap(t *testing.T) {
+	small := [][]byte{{1}, {2, 3}, {4}}
+	packed := ConcatReliableFrames(small)
+	if len(packed) != 1 || string(packed[0]) != string([]byte{1, 2, 3, 4}) {
+		t.Fatalf("packed = %v", packed)
+	}
+	small[0][0] = 9
+	if packed[0][0] != 1 {
+		t.Fatal("packed frame aliases its input")
+	}
+	half := make([]byte, maxReliableMessageBytes/2)
+	big := make([]byte, maxReliableMessageBytes+1)
+	got := ConcatReliableFrames([][]byte{half, half, {7}, big, {8}})
+	if len(got) != 4 || len(got[0]) != maxReliableMessageBytes || len(got[1]) != 1 || len(got[2]) != len(big) || len(got[3]) != 1 {
+		sizes := make([]int, len(got))
+		for i, f := range got {
+			sizes[i] = len(f)
+		}
+		t.Fatalf("packed sizes = %v", sizes)
+	}
+	if single := [][]byte{{5}}; &ConcatReliableFrames(single)[0][0] != &single[0][0] {
+		t.Fatal("a single frame must pass through")
+	}
+}

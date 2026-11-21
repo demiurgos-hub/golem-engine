@@ -536,3 +536,161 @@ func TestStreamOverflowCoolsDownThenResnapshots(t *testing.T) {
 		t.Fatalf("resnapshot epoch %d live %v", e, a.stream.live)
 	}
 }
+
+func TestAgentStreamsSpaces(t *testing.T) {
+	srv := startServer(t, &testActor{id: 1}, &testActor{id: 2})
+	hub := newFakeHub(t)
+	attach(t, srv, hub, nil)
+	conn := hub.conn()
+	next[*wire.Register](t, hub)
+	post(t, srv, func(s *golem.Server) {
+		if err := s.SetEntitySpace(2, 3); err != nil {
+			t.Error(err)
+		}
+	})
+
+	hub.send(conn, &wire.ObserveStart{})
+	chunk := waitFor[*wire.SnapshotChunk](t, hub)
+	if len(chunk.Entities) != 2 || chunk.Entities[0].Space != 0 || chunk.Entities[1].Space != 3 {
+		t.Fatalf("snapshot spaces = %+v", chunk.Entities)
+	}
+	waitFor[*wire.SnapshotEnd](t, hub)
+
+	post(t, srv, func(s *golem.Server) {
+		if err := s.SetEntitySpace(1, 5); err != nil {
+			t.Error(err)
+		}
+		if err := s.CreateEntityIn(4, &testActor{id: 7}); err != nil {
+			t.Error(err)
+		}
+	})
+	moved, spawned := false, false
+	for !moved || !spawned {
+		b := next[*wire.Batch](t, hub)
+		for _, m := range b.Moves {
+			if m != (wire.SpaceMove{ID: 1, Space: 5}) {
+				t.Fatalf("unexpected move %+v", m)
+			}
+			moved = true
+		}
+		for _, st := range b.Spawns {
+			if st.ID == 7 {
+				if st.Space != 4 {
+					t.Fatalf("spawn space = %d, want 4", st.Space)
+				}
+				spawned = true
+			}
+		}
+	}
+}
+
+// TestStreamCoalescesMoves drives the stream directly: moves coalesce to the
+// latest space per window, and spawned or removed entities drop theirs.
+func TestStreamCoalescesMoves(t *testing.T) {
+	srv := golem.NewServer(golem.ServerConfig{})
+	for id := int64(1); id <= 3; id++ {
+		if err := srv.CreateEntity(&testActor{id: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := &Agent{srv: srv, schema: testSchema(), opts: Options{RateHz: 1, Logger: quietLogger()}.withDefaults(), out: make(chan [][]byte, 4)}
+	a.stream.agent = a
+	a.observing.Store(true)
+
+	a.stream.onFrame(golem.ReplicationFrame{Tick: 1}) // snapshot
+	<-a.out
+	a.stream.onFrame(golem.ReplicationFrame{Tick: 2, Moved: []golem.EntitySpaceMove{{ID: 1, From: 0, To: 2}, {ID: 4, From: 0, To: 1}}})
+	a.stream.onFrame(golem.ReplicationFrame{Tick: 3, Moved: []golem.EntitySpaceMove{{ID: 1, From: 2, To: 4}}, Spawned: []int64{3}})
+	a.stream.onFrame(golem.ReplicationFrame{Tick: 4, Moved: []golem.EntitySpaceMove{{ID: 3, From: 0, To: 5}}, Removed: []golem.RemovedEntity{{ID: 4, Revision: 1}}})
+	if len(a.out) != 0 {
+		t.Fatal("stream flushed before its rate window elapsed")
+	}
+	a.stream.lastFlush = time.Time{}
+	a.stream.onFrame(golem.ReplicationFrame{Tick: 5})
+
+	item := <-a.out
+	if len(item) != 1 {
+		t.Fatalf("flush produced %d frames", len(item))
+	}
+	msg, err := wire.Decode(item[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := msg.(*wire.Batch)
+	if len(b.Moves) != 1 || b.Moves[0] != (wire.SpaceMove{ID: 1, Space: 4}) {
+		t.Fatalf("moves = %+v, want only entity 1 at its latest space", b.Moves)
+	}
+	if len(b.Spawns) != 1 || b.Spawns[0].ID != 3 || len(b.Removals) != 1 || b.Removals[0].ID != 4 {
+		t.Fatalf("spawns = %+v removals = %+v", b.Spawns, b.Removals)
+	}
+}
+
+// TestStreamKeepsMovesWithTheirDeltas splits a flush across batches and checks
+// that each moved entity's delta and space move land in the same batch.
+func TestStreamKeepsMovesWithTheirDeltas(t *testing.T) {
+	srv := golem.NewServer(golem.ServerConfig{})
+	actors := map[int64]*testActor{}
+	for id := int64(1); id <= 6; id++ {
+		actors[id] = &testActor{id: id}
+		if err := srv.CreateEntity(actors[id]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := &Agent{srv: srv, schema: testSchema(), opts: Options{RateHz: 1, MaxFrameBytes: 1, Logger: quietLogger()}.withDefaults(), out: make(chan [][]byte, 4)}
+	a.stream.agent = a
+	a.observing.Store(true)
+
+	a.stream.onFrame(golem.ReplicationFrame{Tick: 1}) // snapshot
+	<-a.out
+	for id := int64(1); id <= 5; id++ {
+		actors[id].lastMask = 4
+	}
+	a.stream.onFrame(golem.ReplicationFrame{
+		Tick:    2,
+		Changed: []int64{1, 2, 3, 4, 5},
+		// Entity 6 moves without a delta.
+		Moved: []golem.EntitySpaceMove{{ID: 2, To: 7}, {ID: 4, To: 8}, {ID: 5, To: 9}, {ID: 6, To: 3}},
+	})
+	a.stream.lastFlush = time.Time{}
+	a.stream.onFrame(golem.ReplicationFrame{Tick: 3})
+
+	item := <-a.out
+	if len(item) < 5 {
+		t.Fatalf("flush produced %d frames, want one per delta at MaxFrameBytes=1", len(item))
+	}
+	deltaBatch := map[int64]int{}
+	moveBatch := map[int64]int{}
+	moveSpace := map[int64]uint32{}
+	for i, frame := range item {
+		msg, err := wire.Decode(frame)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := msg.(*wire.Batch)
+		for _, d := range b.Deltas {
+			deltaBatch[d.ID] = i
+		}
+		for _, m := range b.Moves {
+			if _, dup := moveBatch[m.ID]; dup {
+				t.Fatalf("entity %d moved twice", m.ID)
+			}
+			moveBatch[m.ID] = i
+			moveSpace[m.ID] = m.Space
+		}
+	}
+	if len(deltaBatch) != 5 {
+		t.Fatalf("deltas for %d entities, want 5", len(deltaBatch))
+	}
+	want := map[int64]uint32{2: 7, 4: 8, 5: 9, 6: 3}
+	if len(moveSpace) != len(want) {
+		t.Fatalf("moves = %v, want %v", moveSpace, want)
+	}
+	for id, space := range want {
+		if moveSpace[id] != space {
+			t.Fatalf("entity %d moved to %d, want %d", id, moveSpace[id], space)
+		}
+		if db, ok := deltaBatch[id]; ok && db != moveBatch[id] {
+			t.Fatalf("entity %d: delta in batch %d, move in batch %d", id, db, moveBatch[id])
+		}
+	}
+}

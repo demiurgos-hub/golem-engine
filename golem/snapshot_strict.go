@@ -10,7 +10,8 @@ import (
 
 // LoadSnapshotStrict restores an entity-only snapshot before Run. It reads the
 // file once, validates every record and restored identity, then publishes the
-// entire batch without ordinary spawn/remove hooks. Existing entities must have
+// entire batch, each entity in its recorded space, without ordinary spawn/remove
+// hooks. Existing entities must have
 // distinct IDs and are preserved. Restore errors, including missing content
 // definitions and unknown entity types, are never skipped.
 //
@@ -27,7 +28,7 @@ func (s *Server) LoadSnapshotStrict(path, fingerprint string, restore func(snaps
 	if !created {
 		return errors.New("golem: LoadSnapshotStrict requires startup before Run")
 	}
-	if s.physics != nil {
+	if s.anyPhysics() {
 		return errors.New("golem: LoadSnapshotStrict is entity-only; use paired physics checkpoint restoration")
 	}
 	if restore == nil {
@@ -89,7 +90,7 @@ func (s *Server) restoreSnapshotRecordsStrict(records []snapshot.Record, restore
 		if e.EntityID() != ids[i] || e.TypeName() != records[i].TypeName {
 			return fmt.Errorf("snapshot: restored identity changed during binding for entity %d (%s)", ids[i], records[i].TypeName)
 		}
-		if err = s.reg.AddProvisional(e); err != nil {
+		if err = s.reg.AddProvisionalIn(records[i].Space, e); err != nil {
 			return err
 		}
 		staged++

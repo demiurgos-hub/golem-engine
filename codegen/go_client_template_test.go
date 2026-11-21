@@ -142,3 +142,30 @@ func TestGenerateEbitenBridgeTemplateSyncsDrawable(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateGoClientWorldManagerClearsByWorldName(t *testing.T) {
+	tmpl, err := loadEmbeddedTemplate("templates/go_client/world_manager.go.tmpl")
+	if err != nil {
+		t.Fatalf("loadEmbeddedTemplate: %v", err)
+	}
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, schema.SharedData{
+		GoPackage:  "client",
+		WorldTypes: []schema.WorldTypeData{{Name: "Zone", LowerName: "zone", DataName: "ZoneData"}},
+	}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	content := out.String()
+	for _, want := range []string{
+		"onZoneCleared func()",
+		"func (m *WorldManager) OnZoneCleared(fn func()) { m.onZoneCleared = fn }",
+		"func (m *WorldManager) ClearWorld(name string) {",
+		`case "Zone":`,
+		"m.zone = nil",
+		"m.onZoneCleared()",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("generated go WorldManager missing %q\n%s", want, content)
+		}
+	}
+}
