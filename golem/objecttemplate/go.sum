@@ -8,6 +8,8 @@ github.com/demiurgos-hub/golem-engine/golem/geometry v0.0.0-20261115012239-c9fd8
 github.com/demiurgos-hub/golem-engine/golem/geometry v0.0.0-20261115012239-c9fd88dc8adc/go.mod h1:r5JEDgAvE/+trShzySM2ksuKPetPvk006VIUcM53yZI=
 github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261115012239-c9fd88dc8adc h1:oaOmR8GXkhko53sbcBNB/ONKVrzdJavRr94xDy8hkok=
 github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261115012239-c9fd88dc8adc/go.mod h1:KASsltyLacjdk+f5HX3H3VzcbNxba21+r0oaqpEXTO4=
+github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261121202043-e7dc52314ca4 h1:/Jp7qnfEHJGp1EwgMT0ahH2WVzWogKRZX8P0pDA3NA4=
+github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261121202043-e7dc52314ca4/go.mod h1:KASsltyLacjdk+f5HX3H3VzcbNxba21+r0oaqpEXTO4=
 github.com/demiurgos-hub/golem-engine/golem/physics3d/box3d v0.0.0-20261115012239-c9fd88dc8adc h1:LKuyxjRpcY+ovmi/v4+73BAKUJYr0UdVe8pSm8quiXY=
 github.com/demiurgos-hub/golem-engine/golem/physics3d/box3d v0.0.0-20261115012239-c9fd88dc8adc/go.mod h1:rgxs6PkURaBU73RzUL3aubaeGPG5Ztsrky8etx0ZTDk=
 github.com/demiurgos-hub/navmesh-go v0.0.0-20261116105330-b17cd9f21c78 h1:2lh+woVUY1Lho9I47YufB9Nj3uue8Tphiqd4U0BqgTo=
