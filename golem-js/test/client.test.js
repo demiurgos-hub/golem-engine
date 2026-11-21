@@ -2486,3 +2486,51 @@ test("GameClient routes WorldCleared to the world manager's optional clearWorld 
     client.disconnect();
   }
 });
+
+test("GameClient stops applying a compact batch after a callback disconnects", () => {
+  for (const held of [false, true]) {
+    const { client, entities, connect } = spaceClient();
+    const channel = connect();
+    entities.log.length = 0;
+    const apply = entities.applyCompactUpdate;
+    entities.applyCompactUpdate = (frame) => {
+      apply(frame);
+      client.disconnect();
+    };
+    const batch = framedBatchBytes([fencedRecord(1, 1, "first"), fencedRecord(2, 1, "second"), fencedRecord(3, 1, "third")]);
+    if (held) channel.stream(spaceChangedField(4, 1));
+    channel.eventual(batch);
+    if (held) channel.stream(spaceSettledField(1));
+    assert.deepEqual(entities.log, ["compact 1@1=first", "clear"], held ? "held batch" : "live batch");
+    assert.equal(channel.sent.length, 0);
+    entities.applyCompactUpdate = apply;
+  }
+});
+
+test("GameClient sends EntityResync when the entity manager reports evicted records", () => {
+  const entities = fencedEntities();
+  let resync;
+  entities.onResyncNeeded = (fn) => {
+    resync = fn;
+    return () => { resync = undefined; };
+  };
+  const channels = [];
+  new GameClient({
+    entityManager: entities,
+    decode: (bytes) => bytes,
+    encode: () => new Uint8Array(),
+    encodePacket: packetBytes,
+    createChannel: (options) => {
+      const channel = new SpaceChannel(options.transport);
+      channels.push(channel);
+      return channel;
+    },
+  }).connect({ transport: "webtransport", url: "https://example.test" });
+  assert.equal(typeof resync, "function");
+  const channel = channels.at(-1);
+  resync(5);
+  assert.equal(channel.sent.length, 0, "no resync before the channel opens");
+  channel.open();
+  resync(0x0102030405);
+  assert.deepEqual(channel.sent.map((bytes) => Array.from(bytes)), [[0x00, 0x4f, 0x47, 0x53, 0x04, 0, 0, 0, 1, 2, 3, 4, 5]]);
+});

@@ -49,6 +49,61 @@ func TestManagerHoldsCompactBeforeSpawn(t *testing.T) {
  if m.heldCount!=256||len(m.heldCompact)!=256 {t.Fatal("held records unbounded",m.heldCount)}
  m.Clear();if m.heldCount!=0||len(m.heldCompact)!=0 {t.Fatal("clear kept held records")}
 }
+// A re-held entity is the newest in the eviction order: replay and removal
+// forget its earlier place, and each eviction asks for a resync.
+func TestManagerEvictsOldestHeldEntityAndRequestsResync(t *testing.T) {
+ m:=NewEntityManager();var resyncs []int64;m.OnResyncNeeded(func(id int64){resyncs=append(resyncs,id)})
+ state:=func(id int64,rev uint64){m.ApplyEntityUpdate(&EntityUpdate{Payload:&EntityUpdate_ActorState{ActorState:&ActorState{EntityId:id,Revision:rev,Items:[]Item{{Id:1}}}}})}
+ compact:=func(id int64,rev uint64,items []Item){m.ApplyCompactUpdate((&pb.Writer{}).Int64(id).Uint64(rev).Uint64(1).Raw((&ActorDelta{Items:items}).Marshal()).Finish())}
+ compact(1000,1,nil);compact(5,1,nil);state(5,2)
+ for i:=int64(1);i<100;i++ {compact(1000+i,1,nil)}
+ m.ApplyEntityUpdate(&EntityUpdate{Payload:&EntityUpdate_EntityRemoved{EntityRemoved:&EntityRemoved{EntityId:5,Revision:3}}})
+ compact(5,4,[]Item{{Id:1},{Id:2},{Id:3}})
+ for i:=int64(100);i<255;i++ {compact(1000+i,1,nil)}
+ if m.heldCount!=256||len(resyncs)!=0 {t.Fatal("held before the cap",m.heldCount,resyncs)}
+ for i:=int64(0);i<10;i++ {compact(2000+i,1,nil)}
+ if m.heldCount!=256||len(m.heldOrder)!=256||len(resyncs)!=10||resyncs[0]!=1000||resyncs[1]!=1001||resyncs[9]!=1009 {t.Fatal("eviction order",resyncs)}
+ if len(m.heldCompact[5])!=1 {t.Fatal("evicted the newest held entity")}
+ state(5,3);if a:=m.Get(5).(*SyncedActor);a.Revision()!=4||len(a.Items())!=3 {t.Fatal("re-held record not replayed")}
+}
+// A callback that clears the manager stops the held-record replay.
+func TestManagerClearInCallbackStopsReplay(t *testing.T) {
+ for _,inSpawn:=range []bool{false,true} {
+  m:=NewEntityManager();updates:=0
+  state:=func(id int64,rev uint64){m.ApplyEntityUpdate(&EntityUpdate{Payload:&EntityUpdate_ActorState{ActorState:&ActorState{EntityId:id,Revision:rev}}})}
+  compact:=func(id int64,rev uint64){m.ApplyCompactUpdate((&pb.Writer{}).Int64(id).Uint64(rev).Uint64(1).Raw((&ActorDelta{Items:[]Item{}}).Marshal()).Finish())}
+  compact(7,2);compact(7,3);compact(7,4)
+  if inSpawn {m.OnSpawn(func(SyncedEntity){m.Clear()})}
+  m.OnUpdate(func(SyncedEntity){updates++;m.Clear()})
+  state(7,1)
+  want:=1;if inSpawn {want=0}
+  if updates!=want||m.Get(7)!=nil||m.heldCount!=0||len(m.heldCompact)!=0||len(m.heldOrder)!=0 {t.Fatal("replay continued after Clear",inSpawn,updates,m.heldCount)}
+ }
+}
+`
+
+// The generated server bumps an entity's revision on an owner change, so the
+// public full state of a revoke (with a move on the same tick) outranks a late
+// owner-view datagram record and the generated client manager rejects it.
+const goOwnerRevisionContract = `package generated
+import("testing";golem "github.com/demiurgos-hub/golem-engine/golem";srv "resolutionconsumer/server")
+func TestOwnerRevokeRejectsLateOwnerRecord(t *testing.T) {
+ s:=golem.NewServer(golem.ServerConfig{});a:=&srv.SyncedActor{}
+ if err:=s.CreateEntity(a,7);err!=nil {t.Fatal(err)}
+ a.SetSecret("private");a.SetHealth(3)
+ m:=NewEntityManager()
+ apply:=func(raw []byte,err error){if err!=nil {t.Fatal(err)};var u EntityUpdate;if err:=u.Unmarshal(raw);err!=nil {t.Fatal(err)};m.ApplyEntityUpdate(&u)}
+ apply(a.FullUpdate())
+ a.FlushDelta();late,err:=a.MarshalCompactDeltaMask(a.LastFlushMask());if err!=nil {t.Fatal(err)}
+ rev:=a.StateRevision()
+ if !s.SetOwner(a.EntityID(),0) {t.Fatal("SetOwner")}
+ if a.StateRevision()!=rev+1||a.FlushDelta()!=nil {t.Fatal("owner change must bump the revision without dirty fields",a.StateRevision(),rev)}
+ if err:=s.SetEntitySpace(a.EntityID(),2);err!=nil {t.Fatal(err)}
+ if !s.SetOwner(a.EntityID(),0)||a.StateRevision()!=rev+1 {t.Fatal("unchanged owner bumped the revision")}
+ apply(a.PublicFullUpdate())
+ m.ApplyCompactUpdate(late)
+ if got:=m.Get(a.EntityID()).(*SyncedActor);got.Secret()!=""||got.Health()!=3||got.Revision()!=rev+1 {t.Fatalf("late owner record applied: %q %d %d",got.Secret(),got.Health(),got.Revision())}
+}
 `
 
 const jsManagerContract = `import assert from 'node:assert/strict';
@@ -92,6 +147,34 @@ hstate(5,5);assert.equal(h.get(5).revision,6);assert.equal(h.get(5).items.length
 hcompact(6,4,[{id:1},{id:2}]);h.applyUpdate({entityRemoved:{entityId:6,revision:4}});hstate(6,4);assert.equal(h.get(6).items.length,1);
 for(let i=0;i<300;i++)hcompact(1000+i,1,[]);assert.equal(h._heldCount,256);assert.equal(h._heldCompact.size,256);
 h.clear();assert.equal(h._heldCount,0);
+// A re-held entity is the newest in the eviction order; each eviction asks for a resync.
+const e=new EntityManager();const resyncs=[];const offResync=e.onResyncNeeded(id=>resyncs.push(id));
+const estate=(id,revision)=>e.applyUpdate({actorState:Object.assign(new ActorState(),{entityId:id,revision,items:[{id:1}]})});
+const ecompact=(id,revision,items)=>{
+ const body=ActorDelta.encode(Object.assign(new ActorDelta(),{items}));const header=new PbWriter().int64(id).uint64(revision).uint64(1).finish();
+ const bytes=new Uint8Array(header.length+body.length);bytes.set(header);bytes.set(body,header.length);e.applyCompactUpdate(bytes);
+};
+ecompact(1000,1,[]);ecompact(5,1,[]);estate(5,2);for(let i=1;i<100;i++)ecompact(1000+i,1,[]);
+e.applyUpdate({entityRemoved:{entityId:5,revision:3}});ecompact(5,4,[{id:1},{id:2},{id:3}]);
+for(let i=100;i<255;i++)ecompact(1000+i,1,[]);assert.equal(e._heldCount,256);assert.deepEqual(resyncs,[]);
+for(let i=0;i<10;i++)ecompact(2000+i,1,[]);
+assert.equal(e._heldCount,256);assert.deepEqual(resyncs,Array.from({length:10},(_,i)=>1000+i));assert.equal(e._heldCompact.get(5).length,1);
+estate(5,3);assert.equal(e.get(5).revision,4);assert.equal(e.get(5).items.length,3);
+offResync();e.clear();for(let i=0;i<257;i++)ecompact(3000+i,1,[]);assert.equal(resyncs.length,10);
+// A callback that clears the manager stops the held-record replay.
+for(const inSpawn of [false,true]){
+ const c=new EntityManager();let cupdates=0;
+ const cstate=(id,revision)=>c.applyUpdate({actorState:Object.assign(new ActorState(),{entityId:id,revision,items:[]})});
+ const ccompact=(id,revision)=>{
+  const body=ActorDelta.encode(Object.assign(new ActorDelta(),{items:[]}));const header=new PbWriter().int64(id).uint64(revision).uint64(1).finish();
+  const bytes=new Uint8Array(header.length+body.length);bytes.set(header);bytes.set(body,header.length);c.applyCompactUpdate(bytes);
+ };
+ ccompact(7,2);ccompact(7,3);ccompact(7,4);
+ if(inSpawn)c.onSpawn(()=>c.clear());
+ c.onUpdate(()=>{cupdates++;c.clear();});
+ cstate(7,1);
+ assert.equal(cupdates,inSpawn?0:1);assert.equal(c.get(7),undefined);assert.equal(c._heldCount,0);assert.equal(c._heldCompact.size,0);
+}
 `
 
 const csManagerContract = `using System;using System.Collections.Generic;using System.Linq;using Generated;using GolemEngine.Unity;
@@ -128,6 +211,29 @@ static class ManagerContract {
  for(int i=0;i<300;i++)hcompact(1000+i,1,new List<Item>());
  for(long id=1000;id<1300;id++){hstate(id,1);}
  Check(held==1+256,"held records unbounded");h.Clear();
+ // A re-held entity is the newest in the eviction order; each eviction asks for a resync.
+ var e=new EntityManager();IEntityResyncNotifier notifier=e;var resyncs=new List<long>();notifier.OnResyncNeeded(id=>resyncs.Add(id));int eheld=0;e.OnUpdate(_=>eheld++);
+ Action<long,ulong> estate=(id,rev)=>e.ApplyUpdate(new EntityUpdate{ActorState=new ActorState{EntityId=id,Revision=rev,Items=new List<Item>{new Item{Id=1}}}});
+ Action<long,ulong,List<Item>> ecompact=(id,rev,items)=>e.ApplyCompactUpdate(new PbWriter().Int64(id).Uint64(rev).Uint64(1).Finish().Concat(ActorDelta.Encode(new ActorDelta{Items=items})).ToArray());
+ ecompact(1000,1,new List<Item>());ecompact(5,1,new List<Item>());estate(5,2);for(int i=1;i<100;i++)ecompact(1000+i,1,new List<Item>());
+ e.ApplyUpdate(new EntityUpdate{EntityRemoved=new EntityRemoved{EntityId=5,Revision=3}});
+ ecompact(5,4,new List<Item>{new Item{Id=1},new Item{Id=2},new Item{Id=3}});
+ for(int i=100;i<255;i++)ecompact(1000+i,1,new List<Item>());Check(resyncs.Count==0,"evicted before the cap");
+ for(int i=0;i<10;i++)ecompact(2000+i,1,new List<Item>());
+ Check(resyncs.SequenceEqual(Enumerable.Range(1000,10).Select(i=>(long)i)),"eviction order");
+ eheld=0;estate(5,3);var re=(SyncedActor)e.Get(5);Check(re.Revision==4&&re.Items.Count==3&&eheld==1,"evicted the newest held entity");
+ // A callback that clears the manager stops the held-record replay.
+ foreach(var inSpawn in new[]{false,true}){
+  var c=new EntityManager();int cupdates=0;
+  Action<long,ulong> cstate=(id,rev)=>c.ApplyUpdate(new EntityUpdate{ActorState=new ActorState{EntityId=id,Revision=rev}});
+  Action<long,ulong> ccompact=(id,rev)=>c.ApplyCompactUpdate(new PbWriter().Int64(id).Uint64(rev).Uint64(1).Finish().Concat(ActorDelta.Encode(new ActorDelta{Items=new List<Item>()})).ToArray());
+  ccompact(7,2);ccompact(7,3);ccompact(7,4);
+  if(inSpawn)c.OnSpawn(_=>c.Clear());
+  c.OnUpdate(_=>{cupdates++;c.Clear();});
+  cstate(7,1);
+  Check(cupdates==(inSpawn?0:1)&&c.Get(7)==null,"replay continued after Clear");
+  var heldCount=(int)typeof(EntityManager).GetField("_heldCount",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).GetValue(c);Check(heldCount==0,"Clear left replayed records held");
+ }
  }
 }
 `

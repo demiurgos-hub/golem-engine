@@ -10,7 +10,11 @@ import { Synced{{.Name}} } from "./{{.Name}}Synced.js";
 {{end}}
 export type SyncedEntity = {{if .Entities}}{{range $i, $e := .Entities}}{{if $i}} | {{end}}Synced{{$e.Name}}{{end}}{{else}}never{{end}};
 
-/** Bounds compact records held for entities whose spawn has not arrived yet. */
+/**
+ * Bounds compact records held for entities whose spawn has not arrived yet. When
+ * it is reached, all records of the entity held longest are evicted and the
+ * resync listeners are told about that entity.
+ */
 const maxHeldCompactUpdates = 256;
 
 /** Manages all synced entities and dispatches incoming EntityUpdate messages. */
@@ -20,6 +24,9 @@ export class EntityManager {
   /** Compact records that arrived before their entity's spawn, in hold order. */
   private _heldCompact = new Map<number, Uint8Array[]>();
   private _heldCount = 0;
+  /** Advanced by clear() so a callback that clears stops a replay. */
+  private _clearEpoch = 0;
+  private _onResyncNeeded = new Set<(entityId: number) => void>();
   private _onSpawn = new Set<(entity: SyncedEntity) => void>();
   private _onUpdate = new Set<(entity: SyncedEntity) => void>();
   private _onRemove = new Set<(entityId: number) => void>();
@@ -61,11 +68,24 @@ export class EntityManager {
   }
 
   /**
+   * Register a listener fired with an entity id when the compact records held
+   * for that entity are evicted before its spawn arrived. Those datagrams were
+   * already acknowledged, so the server will not resend them; GameClient
+   * registers a listener that requests a full state of the entity. Returns an
+   * unsubscribe function.
+   */
+  onResyncNeeded(fn: (entityId: number) => void): () => void {
+    this._onResyncNeeded.add(fn);
+    return () => { this._onResyncNeeded.delete(fn); };
+  }
+
+  /**
    * Remove every known entity, fire onRemove for each, and clear revision
    * tracking. Call on disconnect / before reconnect so stale sprites cannot
    * linger when remove frames were lost with the transport.
    */
   clear(): void {
+    this._clearEpoch++;
     const ids = [...this._entities.keys()];
     for (const id of ids) {
       this._removeEntity(id);
@@ -142,11 +162,20 @@ export class EntityManager {
     for (const fn of this._onRemove) fn(id);
   }
 
+  /**
+   * Keep a copy of frame until the entity spawns. At the cap, evict every record
+   * of the entity held longest (Map insertion order) and report it for a resync.
+   */
   private _holdCompact(id: number, frame: Uint8Array): void {
+    const epoch = this._clearEpoch;
     while (this._heldCount >= maxHeldCompactUpdates) {
       const oldest = this._heldCompact.keys().next();
       if (oldest.done) break;
       this._dropHeldCompact(oldest.value);
+      for (const fn of [...this._onResyncNeeded]) {
+        fn(oldest.value);
+        if (this._clearEpoch !== epoch) return;
+      }
     }
     let held = this._heldCompact.get(id);
     if (!held) {
@@ -164,12 +193,19 @@ export class EntityManager {
     this._heldCompact.delete(id);
   }
 
-  /** Apply records held for a newly spawned entity; older ones fail the revision check. */
+  /**
+   * Apply records held for a newly spawned entity; older ones fail the revision
+   * check. A callback that calls clear() stops the replay.
+   */
   private _replayHeldCompact(id: number): void {
     const held = this._heldCompact.get(id);
     if (!held) return;
     this._dropHeldCompact(id);
-    for (const frame of held) this.applyCompactUpdate(frame);
+    const epoch = this._clearEpoch;
+    for (const frame of held) {
+      if (this._clearEpoch !== epoch) return;
+      this.applyCompactUpdate(frame);
+    }
   }
 
   private _isStale(entityId: number, revision: number): boolean {
@@ -190,9 +226,10 @@ export class EntityManager {
     e!.applyState(s);
     this._lastRevisions.set(id, revision);
     if (isNew) {
+      const epoch = this._clearEpoch;
       (e as EntityLifecycle).onSpawn?.();
       for (const fn of this._onSpawn) fn(e!);
-      this._replayHeldCompact(id);
+      if (this._clearEpoch === epoch) this._replayHeldCompact(id);
     } else {
       for (const fn of this._onUpdate) fn(e!);
     }

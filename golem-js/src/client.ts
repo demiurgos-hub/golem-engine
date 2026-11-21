@@ -35,6 +35,8 @@ const clientCloseControlFrame = new Uint8Array([0x00, 0x4f, 0x47, 0x53, 0x01]);
 const clientReliableAckControlFrame = new Uint8Array([0x00, 0x4f, 0x47, 0x53, 0x02]);
 const clientSpaceAckControlFrame = new Uint8Array([0x00, 0x4f, 0x47, 0x53, 0x03]);
 const clientSpaceAckControlBytes = clientSpaceAckControlFrame.byteLength + 8;
+const clientEntityResyncControlFrame = new Uint8Array([0x00, 0x4f, 0x47, 0x53, 0x04]);
+const clientEntityResyncControlBytes = clientEntityResyncControlFrame.byteLength + 8;
 // Compact datagram batches held while a space transition is open. Built-in
 // datagrams are at most 1200 bytes, so the batch count normally binds first.
 const maxHeldSpaceTransitionBatches = 1024;
@@ -174,6 +176,14 @@ export interface EntityManagerLike {
   get(entityId: number): unknown;
   /** Optional: drop all entities (fires remove listeners). Called on disconnect. */
   clear?(): void;
+  /**
+   * Optional: register a listener fired with an entity id when the compact
+   * records held for an entity whose spawn has not arrived are evicted. Those
+   * datagrams were already acknowledged, so GameClient registers a listener
+   * that asks the server for a full state of the entity. Generated
+   * EntityManagers implement it.
+   */
+  onResyncNeeded?(fn: (entityId: number) => void): () => void;
 }
 
 /**
@@ -640,6 +650,15 @@ export class GameClient {
         ? builtInSupportsTransport
         : () => true
     );
+    this.entities.onResyncNeeded?.((entityId) => this._requestEntityResync(entityId));
+  }
+
+  /** Ask the server for a full state of an entity whose held compact records were evicted. */
+  private _requestEntityResync(entityId: number): void {
+    const channel = this._channel;
+    if (channel?.connected) {
+      channel.send(encodeEntityResync(entityId));
+    }
   }
 
   /** Open a connection using the built-in transport adapter. */
@@ -1392,7 +1411,10 @@ export class GameClient {
     if (!this.entities.applyCompactUpdate) {
       throw new Error("golem-js: EntityManager does not support compact state updates");
     }
+    // A callback may disconnect or reconnect; later frames belong to the old connection.
+    const generation = this._connectionGeneration;
     for (const frame of decodeReliableBatchPayload(bytes)) {
+      if (!this._isCurrentGeneration(generation)) return;
       // Event records start with a zero tag; a compact record's varint entity ID never does.
       if (frame.byteLength > 0 && frame[0] === eventRecordTag) {
         this.events?.applyRaw(frame.subarray(1));
@@ -2437,6 +2459,17 @@ function encodeSpaceAck(transition: number): Uint8Array {
   const prefix = clientSpaceAckControlFrame.byteLength;
   view.setUint32(prefix, Math.floor(transition / 0x1_0000_0000), false);
   view.setUint32(prefix + 4, transition >>> 0, false);
+  return out;
+}
+
+/** Encode the EntityResync control frame: prefix plus big-endian uint64 entity id. */
+function encodeEntityResync(entityId: number): Uint8Array {
+  const out = new Uint8Array(clientEntityResyncControlBytes);
+  out.set(clientEntityResyncControlFrame, 0);
+  const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+  const prefix = clientEntityResyncControlFrame.byteLength;
+  view.setUint32(prefix, Math.floor(entityId / 0x1_0000_0000), false);
+  view.setUint32(prefix + 4, entityId >>> 0, false);
   return out;
 }
 

@@ -20,6 +20,7 @@ namespace GolemEngine.Unity
         private const int ServerMessageSpaceSettledField = 5;
         private const int ServerMessageWorldClearedField = 6;
         private static readonly byte[] SpaceAckControlPrefix = { 0x00, 0x4f, 0x47, 0x53, 0x03 };
+        private static readonly byte[] EntityResyncControlPrefix = { 0x00, 0x4f, 0x47, 0x53, 0x04 };
 
         private readonly Func<byte[], object> _decodeEntityUpdate;
         private readonly Func<object, byte[]> _encodeCommand;
@@ -67,6 +68,7 @@ namespace GolemEngine.Unity
             World = worldManager;
             Events = eventManager;
             _decodeWorldUpdate = decodeWorldUpdate;
+            RegisterEntityResync();
         }
 
         /// <summary>
@@ -103,9 +105,36 @@ namespace GolemEngine.Unity
             World = worldManager;
             Events = eventManager;
             _decodeWorldUpdate = decodeWorldUpdate;
+            RegisterEntityResync();
         }
 
         public IEntityManager Entities { get; }
+
+        /// <summary>
+        /// Lets a manager implementing <see cref="IEntityResyncNotifier"/> request a full state of an entity whose
+        /// held compact records it evicted.
+        /// </summary>
+        private void RegisterEntityResync()
+        {
+            if (Entities is IEntityResyncNotifier notifier)
+            {
+                notifier.OnResyncNeeded(RequestEntityResync);
+            }
+        }
+
+        /// <summary>Sends the EntityResync control frame for entityId on the current connection, if any.</summary>
+        private void RequestEntityResync(long entityId)
+        {
+            IGolemTransport transport;
+            lock (_connectionGate)
+            {
+                transport = _transport;
+            }
+            if (transport != null && transport.Connected)
+            {
+                transport.Send(EncodeEntityResync(entityId));
+            }
+        }
         public IWorldManager World { get; }
         public IEventManager Events { get; }
         public bool Connected
@@ -670,10 +699,10 @@ namespace GolemEngine.Unity
         private void WireMessages(int generation, IGolemTransport transport)
         {
             transport.MessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => HandleMessage(bytes));
-            transport.UnreliableStateMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => ReceiveCompactStateBatch(bytes));
-            transport.ReliableUnorderedMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => ReceiveCompactStateBatch(bytes));
-            transport.ReliableOrderedMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => ReceiveCompactStateBatch(bytes));
-            transport.EventualStateMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => ReceiveCompactStateBatch(bytes));
+            transport.UnreliableStateMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => ReceiveCompactStateBatch(bytes, generation));
+            transport.ReliableUnorderedMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => ReceiveCompactStateBatch(bytes, generation));
+            transport.ReliableOrderedMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => ReceiveCompactStateBatch(bytes, generation));
+            transport.EventualStateMessageEvent += bytes => EnqueueIfCurrent(generation, transport, () => ReceiveCompactStateBatch(bytes, generation));
         }
 
         private void EnqueueIfCurrent(int generation, IGolemTransport transport, Action action)
@@ -1379,7 +1408,7 @@ namespace GolemEngine.Unity
                 {
                     return;
                 }
-                HandleCompactStateBatch(batch);
+                HandleCompactStateBatch(batch, generation);
             }
             IGolemTransport transport;
             lock (_connectionGate)
@@ -1401,8 +1430,11 @@ namespace GolemEngine.Unity
             }
         }
 
-        /// <summary>Holds a compact batch while a space transition is open, otherwise applies it.</summary>
-        private void ReceiveCompactStateBatch(byte[] bytes)
+        /// <summary>
+        /// Holds a compact batch while a space transition is open, otherwise applies it. <paramref name="generation"/>
+        /// is the connection the batch arrived on.
+        /// </summary>
+        private void ReceiveCompactStateBatch(byte[] bytes, int generation)
         {
             var overflow = false;
             lock (_spaceGate)
@@ -1427,7 +1459,7 @@ namespace GolemEngine.Unity
                 FailConnection("space_transition_overflow");
                 return;
             }
-            HandleCompactStateBatch(bytes);
+            HandleCompactStateBatch(bytes, generation);
         }
 
         /// <summary>Closes the established connection after a client protocol failure and reports it once.</summary>
@@ -1533,6 +1565,19 @@ namespace GolemEngine.Unity
             return name;
         }
 
+        /// <summary>Encodes the EntityResync control frame: <c>00 'O' 'G' 'S' 04</c> plus the big-endian entity id.</summary>
+        internal static byte[] EncodeEntityResync(long entityId)
+        {
+            var frame = new byte[EntityResyncControlPrefix.Length + 8];
+            Buffer.BlockCopy(EntityResyncControlPrefix, 0, frame, 0, EntityResyncControlPrefix.Length);
+            var value = (ulong)entityId;
+            for (var i = 0; i < 8; i++)
+            {
+                frame[EntityResyncControlPrefix.Length + i] = (byte)(value >> (56 - 8 * i));
+            }
+            return frame;
+        }
+
         /// <summary>Encodes the SpaceAck control frame: <c>00 'O' 'G' 'S' 03</c> plus the big-endian transition.</summary>
         internal static byte[] EncodeSpaceAck(ulong transition)
         {
@@ -1545,7 +1590,11 @@ namespace GolemEngine.Unity
             return frame;
         }
 
-        private void HandleCompactStateBatch(byte[] bytes)
+        /// <summary>
+        /// Applies every frame of one compact batch received on connection <paramref name="generation"/>. A callback
+        /// that disconnects or replaces the connection stops the remaining frames.
+        /// </summary>
+        private void HandleCompactStateBatch(byte[] bytes, int generation)
         {
             if (Entities is not ICompactEntityManager compactEntities)
             {
@@ -1553,6 +1602,10 @@ namespace GolemEngine.Unity
             }
             GolemDatagramProtocol.DecodeLengthPrefixedFrames(bytes, frame =>
             {
+                if (generation != CurrentGeneration())
+                {
+                    return;
+                }
                 if (GolemDatagramProtocol.TryGetEventRecord(frame, out var serverEvent))
                 {
                     Events?.ApplyRaw(serverEvent);

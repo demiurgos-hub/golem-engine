@@ -16,6 +16,12 @@ const (
 	// big-endian uint64, SpaceAckControlBytes in total.
 	SpaceAckControlPrefix = "\x00OGS\x03"
 	SpaceAckControlBytes  = len(SpaceAckControlPrefix) + 8
+	// EntityResyncControlPrefix starts the client's reliable request for a
+	// full state of one entity after it evicted compact records held for it:
+	// the prefix followed by the entity ID as a big-endian uint64,
+	// EntityResyncControlBytes in total.
+	EntityResyncControlPrefix = "\x00OGS\x04"
+	EntityResyncControlBytes  = len(EntityResyncControlPrefix) + 8
 )
 
 // SizeError reports a size boundary without choosing an endpoint's diagnostic.
@@ -134,4 +140,22 @@ func DecodeSpaceAckControl(data []byte) (uint64, bool, error) {
 		return 0, true, SizeError{uint64(len(data)), uint64(SpaceAckControlBytes)}
 	}
 	return binary.BigEndian.Uint64(data[len(SpaceAckControlPrefix):]), true, nil
+}
+
+// AppendEntityResyncControl appends an entity resync request for entityID.
+func AppendEntityResyncControl(dst []byte, entityID int64) []byte {
+	dst = append(dst, EntityResyncControlPrefix...)
+	return binary.BigEndian.AppendUint64(dst, uint64(entityID))
+}
+
+// DecodeEntityResyncControl recognizes the entity resync prefix. Unmatched
+// data reports false; a recognized frame of the wrong length is an error.
+func DecodeEntityResyncControl(data []byte) (int64, bool, error) {
+	if !bytes.HasPrefix(data, []byte(EntityResyncControlPrefix)) {
+		return 0, false, nil
+	}
+	if len(data) != EntityResyncControlBytes {
+		return 0, true, SizeError{uint64(len(data)), uint64(EntityResyncControlBytes)}
+	}
+	return int64(binary.BigEndian.Uint64(data[len(EntityResyncControlPrefix):])), true, nil
 }

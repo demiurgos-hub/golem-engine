@@ -199,6 +199,32 @@ func TestSpaceAckControlGoldenBytes(t *testing.T) {
 	}
 }
 
+func TestEntityResyncControlGoldenBytes(t *testing.T) {
+	want := unhex(t, "004f4753040102030405060708")
+	got := AppendEntityResyncControl([]byte{}, 0x0102030405060708)
+	if !bytes.Equal(got, want) || len(got) != EntityResyncControlBytes {
+		t.Fatalf("EntityResync control = %x", got)
+	}
+	id, matched, err := DecodeEntityResyncControl(want)
+	if err != nil || !matched || id != 0x0102030405060708 {
+		t.Fatalf("decoded = %d %v %v", id, matched, err)
+	}
+	for _, other := range [][]byte{[]byte("plain"), AppendCloseControl(nil), AppendACKControl(nil, ACK{}, nil), AppendSpaceAckControl(nil, 4)} {
+		if _, matched, err := DecodeEntityResyncControl(other); matched || err != nil {
+			t.Fatalf("unrelated frame %x matched=%v err=%v", other, matched, err)
+		}
+	}
+	if _, matched, _ := DecodeSpaceAckControl(want); matched {
+		t.Fatal("EntityResync matched the SpaceAck prefix")
+	}
+	for _, bad := range [][]byte{want[:len(want)-1], want[:len(EntityResyncControlPrefix)], append(append([]byte(nil), want...), 0)} {
+		var size SizeError
+		if _, matched, err := DecodeEntityResyncControl(bad); !matched || !errors.As(err, &size) {
+			t.Fatalf("wrong-length EntityResync %x matched=%v err=%v", bad, matched, err)
+		}
+	}
+}
+
 type testWriter struct {
 	writes int
 	data   []byte

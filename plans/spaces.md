@@ -16,6 +16,8 @@ Milestones M1–M9 are implemented on `feature/spaces`:
 | M8 Inspector | `6ac1172` |
 | M9 Reconciliation | the commit that adds this section |
 
+Review fixes after M9: `18226e6` (events, acks and world data ordered with space switches); then held compact records that a client must evict are recovered with the EntityResync control frame (`"\x00OGS\x04"` plus the entity ID; the server answers with a stream full state for known entities), `Server.SetOwner` advances the entity's state revision so a late owner-view record cannot follow a revoke, and the clients stop a compact batch once a callback disconnects.
+
 Known follow-ups:
 - `examples/` and qualification consumers; regenerate the checked-in examples' `entities.proto` (fields 4–6).
 - Website docs: a Spaces page (sessions, transfer, world data, per-space services, client callbacks, compatibility notes).

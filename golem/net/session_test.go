@@ -178,7 +178,7 @@ func TestSessionReadPumpClosesTransportWhenDatagramReadFails(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		sess.readPump(context.Background(), nil, nil, nil, nil, nil, nil)
+		sess.readPump(context.Background(), nil, nil, nil, nil, nil, nil, nil)
 		close(done)
 	}()
 
@@ -336,7 +336,7 @@ func TestSessionReadPumpInterceptsClientCloseControlFrame(t *testing.T) {
 
 	sess.readPump(context.Background(), func(*Session, []byte) {
 		onMsg.Add(1)
-	}, nil, nil, nil, nil, nil)
+	}, nil, nil, nil, nil, nil, nil)
 
 	if got := onMsg.Load(); got != 0 {
 		t.Fatalf("onMsg calls = %d, want 0", got)
@@ -361,7 +361,7 @@ func TestSessionReadPumpCloseControlFrameRacesTransportFailure(t *testing.T) {
 	go func() {
 		sess.readPump(context.Background(), func(*Session, []byte) {
 			onMsg.Add(1)
-		}, nil, nil, nil, nil, nil)
+		}, nil, nil, nil, nil, nil, nil)
 		close(done)
 	}()
 	close(reliable.block)
@@ -401,7 +401,7 @@ func TestSessionReadPumpAppliesReliableAckControlFrame(t *testing.T) {
 		gotMsg = append([]byte(nil), data...)
 	}, nil, nil, nil, func(_ *Session, feedback []EventualStateDelivery) {
 		gotFeedback = append([]EventualStateDelivery(nil), feedback...)
-	}, nil)
+	}, nil, nil)
 
 	if !bytes.Equal(gotMsg, payload) {
 		t.Fatalf("message payload = %q, want %q", gotMsg, payload)
@@ -430,7 +430,7 @@ func TestSessionReadPumpDeliversSpaceAckControlFrames(t *testing.T) {
 			t.Errorf("SpaceAck session = %p, want %p", got, sess)
 		}
 		acks = append(acks, transition)
-	})
+	}, nil)
 	if len(acks) != 2 || acks[0] != 7 || acks[1] != 9 {
 		t.Fatalf("SpaceAck transitions = %v, want [7 9]", acks)
 	}
@@ -445,7 +445,7 @@ func TestSessionReadPumpAcceptsSpaceAckWithoutDatagrams(t *testing.T) {
 	var acks []uint64
 	sess.readPump(context.Background(), func(*Session, []byte) { t.Error("SpaceAck reached OnMessage") }, nil, nil, nil, nil, func(_ *Session, transition uint64) {
 		acks = append(acks, transition)
-	})
+	}, nil)
 	if len(acks) != 1 || acks[0] != 4 {
 		t.Fatalf("SpaceAck transitions = %v, want [4]", acks)
 	}
@@ -456,12 +456,61 @@ func TestSessionReadPumpClosesOnMalformedSpaceAck(t *testing.T) {
 	reliable := &scriptedReliableChannel{messages: [][]byte{frame[:len(frame)-1], []byte("after")}}
 	sess := newSession(13, reliable, &captureDatagramChannel{}, reliable.Close)
 	var msgs, acks int
-	sess.readPump(context.Background(), func(*Session, []byte) { msgs++ }, nil, nil, nil, nil, func(*Session, uint64) { acks++ })
+	sess.readPump(context.Background(), func(*Session, []byte) { msgs++ }, nil, nil, nil, nil, func(*Session, uint64) { acks++ }, nil)
 	if msgs != 0 || acks != 0 {
 		t.Fatalf("messages=%d acks=%d after malformed SpaceAck", msgs, acks)
 	}
 	if !sess.IsClosing() {
 		t.Fatal("malformed SpaceAck must close the session")
+	}
+}
+
+func TestSessionReadPumpDeliversEntityResyncControlFrames(t *testing.T) {
+	piggyback := make([]byte, clientReliableAckControlHeaderBytes)
+	copy(piggyback, clientReliableAckControlFrame)
+	piggyback = append(piggyback, ClientEntityResyncControlFrame(9)...)
+	reliable := &scriptedReliableChannel{messages: [][]byte{
+		ClientEntityResyncControlFrame(7),
+		[]byte("command"),
+		piggyback,
+		ClientSpaceAckControlFrame(2),
+	}}
+	sess := newSession(15, reliable, &captureDatagramChannel{}, reliable.Close)
+	var resyncs []int64
+	var acks []uint64
+	var msgs [][]byte
+	sess.readPump(context.Background(), func(_ *Session, data []byte) {
+		msgs = append(msgs, append([]byte(nil), data...))
+	}, nil, nil, nil, nil, func(_ *Session, transition uint64) {
+		acks = append(acks, transition)
+	}, func(got *Session, entityID int64) {
+		if got != sess {
+			t.Errorf("EntityResync session = %p, want %p", got, sess)
+		}
+		resyncs = append(resyncs, entityID)
+	})
+	if len(resyncs) != 2 || resyncs[0] != 7 || resyncs[1] != 9 {
+		t.Fatalf("EntityResync IDs = %v, want [7 9]", resyncs)
+	}
+	if len(acks) != 1 || acks[0] != 2 {
+		t.Fatalf("SpaceAck transitions = %v, want [2]", acks)
+	}
+	if len(msgs) != 1 || string(msgs[0]) != "command" {
+		t.Fatalf("messages = %q, want only the command", msgs)
+	}
+}
+
+func TestSessionReadPumpClosesOnMalformedEntityResync(t *testing.T) {
+	frame := ClientEntityResyncControlFrame(3)
+	reliable := &scriptedReliableChannel{messages: [][]byte{append(frame, 0), []byte("after")}}
+	sess := newSession(16, reliable, nil, reliable.Close)
+	var msgs, resyncs int
+	sess.readPump(context.Background(), func(*Session, []byte) { msgs++ }, nil, nil, nil, nil, nil, func(*Session, int64) { resyncs++ })
+	if msgs != 0 || resyncs != 0 {
+		t.Fatalf("messages=%d resyncs=%d after malformed EntityResync", msgs, resyncs)
+	}
+	if !sess.IsClosing() {
+		t.Fatal("malformed EntityResync must close the session")
 	}
 }
 
@@ -758,7 +807,7 @@ func TestSessionReadPumpRejectsOversizeMessage(t *testing.T) {
 	called := make(chan struct{}, 1)
 	go sess.readPump(ctx, func(*Session, []byte) {
 		called <- struct{}{}
-	}, nil, nil, nil, nil, nil)
+	}, nil, nil, nil, nil, nil, nil)
 
 	oversized := bytes.Repeat([]byte("z"), maxWebSocketPayloadBytes+1)
 	if err := client.Write(ctx, websocket.MessageBinary, oversized); err != nil {

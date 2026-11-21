@@ -130,7 +130,7 @@ func NewGameClient(options GameClientOptions) *GameClient {
 	if supports == nil {
 		supports = builtinSupportsTransport
 	}
-	return &GameClient{
+	c := &GameClient{
 		entities:      options.EntityManager,
 		world:         options.WorldManager,
 		events:        options.EventManager,
@@ -141,6 +141,25 @@ func NewGameClient(options GameClientOptions) *GameClient {
 		createChannel: create,
 		supports:      supports,
 		closedCh:      make(chan struct{}),
+	}
+	if notifier, ok := options.EntityManager.(EntityResyncNotifier); ok {
+		notifier.OnResyncNeeded(c.requestEntityResync)
+	}
+	return c
+}
+
+// requestEntityResync asks the server for a full state of entityID after the
+// entity manager evicted compact records held for it. It runs on the inbound
+// dispatcher goroutine and does nothing while disconnected.
+func (c *GameClient) requestEntityResync(entityID int64) {
+	c.mu.Lock()
+	channel := c.channel
+	c.mu.Unlock()
+	if channel == nil {
+		return
+	}
+	if err := channel.Send(netwire.AppendEntityResyncControl(nil, entityID)); err != nil {
+		c.setLastErr(sanitizeURLError(err))
 	}
 }
 
@@ -585,7 +604,7 @@ func (c *GameClient) dispatchInboundEvent(dispatcher *inboundDispatcher, event i
 			c.holdCompactStateBatch(dispatcher, event.data)
 			return
 		}
-		c.handleCompactStateBatch(event.data)
+		c.handleCompactStateBatch(dispatcher, event.data)
 	}
 }
 
@@ -635,8 +654,13 @@ func (c *GameClient) handleMessage(d *inboundDispatcher, data []byte) {
 	}
 }
 
-func (c *GameClient) handleCompactStateBatch(data []byte) {
+// handleCompactStateBatch applies every frame of one datagram batch. A callback
+// that disconnects stops dispatcher d, and the remaining frames are skipped.
+func (c *GameClient) handleCompactStateBatch(d *inboundDispatcher, data []byte) {
 	_ = decodeLengthPrefixedFrames(data, func(frame []byte) {
+		if d != nil && d.isDone() {
+			return
+		}
 		if event, ok := netwire.EventRecord(frame); ok {
 			if c.events != nil {
 				c.events.ApplyRaw(event)

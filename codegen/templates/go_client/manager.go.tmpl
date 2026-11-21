@@ -2,6 +2,8 @@
 package {{.GoPackage}}
 
 import (
+	"slices"
+
 	golemclient "{{.GolemImport}}"
 	"{{.GolemImport}}/pb"
 )
@@ -13,7 +15,8 @@ type SyncedEntity interface {
 }
 
 // maxHeldCompactUpdates bounds compact records held for entities whose spawn
-// has not arrived yet.
+// has not arrived yet. When it is reached, all records of the entity held
+// longest are evicted and OnResyncNeeded reports that entity.
 const maxHeldCompactUpdates = 256
 
 // EntityManager manages synced entities and dispatches incoming EntityUpdate messages.
@@ -21,11 +24,13 @@ type EntityManager struct {
 	entities      map[int64]SyncedEntity
 	lastRevisions map[int64]uint64
 	heldCompact   map[int64][][]byte // compact records that arrived before their entity's spawn
-	heldOrder     []int64            // entity IDs in the order their first record was held
+	heldOrder     []int64            // IDs with held records, in the order their first record was held
 	heldCount     int
+	clearEpoch    uint64 // advanced by Clear so a callback that clears stops a replay
 	onSpawn       func(SyncedEntity)
 	onUpdate      func(SyncedEntity)
 	onRemove      func(int64)
+	onResync      func(int64)
 {{- range .Entities}}
 	{{.LowerName}}Factory func(int64) {{.Name}}ClientEntity
 {{- end}}
@@ -66,10 +71,17 @@ func (m *EntityManager) OnUpdate(fn func(SyncedEntity)) { m.onUpdate = fn }
 // OnRemove registers a callback fired after an entity is removed.
 func (m *EntityManager) OnRemove(fn func(int64)) { m.onRemove = fn }
 
+// OnResyncNeeded registers a callback fired with an entity ID when the compact
+// records held for that entity are evicted before its spawn arrived. Those
+// datagrams were already acknowledged, so the server will not resend them;
+// GameClient installs a callback that requests a full state of the entity.
+func (m *EntityManager) OnResyncNeeded(fn func(entityID int64)) { m.onResync = fn }
+
 // Clear removes every known entity, fires onRemove for each, and clears
 // revision tracking. Call on disconnect / before reconnect so stale state
 // cannot linger when remove frames were lost with the transport.
 func (m *EntityManager) Clear() {
+	m.clearEpoch++
 	ids := make([]int64, 0, len(m.entities))
 	for id := range m.entities {
 		ids = append(ids, id)
@@ -172,39 +184,41 @@ func (m *EntityManager) removeEntity(id int64) {
 	}
 }
 
+// holdCompact keeps a copy of frame until id spawns. At the cap it evicts every
+// record of the entity held longest and reports that entity for a resync.
 func (m *EntityManager) holdCompact(id int64, frame []byte) {
 	if m.heldCompact == nil {
 		m.heldCompact = make(map[int64][][]byte)
 	}
+	epoch := m.clearEpoch
 	for m.heldCount >= maxHeldCompactUpdates && len(m.heldOrder) > 0 {
-		oldest := m.heldOrder[0]
-		m.heldOrder = m.heldOrder[1:]
-		m.dropHeldCompactFor(oldest)
+		evicted := m.heldOrder[0]
+		m.dropHeldCompactFor(evicted)
+		if m.onResync != nil {
+			m.onResync(evicted)
+			if m.clearEpoch != epoch {
+				return
+			}
+		}
 	}
 	if _, ok := m.heldCompact[id]; !ok {
-		if len(m.heldOrder) >= 2*maxHeldCompactUpdates {
-			// Forget IDs whose records were already replayed or dropped.
-			live := m.heldOrder[:0]
-			for _, heldID := range m.heldOrder {
-				if _, ok := m.heldCompact[heldID]; ok {
-					live = append(live, heldID)
-				}
-			}
-			m.heldOrder = live
-		}
 		m.heldOrder = append(m.heldOrder, id)
 	}
 	m.heldCompact[id] = append(m.heldCompact[id], append([]byte(nil), frame...))
 	m.heldCount++
 }
 
+// dropHeldCompactFor discards the records held for id and its place in the
+// eviction order.
 func (m *EntityManager) dropHeldCompactFor(id int64) {
-	if held, ok := m.heldCompact[id]; ok {
-		m.heldCount -= len(held)
-		delete(m.heldCompact, id)
-		if m.heldCount == 0 {
-			m.heldOrder = m.heldOrder[:0]
-		}
+	held, ok := m.heldCompact[id]
+	if !ok {
+		return
+	}
+	m.heldCount -= len(held)
+	delete(m.heldCompact, id)
+	if i := slices.Index(m.heldOrder, id); i >= 0 {
+		m.heldOrder = slices.Delete(m.heldOrder, i, i+1)
 	}
 }
 
@@ -215,14 +229,19 @@ func (m *EntityManager) dropHeldCompact() {
 }
 
 // replayHeldCompact applies records held for a newly spawned entity; the
-// revision check skips those older than its full state.
+// revision check skips those older than its full state. A callback that
+// calls Clear stops the replay.
 func (m *EntityManager) replayHeldCompact(id int64) {
 	held, ok := m.heldCompact[id]
 	if !ok {
 		return
 	}
 	m.dropHeldCompactFor(id)
+	epoch := m.clearEpoch
 	for _, frame := range held {
+		if m.clearEpoch != epoch {
+			return
+		}
 		m.ApplyCompactUpdate(frame)
 	}
 }
@@ -251,13 +270,16 @@ func (m *EntityManager) applyState{{.Name}}(st *{{.Name}}State) {
 	entity.ApplyState(st)
 	m.lastRevisions[id] = revision
 	if isNew {
+		epoch := m.clearEpoch
 		if lifecycle, ok := entity.(golemclient.EntityLifecycle); ok {
 			lifecycle.OnSpawn()
 		}
 		if m.onSpawn != nil {
 			m.onSpawn(entity)
 		}
-		m.replayHeldCompact(id)
+		if m.clearEpoch == epoch {
+			m.replayHeldCompact(id)
+		}
 		return
 	}
 	if m.onUpdate != nil {

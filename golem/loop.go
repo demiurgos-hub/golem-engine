@@ -204,6 +204,12 @@ type Server struct {
 	spaceAckMu    sync.Mutex
 	spaceAckInbox map[int64]uint64
 
+	// EntityResync requests waiting for the tick: per session, the IDs of
+	// entities whose held compact records the client evicted, kept outside
+	// msgQueue (entity_resync.go).
+	entityResyncMu    sync.Mutex
+	entityResyncInbox map[int64]map[int64]struct{}
+
 	// Per-space service coordination (space_runtime.go, space_transfer.go).
 	navigationBySpace map[SpaceID]*navigationService // non-zero spaces' navigation (lifeMu; written before Run)
 	simulatingSpaces  bool                           // per-space step loop running with several runtimes
@@ -353,6 +359,7 @@ func NewServer(cfg ServerConfig) *Server {
 	s.listener.OnReliableOrdered(s.enqueueReliableOrdered)
 	s.listener.OnEventualStateFeedback(s.enqueueEventualStateFeedback)
 	s.listener.OnSpaceAck(s.enqueueSpaceAck)
+	s.listener.OnEntityResync(s.enqueueEntityResync)
 	s.listener.OnDisconnect(s.enqueueDisconnect)
 	return s
 }
@@ -536,6 +543,12 @@ func (s *Server) Owner(entityID int64) (sessionID int64, owned bool) {
 // authoritative full state. Same-tick A→…→A coalesces to a no-op. Visibility:
 // owner is replication redaction only — command authorization remains the
 // separate Owner check used by generated routers.
+//
+// When the owner changes, entities implementing registry.StateRevisionBumper
+// (generated entities do) advance their state revision without marking any
+// field dirty, so the refresh or space-transition full state carries a newer
+// revision than a late datagram record serialized for the previous owner view,
+// which clients then discard as stale.
 func (s *Server) SetOwner(entityID, sessionID int64) bool {
 	s.interestMu.Lock()
 	defer s.interestMu.Unlock()
@@ -553,6 +566,9 @@ func (s *Server) SetOwner(entityID, sessionID int64) bool {
 	}
 	if !s.reg.SetOwner(entityID, sessionID) {
 		return false
+	}
+	if bumper, ok := e.(registry.StateRevisionBumper); ok {
+		bumper.BumpStateRevision()
 	}
 	if entityIsOwnerScoped(e) {
 		s.queueOwnershipRefreshLocked(entityID, oldOwner, sessionID)
@@ -1164,7 +1180,7 @@ func (s *Server) enqueueDisconnect(sess *Session) {
 }
 
 // drainMessages processes all queued session events in FIFO order on the tick
-// goroutine, then the SpaceAcks stored meanwhile. Called once per tick before
+// goroutine, then the SpaceAcks and EntityResync requests stored meanwhile. Called once per tick before
 // entity ticks so that handlers such as CreateEntity and DeleteEntity are safe
 // without additional synchronization.
 func (s *Server) drainMessages() {
@@ -1210,6 +1226,7 @@ func (s *Server) drainMessages() {
 			}
 		default:
 			s.applySpaceAcks()
+			s.applyEntityResyncs()
 			return
 		}
 	}

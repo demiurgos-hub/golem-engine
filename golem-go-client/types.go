@@ -89,6 +89,16 @@ type EntityManagerLike interface {
 	Get(int64) any
 }
 
+// EntityResyncNotifier is optionally implemented by an EntityManagerLike that
+// holds compact records arriving before their entity's spawn. The manager calls
+// the registered function with an entity ID when the records held for it are
+// evicted; those datagrams were already acknowledged, so NewGameClient
+// registers a function that asks the server for a full state of the entity.
+// Generated EntityManagers implement it.
+type EntityResyncNotifier interface {
+	OnResyncNeeded(func(entityID int64))
+}
+
 // clearableEntityManager is optionally implemented by generated EntityManagers.
 type clearableEntityManager interface {
 	Clear()

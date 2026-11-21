@@ -103,6 +103,7 @@ replace github.com/demiurgos-hub/golem-engine/golem/physics3d => %q
 			renderConsumerTemplate(t, out, "go_client/manager.go.tmpl", "manager.go", schema.SharedData{GoPackage: "generated", GolemImport: imp, Entities: pd.Entities})
 			writeConsumerFile(t, out, "client_test.go", goClientContract)
 			writeConsumerFile(t, out, "manager_test.go", goManagerContract)
+			writeConsumerFile(t, out, "owner_revision_test.go", goOwnerRevisionContract)
 			renderConsumerTemplate(t, out, "go_client/world_manager.go.tmpl", "world_manager.go", schema.SharedData{GoPackage: "generated", WorldTypes: pd.WorldTypes})
 			writeConsumerFile(t, out, "world_manager_test.go", goWorldManagerContract)
 		} else {

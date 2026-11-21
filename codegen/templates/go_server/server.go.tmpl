@@ -193,6 +193,15 @@ func (s *Synced{{.Name}}) StateRevision() uint64 {
 	return s.revision
 }
 
+// BumpStateRevision advances the state revision without marking any field
+// dirty. golem.Server.SetOwner calls it on an owner change so the next owner
+// or public full state outranks records serialized for the previous view.
+func (s *Synced{{.Name}}) BumpStateRevision() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.revision++
+}
+
 // IsGlobal reports whether this entity bypasses field-of-interest checks.
 func (s *Synced{{.Name}}) IsGlobal() bool { return {{.Global}} }
 

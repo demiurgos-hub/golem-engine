@@ -84,7 +84,7 @@ func (c *GameClient) applySpaceSettled(d *inboundDispatcher, transition uint64) 
 		if d.isDone() {
 			return
 		}
-		c.handleCompactStateBatch(batch)
+		c.handleCompactStateBatch(d, batch)
 	}
 	c.mu.Lock()
 	channel := c.channel

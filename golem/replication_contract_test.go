@@ -710,3 +710,149 @@ func TestSpaceTransitionStreamLaneWebTransportKeepsGateUntilSpaceAck(t *testing.
 		t.Fatalf("event after ack = %q", got)
 	}
 }
+
+// waitForEntityResync waits until the EntityResync inbox holds n IDs for sid.
+func waitForEntityResync(t *testing.T, s *Server, sid int64, n int) {
+	t.Helper()
+	for deadline := time.Now().Add(3 * time.Second); ; {
+		s.entityResyncMu.Lock()
+		got := len(s.entityResyncInbox[sid])
+		s.entityResyncMu.Unlock()
+		if got == n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("EntityResync inbox for session %d has %d IDs, want %d", sid, got, n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestEntityResyncSendsStreamFullStateForKnownEntities uses a real WebTransport
+// peer in datagram mode: an EntityResync request for an entity the session
+// knows answers with that entity's full state in the session's current owner
+// or public view on the ordered stream; unknown, deleted and other-space
+// entities are ignored.
+func TestEntityResyncSendsStreamFullStateForKnownEntities(t *testing.T) {
+	for _, interestMode := range []bool{false, true} {
+		name, cellSize := "broadcast", 0.0
+		if interestMode {
+			name, cellSize = "interest", 8
+		}
+		t.Run(name, func(t *testing.T) {
+			s, _, stream, sid := replicationTestPeer(t, cellSize)
+			writer := stream.(io.Writer)
+			avatar := &interestTickEntity{id: 1, full: []byte("avatar-full"), revision: 1}
+			crate := &ownerScopedTickEntity{interestTickEntity: interestTickEntity{id: 2, x: 1, full: []byte("crate-full"), revision: 1}, publicFull: []byte("crate-public")}
+			elsewhere := &interestTickEntity{id: 3, full: []byte("elsewhere-full"), revision: 1}
+			opts := AvatarOptions{}
+			if interestMode {
+				opts.FOIRadius, opts.FOIMargin = 10, 1
+			}
+			if err := s.SpawnAvatar(&Session{ID: sid}, avatar, opts); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.CreateEntity(crate, sid+100); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.CreateEntityIn(5, elsewhere); err != nil {
+				t.Fatal(err)
+			}
+			run := s.runBroadcastTick
+			if interestMode {
+				run = s.runInterestTick
+			}
+			if err := run(); err != nil {
+				t.Fatal(err)
+			}
+			spawned := append(decodeServerTokens(t, mustReadReliableFrame(t, stream)), decodeServerTokens(t, mustReadReliableFrame(t, stream))...)
+			if slices.Sort(spawned); !slices.Equal(spawned, []string{"avatar-full", "crate-public"}) {
+				t.Fatalf("spawn frames = %q", spawned)
+			}
+			resync := func(ids ...int64) {
+				t.Helper()
+				for _, id := range ids {
+					if _, err := writer.Write(netwire.AppendFrame(nil, golemnet.ClientEntityResyncControlFrame(id))); err != nil {
+						t.Fatal(err)
+					}
+				}
+				waitForEntityResync(t, s, sid, len(ids))
+				s.drainMessages()
+			}
+
+			// The crate is known in its public view; the other-space entity
+			// and an unknown ID are ignored.
+			resync(2, 3, 99)
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"crate-public"}) {
+				t.Fatalf("resync frame = %q", got)
+			}
+			// The next frame answers the next request: nothing else was sent.
+			resync(1)
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"avatar-full"}) {
+				t.Fatalf("avatar resync frame = %q", got)
+			}
+			// The view follows the current owner.
+			if !s.SetOwner(crate.id, sid) {
+				t.Fatal("SetOwner")
+			}
+			resync(2)
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"crate-full"}) {
+				t.Fatalf("owner resync frame = %q", got)
+			}
+		})
+	}
+}
+
+// TestEntityResyncIgnoredOnStreamStateLane: sessions that never receive
+// compact datagram records get nothing for a resync request.
+func TestEntityResyncIgnoredOnStreamStateLane(t *testing.T) {
+	s, _, stream, sid := replicationTestPeerWith(t, ServerConfig{Transport: golemnet.TransportWebTransport, StateUpdateLane: StateUpdateLaneStream})
+	avatar := &interestTickEntity{id: 1, full: []byte("avatar-full"), revision: 1}
+	if err := s.SpawnAvatar(&Session{ID: sid}, avatar, AvatarOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.runBroadcastTick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"avatar-full"}) {
+		t.Fatalf("spawn frame = %q", got)
+	}
+	if _, err := stream.(io.Writer).Write(netwire.AppendFrame(nil, golemnet.ClientEntityResyncControlFrame(avatar.id))); err != nil {
+		t.Fatal(err)
+	}
+	waitForEntityResync(t, s, sid, 1)
+	s.drainMessages()
+	if err := s.listener.SendBatch(sid, [][]byte{s.listener.Wrap([]byte("marker"))}); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"marker"}) {
+		t.Fatalf("frame after ignored resync = %q", got)
+	}
+}
+
+// revisionBumpEntity counts BumpStateRevision calls.
+type revisionBumpEntity struct {
+	interestTickEntity
+	bumps int
+}
+
+func (e *revisionBumpEntity) BumpStateRevision() { e.bumps++; e.revision++ }
+
+func TestSetOwnerBumpsStateRevisionOnChange(t *testing.T) {
+	s := NewServer(ServerConfig{})
+	e := &revisionBumpEntity{interestTickEntity: interestTickEntity{id: 1, revision: 4}}
+	if err := s.CreateEntity(e, 7); err != nil {
+		t.Fatal(err)
+	}
+	for _, owner := range []int64{7, 8, 8, 0, 0} {
+		if !s.SetOwner(e.id, owner) {
+			t.Fatalf("SetOwner(%d)", owner)
+		}
+	}
+	if e.bumps != 2 || e.revision != 6 {
+		t.Fatalf("bumps=%d revision=%d, want one bump per owner change", e.bumps, e.revision)
+	}
+	if s.SetOwner(99, 1) || e.bumps != 2 {
+		t.Fatal("unknown entity changed revisions")
+	}
+}

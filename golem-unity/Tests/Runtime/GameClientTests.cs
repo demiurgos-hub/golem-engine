@@ -39,9 +39,7 @@ namespace GolemEngine.Unity.Tests
 
             var frame = new byte[] { 1, 2, 3 };
             var batch = GolemDatagramProtocol.EncodeLengthPrefixedFrame(frame);
-            typeof(GameClient)
-                .GetMethod("HandleCompactStateBatch", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-                ?.Invoke(client, new object[] { batch });
+            InvokeBatch(client, "HandleCompactStateBatch", batch);
 
             Assert.That(manager.LastCompactUpdate, Is.EqualTo(frame));
         }
@@ -63,9 +61,7 @@ namespace GolemEngine.Unity.Tests
             var record = new byte[] { GolemDatagramProtocol.EventRecordTag, 7, 8 };
             var batch = new List<byte>(GolemDatagramProtocol.EncodeLengthPrefixedFrame(record));
             batch.AddRange(GolemDatagramProtocol.EncodeLengthPrefixedFrame(frame));
-            typeof(GameClient)
-                .GetMethod("HandleCompactStateBatch", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-                ?.Invoke(client, new object[] { batch.ToArray() });
+            InvokeBatch(client, "HandleCompactStateBatch", batch.ToArray());
 
             Assert.That(events.LastEvent, Is.EqualTo(new byte[] { 7, 8 }));
             Assert.That(manager.LastCompactUpdate, Is.EqualTo(frame));
@@ -82,9 +78,7 @@ namespace GolemEngine.Unity.Tests
                 _ => new RecordingTransport());
 
             var error = Assert.Throws<System.Reflection.TargetInvocationException>(() =>
-                typeof(GameClient)
-                    .GetMethod("HandleCompactStateBatch", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-                    ?.Invoke(client, new object[] { Array.Empty<byte>() }));
+                InvokeBatch(client, "HandleCompactStateBatch", Array.Empty<byte>()));
             Assert.That(error.InnerException, Is.TypeOf<InvalidOperationException>());
         }
 
@@ -318,9 +312,9 @@ namespace GolemEngine.Unity.Tests
 
             InvokePrivate(client, "HandleMessage", EntityField(1, 8, "old"));
             InvokePrivate(client, "HandleMessage", SpaceChangedField(7, 3));
-            InvokePrivate(client, "ReceiveCompactStateBatch", CompactBatch(1, 9, "late"));
-            InvokePrivate(client, "ReceiveCompactStateBatch", CompactBatch(1, 10, "carried"));
-            InvokePrivate(client, "ReceiveCompactStateBatch", CompactBatch(1, 11, "next"));
+            InvokeBatch(client, "ReceiveCompactStateBatch", CompactBatch(1, 9, "late"));
+            InvokeBatch(client, "ReceiveCompactStateBatch", CompactBatch(1, 10, "carried"));
+            InvokeBatch(client, "ReceiveCompactStateBatch", CompactBatch(1, 11, "next"));
             Assert.That(manager.Log, Is.EqualTo(new[] { "full 1@8=old" }));
             Assert.That(transport.Sent, Is.Empty);
 
@@ -336,7 +330,7 @@ namespace GolemEngine.Unity.Tests
             Assert.That(transport.Sent, Has.Count.EqualTo(1));
             Assert.That(transport.Sent[0], Is.EqualTo(GameClient.EncodeSpaceAck(3)));
 
-            InvokePrivate(client, "ReceiveCompactStateBatch", CompactBatch(1, 12, "live"));
+            InvokeBatch(client, "ReceiveCompactStateBatch", CompactBatch(1, 12, "live"));
             Assert.That(manager.Log[manager.Log.Count - 1], Is.EqualTo("compact 1@12=live"));
         }
 
@@ -349,7 +343,7 @@ namespace GolemEngine.Unity.Tests
             client.Connect("https://example.invalid/wt");
 
             InvokePrivate(client, "HandleMessage", SpaceChangedField(1, 1));
-            InvokePrivate(client, "ReceiveCompactStateBatch", CompactBatch(1, 1, "held"));
+            InvokeBatch(client, "ReceiveCompactStateBatch", CompactBatch(1, 1, "held"));
             InvokePrivate(client, "HandleMessage", Concat(SpaceChangedField(2, 2), SpaceSettledField(1)));
             Assert.That(manager.Log, Is.Empty);
             Assert.That(transport.Sent, Is.Empty);
@@ -380,7 +374,7 @@ namespace GolemEngine.Unity.Tests
 #endif
             for (var i = 0; i <= GameClient.MaxHeldSpaceTransitionBatches; i++)
             {
-                InvokePrivate(client, "ReceiveCompactStateBatch", CompactBatch(1, 1, "x"));
+                InvokeBatch(client, "ReceiveCompactStateBatch", CompactBatch(1, 1, "x"));
             }
 
             Assert.That(disconnects, Has.Count.EqualTo(1));
@@ -406,7 +400,7 @@ namespace GolemEngine.Unity.Tests
             client.Connect("https://example.invalid/wt");
 
             InvokePrivate(client, "HandleMessage", SpaceChangedField(3, 1));
-            InvokePrivate(client, "ReceiveCompactStateBatch", CompactBatch(1, 1, "held"));
+            InvokeBatch(client, "ReceiveCompactStateBatch", CompactBatch(1, 1, "held"));
             Assert.That(client.Space, Is.EqualTo(3u));
 
             client.Disconnect();
@@ -416,7 +410,7 @@ namespace GolemEngine.Unity.Tests
             Assert.That(calls, Is.EqualTo(1));
 
             // The previous connection's open transition and held batch are gone.
-            InvokePrivate(client, "ReceiveCompactStateBatch", CompactBatch(1, 2, "fresh"));
+            InvokeBatch(client, "ReceiveCompactStateBatch", CompactBatch(1, 2, "fresh"));
             Assert.That(manager.Log, Is.EqualTo(new[] { "compact 1@2=fresh" }));
         }
 
@@ -434,12 +428,63 @@ namespace GolemEngine.Unity.Tests
                 EntityField(1, 1, "a"),
                 new PbWriter().Tag(9, 2).Bytes(new byte[] { 7 }).Finish(),
                 EntityField(2, 1, "b")));
-            InvokePrivate(client, "ReceiveCompactStateBatch", CompactBatch(1, 2, "c"));
+            InvokeBatch(client, "ReceiveCompactStateBatch", CompactBatch(1, 2, "c"));
 
             Assert.That(manager.Log, Is.EqualTo(new[] { "full 1@1=a", "full 2@1=b", "compact 1@2=c" }));
             Assert.That(client.Space, Is.EqualTo(0u));
             Assert.That(calls, Is.Zero);
             Assert.That(transport.Sent, Is.Empty);
+        }
+
+        [Test]
+        public void EncodesEntityResyncGoldenBytes()
+        {
+            Assert.That(
+                GameClient.EncodeEntityResync(0x0102030405060708L),
+                Is.EqualTo(new byte[] { 0x00, 0x4f, 0x47, 0x53, 0x04, 1, 2, 3, 4, 5, 6, 7, 8 }));
+        }
+
+        [Test]
+        public void SendsEntityResyncWhenManagerReportsEvictedRecords()
+        {
+            var manager = new ResyncEntityManager();
+            var transport = new RecordingTransport(GolemDatagramProtocol.MaxWebTransportDatagramBytes);
+            var client = SpaceClient(manager, transport);
+            Assert.That(manager.Resync, Is.Not.Null, "GameClient registers the resync callback");
+            manager.Resync(5);
+            Assert.That(transport.Sent, Is.Empty, "no resync without a connection");
+
+            client.Connect("https://example.invalid/wt");
+            manager.Resync(9);
+            Assert.That(transport.Sent, Has.Count.EqualTo(1));
+            Assert.That(transport.Sent[0], Is.EqualTo(GameClient.EncodeEntityResync(9)));
+        }
+
+        [Test]
+        public void DisconnectInCompactCallbackStopsBatch()
+        {
+            foreach (var held in new[] { false, true })
+            {
+                var manager = new FencedEntityManager();
+                var transport = new RecordingTransport(GolemDatagramProtocol.MaxWebTransportDatagramBytes);
+                var client = SpaceClient(manager, transport);
+                client.Connect("https://example.invalid/wt");
+                manager.AfterCompact = () => client.Disconnect();
+
+                var batch = Concat(CompactBatch(1, 1, "first"), CompactBatch(2, 1, "second"), CompactBatch(3, 1, "third"));
+                if (held)
+                {
+                    InvokePrivate(client, "HandleMessage", SpaceChangedField(4, 1));
+                }
+                InvokeBatch(client, "ReceiveCompactStateBatch", batch);
+                if (held)
+                {
+                    InvokePrivate(client, "HandleMessage", SpaceSettledField(1));
+                }
+
+                Assert.That(manager.Log, Is.EqualTo(new[] { "compact 1@1=first" }), held ? "held batch" : "live batch");
+                Assert.That(transport.Sent, Is.Empty);
+            }
         }
 
         [Test]
@@ -498,6 +543,16 @@ namespace GolemEngine.Unity.Tests
                 _ => transport);
         }
 
+        /// <summary>Invokes a private batch handler with the client's current connection generation.</summary>
+        private static void InvokeBatch(GameClient client, string name, byte[] batch)
+        {
+            const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+            var generation = typeof(GameClient).GetMethod("CurrentGeneration", flags).Invoke(client, Array.Empty<object>());
+            var method = typeof(GameClient).GetMethod(name, flags);
+            Assert.That(method, Is.Not.Null, name);
+            method.Invoke(client, new[] { batch, generation });
+        }
+
         private static void InvokePrivate(GameClient client, string name, byte[] argument)
         {
             var method = typeof(GameClient).GetMethod(name, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
@@ -548,12 +603,17 @@ namespace GolemEngine.Unity.Tests
         }
 
         /// <summary>Mimics the generated managers' revision fence: older revisions are rejected, equal ones apply.</summary>
-        private sealed class FencedEntityManager : IEntityManager, ICompactEntityManager
+        private class FencedEntityManager : IEntityManager, ICompactEntityManager
         {
             private readonly Dictionary<int, int> _last = new Dictionary<int, int>();
             public List<string> Log { get; } = new List<string>();
+            public Action AfterCompact { get; set; }
             public void ApplyUpdate(object update) { Apply("full", (byte[])update); }
-            public void ApplyCompactUpdate(byte[] frame) { Apply("compact", frame); }
+            public void ApplyCompactUpdate(byte[] frame)
+            {
+                Apply("compact", frame);
+                AfterCompact?.Invoke();
+            }
             public object Get(long entityId) { return null; }
 
             private void Apply(string kind, byte[] frame)
@@ -569,6 +629,12 @@ namespace GolemEngine.Unity.Tests
                 _last[id] = revision;
                 Log.Add($"{kind} {id}@{revision}={value}");
             }
+        }
+
+        private sealed class ResyncEntityManager : FencedEntityManager, IEntityResyncNotifier
+        {
+            public Action<long> Resync { get; private set; }
+            public void OnResyncNeeded(Action<long> fn) { Resync = fn; }
         }
 
         private static byte[] ClientPacket(IReadOnlyList<byte[]> frames)

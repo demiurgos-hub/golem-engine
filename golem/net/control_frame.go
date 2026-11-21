@@ -36,3 +36,18 @@ func decodeClientSpaceAckControlFrame(data []byte) (uint64, bool, error) {
 	}
 	return transition, matched, nil
 }
+
+// ClientEntityResyncControlFrame returns the reliable control frame a client
+// sends to request a full state of entityID after it evicted compact records
+// held for that entity.
+func ClientEntityResyncControlFrame(entityID int64) []byte {
+	return netwire.AppendEntityResyncControl(nil, entityID)
+}
+
+func decodeClientEntityResyncControlFrame(data []byte) (int64, bool, error) {
+	entityID, matched, err := netwire.DecodeEntityResyncControl(data)
+	if err != nil {
+		return 0, true, fmt.Errorf("golem/net: EntityResync control frame has %d bytes, want %d", len(data), netwire.EntityResyncControlBytes)
+	}
+	return entityID, matched, nil
+}
