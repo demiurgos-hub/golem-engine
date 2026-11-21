@@ -322,3 +322,17 @@ func TestLayers_Remove_panicWithNoBackend(t *testing.T) {
 	}()
 	NewLayers().Remove(1)
 }
+
+func TestLayers_Bound(t *testing.T) {
+	var nilLayers *Layers
+	if nilLayers.Bound() {
+		t.Fatal("nil Layers reported bound")
+	}
+	l := NewLayers().Define("A")
+	if l.Bound() {
+		t.Fatal("Layers without Bind reported bound")
+	}
+	if !l.Bind(&stubBackend{}).Bound() {
+		t.Fatal("Layers after Bind reported unbound")
+	}
+}

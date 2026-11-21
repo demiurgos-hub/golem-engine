@@ -3,6 +3,7 @@ package golem
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
 )
@@ -22,22 +23,29 @@ type spaceTransferEntity struct {
 
 // applySpaceMove validates every entity of t, including its legacy collider
 // transfer and the services it needs in t.To, rebuilds physics bodies in the
-// destination world, and then moves everything together: source attachments
-// detach, the registry and legacy collider moves happen in the same
-// tick-owned step (interestMu makes the batch atomic for session-space
-// readers), and attachments are recreated in the destination.
+// destination world, and then commits in this order: detach every source
+// attachment (physics and navigation), move the registry space (under
+// interestMu, so the batch is atomic for session-space readers), move legacy
+// colliders, attach destination physics, run the deferred traversal-cancel
+// callbacks, and attach destination navigation. A failing source detach rolls
+// back the destination bodies and leaves the registry and colliders unchanged.
 func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 	dst := s.runtime(t.To)
 	var moves []spaceTransferEntity
 	physicsMoves := 0
-	for _, id := range t.Entities {
+	froms := make([]SpaceID, len(t.Entities))
+	for i, id := range t.Entities {
 		from, published := s.reg.PublishedSpace(id)
 		if !published {
 			return fmt.Errorf("golem: %s: entity %d is not published", op, id)
 		}
+		froms[i] = from
 		src := s.runtime(from)
 		if n := src.nav(); n != nil && n.deleting[id] {
 			return fmt.Errorf("golem: %s: entity %d is being deleted", op, id)
+		}
+		if src.phys().deletePending(id) {
+			return fmt.Errorf("golem: %s: entity %d has a pending deletion", op, id)
 		}
 		if from == t.To {
 			continue
@@ -50,6 +58,9 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 			m.nav, m.navConfig = true, n.agents[id].config
 		}
 		if m.physics != nil {
+			if src.physics.geometryOwns(m.physics.body) {
+				return fmt.Errorf("golem: %s: entity %d is attached to a body of loaded physics geometry, which cannot leave its space", op, id)
+			}
 			if dst.phys() == nil {
 				return fmt.Errorf("golem: %s: entity %d is attached to physics but space %d has no physics world", op, id, t.To)
 			}
@@ -85,17 +96,22 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 	}
 
 	s.transferring = true
-	defer func() { s.transferring = false }()
+	defer s.finishTransfer()
 	var created map[int64]p.BodyHandle
 	if physicsMoves != 0 {
 		created, err = s.rebuildTransferPhysics(op, t, dst, moves)
 		if err != nil {
 			return err
 		}
+		// RebuildPhysics must not call Server APIs; make sure it changed nothing
+		// the commit relies on before anything changes.
+		if err := s.transferUnchanged(op, t, froms, moves, colliders); err != nil {
+			return errors.Join(err, destroyTransferBodies(dst.phys(), created))
+		}
 	}
 
 	// Traversal cancellation callbacks of the detached source agents run only
-	// after the whole batch has committed.
+	// after the registry and physics have committed.
 	var deferred []*navigationService
 	for _, m := range moves {
 		if n := m.from.nav(); n != nil && n.frameCallbacks == nil {
@@ -109,35 +125,52 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 			callbacks = append(callbacks, n.frameCallbacks...)
 			n.frameCallbacks = nil
 		}
+		deferred = nil
 		s.transferring = false
 		for _, callback := range callbacks {
 			callback()
 		}
 	}
 
-	s.interestMu.Lock()
-	bad, moved := s.reg.SetSpaces(t.Entities, t.To)
-	s.interestMu.Unlock()
-	if !moved {
-		runDeferred()
-		return errors.Join(fmt.Errorf("golem: %s: entity %d is not published", op, bad), destroyTransferBodies(dst.phys(), created))
-	}
-	applyColliderMoves(colliders)
-
-	var faults []error
+	// Detach every source first. A failure here leaves the registry and
+	// colliders unchanged; entities detached before it have lost their source
+	// bodies, which cannot be restored, and the faulted space ends Run.
+	var retired []*physicsService
 	for _, m := range moves {
 		if m.physics != nil {
+			ps := m.from.physics
 			// Destroys the source body with its colliders and joints, cancels its
 			// timed trajectory and detaches its source navigation.
-			if err := m.from.physics.detach(m.id, p.Teleported); err != nil {
-				m.from.physics.fault = err
-				faults = append(faults, fmt.Errorf("golem: %s: detach entity %d from space %d physics: %w", op, m.id, m.from.id, err))
+			if err := ps.detach(m.id, p.Teleported); err != nil {
+				ps.fault = err
+				failure := fmt.Errorf("golem: %s: detach entity %d from space %d physics: %w", op, m.id, m.from.id, err)
+				syncErr := synchronizeRetired(op, retired)
+				runDeferred()
+				return errors.Join(failure, syncErr, destroyTransferBodies(dst.phys(), created))
+			}
+			if !slices.Contains(retired, ps) {
+				retired = append(retired, ps)
 			}
 		}
 		if m.nav {
 			m.from.navigation.detach(m.id)
 		}
 	}
+	// Destroyed bodies leave the source worlds unsynchronized; publish them so
+	// source queries and checkpoint captures work again. A failure faults that
+	// space, but the batch still commits: its source bodies are gone.
+	syncErr := synchronizeRetired(op, retired)
+
+	s.interestMu.Lock()
+	bad, moved := s.reg.SetSpaces(t.Entities, t.To)
+	s.interestMu.Unlock()
+	if !moved {
+		// Unreachable after validation; keep the registry and colliders.
+		runDeferred()
+		return errors.Join(fmt.Errorf("golem: %s: entity %d is not published", op, bad), syncErr, destroyTransferBodies(dst.phys(), created))
+	}
+	applyColliderMoves(colliders)
+
 	for _, m := range moves {
 		if m.physics != nil {
 			old := m.physics
@@ -147,12 +180,83 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 			dst.physics.agents[m.id], dst.physics.bodies[m.body] = a, m.id
 			dst.physics.write(a, m.state, true)
 		}
-		if m.nav {
-			dst.navigation.addAgent(m.id, m.navConfig)
-		}
 	}
 	runDeferred()
-	return errors.Join(faults...)
+	// A cancel callback may have moved, deleted or re-attached the entity.
+	for _, m := range moves {
+		if !m.nav {
+			continue
+		}
+		n := dst.nav()
+		if space, ok := s.reg.PublishedSpace(m.id); !ok || space != t.To || n == nil || n.agents[m.id] != nil || n.deleting[m.id] {
+			continue
+		}
+		if m.navConfig.StagedPhysics && dst.phys() != nil && !dst.physicsAttached(m.id) {
+			continue
+		}
+		n.addAgent(m.id, m.navConfig)
+	}
+	return syncErr
+}
+
+// finishTransfer ends a transfer and applies the DeleteEntity calls deferred
+// while it ran.
+func (s *Server) finishTransfer() {
+	s.transferring = false
+	deletes := s.transferDeletes
+	s.transferDeletes = nil
+	for _, id := range deletes {
+		s.DeleteEntity(id)
+	}
+}
+
+// transferUnchanged checks, after RebuildPhysics, that every entity is still
+// published in the space validation found it in, is the same entity, is not
+// being deleted and keeps the source attachments the commit will detach.
+func (s *Server) transferUnchanged(op string, t SpaceTransfer, froms []SpaceID, moves []spaceTransferEntity, colliders []colliderMove) error {
+	for i, id := range t.Entities {
+		if space, ok := s.reg.PublishedSpace(id); !ok || space != froms[i] {
+			return fmt.Errorf("golem: %s: entity %d changed during RebuildPhysics", op, id)
+		}
+		src := s.runtime(froms[i])
+		if n := src.nav(); n != nil && n.deleting[id] || src.phys().deletePending(id) {
+			return fmt.Errorf("golem: %s: entity %d changed during RebuildPhysics", op, id)
+		}
+	}
+	for _, m := range moves {
+		var physics *physicsAttachment
+		if ps := m.from.phys(); ps != nil {
+			physics = ps.agents[m.id]
+		}
+		n := m.from.nav()
+		if physics != m.physics || (n != nil && n.agents[m.id] != nil) != m.nav {
+			return fmt.Errorf("golem: %s: entity %d attachments changed during RebuildPhysics", op, m.id)
+		}
+	}
+	for _, c := range colliders {
+		if e, ok := s.reg.Get(c.id); !ok || e != c.e {
+			return fmt.Errorf("golem: %s: entity %d changed during RebuildPhysics", op, c.id)
+		}
+	}
+	return nil
+}
+
+// synchronizeRetired advances the retire epoch of every source physics service
+// that destroyed bodies in a transfer (so commands queued earlier for those
+// bodies no longer fault on their stale handles) and synchronizes its world.
+// A failing synchronization faults that space.
+func synchronizeRetired(op string, retired []*physicsService) error {
+	var errs []error
+	for _, ps := range retired {
+		ps.retireEpoch++
+		if err := ps.world.Synchronize(); err != nil {
+			if ps.fault == nil {
+				ps.fault = err
+			}
+			errs = append(errs, fmt.Errorf("golem: %s: synchronize space %d physics: %w", op, ps.space.id, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // rebuildTransferPhysics captures the source states of the moving physics

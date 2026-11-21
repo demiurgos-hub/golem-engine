@@ -124,3 +124,17 @@ func TestLayers3D_Add_panicWithNoBackend(t *testing.T) {
 	}()
 	NewLayers().Define("A").Add(1, Sphere{R: 1}, "A", false)
 }
+
+func TestLayers3D_Bound(t *testing.T) {
+	var nilLayers *Layers
+	if nilLayers.Bound() {
+		t.Fatal("nil Layers reported bound")
+	}
+	l := NewLayers().Define("A")
+	if l.Bound() {
+		t.Fatal("Layers without Bind reported bound")
+	}
+	if !l.Bind(&stubBackend3D{}).Bound() {
+		t.Fatal("Layers after Bind reported unbound")
+	}
+}

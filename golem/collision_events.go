@@ -55,7 +55,9 @@ type CollisionExit interface {
 // those interfaces. This requires a collision backend (SetCollisionBackend) to have any
 // effect — without a backend, no contacts are produced and no events fire.
 // Safe to call after Run has started; the tracking maps begin empty, so all
-// currently-overlapping pairs fire as Enter on the next tick.
+// currently-overlapping pairs fire as Enter on the next tick. Handlers run in
+// the collision phase, where MoveToSpace returns an error wrapping
+// physics3d.ErrBusy; a portal trigger moves its entity with Server.Post.
 func (s *Server) EnableContactEvents() {
 	s.contactEventsEnabled = true
 	s.triggerPairs = make(map[[2]int64]struct{})

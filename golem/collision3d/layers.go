@@ -24,6 +24,13 @@ func (l *Layers) Bind(b Backend) *Layers {
 	return l
 }
 
+// Bound reports whether a backend has been bound with Bind, which Add, Set
+// and Remove require. It is false for a nil receiver. Check it before calling
+// those methods to avoid their panic.
+func (l *Layers) Bound() bool {
+	return l != nil && l.backend != nil
+}
+
 // Define registers one or more layer names, assigning them consecutive bit
 // indices starting after the last registered layer. Returns the receiver for
 // method chaining. Panics if any name is already registered or if the total

@@ -213,7 +213,9 @@ type Server struct {
 	// Per-space service coordination (space_runtime.go, space_transfer.go).
 	navigationBySpace map[SpaceID]*navigationService // non-zero spaces' navigation (lifeMu; written before Run)
 	simulatingSpaces  bool                           // per-space step loop running with several runtimes
+	collisionStepping bool                           // legacy collision phase, including its contact callbacks
 	transferring      bool                           // MoveToSpace rebuild/commit in progress
+	transferDeletes   []int64                        // DeleteEntity calls deferred until the transfer finishes
 
 	// Avatar indexes (session ↔ entity). Protected by avatarMu; never hold
 	// avatarMu while calling registry hooks or interest AssignFOI/RemoveFOI.
@@ -490,8 +492,14 @@ func (s *Server) CreateEntityIn(space SpaceID, e Entity, owner ...int64) error {
 // while invoking registry hooks (OnRemove) or interest operations.
 // Physics attachments are destroyed before OnRemove. During accepted physics
 // callbacks of the entity's space deletion is deferred to the next tick's input
-// boundary.
+// boundary. Inside SpaceTransfer.RebuildPhysics, which must not call Server
+// APIs, deletion is deferred until MoveToSpace has finished (on the same tick),
+// so the transfer stays atomic.
 func (s *Server) DeleteEntity(id int64) {
+	if s.transferring {
+		s.transferDeletes = append(s.transferDeletes, id)
+		return
+	}
 	rt := s.runtimeOf(id)
 	ps, n := rt.phys(), rt.nav()
 	if ps != nil && ps.dispatching {
@@ -656,7 +664,10 @@ func (s *Server) SetRemovalSerializer(fn RemovalSerializer) {
 // set, each tick syncs space-0 entity positions into the backend, steps it,
 // reads physics corrections back via PositionWriter, and fires OnContact
 // handlers. Space(id).SetCollisionBackend configures other spaces.
-// Shape registration (Add/Remove) remains in game code.
+// Shape registration (Add/Remove) remains in game code. MoveToSpace moves only
+// schema colliders (ColliderProvider) registered through the layer helper;
+// shapes the game registers on a backend itself stay where they are, so remove
+// and re-register them on the destination's backend after MoveToSpace returns.
 func (s *Server) SetCollisionBackend(b collision.Backend) {
 	s.space0.collision = b
 }
@@ -664,20 +675,26 @@ func (s *Server) SetCollisionBackend(b collision.Backend) {
 // SetCollision3DBackend attaches space 0's 3D collision backend to the server.
 // When set, each tick syncs space-0 3D entity positions into the backend, steps
 // it, reads corrections back via Position3DWriter, and fires OnContact3D
-// handlers. Space(id).SetCollision3DBackend configures other spaces.
+// handlers. Space(id).SetCollision3DBackend configures other spaces. As with
+// SetCollisionBackend, shapes the game registers itself are not moved by
+// MoveToSpace; re-register them after it returns.
 func (s *Server) SetCollision3DBackend(b collision3d.Backend) {
 	s.space0.collision3D = b
 }
 
 // OnContact registers a callback invoked after each collision step when at
 // least one contact was detected. Contacts include both solid overlaps and
-// trigger overlaps (Depth == 0 for triggers).
+// trigger overlaps (Depth == 0 for triggers). MoveToSpace and SetEntitySpace
+// return an error wrapping physics3d.ErrBusy during the collision phase,
+// including this callback and per-entity contact events; move entities with
+// Server.Post instead.
 func (s *Server) OnContact(fn ContactFunc) {
 	s.onContact = fn
 }
 
 // OnContact3D registers a callback invoked after each 3D collision step when at
-// least one contact was detected.
+// least one contact was detected. Like OnContact, it cannot move entities
+// between spaces directly; use Server.Post.
 func (s *Server) OnContact3D(fn Contact3DFunc) {
 	s.onContact3D = fn
 }

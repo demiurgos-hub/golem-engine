@@ -73,8 +73,9 @@ type PhysicsFrameMetrics struct {
 type PhysicsCommand func(p.World) error
 
 type queuedPhysicsCommand struct {
-	tick uint64
-	run  PhysicsCommand
+	tick  uint64
+	epoch uint64 // retireEpoch when queued
+	run   PhysicsCommand
 }
 
 type physicsAttachment struct {
@@ -110,6 +111,12 @@ type physicsService struct {
 	geometryPending      map[string]PhysicsGeometryPending
 	trajectories         map[int64]*physicsTrajectory
 	trajectoryGeneration uint64
+	// retireEpoch advances whenever MoveToSpace destroys bodies of this world.
+	// A command queued before that fails with a stale handle without faulting.
+	retireEpoch uint64
+	// pendingDeletes holds the entities whose DeleteEntity was deferred to a
+	// queued command; transfers reject them.
+	pendingDeletes map[int64]struct{}
 }
 
 // SetPhysicsWorld installs space 0's tick-owned physics world before Run. The
@@ -168,6 +175,9 @@ func (s *Server) AttachPhysics(id int64, body p.BodyHandle, cfg PhysicsAttachmen
 func (s *Server) attachPhysics(rt *spaceRuntime, id int64, body p.BodyHandle, cfg PhysicsAttachmentConfig) error {
 	ps := rt.phys()
 	if err := ps.mutable(); err != nil {
+		return err
+	}
+	if err := s.transferBusy("AttachPhysics"); err != nil {
 		return err
 	}
 	s.lifeMu.Lock()
@@ -470,7 +480,10 @@ func (ps *physicsService) setFrameObserver(fn func(PhysicsFrameMetrics)) error {
 // QueuePhysicsCommand schedules a command on space 0's world for the next tick's
 // input boundary. The queue is bounded by PostQueueCapacity and never executes
 // recursively. It is tick-owned; use Server.Post when submitting from another
-// goroutine.
+// goroutine. A command error faults the space (Run ends), except an error
+// wrapping physics3d.ErrStale from a command queued before MoveToSpace removed
+// bodies from this world: such a command most likely addressed a moved body
+// and is dropped.
 func (s *Server) QueuePhysicsCommand(command PhysicsCommand) error {
 	return s.space0.physics.queue(command)
 }
@@ -485,7 +498,7 @@ func (ps *physicsService) queue(command PhysicsCommand) error {
 	if len(ps.commands) >= ps.server.config.PostQueueCapacity {
 		return ErrPostQueueFull
 	}
-	ps.commands = append(ps.commands, queuedPhysicsCommand{tick: ps.server.tick, run: command})
+	ps.commands = append(ps.commands, queuedPhysicsCommand{tick: ps.server.tick, epoch: ps.retireEpoch, run: command})
 	return nil
 }
 
@@ -506,10 +519,27 @@ func (ps *physicsService) mutable() error {
 }
 
 func (ps *physicsService) queueDelete(id int64) error {
-	return ps.queue(func(p.World) error {
+	if err := ps.queue(func(p.World) error {
+		delete(ps.pendingDeletes, id)
 		ps.server.DeleteEntity(id)
 		return ps.fault
-	})
+	}); err != nil {
+		return err
+	}
+	if ps.pendingDeletes == nil {
+		ps.pendingDeletes = make(map[int64]struct{})
+	}
+	ps.pendingDeletes[id] = struct{}{}
+	return nil
+}
+
+// deletePending reports whether DeleteEntity(id) waits in the command queue.
+func (ps *physicsService) deletePending(id int64) bool {
+	if ps == nil || len(ps.pendingDeletes) == 0 {
+		return false
+	}
+	_, ok := ps.pendingDeletes[id]
+	return ok
 }
 
 func (ps *physicsService) drain() error {
@@ -524,6 +554,10 @@ func (ps *physicsService) drain() error {
 	ps.commands = ps.commands[count:]
 	for _, command := range commands {
 		if err := command.run(ps.world); err != nil {
+			if command.epoch < ps.retireEpoch && errors.Is(err, p.ErrStale) {
+				// Queued before a transfer removed bodies from this world.
+				continue
+			}
 			ps.fault = err
 			return fmt.Errorf("golem: queued physics command: %w", err)
 		}
@@ -733,7 +767,7 @@ func (ps *physicsService) stop() {
 		return
 	}
 	ps.closed = true
-	ps.commands = nil
+	ps.commands, ps.pendingDeletes = nil, nil
 	ps.trajectories = nil
 	ps.geometry, ps.geometryIdentities, ps.geometryPending = nil, nil, nil
 	if world, ok := ps.world.(p.ShutdownWorld); ok {

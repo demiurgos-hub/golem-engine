@@ -830,7 +830,7 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 	}
 	for _, r := range restores {
 		r.rt.physics.fault = nil
-		r.rt.physics.commands = nil
+		r.rt.physics.commands, r.rt.physics.pendingDeletes = nil, nil
 	}
 	old := s.reg.All()
 	for _, r := range restores {

@@ -204,7 +204,9 @@ type colliderMove struct {
 // planColliderMoves validates the legacy collider transfers of t without
 // changing anything. A destination with layer helpers must define each moving
 // collider's layer; a destination without helpers simply drops the collider,
-// as CreateEntity skips registration when no helper is configured.
+// as CreateEntity skips registration when no helper is configured. Every
+// helper the move removes from or adds to must be bound to a backend, so
+// applyColliderMoves cannot panic after the registry has moved.
 func (s *Server) planColliderMoves(op string, t SpaceTransfer) ([]colliderMove, error) {
 	var plan []colliderMove
 	for _, id := range t.Entities {
@@ -222,10 +224,19 @@ func (s *Server) planColliderMoves(op string, t SpaceTransfer) ([]colliderMove, 
 			continue
 		}
 		m := colliderMove{e: e, id: id, from: s.runtime(from), to: s.runtime(t.To)}
+		if has2D && m.from != nil && m.from.layers != nil && !m.from.layers.Bound() {
+			return nil, fmt.Errorf("golem: %s: entity %d: space %d collision layers have no bound backend", op, id, from)
+		}
+		if has3D && m.from != nil && m.from.layers3D != nil && !m.from.layers3D.Bound() {
+			return nil, fmt.Errorf("golem: %s: entity %d: space %d 3D collision layers have no bound backend", op, id, from)
+		}
 		if has2D && m.to != nil && m.to.layers != nil {
 			m.shape2D, m.layer2D, m.trig2D = p2.Collider()
 			if _, _, ok := m.to.layers.Lookup(m.layer2D); !ok {
 				return nil, fmt.Errorf("golem: %s: entity %d collision layer %q is not defined in space %d", op, id, m.layer2D, t.To)
+			}
+			if !m.to.layers.Bound() {
+				return nil, fmt.Errorf("golem: %s: entity %d: space %d collision layers have no bound backend", op, id, t.To)
 			}
 			m.add2D = true
 		}
@@ -233,6 +244,9 @@ func (s *Server) planColliderMoves(op string, t SpaceTransfer) ([]colliderMove, 
 			m.shape3D, m.layer3D, m.trig3D = p3.Collider3D()
 			if _, _, ok := m.to.layers3D.Lookup(m.layer3D); !ok {
 				return nil, fmt.Errorf("golem: %s: entity %d 3D collision layer %q is not defined in space %d", op, id, m.layer3D, t.To)
+			}
+			if !m.to.layers3D.Bound() {
+				return nil, fmt.Errorf("golem: %s: entity %d: space %d 3D collision layers have no bound backend", op, id, t.To)
 			}
 			m.add3D = true
 		}
@@ -242,15 +256,29 @@ func (s *Server) planColliderMoves(op string, t SpaceTransfer) ([]colliderMove, 
 }
 
 // applyColliderMoves removes each planned collider from its old space's
-// helpers and registers it on the new space's helpers.
+// helpers and registers it on the new space's helpers. A newly added shape is
+// synced to the entity's position on the destination's collision backend at
+// once, as the next collision step would, so spatial queries made later in the
+// move's tick find it where the entity is rather than at the origin. Backends
+// ignore updates of entities registered on another backend.
 func applyColliderMoves(plan []colliderMove) {
 	for _, m := range plan {
 		m.from.unregisterCollider(m.e, m.id)
 		if m.add2D {
 			m.to.layers.Add(m.id, m.shape2D, m.layer2D, m.trig2D)
+			if b := m.to.collision; b != nil && !m.to.physicsAttached(m.id) {
+				x, y := m.e.Position()
+				b.Update(m.id, float64(x), float64(y))
+			}
 		}
 		if m.add3D {
 			m.to.layers3D.Add(m.id, m.shape3D, m.layer3D, m.trig3D)
+			if b := m.to.collision3D; b != nil && !m.to.physicsAttached(m.id) {
+				if sp, ok := m.e.(registry.Spatial3DEntity); ok {
+					x, y, z := sp.Position3D()
+					b.Update(m.id, float64(x), float64(y), float64(z))
+				}
+			}
 		}
 	}
 }
@@ -259,8 +287,12 @@ func applyColliderMoves(plan []colliderMove) {
 // ascending order: each space updates only its own entities, steps and reads
 // back. Contact callbacks and per-entity contact events then run once per
 // tick with the contacts of all spaces merged. While every entity is in
-// space 0 the entity list is the plain registry snapshot.
+// space 0 the entity list is the plain registry snapshot. Space moves are
+// rejected for the whole phase (collisionStepping), so a 2D contact callback
+// cannot move an entity before the 3D step; callbacks use Post.
 func (s *Server) stepCollision(dt float64) {
+	s.collisionStepping = true
+	defer func() { s.collisionStepping = false }()
 	s.stepCollision2D(dt)
 	s.stepCollision3D(dt)
 }

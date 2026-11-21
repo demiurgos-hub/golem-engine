@@ -142,6 +142,27 @@ type physicsGeometryBuild struct {
 	activation                bool
 }
 
+// anyGeometryBody reports whether match holds for any loaded body of instance.
+func anyGeometryBody(instance *content.Instance, match func(p.BodyHandle) bool) bool {
+	for _, id := range instance.Prepared().BodyIDs() {
+		if h, ok := instance.Body(id); ok && match(h) {
+			return true
+		}
+	}
+	return false
+}
+
+// geometryOwns reports whether h is a body of loaded physics geometry, which
+// its lease owns and replaces; such a body cannot be destroyed by a transfer.
+func (ps *physicsService) geometryOwns(h p.BodyHandle) bool {
+	for _, instance := range ps.geometry {
+		if anyGeometryBody(instance, func(body p.BodyHandle) bool { return body == h }) {
+			return true
+		}
+	}
+	return false
+}
+
 func (b *physicsGeometryBuild) Commit() error {
 	if b.done {
 		return p.ErrStale
@@ -165,11 +186,8 @@ func (b *physicsGeometryBuild) Commit() error {
 		if present && !geometryBoundsContain(b.request.Bounds, min, max) {
 			return errors.New("golem: current geometry lies outside declared quarantine bounds")
 		}
-		for _, id := range old.Prepared().BodyIDs() {
-			h, ok := old.Body(id)
-			if ok && ps.bodies[h] != 0 {
-				return errors.New("golem: detach entity physics before replacing its source lease")
-			}
+		if anyGeometryBody(old, func(h p.BodyHandle) bool { return ps.bodies[h] != 0 }) {
+			return errors.New("golem: detach entity physics before replacing its source lease")
 		}
 	}
 	if source := b.prepared.Source; source != nil {

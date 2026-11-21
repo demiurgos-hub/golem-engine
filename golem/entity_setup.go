@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 
+	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
 	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
@@ -23,7 +24,8 @@ type EntitySetup func(Entity) (rollback func() error, err error)
 // panic rolls back server resources and then continues unwinding unchanged.
 //
 // Call before Run or on the tick goroutine, outside physics callbacks, active
-// frames and restoration. Setup must not advance simulation, change the entity
+// frames, restoration, the per-space simulation phase and space transfers
+// (those return an error wrapping physics3d.ErrBusy). Setup must not advance simulation, change the entity
 // identity, publish it itself, or mutate unrelated entities. Unattached resources
 // acquired before a panic remain the callback's responsibility. Assigned IDs are
 // consumed even on failure. Existing CreateEntity behavior is unchanged. The
@@ -89,6 +91,9 @@ func (s *Server) entitySetupAllowed() error {
 	s.lifeMu.Unlock()
 	if stopping {
 		return ErrServerNotRunning
+	}
+	if s.transferring || s.simulatingSpaces {
+		return fmt.Errorf("golem: entity setup is unavailable while spaces simulate or transfer: %w", p.ErrBusy)
 	}
 	return s.servicesQuiescent("entity setup")
 }

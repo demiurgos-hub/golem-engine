@@ -321,6 +321,9 @@ func (s *Server) attachNavigation(rt *spaceRuntime, id int64, cfg NavigationAgen
 	if stopping {
 		return ErrServerNotRunning
 	}
+	if err := s.transferBusy("AttachNavigation"); err != nil {
+		return err
+	}
 	n := rt.nav()
 	if n == nil {
 		return errors.New("golem: surface navigation is not configured")
