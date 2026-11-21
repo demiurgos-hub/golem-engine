@@ -39,6 +39,18 @@ Review fixes, round 2 (one commit each, on top of `a1ad376`):
 | `fcf80ee` | Only commands failing with a `physics3d.StaleHandleError` for a body a transfer destroyed after they were queued are dropped (collider and joint handles of moved bodies still fault); typed-nil backends count as nil (`Layers.Bind` and the setters); a restore that panics after publication keeps readiness closed; the Chipmunk backend reindexes shapes moved or added since its last `Step` before querying; layer helpers cannot share a backend across spaces (`Layers.Backend`); `NavAgent` drops its route after a round trip (`Registry.SpaceMoveGeneration`). |
 | `820a78f` | The inspector ignores filter spaces without entities (`pruneFilterSpaces`, stored filter kept) and resets filters on target change; single-space games skip per-entity space work in filtered broadcast and the connect snapshot, release replication scratch pointers and take no inbox locks on quiet ticks. Measured against `e3c4ab0` (`-count 6`, interleaved): equal B/op and allocs for blind broadcast, interest, `BenchmarkManagerComputeDiffs` and eventual state; one allocation and 3.4 KB less for filtered broadcast; pass times within noise; quiet-tick drains at 3.4 ns instead of about 40 ns. |
 
+Review fixes, round 3 (one commit each, on top of `bbda8c7`):
+
+| Commit | Fixes |
+| --- | --- |
+| `7e3e220` | Transfers admit rebuilt bodies with their own placement tolerance (`SpaceTransfer.Placement`, zero selects `DefaultTransferMaxPenetration` = 1 cm; the entity's own tolerance applies when larger), so bodies at rest move by default. First transfer test against a real physics backend (`examples/physics-stress`, Box3D). |
+| `b0ed71d` | `Space.BroadcastServerEvent` chooses recipients by the space a session is in or moving to, and makes recipients whose transition is not queued hold the event, so an event sent on the tick of a move plays in the right space. World pushes keep the announced space. |
+| `a5e0813` | `SetSessionSpace` stores nothing for a session that is not connected (`closedSessions` mark plus a listener check after storing). |
+| `54ff25f` | A session whose avatar is deleted keeps the avatar's last space (`sessionSpaceKept`) in both replication modes until it gets a new avatar or `SetSessionSpace` is called; an explicit space still wins. |
+| `97fe62c` | Snapshot capture pre-sizes its record slots and file buffer and, from 4,096 entities, calls `FullUpdate` from several goroutines while the caller waits; the first write to a path removes temp files left by a crashed process. Caller time at 20,000 small entities: about 8 ms and 21.7 MB before, 2.9 ms and 6 MB after (0.33 ms at `e3c4ab0`, where serialization ran in the background). Encoding stays on the caller, because a capture owns its bytes when the call returns. |
+| `17ec862` | The legacy collision phase copies positions to all backends in one pass over the entities instead of one pass per space; `Registry.GetSpaced` reads an entity and its space under one lock. |
+| `16443b9` | `golem/space_e2e_test.go` runs a real `Server.Run` against the real Go client over WebTransport datagram lanes across a switch and back; the `EventDelivery` godoc states that datagram lanes, the reliable ones included, are reliable within one space only, pinned by one test per client runtime. |
+
 Not fixed by decision: legacy contact events identify pairs by entity ID, so a pair of entities moved together keeps its contact history and reports "stay" (pairs split by a move exit; semantic choice), and older clients' handling of the new frames (no compatibility goal: games upgrade client and server together).
 
 After pushing: bump the root `go.mod` pins of `golem/collision` (`Layers.Bound`, `Layers.Backend`) and `golem/physics3d` (`CharacterControllerReader`, `StaleHandleError`), and box3d's own `physics3d` pin (it now needs `StaleHandleError`); until then the root builds only through the local `go.work`.
@@ -60,6 +72,11 @@ Known follow-ups:
   - An off-tick space change racing a pass's event release may flush that session's held events one pass early.
   - Collider and joint handles destroyed with a moved body still fault commands queued for them (no API lists them, so only the moved body's own stale handle is dropped).
   - `TestBroadcastBlindDecisionMutationReconciledNextPass` (`golem/visibility_replication_test.go`) is flaky under full-suite load.
+- Found in round 3, not fixed:
+  - A session that changes space twice before one replication pass still receives the space-scoped events sent to the space in between, delivered after it lands in the final space (held events carry no space).
+  - `SaveSnapshot` still blocks its caller for one `FullUpdate` per entity plus one copy of the state; that is the price of a save taken from one tick.
+  - A per-event option that exempts an event from the older-transition drop on datagram lanes was considered and declined; use stream delivery.
+  - No test joins a real server to the JS or Unity client runtime; only the Go client has one.
 - Pre-existing flaky hub test `TestShutdownClosesSocketsWithServiceRestart`.
 - The `golem-threlte` browser test was not run (Playwright Chromium build 1243 missing).
 
@@ -73,7 +90,7 @@ We are adding **Spaces** to the engine as a general feature that other Golem dev
 - **Identity:** every entity belongs to a `SpaceID` (`uint32`, default `0`).
 - **Isolation:** entities in different spaces never see, collide with, query or navigate with each other.
 - **Space changes:** a space change keeps the moving session's carried entities. There is no despawn and respawn, and no stale or early state is applied out of context.
-- **Zero cost for single-space games:** no API change, no extra bytes on the wire, and byte-identical snapshots and checkpoints.
+- **No replication cost for single-space games:** no extra bytes on the wire, the same allocations per replication pass, and byte-identical snapshots and checkpoints. This was first written as "zero cost, no API change"; the implementation did change a few signatures and behaviours that also reach single-space games (`DetachNavigation` returns an error, `PhysicsFrameMetrics` gained `Space`, `SaveSnapshot` serializes on the caller, and others). The CHANGELOG lists them under Changed.
 
 **Decisions already made:**
 - `uint32` ids.
@@ -91,15 +108,17 @@ Repo: `C:\Demiurgos\golem-engine`. The first step copies this plan to `plans/spa
 ## Core rules
 
 - **Space metadata lives in the registry, like owner.** The registry keeps `spaces map[int64]SpaceID` with only non-zero entries. Neither the `Entity` interface nor the user schemas change, so the schema fingerprint is unaffected.
-- **A session's effective space comes from, in order:** its FOI anchor, then its avatar, then an explicit `SetSessionSpace`, then 0.
+- **A session's effective space comes from, in order:** its FOI anchor, then its avatar, then an explicit `SetSessionSpace`, then the last space of its deleted avatar (added in round 3), then 0.
   - The server also keeps the **announced** space per session (`sentSpace`, initially 0). It changes only through a replication transition.
   - Only sessions whose space has changed ever receive extra messages.
 - **Visibility stays independent:** an entity is replicated only when it is in the session's space *and* `visibility.Allows` passes. The `golem/visibility` package does not change.
-- **Ordering:** all space mutations happen on the tick. Several `MoveToSpace` / `SetEntitySpace` calls in one tick are seen together by that tick's replication pass.
+- **Ordering:** entity space mutations (`MoveToSpace` / `SetEntitySpace`) happen on the tick, and several of them in one tick are seen together by that tick's replication pass. Session-level changes (`SetSessionSpace`, `AssignFOI`, `RemoveFOI`) are safe from any goroutine; they take effect on the next replication pass, and world pushes and space events are ordered with transitions from any goroutine (`announceMu`).
 
 ## Milestones
 
 Each milestone is committed separately and ends green on `go test ./...` from the repo root, plus its listed package tests. It also adds its CHANGELOG `Unreleased` entries and updates the rules it affects.
+
+The `file.go:line` references in the milestone sections point at the code as it was at `e3c4ab0`, before this work started. They record where each change was planned and no longer match the files; find the code by the function names instead.
 
 ### M1: Space identity (registry, creation, snapshots)
 
@@ -136,7 +155,7 @@ Each milestone is committed separately and ends green on `go test ./...` from th
   - New APIs: `SetSessionSpace(sessionID, space)`, `SessionSpace(sessionID)`, `SessionsInSpace(space)` (by announced space).
   - `MoveToSpace(SpaceTransfer)`: in this milestone, for entities without physics or navigation.
   - `Space(id).BroadcastServerEvent(...)` sends to `SessionsInSpace`. Existing broadcasts stay global.
-  - *Updated after review:* `SessionsInSpace` and `Space(id).BroadcastServerEvent` use the announced space (the old one until the switching pass has queued its transition), ordered with transitions from any goroutine (`announceMu`). Server events sent to a session before the pass that plans its switch are held and follow `SpaceSettled`, and once a session has switched its datagram event records carry the transition so clients drop older ones (see Status).
+  - *Updated after review:* `SessionsInSpace` and world pushes use the announced space (the old one until the switching pass has queued its transition), ordered with transitions from any goroutine (`announceMu`). Since round 3, `Space(id).BroadcastServerEvent` instead chooses recipients by the space each session is in or moving to, because a moving session's events are held until its transition. Server events sent to a session before the pass that plans its switch are held and follow `SpaceSettled`, and once a session has switched its datagram event records carry the transition so clients drop older ones (see Status).
 - **Broadcast mode:**
   - `shouldFilterBroadcastLocked` (`:1373`) also returns true when `SpacesInUse()` or any session space is non-zero.
   - `computeBroadcastDiff` (`:1617`) adds a same-space check.
@@ -240,7 +259,7 @@ Each milestone is committed separately and ends green on `go test ./...` from th
   *Order and guarantees updated after review.* The approved plan moved colliders before the registry and reattached navigation before attaching physics, and promised that a failed move changes nothing. The implementation (`golem/space_transfer.go`, documented on `MoveToSpace` in `golem/space.go`) runs:
 
   1. **Validate everything first:** each entity exists, is published, is listed once, is not being deleted (including a deletion deferred from a physics callback), is not awaiting navigation reattachment from an outer transfer, and is not attached to a body of loaded physics geometry. The destination has the services the entity needs: a physics world plus `RebuildPhysics` for a physics attachment, surface navigation for a navigation attachment, and no staged agent may arrive without a body in a physics space. Schema colliders need bound layer helpers in both spaces and a destination layer. Return `ErrBusy` while any space is stepping, dispatching, restoring or holds a prepared navigation frame, during the per-space simulation phase and during the legacy collision phase; callbacks must use `Server.Post`.
-  2. **Rebuild:** call `RebuildPhysics` once with the synchronized source states (including the source character controller configuration) while the source bodies still exist, and admit each returned body like `AttachPhysics` (same motion mode and, when both worlds report it, the same controller configuration). Then check that the callback changed no moving entity (space, deletion, attachments, registry incarnation).
+  2. **Rebuild:** call `RebuildPhysics` once with the synchronized source states (including the source character controller configuration) while the source bodies still exist, and admit each returned body like `AttachPhysics` (same motion mode and, when both worlds report it, the same controller configuration), with the transfer's placement tolerance (`SpaceTransfer.Placement`, 1 cm by default since round 3, so bodies at rest are accepted). Then check that the callback changed no moving entity (space, deletion, attachments, registry incarnation).
   3. **Preflight:** every source body is still alive in a source world that accepts mutations and has not faulted, so the destructive phase cannot fail on a body the callback destroyed.
   4. **`MoveShapes`** (optional, also for batches without physics or navigation) moves the game's own collision shapes, followed by the same no-change check.
 
