@@ -6,17 +6,31 @@ Milestones M1–M9 are implemented on `feature/spaces`:
 
 | Milestone | Commit |
 | --- | --- |
-| M1 Space identity | `8013bb3` |
-| M2 Per-space replication and transitions | `f6a7f3a` (preceded by the fix `3010c7e`, compact records that overtake their spawn) |
-| M3 Client runtimes | `987bdfe` |
-| M4 Per-space world data | `f76d51b` |
-| M5 Space runtimes, legacy collision, 2D navigation | `881ab65` |
-| M6 Per-space physics, 3D navigation, transfer | `0c670d4` |
-| M7 Multi-space checkpoints | `33b1d86` |
-| M8 Inspector | `6ac1172` |
-| M9 Reconciliation | the commit that adds this section |
+| M1 Space identity | `385ed6d` |
+| M2 Per-space replication and transitions | `3c49c10` (preceded by the fix `cd202ae`, compact records that overtake their spawn) |
+| M3 Client runtimes | `6351092` |
+| M4 Per-space world data | `b345418` |
+| M5 Space runtimes, legacy collision, 2D navigation | `347b7da` |
+| M6 Per-space physics, 3D navigation, transfer | `4bba197` |
+| M7 Multi-space checkpoints | `359a98c` |
+| M8 Inspector | `64bfff9` |
+| M9 Reconciliation | `1dfe839` |
 
-Review fixes after M9: `18226e6` (events, acks and world data ordered with space switches); then held compact records that a client must evict are recovered with the EntityResync control frame (`"\x00OGS\x04"` plus the entity ID; the server answers with a stream full state for known entities), `Server.SetOwner` advances the entity's state revision so a late owner-view record cannot follow a revoke, and the clients stop a compact batch once a callback disconnects. Then `SaveSnapshot` (and `snapshot.Save`/`SaveSpaced`) serialize on the caller and only write in the background (`snapshot.WriteAsync`), so a record's space and state come from the same moment; `golem-bake` rejects schemas whose generated protobuf messages share a name (including the fixed `SpaceChanged`/`SpaceSettled`/`WorldCleared`/`ServerMessage`); and the docs state that one stream frame can hold several concatenated `ServerMessage` envelopes. `Server.SaveSnapshotOnTick` queues a capture for the end of the next tick (after replication, before `OnTickEnd`; pending requests fail with `ErrServerNotRunning` at shutdown), and the generated `RunSnapshotAutosave` uses it. Then transfers became fully guarded: the M6 commit order is replaced by detach every source first (a failing source destroy faults that space and rolls back with the registry and colliders unchanged), synchronize the source worlds, move the registry, move colliders (synced to the entity position at once), attach destination physics, run the deferred traversal-cancel callbacks and only then reattach navigation (skipped when a callback already attached, moved or deleted the entity). Moves are also rejected during the legacy collision phase (contact callbacks), for entities with a queued deletion or attached to loaded-geometry bodies, and into or out of unbound collision layer helpers (new `Layers.Bound`); entity setup is rejected during transfers and the per-space simulation phase, and `AttachPhysics`/`AttachNavigation` (busy) and `DeleteEntity` (deferred) inside `RebuildPhysics`. Queued source physics commands still run; one queued before the transfer that fails with a stale handle is dropped instead of faulting. Rebuilt characters keep their controller settings: `PhysicsTransferSource.Controller` carries the source controller (without velocity intent) read through the new optional `physics3d.CharacterControllerReader` (Box3D implements it), and admission rejects a rebuilt body whose controller configuration differs or that gains or loses a controller when both worlds implement the reader. Then setup and restore were tightened: no backend, layer helper, nav grid, physics world or surface navigation backend can serve two spaces (pointer identity; the legacy collision and 2D nav setters panic, physics and surface navigation return an error); `RestorePhysicsCheckpoint` reports configuration errors instead of `ErrBusy` and checks every schema collider before its first commit; `Validate` rejects staged navigation agents without a body and accepted-navigation intents of other agents; and `NavAgent` drops a path planned in its entity's previous space. In the inspector, the map's space selector and default follow the space filter (only filtered spaces are offered; a single-space filter shows exactly the filtered list), and the agent sends an entity's space move in the same batch as its delta.
+Review fixes after M9 (one commit each):
+
+| Commit | Fixes |
+| --- | --- |
+| `18226e6` | Datagram-lane events stay on the stream until SpaceAck (also for stream-lane WebTransport sessions); SpaceAcks bypass the droppable queue; world pushes and space events keep the old space until the transition is queued; a spectator's RemoveFOI orphans exit on its next switch; a deleted FOI anchor replaced by a global one exits; `AppendSpaced` skips lookups when unused. |
+| `5ffbaf5` | Go/C# held-record eviction order; EntityResync control frame (`"\x00OGS\x04"` + entity ID) answered with a stream full state; `SetOwner` advances the state revision; batches and replays stop once a callback disconnects or clears. |
+| `05ef1d2` | `SaveSnapshot` serializes on the caller (`snapshot.WriteAsync` writes); `SaveSnapshotOnTick` and tick-time autosave; clashing generated protobuf message names are rejected; multi-envelope stream frames documented. |
+| `c43bc3c` | Transfers detach every source before the registry moves, run traversal cancels before navigation reattaches, reject unbound layers (`Layers.Bound`), queued deletions and geometry bodies, drop stale pre-transfer commands, guard setup, attaches and the legacy collision phase, sync moved colliders and source worlds. |
+| `7b342ec` | Rebuilt characters keep their controller settings (`physics3d.CharacterControllerReader`, `PhysicsTransferSource.Controller`). |
+| `e009add` | No service can serve two spaces; restore reports configuration errors and checks colliders before committing; stricter v2 navigation validation; `NavAgent` drops a path from its previous space; restriction docs. |
+| `6c5cb64` | Inspector map follows the space filter; space moves travel with their deltas. |
+
+Not fixed by decision: contact history between two entities moved together reads as "stay" (semantic choice), and older clients' handling of the new frames (no compatibility goal: games upgrade client and server together).
+
+After pushing: bump the root `go.mod` pins of `golem/collision` (`Layers.Bound`) and `golem/physics3d` (`CharacterControllerReader`), and box3d's own `physics3d` pin; until then the root builds only through the local `go.work`.
 
 Known follow-ups:
 - `examples/` and qualification consumers; regenerate the checked-in examples' `entities.proto` (fields 4–6).
@@ -25,7 +39,8 @@ Known follow-ups:
 - Creating or removing serviced spaces after `Run`.
 - A connect-time initial-space hook for broadcast mode.
 - Space-scoped generated `EventBroadcaster`, deferred because `Broadcast<X>InSpace` may collide with schema event names; use `Space(id).BroadcastServerEvent` meanwhile.
-- Pre-existing, found in M2 and not fixed: ownership-refresh full states and oversized stream-fallback deltas travel on the reliable stream and can be overtaken by datagrams from later ticks. `3010c7e` fixed only the spawn case; transitions themselves are covered by the SpaceAck gate.
+- Pre-existing, found in M2 and not fixed: ownership-refresh full states and oversized stream-fallback deltas travel on the reliable stream and can be overtaken by datagrams from later ticks. `cd202ae` fixed only the spawn case; transitions themselves are covered by the SpaceAck gate.
+- Generated client code adds its own top-level names (`Client`, `EntityManager`, `Synced<E>` and others) that a custom type could clash with in one client language; the new proto-name check does not cover them.
 - Pre-existing flaky hub test `TestShutdownClosesSocketsWithServiceRestart`.
 - The `golem-threlte` browser test was not run (Playwright Chromium build 1243 missing).
 
