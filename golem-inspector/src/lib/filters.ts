@@ -54,3 +54,17 @@ export function effectiveMapSpace(selected: MapSpace | null, spaces: readonly nu
   if (selected !== null && spaces.includes(selected)) return selected;
   return spaces[0]!;
 }
+
+/**
+ * Spaces the map may show: every space when the space filter is empty,
+ * otherwise only the filtered spaces that are present, so the map never
+ * defaults to (or offers) a space the filter excludes.
+ */
+export function mapSpaces(spaces: readonly number[], filterSpaces: readonly number[]): number[] {
+  return filterSpaces.length === 0 ? [...spaces] : spaces.filter((s) => filterSpaces.includes(s));
+}
+
+/** Entities the map draws for a resolved map space. */
+export function mapEntities(entities: EntityRecord[], mapSpace: MapSpace): EntityRecord[] {
+  return mapSpace === 'all' ? entities : entities.filter((e) => e.space === mapSpace);
+}

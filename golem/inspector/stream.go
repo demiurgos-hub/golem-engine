@@ -215,10 +215,18 @@ func (s *stream) flush(tick uint64) {
 		if d, ok := s.entityDelta(e, p.mask); ok {
 			batch.Deltas = append(batch.Deltas, d)
 			size += d.EncodedSize()
+			// A delta and its space move travel in the same batch, so viewers
+			// never apply the new position in the old space.
+			if space, moved := s.moves[id]; moved {
+				batch.Moves = append(batch.Moves, wire.SpaceMove{ID: id, Space: space})
+				size += spaceMoveSize
+				delete(s.moves, id)
+			}
 		}
 	}
 	batch.Removals = append(batch.Removals, s.removals...)
-	// Full states already carry the entity's current space.
+	// Full states already carry the entity's current space; moves that rode
+	// with a delta were sent above.
 	moved := make([]int64, 0, len(s.moves))
 	for id := range s.moves {
 		if p := s.pending[id]; p == nil || !p.full {
