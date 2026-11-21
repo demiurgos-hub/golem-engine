@@ -19,6 +19,15 @@ var writeSnapshotAsync = snapshot.WriteAsync
 // The returned channel receives exactly one value: nil on success or a
 // non-nil error on failure.
 //
+// The caller is blocked for one FullUpdate per persistent entity plus one copy
+// of the state bytes; BenchmarkSaveSnapshotCallerTime measures it. The capture
+// is complete when SaveSnapshot returns, so entities may reuse the buffers
+// their FullUpdate returned. From 4,096 entities on, the FullUpdate calls are spread
+// over several goroutines while the caller waits, each entity once: FullUpdate
+// must be safe to call off the tick goroutine (the connect-time entity
+// snapshot already requires that) and must not share unsynchronized scratch
+// state between entities.
+//
 // fingerprint should be the generated SchemaFingerprint constant from the
 // consumer's generated code (e.g. synced.SchemaFingerprint). It is embedded in
 // the file header and validated on Load to detect schema changes between saves.

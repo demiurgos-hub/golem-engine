@@ -282,7 +282,9 @@ func TestLoadSnapshotRestoresSpaces(t *testing.T) {
 
 // TestSaveSnapshotCapturesSpaceAndStateTogether holds the background write
 // until after the entity moves and changes state, proving the saved record's
-// space and state both come from the SaveSnapshot call.
+// space and state both come from the SaveSnapshot call. Another entity then
+// overwrites the buffer its FullUpdate returned: the capture owns its bytes
+// once SaveSnapshot returns.
 func TestSaveSnapshotCapturesSpaceAndStateTogether(t *testing.T) {
 	release := make(chan struct{})
 	prev := writeSnapshotAsync
@@ -304,6 +306,8 @@ func TestSaveSnapshotCapturesSpaceAndStateTogether(t *testing.T) {
 		t.Fatal(err)
 	}
 	moved.(*snapshotTestEntity).state = []byte{8}
+	reused, _ := s.Get(4)
+	reused.(*snapshotTestEntity).state[0] = 99
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -319,6 +323,9 @@ func TestSaveSnapshotCapturesSpaceAndStateTogether(t *testing.T) {
 	for _, rec := range records {
 		if rec.EntityID == 9 && (rec.Space != 7 || !bytes.Equal(rec.StateData, []byte{2})) {
 			t.Fatalf("saved entity 9 = space %d state %v, want space 7 state [2]", rec.Space, rec.StateData)
+		}
+		if rec.EntityID == 4 && !bytes.Equal(rec.StateData, []byte{1}) {
+			t.Fatalf("saved entity 4 state = %v, want [1]: the save read a buffer after SaveSnapshot returned", rec.StateData)
 		}
 	}
 	if len(records) != 2 {

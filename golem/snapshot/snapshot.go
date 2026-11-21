@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,10 +51,10 @@ const (
 // Save collects the persistent entities from the provided slice, serializes
 // each via FullUpdate(), and writes an atomic snapshot file to path.
 // Serialization runs synchronously on the caller, so every record reflects the
-// moment of the call; only the file write runs in a background goroutine (see
-// WriteAsync). The returned channel receives exactly one value: nil on success
-// or a non-nil error on failure (a serialization error is delivered without
-// starting a write).
+// moment of the call and the entities may reuse their buffers afterwards; only
+// the file write runs in a background goroutine (see WriteAsync). The returned
+// channel receives exactly one value: nil on success or a non-nil error on
+// failure (a serialization error is delivered without starting a write).
 // fingerprint should be the generated SchemaFingerprint constant from the
 // consumer's generated code (e.g. synced.SchemaFingerprint). Every entity is
 // recorded in space 0; use SaveSpaced to keep spaces.
@@ -85,6 +87,10 @@ func captureThenWrite(path string, capture func() ([]byte, error)) <-chan error 
 // run one at a time in the order of their WriteAsync calls, so the file ends
 // with the bytes of the last call. The returned channel receives exactly one
 // value: nil on success or a non-nil error on failure.
+//
+// The first write to a path in a process removes the temporary files an
+// earlier, crashed process left for that path, so only one process may write
+// a given snapshot file at a time.
 func WriteAsync(path string, data []byte) <-chan error {
 	errc := make(chan error, 1)
 	key := writeChainKey(path)
@@ -97,6 +103,7 @@ func WriteAsync(path string, data []byte) <-chan error {
 		if prev != nil {
 			<-prev
 		}
+		sweepLeftovers(path, key)
 		err := write(path, data)
 		writeChains.mu.Lock()
 		if writeChains.last[key] == done {
@@ -109,20 +116,62 @@ func WriteAsync(path string, data []byte) <-chan error {
 	return errc
 }
 
-// writeChains orders WriteAsync calls per destination: last maps each cleaned
-// absolute path to the done channel of its most recent write, which the next
-// write to that path waits on. An entry is removed once its write finishes and
-// no later write has replaced it.
+// writeChains orders writes per destination: last maps each cleaned absolute
+// path to the done channel of its most recent write, which the next write to
+// that path waits on. An entry is removed once its write finishes and no
+// later write has replaced it. swept holds the destinations whose leftover
+// temporary files this process has already removed.
 var writeChains = struct {
-	mu   sync.Mutex
-	last map[string]chan struct{}
-}{last: make(map[string]chan struct{})}
+	mu    sync.Mutex
+	last  map[string]chan struct{}
+	swept map[string]struct{}
+}{last: make(map[string]chan struct{}), swept: make(map[string]struct{})}
+
+// maxSweptPaths bounds the swept set; a process that writes more distinct
+// snapshot paths than this (uniquely named files) stops sweeping new ones.
+const maxSweptPaths = 1024
 
 func writeChainKey(path string) string {
 	if abs, err := filepath.Abs(path); err == nil {
 		return abs
 	}
 	return filepath.Clean(path)
+}
+
+// sweepLeftovers removes, once per destination and process, the temporary
+// files of path that a crashed process left behind. It runs inside path's
+// write chain, so no write of this process to path is in flight. Only names
+// that write itself can create match: ".<base>-<digits>.tmp".
+func sweepLeftovers(path, key string) {
+	writeChains.mu.Lock()
+	_, done := writeChains.swept[key]
+	if !done && len(writeChains.swept) < maxSweptPaths {
+		writeChains.swept[key] = struct{}{}
+	} else {
+		done = true
+	}
+	writeChains.mu.Unlock()
+	if done {
+		return
+	}
+	dir := filepath.Dir(path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	prefix := "." + filepath.Base(path) + "-"
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		middle := name[len(prefix) : len(name)-len(".tmp")]
+		if middle == "" || strings.Trim(middle, "0123456789") != "" {
+			// Another destination's temporary file, such as "<base>-1".
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, name))
+	}
 }
 
 func write(path string, encoded []byte) (err error) {
@@ -159,6 +208,14 @@ func write(path string, encoded []byte) (err error) {
 // bytes. Call on the simulation owner for a coherent tick, then write off-thread.
 // It preserves the existing version-1 snapshot format and persistence filtering.
 // Every entity is recorded in space 0; use CaptureSpaced to keep spaces.
+//
+// The returned bytes are complete when Capture returns: entities may reuse
+// the buffers their FullUpdate returned. A capture of 4,096 entities or more
+// calls FullUpdate (and IsPersistent) from several goroutines while the caller
+// waits, each entity once, so those methods must be safe to call off the
+// caller's goroutine, as the connect-time entity snapshot already requires,
+// and must not share unsynchronized scratch state between entities. Records
+// keep the order of entities, and the first error in that order is returned.
 func Capture(entities []registry.Entity, fingerprint string) ([]byte, error) {
 	return capture(len(entities), func(i int) (registry.Entity, registry.SpaceID) { return entities[i], 0 }, fingerprint)
 }
@@ -170,30 +227,106 @@ func CaptureSpaced(entities []registry.SpacedEntity, fingerprint string) ([]byte
 	return capture(len(entities), func(i int) (registry.Entity, registry.SpaceID) { return entities[i].Entity, entities[i].Space }, fingerprint)
 }
 
+// Captures of at least parallelCaptureMin entities serialize on several
+// goroutines, at least parallelCaptureGrain entities each. Variables so tests
+// can force either path.
+var (
+	parallelCaptureMin   = 4096
+	parallelCaptureGrain = 1024
+)
+
 func capture(n int, at func(int) (registry.Entity, registry.SpaceID), fingerprint string) ([]byte, error) {
-	// Collect persistent entity records. FullUpdate is called outside the
-	// registry lock; each entity's own mutex ensures a consistent read.
-	var records []Record
-	for i := 0; i < n; i++ {
-		e, space := at(i)
-		if p, ok := e.(Persister); ok && !p.IsPersistent() {
-			continue
-		}
-		data, err := e.FullUpdate()
-		if err != nil {
-			return nil, fmt.Errorf("snapshot: serializing entity %d (%s): %w", e.EntityID(), e.TypeName(), err)
-		}
-		if data == nil {
-			continue
-		}
-		records = append(records, Record{
-			EntityID:  e.EntityID(),
-			TypeName:  e.TypeName(),
-			StateData: data,
-			Space:     space,
-		})
+	records, err := captureRecords(n, at)
+	if err != nil {
+		return nil, err
 	}
 	return encode(records, fingerprint, time.Now().UnixNano()), nil
+}
+
+// captureRecords serializes the persistent entities into records, in entity
+// order.
+func captureRecords(n int, at func(int) (registry.Entity, registry.SpaceID)) ([]Record, error) {
+	// One slot per entity, filled by index, so serializing in parallel keeps
+	// the order. A slot without StateData is skipped: the entity is not
+	// persistent or serialized to nothing. FullUpdate is called outside the
+	// registry lock; each entity's own mutex ensures a consistent read.
+	slots := make([]Record, n)
+	fill := func(lo, hi int) (int, error) {
+		for i := lo; i < hi; i++ {
+			e, space := at(i)
+			if p, ok := e.(Persister); ok && !p.IsPersistent() {
+				continue
+			}
+			data, err := e.FullUpdate()
+			if err != nil {
+				return i, fmt.Errorf("snapshot: serializing entity %d (%s): %w", e.EntityID(), e.TypeName(), err)
+			}
+			if data == nil {
+				continue
+			}
+			slots[i] = Record{EntityID: e.EntityID(), TypeName: e.TypeName(), StateData: data, Space: space}
+		}
+		return -1, nil
+	}
+	workers := 1
+	if n >= parallelCaptureMin {
+		workers = min(runtime.GOMAXPROCS(0), n/parallelCaptureGrain)
+	}
+	if workers <= 1 {
+		if _, err := fill(0, n); err != nil {
+			return nil, err
+		}
+	} else if err := fillParallel(n, workers, fill); err != nil {
+		return nil, err
+	}
+	records := slots[:0]
+	for i := range slots {
+		if slots[i].StateData != nil {
+			records = append(records, slots[i])
+		}
+	}
+	return records, nil
+}
+
+// fillParallel runs fill over [0, n) split into one contiguous range per
+// worker and waits for all of them. It returns the error of the lowest index,
+// as a serial pass would, and re-raises a panic of entity code on the caller.
+func fillParallel(n, workers int, fill func(lo, hi int) (int, error)) error {
+	type result struct {
+		index    int
+		err      error
+		panicked any
+	}
+	results := make([]result, workers)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		lo, hi := n*w/workers, n*(w+1)/workers
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					results[w].panicked = r
+				}
+			}()
+			results[w].index, results[w].err = fill(lo, hi)
+		}()
+	}
+	wg.Wait()
+	var first *result
+	for w := range results {
+		r := &results[w]
+		if r.panicked != nil {
+			panic(r.panicked)
+		}
+		if r.err != nil && (first == nil || r.index < first.index) {
+			first = r
+		}
+	}
+	if first != nil {
+		return first.err
+	}
+	return nil
 }
 
 // encode writes version 1 unless a record is outside space 0.
@@ -205,7 +338,13 @@ func encode(records []Record, fingerprint string, timestamp int64) []byte {
 			break
 		}
 	}
-	w := &pb.Writer{}
+	// Usually one allocation: the payload plus an allowance for each record's
+	// varints (ID, space and two lengths); append grows it if that falls short.
+	size := len(magic) + 3*binary.MaxVarintLen64 + len(fingerprint)
+	for i := range records {
+		size += 16 + len(records[i].TypeName) + len(records[i].StateData)
+	}
+	w := (&pb.Writer{}).Grow(size)
 	w.Raw(magic[:])
 	w.Uint32(version)
 	w.Int64(timestamp)
