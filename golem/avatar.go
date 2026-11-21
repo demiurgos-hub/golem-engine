@@ -141,7 +141,14 @@ func (s *Server) commitAvatar(sessionID, entityID int64) error {
 	if err := s.bindAvatar(sessionID, entityID); err != nil {
 		return err
 	}
-	s.holdEventsIfSwitchPending(sessionID)
+	// The new avatar decides the session's space; forget the last one's.
+	s.interestMu.Lock()
+	delete(s.sessionSpaceKept, sessionID)
+	pending := s.switchPendingLocked(sessionID)
+	s.interestMu.Unlock()
+	if pending {
+		s.holdSessionEvents(sessionID)
+	}
 	return nil
 }
 
@@ -161,20 +168,42 @@ func (s *Server) bindAvatar(sessionID, entityID int64) error {
 	return nil
 }
 
-// clearAvatarByEntity removes avatar index entries for entityID in O(1).
-// Safe under concurrent SpawnAvatar / Avatar / disconnect; does not touch the
-// registry. Losing its avatar may move the session to its explicit space, so
-// the session then holds its server events until that transition is queued.
-// Call without interestMu.
+// clearAvatarByEntity removes avatar index entries for entityID in O(1), for
+// an avatar that is about to be deleted. Safe under concurrent SpawnAvatar /
+// Avatar / disconnect; does not touch the registry. The session stays in the
+// avatar's last space (sessionSpaceKept) unless it has an explicit space, so
+// the death of an avatar does not move its player; when the explicit space
+// differs, the session holds its server events until that transition is
+// queued. Call while the entity is still registered and without interestMu.
 func (s *Server) clearAvatarByEntity(entityID int64) {
+	s.avatarMu.Lock()
+	_, ok := s.avatarSession[entityID]
+	s.avatarMu.Unlock()
+	if !ok {
+		return
+	}
+	space, _ := s.reg.Space(entityID)
+	// Unlink and remember the space under interestMu, so no reader of the
+	// session's space sees one without the other.
+	s.interestMu.Lock()
 	s.avatarMu.Lock()
 	sessionID, ok := s.avatarSession[entityID]
 	if ok {
 		s.unlinkAvatarLocked(sessionID, entityID)
 	}
 	s.avatarMu.Unlock()
+	pending := false
 	if ok {
-		s.holdEventsIfSwitchPending(sessionID)
+		if _, closed := s.closedSessions[sessionID]; space != 0 && !closed {
+			s.sessionSpaceKept[sessionID] = space
+		} else {
+			delete(s.sessionSpaceKept, sessionID)
+		}
+		pending = s.switchPendingLocked(sessionID)
+	}
+	s.interestMu.Unlock()
+	if pending {
+		s.holdSessionEvents(sessionID)
 	}
 }
 

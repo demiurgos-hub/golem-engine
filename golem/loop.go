@@ -163,6 +163,7 @@ type Server struct {
 	broadcastKnown       map[int64]map[int64]struct{} // sessionID → known entity IDs (broadcast mode)
 	ownershipRefresh     map[int64]ownershipRefresh   // entityID → coalesced ownership confidentiality transition
 	sessionSpaceExplicit map[int64]SpaceID            // SetSessionSpace spaces (non-zero; interestMu)
+	sessionSpaceKept     map[int64]SpaceID            // last space of a session's deleted avatar (non-zero; interestMu)
 	sentSpace            map[int64]SpaceID            // spaces announced to clients (non-zero; interestMu)
 	spaceTransitionSeq   map[int64]uint64             // last space transition counter per session (interestMu)
 	spaceAckPending      map[int64]uint64             // latest transition awaiting SpaceAck per session (interestMu)
@@ -366,6 +367,7 @@ func NewServer(cfg ServerConfig) *Server {
 		visibility:            visibility.NewManager(),
 		broadcastKnown:        make(map[int64]map[int64]struct{}),
 		sessionSpaceExplicit:  make(map[int64]SpaceID),
+		sessionSpaceKept:      make(map[int64]SpaceID),
 		sentSpace:             make(map[int64]SpaceID),
 		spaceTransitionSeq:    make(map[int64]uint64),
 		spaceAckPending:       make(map[int64]uint64),

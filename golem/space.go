@@ -287,9 +287,15 @@ func (s *Server) transferBusy(op string) error {
 // SetSessionSpace sets the space of a session that has neither an FOI anchor
 // nor an avatar, such as a spectator or a client in a menu. The session's
 // effective space comes from, in order: its FOI anchor, its avatar, this
-// explicit space, and finally space 0. Space 0 clears the explicit space. A
-// session with an FOI whose anchor is missing keeps its last space; the
-// avatar or explicit space only seeds it when the FOI is assigned.
+// explicit space, the last space of its deleted avatar, and finally space 0.
+// Space 0 clears the explicit space, and every call forgets the deleted
+// avatar's space. A session with an FOI whose anchor is missing keeps its
+// last space; the avatar or explicit space only seeds it when the FOI is
+// assigned.
+//
+// A session whose avatar is deleted therefore stays where the avatar was
+// until it gets a new avatar or this method is called: to send a dead player
+// elsewhere, call SetSessionSpace (before or after deleting the avatar).
 //
 // The change is announced to the client on the next replication pass as a
 // space transition; server events sent to the session until then follow the
@@ -302,6 +308,7 @@ func (s *Server) SetSessionSpace(sessionID int64, space SpaceID) {
 		s.interestMu.Unlock()
 		return
 	}
+	delete(s.sessionSpaceKept, sessionID)
 	if space == 0 {
 		delete(s.sessionSpaceExplicit, sessionID)
 	} else {
@@ -325,7 +332,8 @@ func (s *Server) SetSessionSpace(sessionID int64, space SpaceID) {
 }
 
 // SessionSpace returns the session's effective space: the space of its FOI
-// anchor, else of its avatar, else the space set with SetSessionSpace, else 0.
+// anchor, else of its avatar, else the space set with SetSessionSpace, else
+// the last space of its deleted avatar, else 0.
 // The client learns about a change on the next replication pass; until that
 // pass has queued the session's transition, SessionsInSpace still lists the
 // session in its announced (old) space.

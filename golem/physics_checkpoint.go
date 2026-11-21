@@ -923,6 +923,7 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 	s.ownershipRefresh = nil
 	s.sentSpace = make(map[int64]SpaceID)
 	s.sessionSpaceExplicit = make(map[int64]SpaceID)
+	s.sessionSpaceKept = make(map[int64]SpaceID)
 	s.spaceTransitionSeq = make(map[int64]uint64)
 	s.spaceAckPending = make(map[int64]uint64)
 	s.spaceAnnouncing = make(map[int64]SpaceID)

@@ -27,11 +27,11 @@ type sessionSpacePlan struct {
 // pass. When false every session and entity is in space 0 and replication runs
 // its single-space paths unchanged. Caller holds interestMu.
 func (s *Server) spacesActiveLocked() bool {
-	return s.reg.SpacesInUse() || len(s.sentSpace) > 0 || len(s.sessionSpaceExplicit) > 0 || len(s.spaceAckPending) > 0
+	return s.reg.SpacesInUse() || len(s.sentSpace) > 0 || len(s.sessionSpaceExplicit) > 0 || len(s.sessionSpaceKept) > 0 || len(s.spaceAckPending) > 0
 }
 
 // effectiveSessionSpaceLocked resolves a session's space: FOI anchor, then
-// avatar, then explicit space, then 0. A session with an FOI whose anchor is
+// avatar, then explicit space, then its deleted avatar's last space, then 0. A session with an FOI whose anchor is
 // missing keeps the interest manager's last space. Caller holds interestMu.
 func (s *Server) effectiveSessionSpaceLocked(sessionID int64) SpaceID {
 	if s.interest != nil {
@@ -46,8 +46,9 @@ func (s *Server) effectiveSessionSpaceLocked(sessionID int64) SpaceID {
 }
 
 // fallbackSessionSpaceLocked resolves the space of a session without an FOI:
-// its avatar's space, else its explicit space, else 0. Caller holds interestMu
-// (lock order: interestMu before avatarMu).
+// its avatar's space, else its explicit space, else the last space of its
+// deleted avatar (sessionSpaceKept), else 0. Caller holds interestMu (lock
+// order: interestMu before avatarMu).
 func (s *Server) fallbackSessionSpaceLocked(sessionID int64) SpaceID {
 	s.avatarMu.Lock()
 	avatarID, ok := s.sessionAvatar[sessionID]
@@ -57,7 +58,10 @@ func (s *Server) fallbackSessionSpaceLocked(sessionID int64) SpaceID {
 			return space
 		}
 	}
-	return s.sessionSpaceExplicit[sessionID]
+	if space, ok := s.sessionSpaceExplicit[sessionID]; ok {
+		return space
+	}
+	return s.sessionSpaceKept[sessionID]
 }
 
 // planSessionSpaceLocked compares a session's space for this pass with the
@@ -136,6 +140,7 @@ func (s *Server) planSessionWithoutFOI(sessionID int64) sessionSpacePlan {
 // Caller holds interestMu.
 func (s *Server) clearSessionSpaceLocked(sessionID int64) {
 	delete(s.sessionSpaceExplicit, sessionID)
+	delete(s.sessionSpaceKept, sessionID)
 	delete(s.sentSpace, sessionID)
 	delete(s.spaceTransitionSeq, sessionID)
 	delete(s.spaceAckPending, sessionID)

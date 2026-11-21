@@ -745,13 +745,14 @@ func TestSpaceDisconnectClearsSessionSpaceState(t *testing.T) {
 	srv := NewServer(ServerConfig{})
 	srv.interestMu.Lock()
 	srv.sessionSpaceExplicit[5] = 2
+	srv.sessionSpaceKept[5] = 3
 	srv.planSessionSpaceLocked(5, 2)
 	srv.foiOrphanKnown[5] = map[int64]uint64{1: 0}
 	srv.interestMu.Unlock()
 	srv.cleanupVisibilityOnDisconnect(5)
 	srv.interestMu.Lock()
 	defer srv.interestMu.Unlock()
-	if len(srv.sessionSpaceExplicit)+len(srv.sentSpace)+len(srv.spaceTransitionSeq)+len(srv.spaceAckPending)+len(srv.spaceAnnouncing)+len(srv.foiOrphanKnown) != 0 {
+	if len(srv.sessionSpaceExplicit)+len(srv.sessionSpaceKept)+len(srv.sentSpace)+len(srv.spaceTransitionSeq)+len(srv.spaceAckPending)+len(srv.spaceAnnouncing)+len(srv.foiOrphanKnown) != 0 {
 		t.Fatal("disconnect retained session space state")
 	}
 }
@@ -809,6 +810,86 @@ func TestSetSessionSpaceIgnoresSessionsThatAreGone(t *testing.T) {
 	srv.interestMu.Unlock()
 	if marked {
 		t.Fatal("a session the listener dropped stayed marked closed")
+	}
+}
+
+// A session whose avatar is deleted stays in the avatar's last space: the
+// player's death and respawn in a cave cause no space transition.
+func TestSpaceSessionKeepsDeletedAvatarSpace(t *testing.T) {
+	spaceModes(t, func(t *testing.T, interestMode bool) {
+		rig := newSpaceTestRig(t, interestMode, 1)
+		srv, conn, sid := rig.srv, rig.conns[0], rig.ids[0]
+		if err := srv.CreateEntity(&interestTickEntity{id: 2, x: 1, full: []byte("overworld-full")}); err != nil {
+			t.Fatal(err)
+		}
+		if err := srv.CreateEntityIn(3, &interestTickEntity{id: 3, x: 1, full: []byte("cave-full")}); err != nil {
+			t.Fatal(err)
+		}
+		spawn := func(id int64, space SpaceID) {
+			t.Helper()
+			opts := AvatarOptions{Space: space}
+			if interestMode {
+				opts.FOIRadius, opts.FOIMargin = 10, 1
+			}
+			if err := srv.SpawnAvatar(&Session{ID: sid}, &interestTickEntity{id: id, full: []byte(fmt.Sprintf("avatar-%d", id))}, opts); err != nil {
+				t.Fatal(err)
+			}
+		}
+		noTransition := func(what string, want []string) {
+			t.Helper()
+			rig.tick(t)
+			got := readSpaceTokens(t, conn)
+			slices.Sort(got)
+			if !slices.Equal(got, want) || srv.SessionSpace(sid) != 3 {
+				t.Fatalf("%s: tokens %q, session space %d", what, got, srv.SessionSpace(sid))
+			}
+		}
+		spawn(1, 3)
+		rig.tick(t)
+		assertTransition(t, readSpaceTokens(t, conn), 3, 1, nil, nil, []string{"avatar-1", "cave-full"})
+
+		srv.DeleteEntity(1)
+		noTransition("avatar death", []string{"removed:1"})
+		spawn(4, 3)
+		noTransition("respawn", []string{"avatar-4"})
+
+		// An explicit space still wins over the remembered one.
+		srv.SetSessionSpace(sid, 2)
+		srv.DeleteEntity(4)
+		if interestMode {
+			// An FOI keeps its last space while its anchor is missing.
+			srv.RemoveFOI(sid)
+		}
+		rig.tick(t)
+		if got := readSpaceTokens(t, conn); indexOf(got, "changed:2:2") < 0 || srv.SessionSpace(sid) != 2 {
+			t.Fatalf("explicit space after avatar death: tokens %q, session space %d", got, srv.SessionSpace(sid))
+		}
+	})
+}
+
+// SetSessionSpace forgets the deleted avatar's space, so space 0 can be chosen.
+func TestSetSessionSpaceForgetsDeletedAvatarSpace(t *testing.T) {
+	rig := newSpaceTestRig(t, false, 1)
+	srv, conn, sid := rig.srv, rig.conns[0], rig.ids[0]
+	rig.spaceAvatar(t, sid, &interestTickEntity{id: 1, full: []byte("avatar-full")})
+	if err := srv.SetEntitySpace(1, 3); err != nil {
+		t.Fatal(err)
+	}
+	rig.tick(t)
+	readSpaceTokens(t, conn)
+	srv.DeleteEntity(1)
+	rig.tick(t)
+	if got := readSpaceTokens(t, conn); !slices.Equal(got, []string{"removed:1"}) || srv.SessionSpace(sid) != 3 {
+		t.Fatalf("avatar death: tokens %q, session space %d", got, srv.SessionSpace(sid))
+	}
+	srv.SetSessionSpace(sid, 0)
+	rig.tick(t)
+	assertTransition(t, readSpaceTokens(t, conn), 0, 2, nil, nil, nil)
+	srv.interestMu.Lock()
+	active := srv.spacesActiveLocked()
+	srv.interestMu.Unlock()
+	if active || srv.SessionSpace(sid) != 0 {
+		t.Fatalf("space bookkeeping stayed active = %v, session space %d", active, srv.SessionSpace(sid))
 	}
 }
 
