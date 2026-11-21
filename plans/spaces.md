@@ -51,6 +51,18 @@ Review fixes, round 3 (one commit each, on top of `bbda8c7`):
 | `17ec862` | The legacy collision phase copies positions to all backends in one pass over the entities instead of one pass per space; `Registry.GetSpaced` reads an entity and its space under one lock. |
 | `16443b9` | `golem/space_e2e_test.go` runs a real `Server.Run` against the real Go client over WebTransport datagram lanes across a switch and back; the `EventDelivery` godoc states that datagram lanes, the reliable ones included, are reliable within one space only, pinned by one test per client runtime. |
 
+Review fixes, round 4 (after an independent review of `e3c4ab0..39209b7` reported 13 findings; 11 were real, 3 of them introduced by round 3):
+
+| Commit | Fixes |
+| --- | --- |
+| `5f08f57` | A transition serialized its world frames (game code, `WorldData.MarshalUpdate`) under `announceMu`; a serializer that broadcast a space event or pushed world data deadlocked the tick. World frames are built before the lock and rebuilt when `worldStamp` (new `world.Store.Version`) changed, at most 8 times. `SendStoredWorldData` likewise. From round 2. |
+| `21f18a8` | A session's space is resolved from published anchors and avatars only (`PublishedSpace`), so a provisional anchor whose setup fails cannot route another space's event to its client. From round 3's event routing. |
+| `7d0f2a5` | An avatar moved and deleted before one pass leaves its session in the avatar's last space in interest mode too (`clearAvatarByEntity` updates the interest manager's missing-anchor space). From round 3. |
+| `711fb83` | The snapshot temp-file cleanup of round 3 is removed: it deleted any `.<name>-<digits>.tmp`, including a finished save with such a name. The temp file is created with `O_EXCL` and mode 0644 so the process umask applies again (round 2 had replaced `os.WriteFile` with a chmod to 0644). Verified on Linux through WSL. |
+| `9e54d85` | A transfer whose later source cannot be destroyed also faults the sources it already detached from; navigation is reattached only to the same registry incarnation. From round 2. |
+| `f1c5753` | The retired-body exception requires every failure in a command's error to be a stale handle of a moved body (no `errors.As`), and retired handles are forgotten once no queued command predates them instead of only when the queue empties. From round 2. |
+| `fe6e32b` | World types whose generated world-manager members clash (`ClearWorld`, `ApplyUpdate`, another type's listener) are rejected by the bake; the Go client's `ServerMessage` is back to `Field` + `Payload`, so decoding 200 envelopes allocates 23.8 KB (47.9 KB at `e3c4ab0`, 69.7 KB in between). |
+
 Not fixed by decision: legacy contact events identify pairs by entity ID, so a pair of entities moved together keeps its contact history and reports "stay" (pairs split by a move exit; semantic choice), and older clients' handling of the new frames (no compatibility goal: games upgrade client and server together).
 
 After pushing: bump the root `go.mod` pins of `golem/collision` (`Layers.Bound`, `Layers.Backend`) and `golem/physics3d` (`CharacterControllerReader`, `StaleHandleError`), and box3d's own `physics3d` pin (it now needs `StaleHandleError`); until then the root builds only through the local `go.work`.
@@ -77,6 +89,13 @@ Known follow-ups:
   - `SaveSnapshot` still blocks its caller for one `FullUpdate` per entity plus one copy of the state; that is the price of a save taken from one tick.
   - A per-event option that exempts an event from the older-transition drop on datagram lanes was considered and declined; use stream delivery.
   - No test joins a real server to the JS or Unity client runtime; only the Go client has one.
+- Reported in round 4 and left as designed:
+  - After `RemoveFOI` the client keeps the entities it knew frozen until its next transition or `AssignFOI`. That includes an entity that has since moved to another space, as it includes one that was deleted.
+  - Generated managers stop asking for an `EntityResync` after three stale answers (round 2). A field carried only by an evicted compact record then stays wrong until it changes again; that needs an eviction plus four full states in a row being overtaken by later datagrams.
+- Found in round 4, not fixed:
+  - An FOI anchored on an entity that is not the session's avatar keeps the space of the last replication pass when that entity is moved and deleted in one tick.
+  - Snapshot temp files left by a process that crashed mid-write are not cleaned up.
+  - `TestGenerateGoSharedTemplateSnapshotHelpersBehavior` (codegen) is timing-dependent: its generated autosave test reads a counter right after a channel send and can fail under full-suite load.
 - Pre-existing flaky hub test `TestShutdownClosesSocketsWithServiceRestart`.
 - The `golem-threlte` browser test was not run (Playwright Chromium build 1243 missing).
 
@@ -258,7 +277,7 @@ The `file.go:line` references in the milestone sections point at the code as it 
 
   *Order and guarantees updated after review.* The approved plan moved colliders before the registry and reattached navigation before attaching physics, and promised that a failed move changes nothing. The implementation (`golem/space_transfer.go`, documented on `MoveToSpace` in `golem/space.go`) runs:
 
-  1. **Validate everything first:** each entity exists, is published, is listed once, is not being deleted (including a deletion deferred from a physics callback), is not awaiting navigation reattachment from an outer transfer, and is not attached to a body of loaded physics geometry. The destination has the services the entity needs: a physics world plus `RebuildPhysics` for a physics attachment, surface navigation for a navigation attachment, and no staged agent may arrive without a body in a physics space. Schema colliders need bound layer helpers in both spaces and a destination layer. Return `ErrBusy` while any space is stepping, dispatching, restoring or holds a prepared navigation frame, during the per-space simulation phase and during the legacy collision phase; callbacks must use `Server.Post`.
+  1. **Validate everything first:** each entity exists, is published, is listed once, is not being deleted (including a deletion deferred from a physics callback), is not awaiting navigation reattachment from an outer transfer, and is not attached to a body of loaded physics geometry. The destination has the services the entity needs: a physics world plus `RebuildPhysics` for a physics attachment, surface navigation for a navigation attachment, and no staged agent may arrive without a body in a physics space. A schema collider needs its layer defined by the destination space's layer helper, and every helper the move touches must be bound to a backend; a destination space without a layer helper drops the collider (corrected in round 4: the plan and the `MoveToSpace` godoc said both spaces need helpers, the code and its test never required that). Return `ErrBusy` while any space is stepping, dispatching, restoring or holds a prepared navigation frame, during the per-space simulation phase and during the legacy collision phase; callbacks must use `Server.Post`.
   2. **Rebuild:** call `RebuildPhysics` once with the synchronized source states (including the source character controller configuration) while the source bodies still exist, and admit each returned body like `AttachPhysics` (same motion mode and, when both worlds report it, the same controller configuration), with the transfer's placement tolerance (`SpaceTransfer.Placement`, 1 cm by default since round 3, so bodies at rest are accepted). Then check that the callback changed no moving entity (space, deletion, attachments, registry incarnation).
   3. **Preflight:** every source body is still alive in a source world that accepts mutations and has not faulted, so the destructive phase cannot fail on a body the callback destroyed.
   4. **`MoveShapes`** (optional, also for batches without physics or navigation) moves the game's own collision shapes, followed by the same no-change check.

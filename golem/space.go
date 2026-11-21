@@ -159,14 +159,18 @@ type PhysicsTransferSource struct {
 // have the services the entity uses: a physics world for a physics attachment
 // (plus t.RebuildPhysics), surface navigation for a navigation attachment.
 // Entities attached to a body of loaded physics geometry are rejected; the
-// geometry lease owns that body. Schema colliders need bound layer helpers in
-// both spaces and a destination helper that defines their layer. MoveToSpace
-// returns an error wrapping physics3d.ErrBusy while any space is stepping,
-// dispatching accepted-frame callbacks, restoring or holding a prepared
-// navigation frame, during the per-space simulation phase, and during the
-// legacy collision phase (OnContact, OnContact3D and per-entity contact
-// events); callbacks must use Server.Post. It returns ErrServerNotRunning
-// while the server stops.
+// geometry lease owns that body. A schema collider moves to the destination
+// space's layer helper, which must define its layer; a destination space
+// without a layer helper drops the collider, as CreateEntity registers none
+// there. Every layer helper the move removes a collider from or adds one to
+// must be bound to a backend.
+//
+// MoveToSpace returns an error wrapping physics3d.ErrBusy while any space is
+// stepping, dispatching accepted-frame callbacks, restoring or holding a
+// prepared navigation frame, during the per-space simulation phase, and
+// during the legacy collision phase (OnContact, OnContact3D and per-entity
+// contact events); callbacks must use Server.Post. It returns
+// ErrServerNotRunning while the server stops.
 //
 // Physics-attached entities are rebuilt before anything changes: RebuildPhysics
 // runs once on the destination world and must return a body for every moved
