@@ -242,18 +242,24 @@ type Server struct {
 	avatarSession map[int64]int64 // entityID → sessionID
 
 	// announceMu orders space-dependent sends with space transitions: a
-	// transition holds it for writing while it builds its world frames, queues
-	// its frames and clears its announcement (queueSpaceTransition); world
-	// pushes, SendStoredWorldData and Space.BroadcastServerEvent hold it for
-	// reading across recipient (or value) selection and the enqueue. So a send
-	// from any goroutine either lands before a session's transition frames,
-	// chosen for its old space, or after them, chosen for its new space.
+	// transition holds it for writing while it queues its frames and clears
+	// its announcement (queueSpaceTransition); world pushes,
+	// SendStoredWorldData and Space.BroadcastServerEvent hold it for reading
+	// across recipient (or value) selection and the enqueue. So a send from
+	// any goroutine either lands before a session's transition frames, chosen
+	// for its old space, or after them, chosen for its new space.
+	// No game code runs under it: world data is serialized before the lock is
+	// taken and worldStamp, compared under the lock, shows whether a value
+	// changed in between (then the holder unlocks and serializes again).
 	// Lock order: announceMu before interestMu. Never take it while holding
 	// interestMu, eventHoldMu or a listener lock, and never nest read locks.
 	announceMu sync.RWMutex
 	// testHookWorldPushSelected, when set by tests, runs in PushWorldData
 	// between recipient selection and the enqueue.
 	testHookWorldPushSelected func()
+	// testHookWorldFramesBuilt, when set by tests, runs in queueSpaceTransition
+	// after the world frames are serialized and before announceMu is taken.
+	testHookWorldFramesBuilt func()
 
 	// interestMu guards interest.Manager, visibility.Manager, broadcastKnown and
 	// the session space maps through Server APIs (AssignFOI, RemoveFOI,
@@ -1228,13 +1234,34 @@ func (s *Server) SendWorldData(sessionID int64, data WorldData) error {
 // must not replace Server.World. Resolving the value and the enqueue are
 // atomic with space transitions, from any goroutine.
 func (s *Server) SendStoredWorldData(sessionID int64, name string) error {
-	s.announceMu.RLock()
-	defer s.announceMu.RUnlock()
-	d := s.storedWorldForSession(sessionID, name)
-	if d == nil {
-		return nil
+	for attempt := 1; ; attempt++ {
+		// Serialize without announceMu (MarshalUpdate is game code), then make
+		// sure under the lock that the session is still in the space the value
+		// was resolved for and that no value changed.
+		stamp := s.worldStamp()
+		space := s.worldSpaceOf(sessionID)
+		d := s.resolveWorld(space, name)
+		var frame []byte
+		if d != nil {
+			payload, err := d.MarshalUpdate()
+			if err != nil {
+				return err
+			}
+			frame = WrapWorldUpdate(payload)
+		}
+		s.announceMu.RLock()
+		if s.worldStamp() == stamp && s.worldSpaceOf(sessionID) == space {
+			defer s.announceMu.RUnlock()
+			if d == nil {
+				return nil
+			}
+			return s.Send(sessionID, frame)
+		}
+		s.announceMu.RUnlock()
+		if attempt == worldSerializeAttempts {
+			return errWorldDataUnstable(fmt.Sprintf("session %d", sessionID))
+		}
 	}
-	return s.SendWorldData(sessionID, d)
 }
 
 // normalizeWorldSnapshotExclude copies names, dropping empties and duplicates

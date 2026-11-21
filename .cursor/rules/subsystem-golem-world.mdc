@@ -6,7 +6,7 @@ alwaysApply: false
 
 # `golem/world`
 
-**Static world data store:** `Data` (`WorldName`, `MarshalUpdate`) and thread-safe `Store` (`Set`, `Get`, `Names`, `MarshalAll`, `MarshalAllExcept`). `Names` returns a fresh sorted copy of the stored names (nil when empty). There is no delete. `MarshalAll` / `MarshalAllExcept` return payloads in sorted name order for deterministic connect snapshots. `MarshalAllExcept(exclude)` omits names present in the exclude set; nil/empty exclude includes everything. Excluded-but-absent names are ignored.
+**Static world data store:** `Data` (`WorldName`, `MarshalUpdate`) and thread-safe `Store` (`Set`, `Get`, `Names`, `Version`, `MarshalAll`, `MarshalAllExcept`). `Version` is an atomic counter advanced by every `Set`; the root runtime compares it to detect a value replaced while it serialized without its ordering lock. `MarshalUpdate` may call server APIs but must not set world data. `Names` returns a fresh sorted copy of the stored names (nil when empty). There is no delete. `MarshalAll` / `MarshalAllExcept` return payloads in sorted name order for deterministic connect snapshots. `MarshalAllExcept(exclude)` omits names present in the exclude set; nil/empty exclude includes everything. Excluded-but-absent names are ignored.
 
 **WorldUpdate tags (bake):** world schemas may set optional root `tag:` (≥1). When any world sets `tag`, every world schema must set a unique tag (all-or-nothing). Otherwise tags auto-assign 1..N in sorted type-name order. Explicit tags keep additive world types from shifting existing wire numbers.
 

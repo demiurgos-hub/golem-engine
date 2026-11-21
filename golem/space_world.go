@@ -22,7 +22,10 @@ import (
 // Space(id).PushWorldData or Server.SendStoredWorldData deliver them.
 //
 // Like Server.World, the store is concurrency-safe; call PushWorldData after
-// changing a value that clients already hold.
+// changing a value that clients already hold. The engine serializes values
+// (WorldData.MarshalUpdate) without holding the lock that orders sends with
+// space transitions, so a serializer may take the game's locks and call server
+// APIs such as Space.BroadcastServerEvent; it must not set world data.
 func (sp *Space) World() *world.Store {
 	s := sp.srv
 	if store := s.spaceWorld(sp.id); store != nil {
@@ -140,15 +143,46 @@ func (s *Server) resolveWorld(space SpaceID, name string) world.Data {
 	return s.World.Get(name)
 }
 
-// storedWorldForSession resolves name for the session's announced space.
-func (s *Server) storedWorldForSession(sessionID int64, name string) world.Data {
+// worldSpaceOf returns the space whose world data a session sees: its
+// announced space, or 0 while no space defines world data.
+func (s *Server) worldSpaceOf(sessionID int64) SpaceID {
 	if !s.spaceWorldsUsed.Load() {
-		return s.World.Get(name)
+		return 0
 	}
 	s.interestMu.Lock()
-	space := s.announcedSpaceLocked(sessionID)
-	s.interestMu.Unlock()
-	return s.resolveWorld(space, name)
+	defer s.interestMu.Unlock()
+	return s.announcedSpaceLocked(sessionID)
+}
+
+// worldStamp identifies the values held by Server.World and every space's
+// store: it advances whenever a value is set or a space store is created. It
+// runs no game code. A caller serializes world data without announceMu, then
+// takes the lock and compares stamps: equal stamps mean no value it used was
+// replaced meanwhile, so a push that ran in between sent nothing newer.
+func (s *Server) worldStamp() uint64 {
+	stamp := s.World.Version()
+	if !s.spaceWorldsUsed.Load() {
+		return stamp
+	}
+	s.spaceWorldMu.RLock()
+	defer s.spaceWorldMu.RUnlock()
+	stamp += uint64(len(s.spaceWorlds))
+	for _, store := range s.spaceWorlds {
+		stamp += store.Version()
+	}
+	return stamp
+}
+
+// worldSerializeAttempts bounds how often world data is serialized again
+// because a value changed before the send could be ordered with space
+// transitions. Reaching it means world data changes on every serialization,
+// which only a serializer that sets world data itself does.
+const worldSerializeAttempts = 8
+
+// errWorldDataUnstable reports that world data kept changing while it was
+// serialized for a send that must be ordered with space transitions.
+func errWorldDataUnstable(what string) error {
+	return fmt.Errorf("golem: world data changed during each of %d attempts to serialize it for %s; a WorldData.MarshalUpdate must not set world data", worldSerializeAttempts, what)
 }
 
 // appendResolvedWorldFrames appends, for each name not excluded from
@@ -198,7 +232,9 @@ func (s *Server) worldSnapshotFrames() ([][]byte, error) {
 // SpaceChanged and the carried entities. For every name any space's store
 // defines, in sorted order, it sends the new space's value, else the
 // Server.World value, else WorldCleared. Names only Server.World defines are
-// already current on the client and are not resent.
+// already current on the client and are not resent. It calls
+// WorldData.MarshalUpdate, which is game code: never call it under announceMu
+// (queueSpaceTransition checks worldStamp instead).
 func (s *Server) appendSpaceWorldFrames(_ int64, plan sessionSpacePlan, frames [][]byte) ([][]byte, error) {
 	names := s.spaceWorldNames()
 	if len(names) == 0 {

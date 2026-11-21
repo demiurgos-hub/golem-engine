@@ -1441,3 +1441,126 @@ func TestSpaceOffTickWorldPushOrderedWithTransition(t *testing.T) {
 		assertTransitionWithWorld(t, got[1:], 4, 1, nil, []string{"world:cave-fog"}, []string{"avatar-full"}, nil)
 	})
 }
+
+// callbackWorldData runs a callback from MarshalUpdate, like a serializer
+// that takes game locks or calls server APIs.
+type callbackWorldData struct {
+	name    string
+	payload string
+	call    func()
+}
+
+func (d *callbackWorldData) WorldName() string { return d.name }
+func (d *callbackWorldData) MarshalUpdate() ([]byte, error) {
+	if d.call != nil {
+		d.call()
+	}
+	return []byte(d.payload), nil
+}
+
+// runWithin fails the test instead of hanging when fn does not return.
+func runWithin(t *testing.T, what string, fn func() error) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s did not return: deadlock", what)
+		return nil
+	}
+}
+
+// World data is serialized without the lock that orders sends with space
+// transitions, so a serializer may call the APIs that take it.
+func TestSpaceTransitionWorldSerializerMayCallServerAPIs(t *testing.T) {
+	spaceModes(t, func(t *testing.T, interestMode bool) {
+		rig := newSpaceTestRig(t, interestMode, 1)
+		srv, conn, sid := rig.srv, rig.conns[0], rig.ids[0]
+		srv.World.Set(&sessionWorldData{name: "zone", payload: []byte("global-zone")})
+		srv.Space(7).World().Set(&callbackWorldData{name: "fog", payload: "cave-fog", call: func() {
+			if err := srv.Space(7).BroadcastServerEvent(EventStream, []byte("from-serializer")); err != nil {
+				t.Error(err)
+			}
+			if err := srv.PushWorldData("zone"); err != nil {
+				t.Error(err)
+			}
+			if err := srv.SendStoredWorldData(sid, "zone"); err != nil {
+				t.Error(err)
+			}
+		}})
+		srv.SetSessionSpace(sid, 7)
+		if err := runWithin(t, "the replication pass", rig.run); err != nil {
+			t.Fatal(err)
+		}
+		// The pushes from the serializer precede the transition; the space
+		// event is held and follows it.
+		want := []string{"world:global-zone", "world:global-zone", "changed:7:1", "world:cave-fog", "settled:1", "event:from-serializer"}
+		if got := readSpaceTokens(t, conn); !slices.Equal(got, want) {
+			t.Fatalf("tokens = %q, want %q", got, want)
+		}
+
+		// The same serializer through SendStoredWorldData.
+		if err := runWithin(t, "SendStoredWorldData", func() error { return srv.SendStoredWorldData(sid, "fog") }); err != nil {
+			t.Fatal(err)
+		}
+		// The session has settled, so nothing is held: the serializer's sends
+		// go out in call order, before the value it serializes.
+		want = []string{"event:from-serializer", "world:global-zone", "world:global-zone", "world:cave-fog"}
+		if got := readSpaceTokens(t, conn); !slices.Equal(got, want) {
+			t.Fatalf("stored world tokens = %q, want %q", got, want)
+		}
+	})
+}
+
+// A value set and pushed after the transition serialized its world frames, but
+// before the transition is queued, still reaches the switching session: the
+// push skipped it as being in its old space, so the transition must carry the
+// new value.
+func TestSpaceTransitionRebuildsWorldFramesChangedBeforeQueueing(t *testing.T) {
+	rig := newSpaceTestRigWith(t, false, 1, nil, func(srv *Server) {
+		srv.Space(4).World().Set(&sessionWorldData{name: "fog", payload: []byte("cave-fog")})
+	})
+	srv, conn, sid := rig.srv, rig.conns[0], rig.ids[0]
+	if got := readSpaceTokens(t, conn); !slices.Equal(got, []string{"cleared:fog"}) {
+		t.Fatalf("connect world = %q", got)
+	}
+	built := 0
+	srv.testHookWorldFramesBuilt = func() {
+		built++
+		if built == 1 {
+			srv.Space(4).World().Set(&sessionWorldData{name: "fog", payload: []byte("cave-fog-v2")})
+			if err := srv.Space(4).PushWorldData("fog"); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	srv.SetSessionSpace(sid, 4)
+	rig.tick(t)
+	srv.testHookWorldFramesBuilt = nil
+	if built != 2 {
+		t.Fatalf("world frames built %d times, want 2", built)
+	}
+	assertTransitionWithWorld(t, readSpaceTokens(t, conn), 4, 1, nil, []string{"world:cave-fog-v2"}, nil, nil)
+}
+
+// A serializer that sets world data on every call can never produce frames
+// that are still current; the pass reports it instead of spinning.
+func TestSpaceTransitionReportsWorldDataThatNeverSettles(t *testing.T) {
+	rig := newSpaceTestRig(t, false, 1)
+	srv, sid := rig.srv, rig.ids[0]
+	calls := 0
+	srv.Space(4).World().Set(&callbackWorldData{name: "fog", payload: "cave-fog", call: func() {
+		calls++
+		srv.World.Set(&sessionWorldData{name: "counter", payload: []byte{byte(calls)}})
+	}})
+	srv.SetSessionSpace(sid, 4)
+	err := runWithin(t, "the replication pass", rig.run)
+	if err == nil || !strings.Contains(err.Error(), "must not set world data") || calls != worldSerializeAttempts {
+		t.Fatalf("error = %v after %d serializations", err, calls)
+	}
+	if err := runWithin(t, "SendStoredWorldData", func() error { return srv.SendStoredWorldData(sid, "fog") }); err == nil || !strings.Contains(err.Error(), "must not set world data") {
+		t.Fatalf("SendStoredWorldData error = %v", err)
+	}
+}

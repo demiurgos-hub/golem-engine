@@ -272,12 +272,17 @@ func (s *Server) deliverSpaceTransition(sessionID int64, transport golemnet.Tran
 }
 
 // queueSpaceTransition builds and queues one session's transition frames and
-// then ends its announcement of the old space, on every exit. The world
-// frames, the enqueue and the end of the announcement happen under announceMu
-// held for writing, so a world push or space event from any goroutine (which
-// holds it for reading across its recipient selection and enqueue) either
-// precedes the transition frames, chosen for the old space, or follows them,
-// chosen for the new one. Entity frames are serialized before taking the lock.
+// then ends its announcement of the old space, on every exit. The enqueue and
+// the end of the announcement happen under announceMu held for writing, so a
+// world push or space event from any goroutine (which holds it for reading
+// across its recipient selection and enqueue) either precedes the transition
+// frames, chosen for the old space, or follows them, chosen for the new one.
+//
+// No game code runs under the lock. Entity and world frames are serialized
+// before it is taken; the world frames are then valid only if worldStamp is
+// unchanged under the lock. Otherwise a value was set meanwhile, and a push of
+// it may already have skipped this session as still in its old space, so the
+// frames are built again.
 func (s *Server) queueSpaceTransition(sessionID int64, transport golemnet.Transport, diff interest.Diff, tick *replicationTick, plan sessionSpacePlan, scope replicationScope) (stats eventualStateSendStats, disconnected bool, err error) {
 	locked := false
 	defer func() {
@@ -325,15 +330,30 @@ func (s *Server) queueSpaceTransition(sessionID int64, transport golemnet.Transp
 		}
 	}
 
-	s.announceMu.Lock()
-	locked = true
-	frames := make([][]byte, 0, len(exits)+len(fulls)+2)
+	var worldFrames [][]byte
+	for attempt := 1; ; attempt++ {
+		stamp := s.worldStamp()
+		worldFrames, err = s.appendSpaceWorldFrames(sessionID, plan, worldFrames[:0])
+		if err != nil {
+			return stats, false, err
+		}
+		if s.testHookWorldFramesBuilt != nil {
+			s.testHookWorldFramesBuilt()
+		}
+		s.announceMu.Lock()
+		if s.worldStamp() == stamp {
+			locked = true
+			break
+		}
+		s.announceMu.Unlock()
+		if attempt == worldSerializeAttempts {
+			return stats, false, errWorldDataUnstable(fmt.Sprintf("the transition of session %d to space %d", sessionID, plan.space))
+		}
+	}
+	frames := make([][]byte, 0, len(exits)+len(worldFrames)+len(fulls)+2)
 	frames = append(frames, exits...)
 	frames = append(frames, WrapSpaceChanged(plan.space, plan.transition))
-	frames, err = s.appendSpaceWorldFrames(sessionID, plan, frames)
-	if err != nil {
-		return stats, false, err
-	}
+	frames = append(frames, worldFrames...)
 	frames = append(frames, fulls...)
 	frames = append(frames, WrapSpaceSettled(plan.transition))
 	sent, err := s.sendReplicationStream(sessionID, transport, golemnet.ConcatReliableFrames(frames), countAfterSend)
