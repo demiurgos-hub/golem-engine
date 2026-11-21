@@ -1961,3 +1961,84 @@ func TestSpaceTransferPlacementTolerance(t *testing.T) {
 		}
 	})
 }
+
+// A transfer from two source spaces that fails on the second source has
+// already taken the first source's body and attachment, while the registry
+// still lists that entity there. All three spaces must report the fault.
+func TestSpaceTransferSourceDestroyFailureFaultsEarlierSources(t *testing.T) {
+	s, a, b := newTransferTestServer(t)
+	c := newTransferTestWorld(3, nil)
+	if err := s.Space(9).SetPhysicsWorld(c); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Space(9).SetSurfaceNavigation(&navigationTestBackend{revision: 1}, NavigationConfig{MovementBudget: time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	first := transferTestEntity(t, s, 0, 1, surface.Vec3{X: 1})
+	second := transferTestEntity(t, s, 9, 2, surface.Vec3{X: 2})
+	transferTestAttach(t, s, a, first, p.FreeDynamic, PhysicsAttachmentConfig{})
+	transferTestAttach(t, s, c, second, p.FreeDynamic, PhysicsAttachmentConfig{})
+	c.destroyErr = func(p.BodyHandle) error { return errors.New("body is locked") }
+	for _, space := range []SpaceID{0, 9, 5} {
+		if ready, _, err := s.Space(space).PhysicsReady(); !ready || err != nil {
+			t.Fatalf("space %d physics not ready before the move: %v", space, err)
+		}
+	}
+
+	calls := 0
+	err := s.MoveToSpace(SpaceTransfer{To: 5, Entities: []int64{1, 2}, RebuildPhysics: rebuildOffset(p.Vec3{X: 100}, &calls)})
+	if err == nil || !strings.Contains(err.Error(), "body is locked") {
+		t.Fatalf("move with a failing second source = %v", err)
+	}
+	// The first source was changed before the failure: its body is gone and
+	// the entity is attached nowhere, yet it is still registered in space 0.
+	if space, _ := s.EntitySpace(1); space != 0 || len(a.owned(1)) != 0 || s.physics.agents[1] != nil {
+		t.Fatalf("entity 1: space %d, source bodies %d", space, len(a.owned(1)))
+	}
+	if len(b.bodies) != 0 {
+		t.Fatalf("destination kept %d rebuilt bodies", len(b.bodies))
+	}
+	for _, space := range []SpaceID{0, 9, 5} {
+		if ready, _, err := s.Space(space).PhysicsReady(); ready || err == nil {
+			t.Fatalf("space %d physics reported ready after the failed move (%v)", space, err)
+		}
+		if r := s.Space(space).NavigationReady(); r.Ready || r.Err == nil {
+			t.Fatalf("space %d navigation reported ready after the failed move: %+v", space, r)
+		}
+	}
+}
+
+// A traversal-cancel callback may delete the moving entity and register a new
+// one under the same ID. The transfer must not give the newcomer the old
+// entity's navigation agent.
+func TestSpaceTransferDoesNotReattachNavigationToAReplacementEntity(t *testing.T) {
+	cfg := NavigationAgentConfig{Profile: "human", Speed: 2, Projection: surface.ProjectionOptions{Horizontal: .5, Up: .5, Down: .5}}
+	s := NewServer(ServerConfig{})
+	for _, space := range []SpaceID{0, 7} {
+		if err := s.Space(space).SetSurfaceNavigation(&navigationTestBackend{revision: 1}, NavigationConfig{MovementBudget: time.Second}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	transferTestEntity(t, s, 0, 1, surface.Vec3{})
+	if err := s.AttachNavigation(1, cfg); err != nil {
+		t.Fatal(err)
+	}
+	startTestSpaces(t, s)
+	var replacement *navigationTestEntity
+	s.navigation.agents[1].traversal = &navigationTraversal{action: &transferCancelAction{cancel: func() {
+		s.DeleteEntity(1)
+		replacement = transferTestEntity(t, s, 7, 1, surface.Vec3{X: 5})
+	}}}
+	if err := s.SetEntitySpace(1, 7); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := s.Get(1); replacement == nil || !ok || got != Entity(replacement) {
+		t.Fatal("the callback's replacement entity is not registered")
+	}
+	if agent := s.runtime(7).navigation.agents[1]; agent != nil {
+		t.Fatalf("the replacement entity inherited a navigation agent: %+v", agent.config)
+	}
+	if s.navigation.agents[1] != nil {
+		t.Fatal("source kept the agent")
+	}
+}

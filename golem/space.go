@@ -195,8 +195,9 @@ type PhysicsTransferSource struct {
 // The commit then runs in this order:
 //  1. Every source attachment is detached: physics (destroying the source
 //     body and its joints and cancelling its timed trajectory) and navigation.
-//     If a source body still cannot be destroyed, the source and destination
-//     spaces fault (Run ends), the rebuilt bodies are destroyed and
+//     If a source body still cannot be destroyed, that source space, every
+//     source space the batch already detached from and the destination
+//     fault (Run ends), the rebuilt bodies are destroyed and
 //     MoveToSpace returns the error with the registry and colliders
 //     unchanged; entities detached before the failure have already lost
 //     their source bodies and MoveShapes has already moved the shapes.
@@ -212,8 +213,9 @@ type PhysicsTransferSource struct {
 //     with the entities already in the destination.
 //  7. Navigation is reattached in the destination with the same configuration
 //     but no destination intent (idle), unless a cancel callback deleted the
-//     entity, attached navigation itself, or detached the physics a staged
-//     agent needs.
+//     entity (also when it registered another entity under the same ID),
+//     attached navigation itself, or detached the physics a staged agent
+//     needs.
 //
 // Not carried to the destination: timed trajectories, physics contact history,
 // navigation routes and destinations, pending forces and retained controller

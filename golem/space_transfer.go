@@ -20,6 +20,9 @@ type spaceTransferEntity struct {
 	navConfig NavigationAgentConfig
 	body      p.BodyHandle // admitted destination body
 	state     p.BodyState  // admitted destination body state
+	// incarnation is the registry lifetime validation found, so navigation is
+	// not reattached to another entity registered under the same ID meanwhile.
+	incarnation uint64
 	// controller is the source body's controller policy with Velocity cleared
 	// (zero without a controller); controllerKnown is false when the source
 	// world does not implement physics3d.CharacterControllerReader.
@@ -71,6 +74,7 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 			continue
 		}
 		m := spaceTransferEntity{id: id, from: src}
+		m.incarnation, _ = s.reg.Incarnation(id)
 		if ps := src.phys(); ps != nil {
 			m.physics = ps.agents[id]
 		}
@@ -175,9 +179,10 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 	// preflight makes a failure here a backend failure: it leaves the registry
 	// and colliders unchanged, but entities detached before it have lost their
 	// source bodies, which cannot be restored, and MoveShapes has already moved
-	// the game's shapes. The source and the destination fault (Run ends).
+	// the game's shapes. Every source this loop already changed, the failing
+	// source and the destination fault (Run ends).
 	var retired []*physicsService
-	for _, m := range moves {
+	for i, m := range moves {
 		if m.physics != nil {
 			ps := m.from.physics
 			// Destroys the source body with its colliders and joints, cancels its
@@ -187,6 +192,11 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 				failure := fmt.Errorf("golem: %s: detach entity %d from space %d physics: %w", op, m.id, m.from.id, err)
 				m.from.faultServices(failure)
 				dst.faultServices(failure)
+				// Earlier moves already lost their source bodies and navigation
+				// agents while the registry still lists the entities there.
+				for _, done := range moves[:i] {
+					done.from.faultServices(failure)
+				}
 				syncErr := synchronizeRetired(op, retired)
 				runDeferred()
 				return errors.Join(failure, syncErr, rollbackTransferBodies(op, dst, created))
@@ -260,6 +270,11 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 		}
 		n := dst.nav()
 		if space, ok := s.reg.PublishedSpace(m.id); !ok || space != t.To || n == nil || n.agents[m.id] != nil || n.deleting[m.id] {
+			continue
+		}
+		if incarnation, _ := s.reg.Incarnation(m.id); incarnation != m.incarnation {
+			// A callback deleted the entity and registered another under its ID;
+			// the newcomer never asked for navigation.
 			continue
 		}
 		if m.navConfig.StagedPhysics && dst.phys() != nil && !dst.physicsAttached(m.id) {
