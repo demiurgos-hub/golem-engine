@@ -16,8 +16,10 @@ import (
 // without the service. Entity-keyed methods (AttachPhysics, TeleportPhysics,
 // SetNavigationDestination, ...) stay on Server and use the entity's space.
 
-// SetPhysicsWorld installs this space's tick-owned physics world before Run.
-// The server closes it on shutdown. A world serves one space only.
+// SetPhysicsWorld installs this space's tick-owned physics world before Run
+// (lifecycle-checked: it fails once Run has started). The server closes it on
+// shutdown. A world serves one space only: installing one that already serves
+// another space returns an error.
 func (sp *Space) SetPhysicsWorld(world p.World) error {
 	return sp.srv.setPhysicsWorld(sp.id, world)
 }
@@ -68,8 +70,10 @@ func (sp *Space) PhysicsReady() (ready, restoring bool, err error) {
 	return sp.srv.runtime(sp.id).phys().readiness()
 }
 
-// SetSurfaceNavigation installs this space's 3D navigation service before Run,
-// with its own backend and path/build worker pools.
+// SetSurfaceNavigation installs this space's 3D navigation service before Run
+// (lifecycle-checked: it fails once Run has started), with its own backend and
+// path/build worker pools. A backend already serving another space's surface
+// navigation is rejected with an error.
 func (sp *Space) SetSurfaceNavigation(backend surface.Backend, cfg NavigationConfig) error {
 	return sp.srv.setSurfaceNavigation(sp.id, backend, cfg)
 }

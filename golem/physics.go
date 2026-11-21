@@ -119,9 +119,11 @@ type physicsService struct {
 	pendingDeletes map[int64]struct{}
 }
 
-// SetPhysicsWorld installs space 0's tick-owned physics world before Run. The
-// server closes it on shutdown. Legacy collision backends may coexist for other
-// entities. Space(id).SetPhysicsWorld configures other spaces.
+// SetPhysicsWorld installs space 0's tick-owned physics world before Run; it
+// fails once Run has started, when space 0 already has a world, or when the
+// world already serves another space. The server closes it on shutdown. Legacy
+// collision backends may coexist for other entities.
+// Space(id).SetPhysicsWorld configures other spaces.
 func (s *Server) SetPhysicsWorld(world p.World) error {
 	return s.setPhysicsWorld(0, world)
 }
@@ -135,13 +137,8 @@ func (s *Server) setPhysicsWorld(space SpaceID, world p.World) error {
 	if s.life != lifecycleCreated || s.runtime(space).phys() != nil {
 		return errors.New("golem: configure physics once before Run")
 	}
-	if err := s.eachRuntime(func(rt *spaceRuntime) error {
-		if rt.physics != nil && samePhysicsWorld(rt.physics.world, world) {
-			return fmt.Errorf("golem: physics world already serves space %d", rt.id)
-		}
-		return nil
-	}); err != nil {
-		return err
+	if owner, shared := s.serviceOwner(space, world, physicsWorldOf); shared {
+		return fmt.Errorf("golem: physics world already serves space %d", owner)
 	}
 	rt := s.ensureRuntime(space)
 	rt.physics = &physicsService{server: s, space: rt, world: world, agents: make(map[int64]*physicsAttachment), bodies: make(map[p.BodyHandle]int64)}
@@ -149,13 +146,6 @@ func (s *Server) setPhysicsWorld(space SpaceID, world p.World) error {
 		s.physics = rt.physics
 	}
 	return nil
-}
-
-// samePhysicsWorld reports whether two worlds are the same pointer. Non-pointer
-// worlds are never considered shared (and are not compared, which could panic).
-func samePhysicsWorld(a, b p.World) bool {
-	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
-	return va.Kind() == reflect.Pointer && vb.Kind() == reflect.Pointer && va.Type() == vb.Type() && va.Pointer() == vb.Pointer()
 }
 
 // AttachPhysics transfers ownership of a body to a registered 3D entity. Its

@@ -689,3 +689,180 @@ func TestPhysicsCheckpointDecodeRejectsMalformedVersions(t *testing.T) {
 		t.Fatalf("obsolete space 3 physics payload = %v", err)
 	}
 }
+
+func TestPhysicsCheckpointRestoreReportsConfigurationErrors(t *testing.T) {
+	_, _, _, c := physicsCheckpointFixture(t)
+	empty := NewServer(ServerConfig{})
+	if err := empty.RestorePhysicsCheckpoint(c, PhysicsRestoreOptions{}); err == nil || errors.Is(err, p.ErrBusy) || !strings.Contains(err.Error(), "physics is not configured") {
+		t.Fatalf("restore without services = %v", err)
+	}
+	s, _, old, c := physicsCheckpointFixture(t)
+	if err := s.Space(6).SetSurfaceNavigation(&navigationTestBackend{revision: 1}, NavigationConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RestorePhysicsCheckpoint(c, physicsCheckpointOptions(t, s, nil)); err == nil || errors.Is(err, p.ErrBusy) || !strings.Contains(err.Error(), "space 6 has surface navigation without physics") {
+		t.Fatalf("restore with a navigation-only space = %v", err)
+	}
+	if got, _ := s.Get(1); got != old {
+		t.Fatal("rejected restore replaced entities")
+	}
+	if ready, restoring, err := s.PhysicsReady(); !ready || restoring || err != nil {
+		t.Fatalf("rejected restore changed readiness %v/%v/%v", ready, restoring, err)
+	}
+}
+
+// TestPhysicsCheckpointRestoreChecksCollidersBeforeCommit restores a collider
+// entity whose space's layer helper cannot take it: nothing may change, and a
+// later restore with a usable helper succeeds.
+func TestPhysicsCheckpointRestoreChecksCollidersBeforeCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		breakIt func(f *multiSpaceCheckpoint)
+		fix     func(f *multiSpaceCheckpoint)
+		want    string
+	}{
+		{"missing layer", func(f *multiSpaceCheckpoint) {
+			f.s.Space(3).SetCollisionLayers(NewCollisionLayers().Bind(f.b3).Define("Other"))
+		}, func(f *multiSpaceCheckpoint) {
+			f.s.Space(3).SetCollisionLayers(NewCollisionLayers().Bind(f.b3).Define("Player"))
+		}, `entity 30 collision layer "Player" is not defined in space 3`},
+		{"unbound helper", func(f *multiSpaceCheckpoint) {
+			f.s.DeleteEntity(30)
+			delete(f.original, 30)
+			f.s.Space(3).SetCollisionLayers3D(NewCollisionLayers3D().Define("Player"))
+		}, func(f *multiSpaceCheckpoint) {
+			f.s.Space(3).SetCollisionLayers3D(NewCollisionLayers3D().Bind(newRecordingBackend3D()).Define("Player"))
+		}, "entity 30: space 3 3D collision layers have no bound backend"},
+		{"unbound helper of a live collider", func(f *multiSpaceCheckpoint) {
+			f.s.Space(3).SetCollisionLayers(NewCollisionLayers().Define("Player"))
+		}, func(f *multiSpaceCheckpoint) {
+			f.s.Space(3).SetCollisionLayers(NewCollisionLayers().Bind(f.b3).Define("Player"))
+		}, "entity 30: space 3 collision layers have no bound backend"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMultiSpaceCheckpoint(t)
+			c := f.capture(t)
+			tc.breakIt(f)
+			err := f.s.RestorePhysicsCheckpoint(c, multiSpaceRestoreOptions(t, f.s))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("restore = %v, want %q", err, tc.want)
+			}
+			for id, old := range f.original {
+				if got, _ := f.s.Get(id); got != old {
+					t.Fatalf("rejected restore replaced entity %d", id)
+				}
+			}
+			if f.s.Len() != len(f.original) {
+				t.Fatalf("rejected restore left %d entities, want %d", f.s.Len(), len(f.original))
+			}
+			if f.w0.discards != 1 || f.w3.discards != 1 {
+				t.Fatalf("prepared worlds not discarded: %d/%d", f.w0.discards, f.w3.discards)
+			}
+			if state, err := f.s.PhysicsBody(11); err != nil || state.Handle.World != 3 {
+				t.Fatal("rejected restore replaced space 3 physics")
+			}
+			for _, space := range []SpaceID{0, 3} {
+				if ready, restoring, navRestoring, err := spaceReady(f.s, space); !ready || restoring || navRestoring || err != nil {
+					t.Fatalf("space %d readiness after rejected restore %v/%v/%v/%v", space, ready, restoring, navRestoring, err)
+				}
+			}
+			tc.fix(f)
+			if err := f.s.RestorePhysicsCheckpoint(c, multiSpaceRestoreOptions(t, f.s)); err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := f.s.Get(30); !ok || got == f.original[30] {
+				t.Fatal("valid restore did not restore the collider entity")
+			}
+		})
+	}
+}
+
+func TestPhysicsCheckpointValidateRejectsUnboundNavigationAgents(t *testing.T) {
+	f := newMultiSpaceCheckpoint(t)
+	c := f.capture(t)
+	clone := func() PhysicsCheckpoint {
+		var out PhysicsCheckpoint
+		data, err := json.Marshal(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = json.Unmarshal(data, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	// pending turns space 3's section into a pending world whose accepted
+	// navigation holds the same intents as its desired navigation.
+	pending := func(x *PhysicsCheckpoint) {
+		section := &x.Spaces[1]
+		accepted := *section.Navigation
+		accepted.Agents = append([]NavigationIntent(nil), section.Navigation.Agents...)
+		section.PendingWorld, section.AcceptedNavigation = true, &accepted
+	}
+	// unbind removes entity 11's body binding in space 3, leaving its
+	// navigation agent staged or not.
+	unbind := func(x *PhysicsCheckpoint, staged bool) {
+		section := &x.Spaces[1]
+		var kept []PhysicsAttachmentCheckpoint
+		for _, a := range section.Attachments {
+			if a.EntityID != 11 {
+				kept = append(kept, a)
+			}
+		}
+		section.Attachments = kept
+		for i := range section.NavigationAgents {
+			if section.NavigationAgents[i].EntityID == 11 {
+				section.NavigationAgents[i].StagedPhysics = staged
+			}
+		}
+	}
+	valid := map[string]func() PhysicsCheckpoint{
+		"pending world": func() PhysicsCheckpoint { x := clone(); pending(&x); return x },
+		"unstaged agent without body": func() PhysicsCheckpoint {
+			x := clone()
+			unbind(&x, false)
+			return x
+		},
+		"v1 unstaged agent without body": func() PhysicsCheckpoint {
+			_, _, _, v1 := physicsCheckpointFixture(t)
+			v1.Attachments = nil
+			v1.NavigationAgents[0].StagedPhysics = false
+			return v1
+		},
+	}
+	for name, build := range valid {
+		if err := build().Validate(); err != nil {
+			t.Fatalf("%s: control checkpoint rejected: %v", name, err)
+		}
+	}
+	invalid := map[string]func() PhysicsCheckpoint{
+		"accepted intent of another section's agent": func() PhysicsCheckpoint {
+			x := clone()
+			pending(&x)
+			intent := x.Spaces[0].Navigation.Agents[0]
+			x.Spaces[1].AcceptedNavigation.Agents = append(x.Spaces[1].AcceptedNavigation.Agents, intent)
+			return x
+		},
+		"accepted intent with another profile": func() PhysicsCheckpoint {
+			x := clone()
+			pending(&x)
+			x.Spaces[1].AcceptedNavigation.Agents[0].Profile = "giant"
+			return x
+		},
+		"staged agent without body": func() PhysicsCheckpoint {
+			x := clone()
+			unbind(&x, true)
+			return x
+		},
+		"v1 staged agent without body": func() PhysicsCheckpoint {
+			_, _, _, v1 := physicsCheckpointFixture(t)
+			v1.Attachments = nil
+			return v1
+		},
+	}
+	for name, build := range invalid {
+		if err := build().Validate(); err == nil {
+			t.Fatalf("%s: malformed checkpoint validated", name)
+		}
+	}
+}

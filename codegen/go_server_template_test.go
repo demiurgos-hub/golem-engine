@@ -670,6 +670,15 @@ func TestGenerateGoSharedTemplateIncludesEnableCollision2D(t *testing.T) {
 	if strings.Contains(content, "EnableSpaceCollision3D") {
 		t.Fatal("2D collision config must not emit EnableSpaceCollision3D")
 	}
+	// A setter that panics (backend already serving another space) must leave
+	// Runtime.Layers untouched.
+	if strings.Index(space, "sp.SetCollisionLayers(layers)") > strings.Index(space, "r.Layers = layers") {
+		t.Fatal("EnableSpaceCollision must install the space's services before storing Layers")
+	}
+	enable := content[strings.Index(content, "func (r *Runtime) EnableCollision("):]
+	if strings.Index(enable, "r.Server.SetCollisionLayers(layers)") > strings.Index(enable, "r.Layers = layers") {
+		t.Fatal("EnableCollision must install the server's services before storing Layers")
+	}
 }
 
 func TestGenerateGoSharedTemplateIncludesEnableCollision3D(t *testing.T) {

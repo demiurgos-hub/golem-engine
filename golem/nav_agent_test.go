@@ -141,3 +141,97 @@ func TestSpaceNavigationAPIsAreIsolated(t *testing.T) {
 		t.Fatal("Space(0).FindPath must match Server.FindPath")
 	}
 }
+
+// TestNavAgentDropsPathAfterSpaceMove covers a path planned in one space and
+// an entity moved to another before the next Tick, including a move back to
+// space 0 that leaves no entity outside it.
+func TestNavAgentDropsPathAfterSpaceMove(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		from, to SpaceID
+	}{{"space 3 to 0", 3, 0}, {"space 0 to 3", 0, 3}, {"space 3 to 4", 3, 4}} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewServer(ServerConfig{})
+			for _, space := range []SpaceID{0, 3, 4} {
+				s.Space(space).SetNavBackend(&navAgentBackend{reachable: true})
+			}
+			e := &navAgentEntity{stubEntity: stubEntity{id: 1}}
+			if err := s.CreateEntityIn(tc.from, e); err != nil {
+				t.Fatal(err)
+			}
+			a := NavAgent{Speed: 1}
+			a.Bind(e)
+			if !a.SetDestination(s, 10, 0) {
+				t.Fatal("destination failed")
+			}
+			a.Tick(1)
+			if e.x != 1 || !a.HasPath() {
+				t.Fatalf("agent did not follow its path before the move: x=%g", e.x)
+			}
+			if err := s.SetEntitySpace(1, tc.to); err != nil {
+				t.Fatal(err)
+			}
+			a.Tick(1)
+			if e.x != 1 || a.HasPath() {
+				t.Fatalf("agent kept following its old space's path: x=%g, path %v", e.x, a.HasPath())
+			}
+			if vx, vy := a.Velocity(); vx != 0 || vy != 0 {
+				t.Fatalf("moved agent kept velocity (%g,%g)", vx, vy)
+			}
+			if _, ok := a.NextWaypoint(); ok || a.RemainingDistance(1, 0) != 0 {
+				t.Fatal("moved agent still reports its old path")
+			}
+			if !a.SetDestination(s, 10, 0) {
+				t.Fatal("destination in the new space failed")
+			}
+			a.Tick(1)
+			if e.x != 2 {
+				t.Fatalf("agent did not follow its new space's path: x=%g", e.x)
+			}
+		})
+	}
+}
+
+func TestNavAgentDropsPathAfterSpaceMoveDetectedByHasPath(t *testing.T) {
+	s := NewServer(ServerConfig{})
+	s.SetNavBackend(&navAgentBackend{reachable: true})
+	e := &navAgentEntity{stubEntity: stubEntity{id: 1}}
+	if err := s.CreateEntity(e); err != nil {
+		t.Fatal(err)
+	}
+	a := NavAgent{Speed: 1}
+	a.Bind(e)
+	if !a.SetDestination(s, 10, 0) {
+		t.Fatal("destination failed")
+	}
+	if err := s.SetEntitySpace(1, 2); err != nil {
+		t.Fatal(err)
+	}
+	if a.HasPath() {
+		t.Fatal("HasPath reported the old space's path")
+	}
+}
+
+func TestNavAgentSingleSpaceFollowsPathToGoal(t *testing.T) {
+	s := NewServer(ServerConfig{})
+	s.SetNavBackend(&navAgentBackend{reachable: true})
+	e := &navAgentEntity{stubEntity: stubEntity{id: 1}}
+	if err := s.CreateEntity(e); err != nil {
+		t.Fatal(err)
+	}
+	a := NavAgent{Speed: 2}
+	a.Bind(e)
+	if !a.SetDestination(s, 5, 0) {
+		t.Fatal("destination failed")
+	}
+	for i := 0; i < 2; i++ {
+		a.Tick(1)
+		if !a.HasPath() {
+			t.Fatalf("path dropped early at tick %d", i)
+		}
+	}
+	a.Tick(1)
+	if e.x != 5 || a.HasPath() {
+		t.Fatalf("agent ended at x=%g with path %v", e.x, a.HasPath())
+	}
+}

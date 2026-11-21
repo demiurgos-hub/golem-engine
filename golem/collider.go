@@ -54,15 +54,19 @@ func MustCollisionBackend3D(backend CollisionBackend3D) {
 //
 // Call before spawning or restoring collidable entities (for example before
 // Runtime.LoadSnapshot). EnableCollision generated helpers set this after
-// binding the backend.
+// binding the backend. Panics when l already serves another space: each space
+// needs its own helper.
 func (s *Server) SetCollisionLayers(l *collision.Layers) {
+	s.mustUnshared("SetCollisionLayers", "collision layers", 0, l, layersOf)
 	s.space0.layers = l
 }
 
 // SetCollisionLayers3D stores space 0's 3D named-layer helper used for automatic
 // ColliderProvider3D registration. A nil helper disables automatic registration
 // without panicking. Call before spawning or restoring collidable 3D entities.
+// Panics when l already serves another space.
 func (s *Server) SetCollisionLayers3D(l *collision3d.Layers) {
+	s.mustUnshared("SetCollisionLayers3D", "3D collision layers", 0, l, layers3DOf)
 	s.space0.layers3D = l
 }
 
@@ -70,21 +74,26 @@ func (s *Server) SetCollisionLayers3D(l *collision3d.Layers) {
 // the space's backend receives only the positions of the space's entities, and
 // its contacts join the other spaces' contacts in one OnContact call and one
 // per-entity contact event pass. Space(0).SetCollisionBackend is
-// Server.SetCollisionBackend. Call before Run or on the tick goroutine.
+// Server.SetCollisionBackend. Call before Run or on the tick goroutine (not
+// enforced). Panics when b already serves another space; installing it again
+// in this space is allowed, and a space that cleared it with nil releases it.
 func (sp *Space) SetCollisionBackend(b CollisionBackend) {
 	if b == nil && sp.srv.runtime(sp.id) == nil {
 		return
 	}
+	sp.srv.mustUnshared("Space.SetCollisionBackend", "collision backend", sp.id, b, collisionOf)
 	sp.srv.ensureRuntime(sp.id).collision = b
 }
 
 // SetCollision3DBackend attaches a 3D collision backend to this space, with the
 // same per-space update and merged OnContact3D semantics as
-// SetCollisionBackend. Call before Run or on the tick goroutine.
+// SetCollisionBackend. Call before Run or on the tick goroutine (not
+// enforced). Panics when b already serves another space.
 func (sp *Space) SetCollision3DBackend(b CollisionBackend3D) {
 	if b == nil && sp.srv.runtime(sp.id) == nil {
 		return
 	}
+	sp.srv.mustUnshared("Space.SetCollision3DBackend", "3D collision backend", sp.id, b, collision3DOf)
 	sp.srv.ensureRuntime(sp.id).collision3D = b
 }
 
@@ -92,19 +101,23 @@ func (sp *Space) SetCollision3DBackend(b CollisionBackend3D) {
 // created in the space, or moved into it with MoveToSpace, register their
 // ColliderProvider shape on it; a nil helper disables registration in this
 // space. Bind it to this space's backend. Call before spawning or restoring
-// collidable entities in the space, before Run or on the tick goroutine.
+// collidable entities in the space, before Run or on the tick goroutine (not
+// enforced). Panics when l already serves another space.
 func (sp *Space) SetCollisionLayers(l *collision.Layers) {
 	if l == nil && sp.srv.runtime(sp.id) == nil {
 		return
 	}
+	sp.srv.mustUnshared("Space.SetCollisionLayers", "collision layers", sp.id, l, layersOf)
 	sp.srv.ensureRuntime(sp.id).layers = l
 }
 
 // SetCollisionLayers3D stores this space's 3D named-layer helper for
-// ColliderProvider3D registration, like SetCollisionLayers.
+// ColliderProvider3D registration, like SetCollisionLayers. Panics when l
+// already serves another space.
 func (sp *Space) SetCollisionLayers3D(l *collision3d.Layers) {
 	if l == nil && sp.srv.runtime(sp.id) == nil {
 		return
 	}
+	sp.srv.mustUnshared("Space.SetCollisionLayers3D", "3D collision layers", sp.id, l, layers3DOf)
 	sp.srv.ensureRuntime(sp.id).layers3D = l
 }

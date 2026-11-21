@@ -3,6 +3,7 @@ package golem
 import (
 	"cmp"
 	"fmt"
+	"reflect"
 	"slices"
 
 	"github.com/demiurgos-hub/golem-engine/golem/collision"
@@ -22,11 +23,13 @@ import (
 // physics step prepares its sibling navigation frame. Server.physics /
 // Server.navigation alias space 0's services (assigned together in
 // SetPhysicsWorld and SetSurfaceNavigation). Physics and surface navigation are
-// installed before Run only; an entity's attachments always live in the
-// services of its own space.
+// installed before Run only (their setters return an error afterwards); an
+// entity's attachments always live in the services of its own space.
 //
 // Runtimes are created and mutated before Run or on the tick goroutine, like
-// the Server setters they back.
+// the Server setters they back; for the legacy collision and 2D navigation
+// setters that is documented, not enforced. No service is ever installed in
+// two spaces: every setter checks the other runtimes first (serviceOwner).
 type spaceRuntime struct {
 	id          SpaceID
 	collision   collision.Backend
@@ -113,6 +116,67 @@ func (s *Server) eachRuntime(fn func(*spaceRuntime) error) error {
 	return nil
 }
 
+// sameService reports whether a and b hold the same non-nil pointer-like value
+// of the same dynamic type, so one backend, layer helper or world is not
+// installed in two spaces. Values of other kinds are never considered shared:
+// they are not compared with ==, which panics for non-comparable dynamic types.
+func sameService(a, b any) bool {
+	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
+	if !va.IsValid() || !vb.IsValid() || va.Type() != vb.Type() {
+		return false
+	}
+	switch va.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Chan, reflect.UnsafePointer:
+		return va.Pointer() != 0 && va.Pointer() == vb.Pointer()
+	}
+	return false
+}
+
+// serviceOwner returns a space other than space whose service selected by get
+// is svc. Re-installing a service into its own space is allowed, and a space
+// that cleared its slot no longer owns the service.
+func (s *Server) serviceOwner(space SpaceID, svc any, get func(*spaceRuntime) any) (SpaceID, bool) {
+	var owner SpaceID
+	found := false
+	_ = s.eachRuntime(func(rt *spaceRuntime) error {
+		if !found && rt.id != space && sameService(get(rt), svc) {
+			owner, found = rt.id, true
+		}
+		return nil
+	})
+	return owner, found
+}
+
+// mustUnshared panics when svc already serves another space in the slot get
+// selects. The legacy collision and 2D navigation setters have no error result,
+// and sharing one stateful backend between spaces is a setup bug: the backend
+// would be stepped once per space and leak contacts or paths across spaces.
+func (s *Server) mustUnshared(op, what string, space SpaceID, svc any, get func(*spaceRuntime) any) {
+	if owner, shared := s.serviceOwner(space, svc, get); shared {
+		panic(fmt.Sprintf("golem: %s: %s for space %d already serves space %d; each space needs its own", op, what, space, owner))
+	}
+}
+
+func collisionOf(rt *spaceRuntime) any   { return rt.collision }
+func collision3DOf(rt *spaceRuntime) any { return rt.collision3D }
+func layersOf(rt *spaceRuntime) any      { return rt.layers }
+func layers3DOf(rt *spaceRuntime) any    { return rt.layers3D }
+func navBackendOf(rt *spaceRuntime) any  { return rt.navBackend }
+
+func physicsWorldOf(rt *spaceRuntime) any {
+	if rt.physics == nil {
+		return nil
+	}
+	return rt.physics.world
+}
+
+func surfaceBackendOf(rt *spaceRuntime) any {
+	if rt.navigation == nil {
+		return nil
+	}
+	return rt.navigation.backend
+}
+
 // anyPhysics reports whether any space has a physics world.
 func (s *Server) anyPhysics() bool {
 	if s.space0.physics != nil {
@@ -185,20 +249,85 @@ func (rt *spaceRuntime) unregisterCollider(e Entity, id int64) {
 	}
 }
 
+// colliderAdd is one entity's legacy collider registration on a space's
+// layer helpers, validated before anything is published.
+type colliderAdd struct {
+	add2D   bool
+	shape2D CollisionShape
+	layer2D string
+	trig2D  bool
+	add3D   bool
+	shape3D CollisionShape3D
+	layer3D string
+	trig3D  bool
+}
+
+// planColliderAdd validates that e's collider providers can register on the
+// helpers of rt's space without panicking: every configured helper must define
+// the collider's layer and be bound to a backend. A missing helper (or a nil
+// runtime) skips that registration, as CreateEntity does. Errors read
+// "entity <id> ..." so callers prefix their operation.
+func (rt *spaceRuntime) planColliderAdd(e Entity) (colliderAdd, error) {
+	var add colliderAdd
+	if rt == nil {
+		return add, nil
+	}
+	id := e.EntityID()
+	if p2, ok := e.(ColliderProvider); ok && rt.layers != nil {
+		add.shape2D, add.layer2D, add.trig2D = p2.Collider()
+		if _, _, ok := rt.layers.Lookup(add.layer2D); !ok {
+			return add, fmt.Errorf("entity %d collision layer %q is not defined in space %d", id, add.layer2D, rt.id)
+		}
+		if !rt.layers.Bound() {
+			return add, fmt.Errorf("entity %d: space %d collision layers have no bound backend", id, rt.id)
+		}
+		add.add2D = true
+	}
+	if p3, ok := e.(ColliderProvider3D); ok && rt.layers3D != nil {
+		add.shape3D, add.layer3D, add.trig3D = p3.Collider3D()
+		if _, _, ok := rt.layers3D.Lookup(add.layer3D); !ok {
+			return add, fmt.Errorf("entity %d 3D collision layer %q is not defined in space %d", id, add.layer3D, rt.id)
+		}
+		if !rt.layers3D.Bound() {
+			return add, fmt.Errorf("entity %d: space %d 3D collision layers have no bound backend", id, rt.id)
+		}
+		add.add3D = true
+	}
+	return add, nil
+}
+
+// checkColliderRemove reports an error when removing e's colliders from rt's
+// helpers would panic because a configured helper has no bound backend.
+func (rt *spaceRuntime) checkColliderRemove(e Entity) error {
+	if rt == nil {
+		return nil
+	}
+	if _, ok := e.(ColliderProvider); ok && rt.layers != nil && !rt.layers.Bound() {
+		return fmt.Errorf("entity %d: space %d collision layers have no bound backend", e.EntityID(), rt.id)
+	}
+	if _, ok := e.(ColliderProvider3D); ok && rt.layers3D != nil && !rt.layers3D.Bound() {
+		return fmt.Errorf("entity %d: space %d 3D collision layers have no bound backend", e.EntityID(), rt.id)
+	}
+	return nil
+}
+
+// applyColliderAdd registers a planned collider on rt's helpers.
+func (rt *spaceRuntime) applyColliderAdd(id int64, add colliderAdd) {
+	if add.add2D {
+		rt.layers.Add(id, add.shape2D, add.layer2D, add.trig2D)
+	}
+	if add.add3D {
+		rt.layers3D.Add(id, add.shape3D, add.layer3D, add.trig3D)
+	}
+}
+
 // colliderMove is one entity's legacy collider transfer between the layer
 // helpers of two spaces, validated before the registry move.
 type colliderMove struct {
 	e        Entity
 	id       int64
 	from, to *spaceRuntime
-	add2D    bool
-	shape2D  CollisionShape
-	layer2D  string
-	trig2D   bool
-	add3D    bool
-	shape3D  CollisionShape3D
-	layer3D  string
-	trig3D   bool
+	colliderAdd
 }
 
 // planColliderMoves validates the legacy collider transfers of t without
@@ -214,8 +343,8 @@ func (s *Server) planColliderMoves(op string, t SpaceTransfer) ([]colliderMove, 
 		if !ok {
 			continue // the registry move reports it
 		}
-		p2, has2D := e.(ColliderProvider)
-		p3, has3D := e.(ColliderProvider3D)
+		_, has2D := e.(ColliderProvider)
+		_, has3D := e.(ColliderProvider3D)
 		if !has2D && !has3D {
 			continue
 		}
@@ -224,32 +353,14 @@ func (s *Server) planColliderMoves(op string, t SpaceTransfer) ([]colliderMove, 
 			continue
 		}
 		m := colliderMove{e: e, id: id, from: s.runtime(from), to: s.runtime(t.To)}
-		if has2D && m.from != nil && m.from.layers != nil && !m.from.layers.Bound() {
-			return nil, fmt.Errorf("golem: %s: entity %d: space %d collision layers have no bound backend", op, id, from)
+		if err := m.from.checkColliderRemove(e); err != nil {
+			return nil, fmt.Errorf("golem: %s: %w", op, err)
 		}
-		if has3D && m.from != nil && m.from.layers3D != nil && !m.from.layers3D.Bound() {
-			return nil, fmt.Errorf("golem: %s: entity %d: space %d 3D collision layers have no bound backend", op, id, from)
+		add, err := m.to.planColliderAdd(e)
+		if err != nil {
+			return nil, fmt.Errorf("golem: %s: %w", op, err)
 		}
-		if has2D && m.to != nil && m.to.layers != nil {
-			m.shape2D, m.layer2D, m.trig2D = p2.Collider()
-			if _, _, ok := m.to.layers.Lookup(m.layer2D); !ok {
-				return nil, fmt.Errorf("golem: %s: entity %d collision layer %q is not defined in space %d", op, id, m.layer2D, t.To)
-			}
-			if !m.to.layers.Bound() {
-				return nil, fmt.Errorf("golem: %s: entity %d: space %d collision layers have no bound backend", op, id, t.To)
-			}
-			m.add2D = true
-		}
-		if has3D && m.to != nil && m.to.layers3D != nil {
-			m.shape3D, m.layer3D, m.trig3D = p3.Collider3D()
-			if _, _, ok := m.to.layers3D.Lookup(m.layer3D); !ok {
-				return nil, fmt.Errorf("golem: %s: entity %d 3D collision layer %q is not defined in space %d", op, id, m.layer3D, t.To)
-			}
-			if !m.to.layers3D.Bound() {
-				return nil, fmt.Errorf("golem: %s: entity %d: space %d 3D collision layers have no bound backend", op, id, t.To)
-			}
-			m.add3D = true
-		}
+		m.colliderAdd = add
 		plan = append(plan, m)
 	}
 	return plan, nil

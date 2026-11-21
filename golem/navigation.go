@@ -268,8 +268,9 @@ type navigationService struct {
 // SetSurfaceNavigation installs space 0's 3D navigation service before Run.
 // Existing 2D navigation remains independent. Backend snapshots must be
 // immutable; workers never read entity pointers or mutate a published navigation
-// mesh. Space(id).SetSurfaceNavigation configures other spaces; each space has
-// its own backend, path and build worker pools.
+// mesh. It fails once Run has started. Space(id).SetSurfaceNavigation
+// configures other spaces; each space has its own backend, path and build
+// worker pools, and a backend already serving another space is rejected.
 func (s *Server) SetSurfaceNavigation(backend surface.Backend, cfg NavigationConfig) error {
 	return s.setSurfaceNavigation(0, backend, cfg)
 }
@@ -288,6 +289,9 @@ func (s *Server) setSurfaceNavigation(space SpaceID, backend surface.Backend, cf
 	}
 	if s.runtime(space).nav() != nil {
 		return errors.New("golem: navigation is already configured")
+	}
+	if owner, shared := s.serviceOwner(space, backend, surfaceBackendOf); shared {
+		return fmt.Errorf("golem: navigation backend already serves space %d; each space needs its own", owner)
 	}
 	rt := s.ensureRuntime(space)
 	rt.navigation = &navigationService{server: s, space: rt, backend: backend, config: cfg,

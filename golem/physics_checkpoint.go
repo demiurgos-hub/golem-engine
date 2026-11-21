@@ -511,10 +511,19 @@ func (c PhysicsSpaceCheckpoint) validate(checkpointID string, entities map[int64
 		return p.ErrUnsupported
 	}
 	for _, a := range c.NavigationAgents {
-		if !inSpace(a.EntityID) || a.Profile == "" || len(a.Profile) > 256 || navAgents[a.EntityID].EntityID != 0 || bindings[a.EntityID] && !a.StagedPhysics {
+		// A bound body requires staged navigation, and a staged agent requires a
+		// body: the space's physics step faults on a staged agent without one.
+		if !inSpace(a.EntityID) || a.Profile == "" || len(a.Profile) > 256 || navAgents[a.EntityID].EntityID != 0 || bindings[a.EntityID] != a.StagedPhysics {
 			return p.ErrInvalid
 		}
 		navAgents[a.EntityID] = a
+	}
+	if c.AcceptedNavigation != nil {
+		for _, intent := range c.AcceptedNavigation.Agents {
+			if navAgents[intent.EntityID].Profile != intent.Profile {
+				return p.ErrInvalid
+			}
+		}
 	}
 	if c.Navigation == nil {
 		if len(c.NavigationAgents) != 0 {
@@ -678,15 +687,20 @@ type physicsSpaceRestore struct {
 // entities and physics of every space untouched. A failure after any commit
 // faults every space and keeps physics and navigation readiness closed in all
 // of them until a coherent retry succeeds. Entities are restored in their
-// recorded spaces, with schema colliders on those spaces' layers.
+// recorded spaces, with schema colliders on those spaces' layers; every
+// collider removal and registration is checked (layer defined, helper bound)
+// before the first commit, so a collider that cannot register fails the
+// restore with nothing changed. A server without physics, or with a serviced
+// space without physics, gets the same configuration error as
+// CapturePhysicsCheckpoint; ErrBusy reports only a busy or closed service.
 func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRestoreOptions) (err error) {
-	runtimes := s.servicedRuntimes()
-	if len(runtimes) == 0 {
-		return p.ErrBusy
+	runtimes, err := s.checkpointRuntimes()
+	if err != nil {
+		return err
 	}
 	for _, rt := range runtimes {
 		ps := rt.physics
-		if ps == nil || ps.closed || ps.stepping || ps.dispatching || ps.restoring && ps.fault == nil {
+		if ps.closed || ps.stepping || ps.dispatching || ps.restoring && ps.fault == nil {
 			return p.ErrBusy
 		}
 		if rt.navigation != nil && rt.navigation.frame != nil {
@@ -803,6 +817,20 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 			return err
 		}
 	}
+	// Schema colliders are re-registered only after the registry and every
+	// world have been replaced, where a Layers panic would leave everything
+	// half-published. Check every removal and registration first.
+	for _, entity := range s.reg.All() {
+		if err = s.runtimeOf(entity.EntityID()).checkColliderRemove(entity); err != nil {
+			return fmt.Errorf("golem: physics restore: %w", err)
+		}
+	}
+	colliders := make([]colliderAdd, len(entries))
+	for i, entry := range entries {
+		if colliders[i], err = s.runtime(entry.Space).planColliderAdd(entry.Entity); err != nil {
+			return fmt.Errorf("golem: physics restore: %w", err)
+		}
+	}
 	for _, r := range restores {
 		if r.section.Navigation != nil && r.navigation == nil {
 			if r.navigation, err = r.options.PrepareNavigation(*r.section.Navigation); err != nil {
@@ -888,8 +916,8 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 	s.avatarSession = map[int64]int64{}
 	s.avatarMu.Unlock()
 	s.eventualTrackers = nil
-	for _, entry := range entries {
-		s.registerCollider(entry.Entity)
+	for i, entry := range entries {
+		s.runtime(entry.Space).applyColliderAdd(entry.Entity.EntityID(), colliders[i])
 	}
 	for _, r := range restores {
 		ps := r.rt.physics

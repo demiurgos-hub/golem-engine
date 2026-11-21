@@ -23,7 +23,10 @@ var writeSnapshotAsync = snapshot.WriteAsync
 // consumer's generated code (e.g. synced.SchemaFingerprint). It is embedded in
 // the file header and validated on Load to detect schema changes between saves.
 // Each entity's space is recorded; the file keeps snapshot format version 1
-// while every entity is in space 0.
+// while every entity is in space 0. Only entity state is saved, even when a
+// space has physics: bodies, bindings and navigation are not (paired physics
+// checkpoints save those; SaveContentSnapshot and LoadSnapshotStrict reject
+// servers with physics).
 func (s *Server) SaveSnapshot(fingerprint, path string) <-chan error {
 	data, err := snapshot.CaptureSpaced(s.reg.AppendSpaced(nil), fingerprint)
 	if err != nil {
@@ -108,7 +111,8 @@ func forwardSnapshotResult(result <-chan error, done chan<- error) {
 //
 // Returns snapshot.ErrFingerprintMismatch when the file was saved with a
 // different schema binary layout — the caller should delete the snapshot and
-// rebuild state from scratch.
+// rebuild state from scratch. It does not check for physics: entities are
+// recreated with CreateEntityIn and attach no bodies or navigation.
 func (s *Server) LoadSnapshot(path, fingerprint string, restore func(snapshot.Record) (Entity, error)) error {
 	records, err := snapshot.Load(path, fingerprint)
 	if err != nil {

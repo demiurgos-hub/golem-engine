@@ -668,7 +668,10 @@ func (s *Server) SetRemovalSerializer(fn RemovalSerializer) {
 // schema colliders (ColliderProvider) registered through the layer helper;
 // shapes the game registers on a backend itself stay where they are, so remove
 // and re-register them on the destination's backend after MoveToSpace returns.
+// Call before Run or on the tick goroutine (not enforced). Panics when b
+// already serves another space: each space needs its own backend.
 func (s *Server) SetCollisionBackend(b collision.Backend) {
+	s.mustUnshared("SetCollisionBackend", "collision backend", 0, b, collisionOf)
 	s.space0.collision = b
 }
 
@@ -677,8 +680,10 @@ func (s *Server) SetCollisionBackend(b collision.Backend) {
 // it, reads corrections back via Position3DWriter, and fires OnContact3D
 // handlers. Space(id).SetCollision3DBackend configures other spaces. As with
 // SetCollisionBackend, shapes the game registers itself are not moved by
-// MoveToSpace; re-register them after it returns.
+// MoveToSpace; re-register them after it returns. Panics when b already
+// serves another space.
 func (s *Server) SetCollision3DBackend(b collision3d.Backend) {
+	s.mustUnshared("SetCollision3DBackend", "3D collision backend", 0, b, collision3DOf)
 	s.space0.collision3D = b
 }
 

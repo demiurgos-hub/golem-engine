@@ -5,8 +5,11 @@ import "github.com/demiurgos-hub/golem-engine/golem/nav"
 // SetNavBackend registers the space-0 nav backend used by Server.FindPath,
 // Server.SetNavWalkable and NavAgent for entities in space 0. Call this at
 // startup after building your grid from map data. Passing nil disables the
-// nav backend. Use Space(id).SetNavBackend for other spaces.
+// nav backend. Use Space(id).SetNavBackend for other spaces. Call before Run
+// or on the tick goroutine (not enforced). Panics when b already serves
+// another space: each space needs its own grid.
 func (s *Server) SetNavBackend(b nav.Backend) {
+	s.mustUnshared("SetNavBackend", "nav backend", 0, b, navBackendOf)
 	s.space0.navBackend = b
 }
 
@@ -28,11 +31,14 @@ func (s *Server) SetNavWalkable(x, y float64, walkable bool) {
 
 // SetNavBackend registers this space's nav backend, used by FindPath,
 // SetNavWalkable and NavAgent for entities in this space. Passing nil
-// disables it. Call before Run or on the tick goroutine.
+// disables it. Call before Run or on the tick goroutine (not enforced).
+// Panics when b already serves another space; installing it again in this
+// space is allowed.
 func (sp *Space) SetNavBackend(b nav.Backend) {
 	if b == nil && sp.srv.runtime(sp.id) == nil {
 		return
 	}
+	sp.srv.mustUnshared("Space.SetNavBackend", "nav backend", sp.id, b, navBackendOf)
 	sp.srv.ensureRuntime(sp.id).navBackend = b
 }
 
