@@ -34,6 +34,9 @@ type eventualStateFrame struct {
 	stream       []byte
 	payloadLen   int
 	fitsDatagram bool
+	// ownerScoped marks frames of OwnerScopedEntity entities, whose private
+	// bytes are re-checked against the recipient's ownership before sending.
+	ownerScoped bool
 }
 
 type eventualPreparedFrame struct {
@@ -441,6 +444,12 @@ func (s *Server) eventualFrameForChange(ch eventualStateChange) (eventualStateFr
 	if !ok {
 		return eventualStateFrame{}, false, nil
 	}
+	f, live, err := s.eventualFrameForEntity(e, ch)
+	f.ownerScoped = entityIsOwnerScoped(e)
+	return f, live, err
+}
+
+func (s *Server) eventualFrameForEntity(e Entity, ch eventualStateChange) (eventualStateFrame, bool, error) {
 	if ch.full {
 		if ch.public && !entityIsOwnerScoped(e) {
 			return eventualStateFrame{}, true, fmt.Errorf("public full for eventual entity %d: missing OwnerScopedEntity", ch.id)
@@ -537,6 +546,8 @@ func (s *Server) sendPreparedEventualStateFrames(sessionID int64, t *eventualSta
 // sendEventualFrames owns packing and submission for either cached changes or
 // prepared frames. The two adapters supply mutually exclusive slices. Reading
 // them directly avoids per-frame callback/struct-copy overhead and an extra slice.
+// A private frame of an owner-scoped entity is re-checked against the
+// session's current ownership after it was built (publicEventualFrame).
 func (s *Server) sendEventualFrames(sessionID int64, t *eventualStateTracker, changes []eventualStateChange, cache *eventualStateTickCache, prepared []eventualPreparedFrame) (eventualStateSendStats, error) {
 	count := len(changes)
 	if prepared != nil {
@@ -597,6 +608,13 @@ func (s *Server) sendEventualFrames(sessionID int64, t *eventualStateTracker, ch
 				return stats, err
 			}
 		}
+		if live && frame.ownerScoped && !ch.public && !s.sessionOwnsEntity(sessionID, ch.id) {
+			var err error
+			ch, frame, live, err = s.publicEventualFrame(ch, cache)
+			if err != nil {
+				return stats, err
+			}
+		}
 		if !live {
 			t.clearDirty(ch.id)
 			continue
@@ -642,4 +660,32 @@ func (s *Server) sendEventualFrames(sessionID int64, t *eventualStateTracker, ch
 		}
 	}
 	return stats, nil
+}
+
+// publicEventualFrame replaces a private eventual change whose recipient lost
+// ownership after its view was chosen (eventualChangeForSession) with the
+// public change and its frame. Server.SetOwner changes the registry owner
+// before it bumps the state revision, so private bytes stamped with the bumped
+// revision always fail the caller's ownership re-check. The public change is
+// what markSent records, so a retry after datagram loss stays public. cache may
+// be nil (prepared frames).
+func (s *Server) publicEventualFrame(ch eventualStateChange, cache *eventualStateTickCache) (eventualStateChange, eventualStateFrame, bool, error) {
+	pub := eventualStateChange{id: ch.id, full: ch.full, public: true}
+	if !ch.full {
+		e, ok := s.reg.Get(ch.id)
+		if !ok {
+			return pub, eventualStateFrame{}, false, nil
+		}
+		pub.mask = e.(registry.OwnerScopedEntity).PublicReplicationMask(ch.mask)
+		if pub.mask == 0 {
+			// Nothing public changed: the caller drops the change.
+			return pub, eventualStateFrame{}, true, nil
+		}
+	}
+	if cache != nil {
+		f, live, err := cache.frame(s, pub)
+		return pub, f, live, err
+	}
+	f, live, err := s.eventualFrameForChange(pub)
+	return pub, f, live, err
 }

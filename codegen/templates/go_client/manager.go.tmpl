@@ -19,6 +19,17 @@ type SyncedEntity interface {
 // longest are evicted and OnResyncNeeded reports that entity.
 const maxHeldCompactUpdates = 256
 
+// maxResyncRetries bounds how often one pending resync is requested again
+// after its recovery full state was rejected as stale.
+const maxResyncRetries = 3
+
+// pendingResync tracks an entity whose evicted records still need a full state
+// of at least revision (the newest evicted record's revision).
+type pendingResync struct {
+	revision uint64
+	retries  int
+}
+
 // EntityManager manages synced entities and dispatches incoming EntityUpdate messages.
 type EntityManager struct {
 	entities      map[int64]SyncedEntity
@@ -27,6 +38,7 @@ type EntityManager struct {
 	heldOrder     []int64            // IDs with held records, in the order their first record was held
 	heldCount     int
 	clearEpoch    uint64 // advanced by Clear so a callback that clears stops a replay
+	pendingResync map[int64]pendingResync
 	onSpawn       func(SyncedEntity)
 	onUpdate      func(SyncedEntity)
 	onRemove      func(int64)
@@ -75,6 +87,10 @@ func (m *EntityManager) OnRemove(fn func(int64)) { m.onRemove = fn }
 // records held for that entity are evicted before its spawn arrived. Those
 // datagrams were already acknowledged, so the server will not resend them;
 // GameClient installs a callback that requests a full state of the entity.
+// The manager remembers the request until a full state at least as new as the
+// evicted records applies, or the entity is removed or cleared; when a full
+// state for it is rejected as stale (a newer datagram overtook it), the
+// callback fires again, at most maxResyncRetries times.
 func (m *EntityManager) OnResyncNeeded(fn func(entityID int64)) { m.onResync = fn }
 
 // Clear removes every known entity, fires onRemove for each, and clears
@@ -91,6 +107,7 @@ func (m *EntityManager) Clear() {
 	}
 	clear(m.lastRevisions)
 	m.dropHeldCompact()
+	clear(m.pendingResync)
 }
 {{range .Entities}}
 
@@ -133,6 +150,7 @@ func (m *EntityManager) ApplyEntityUpdate(update *EntityUpdate) {
 			return
 		}
 		m.lastRevisions[id] = revision
+		delete(m.pendingResync, id)
 		m.removeEntity(id)
 		m.dropHeldCompactFor(id)
 	}
@@ -193,8 +211,15 @@ func (m *EntityManager) holdCompact(id int64, frame []byte) {
 	epoch := m.clearEpoch
 	for m.heldCount >= maxHeldCompactUpdates && len(m.heldOrder) > 0 {
 		evicted := m.heldOrder[0]
+		revision := heldRevision(m.heldCompact[evicted])
 		m.dropHeldCompactFor(evicted)
 		if m.onResync != nil {
+			if m.pendingResync == nil {
+				m.pendingResync = make(map[int64]pendingResync)
+			}
+			pending := m.pendingResync[evicted]
+			pending.revision = max(pending.revision, revision)
+			m.pendingResync[evicted] = pending
 			m.onResync(evicted)
 			if m.clearEpoch != epoch {
 				return
@@ -206,6 +231,41 @@ func (m *EntityManager) holdCompact(id int64, frame []byte) {
 	}
 	m.heldCompact[id] = append(m.heldCompact[id], append([]byte(nil), frame...))
 	m.heldCount++
+}
+
+// heldRevision returns the newest revision among held compact records.
+func heldRevision(held [][]byte) uint64 {
+	var newest uint64
+	for _, frame := range held {
+		r := pb.NewReader(frame)
+		r.Int64()
+		newest = max(newest, r.Uint64())
+	}
+	return newest
+}
+
+// staleFullState requests a resync again when a full state for an entity with
+// a pending resync is rejected as stale, up to maxResyncRetries times.
+func (m *EntityManager) staleFullState(id int64) {
+	pending, ok := m.pendingResync[id]
+	if !ok {
+		return
+	}
+	if pending.retries >= maxResyncRetries || m.onResync == nil {
+		delete(m.pendingResync, id)
+		return
+	}
+	pending.retries++
+	m.pendingResync[id] = pending
+	m.onResync(id)
+}
+
+// appliedFullState forgets a pending resync once a full state at least as new
+// as the evicted records applied.
+func (m *EntityManager) appliedFullState(id int64, revision uint64) {
+	if pending, ok := m.pendingResync[id]; ok && revision >= pending.revision {
+		delete(m.pendingResync, id)
+	}
 }
 
 // dropHeldCompactFor discards the records held for id and its place in the
@@ -259,6 +319,7 @@ func (m *EntityManager) applyState{{.Name}}(st *{{.Name}}State) {
 	id := st.EntityId
 	revision := st.Revision
 	if m.isStale(id, revision) {
+		m.staleFullState(id)
 		return
 	}
 	entity, ok := m.entities[id].({{.Name}}ClientEntity)
@@ -269,6 +330,7 @@ func (m *EntityManager) applyState{{.Name}}(st *{{.Name}}State) {
 	}
 	entity.ApplyState(st)
 	m.lastRevisions[id] = revision
+	m.appliedFullState(id, revision)
 	if isNew {
 		epoch := m.clearEpoch
 		if lifecycle, ok := entity.(golemclient.EntityLifecycle); ok {

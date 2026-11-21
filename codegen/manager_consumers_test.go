@@ -80,6 +80,25 @@ func TestManagerClearInCallbackStopsReplay(t *testing.T) {
   if updates!=want||m.Get(7)!=nil||m.heldCount!=0||len(m.heldCompact)!=0||len(m.heldOrder)!=0 {t.Fatal("replay continued after Clear",inSpawn,updates,m.heldCount)}
  }
 }
+// A recovery full state rejected as stale requests the resync again, at most
+// three times; a full state at least as new as the evicted records, a removal
+// and Clear forget the request.
+func TestManagerRetriesStaleResyncFullState(t *testing.T) {
+ var m *EntityManager;var resyncs []int64;var filler int64
+ reset:=func(){m=NewEntityManager();resyncs=nil;filler=100000;m.OnResyncNeeded(func(id int64){resyncs=append(resyncs,id)})}
+ state:=func(id int64,rev uint64){m.ApplyEntityUpdate(&EntityUpdate{Payload:&EntityUpdate_ActorState{ActorState:&ActorState{EntityId:id,Revision:rev}}})}
+ compact:=func(id int64,rev uint64){m.ApplyCompactUpdate((&pb.Writer{}).Int64(id).Uint64(rev).Uint64(1).Raw((&ActorDelta{Items:[]Item{}}).Marshal()).Finish())}
+ evict:=func(id int64,revs ...uint64){for _,r:=range revs {compact(id,r)};for len(resyncs)==0 {filler++;compact(filler,1)};if !reflect.DeepEqual(resyncs,[]int64{id}) {t.Fatal("eviction",resyncs)}}
+ // The older spawn applies without settling the resync; a newer datagram then
+ // overtakes every recovery full state.
+ reset();evict(1,5,6);state(1,4);compact(1,8)
+ for i:=0;i<5;i++ {state(1,7)}
+ if !reflect.DeepEqual(resyncs,[]int64{1,1,1,1})||len(m.pendingResync)!=0 {t.Fatal("stale retries",resyncs,m.pendingResync)}
+ reset();evict(2,5);state(2,5);state(2,4);if len(resyncs)!=1 {t.Fatal("an applied full state kept the resync",resyncs)}
+ reset();evict(3,5);m.ApplyEntityUpdate(&EntityUpdate{Payload:&EntityUpdate_EntityRemoved{EntityRemoved:&EntityRemoved{EntityId:3,Revision:6}}});state(3,5)
+ if len(resyncs)!=1 {t.Fatal("a removal kept the resync",resyncs)}
+ reset();evict(4,5);m.Clear();if len(m.pendingResync)!=0 {t.Fatal("Clear kept the resync")}
+}
 `
 
 // The generated server bumps an entity's revision on an owner change, so the
@@ -175,6 +194,24 @@ for(const inSpawn of [false,true]){
  cstate(7,1);
  assert.equal(cupdates,inSpawn?0:1);assert.equal(c.get(7),undefined);assert.equal(c._heldCount,0);assert.equal(c._heldCompact.size,0);
 }
+// A recovery full state rejected as stale requests the resync again (at most
+// three times); a full state at least as new as the evicted records, a removal
+// and clear() forget the request.
+{
+ let r,rs,filler;
+ const reset=()=>{r=new EntityManager();rs=[];filler=100000;r.onResyncNeeded(id=>rs.push(id));};
+ const rstate=(id,revision)=>r.applyUpdate({actorState:Object.assign(new ActorState(),{entityId:id,revision,items:[]})});
+ const rcompact=(id,revision)=>{
+  const body=ActorDelta.encode(Object.assign(new ActorDelta(),{items:[]}));const header=new PbWriter().int64(id).uint64(revision).uint64(1).finish();
+  const bytes=new Uint8Array(header.length+body.length);bytes.set(header);bytes.set(body,header.length);r.applyCompactUpdate(bytes);
+ };
+ const evict=(id,...revs)=>{for(const rev of revs)rcompact(id,rev);while(rs.length===0)rcompact(++filler,1);assert.deepEqual(rs,[id]);};
+ reset();evict(1,5,6);rstate(1,4);rcompact(1,8);for(let i=0;i<5;i++)rstate(1,7);
+ assert.deepEqual(rs,[1,1,1,1]);assert.equal(r._pendingResync.size,0);
+ reset();evict(2,5);rstate(2,5);rstate(2,4);assert.equal(rs.length,1);
+ reset();evict(3,5);r.applyUpdate({entityRemoved:{entityId:3,revision:6}});rstate(3,5);assert.equal(rs.length,1);
+ reset();evict(4,5);r.clear();assert.equal(r._pendingResync.size,0);
+}
 `
 
 const csManagerContract = `using System;using System.Collections.Generic;using System.Linq;using Generated;using GolemEngine.Unity;
@@ -233,6 +270,21 @@ static class ManagerContract {
   cstate(7,1);
   Check(cupdates==(inSpawn?0:1)&&c.Get(7)==null,"replay continued after Clear");
   var heldCount=(int)typeof(EntityManager).GetField("_heldCount",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).GetValue(c);Check(heldCount==0,"Clear left replayed records held");
+ }
+ // A recovery full state rejected as stale requests the resync again (at most three times); a full state at least
+ // as new as the evicted records, a removal and Clear forget the request.
+ {
+  EntityManager r=null;var rs=new List<long>();long filler=100000;
+  Action reset=()=>{r=new EntityManager();rs.Clear();filler=100000;((IEntityResyncNotifier)r).OnResyncNeeded(id=>rs.Add(id));};
+  Action<long,ulong> rstate=(id,rev)=>r.ApplyUpdate(new EntityUpdate{ActorState=new ActorState{EntityId=id,Revision=rev}});
+  Action<long,ulong> rcompact=(id,rev)=>r.ApplyCompactUpdate(new PbWriter().Int64(id).Uint64(rev).Uint64(1).Finish().Concat(ActorDelta.Encode(new ActorDelta{Items=new List<Item>()})).ToArray());
+  Action<long,ulong[]> evict=(id,revs)=>{foreach(var rev in revs)rcompact(id,rev);while(rs.Count==0)rcompact(++filler,1);Check(rs.SequenceEqual(new[]{id}),"eviction");};
+  Func<int> pending=()=>((System.Collections.ICollection)typeof(EntityManager).GetField("_pendingResync",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).GetValue(r)).Count;
+  reset();evict(1,new ulong[]{5,6});rstate(1,4);rcompact(1,8);for(int i=0;i<5;i++)rstate(1,7);
+  Check(rs.SequenceEqual(new long[]{1,1,1,1})&&pending()==0,"stale retries");
+  reset();evict(2,new ulong[]{5});rstate(2,5);rstate(2,4);Check(rs.Count==1,"an applied full state kept the resync");
+  reset();evict(3,new ulong[]{5});r.ApplyUpdate(new EntityUpdate{EntityRemoved=new EntityRemoved{EntityId=3,Revision=6}});rstate(3,5);Check(rs.Count==1,"a removal kept the resync");
+  reset();evict(4,new ulong[]{5});r.Clear();Check(pending()==0,"Clear kept the resync");
  }
  }
 }

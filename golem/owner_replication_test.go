@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 
@@ -773,5 +774,150 @@ func TestSetOwnerConcurrentRace(t *testing.T) {
 		if !owned && ref.newOwner != 0 {
 			t.Fatalf("unowned but pending newOwner=%d", ref.newOwner)
 		}
+	}
+}
+
+// racingOwnerEntity runs onCompact once inside compact serialization, standing
+// in for a concurrent SetOwner landing between view selection and the bytes.
+type racingOwnerEntity struct {
+	ownerScopedTickEntity
+	onCompact func()
+}
+
+func (e *racingOwnerEntity) MarshalCompactDeltaMask(mask uint64) ([]byte, error) {
+	if fn := e.onCompact; fn != nil {
+		e.onCompact = nil
+		fn()
+	}
+	return e.ownerScopedTickEntity.MarshalCompactDeltaMask(mask)
+}
+
+// TestOwnerRevokeDuringFullSerializationSendsPublicView: the session is the
+// owner when its view is chosen, and a revoke lands while the owner-view full
+// state is serialized. The session gets the public view, both on a real
+// replication pass (visibility entry) and in the connect snapshot.
+func TestOwnerRevokeDuringFullSerializationSendsPublicView(t *testing.T) {
+	rig := newSpaceTestRig(t, false, 1)
+	srv, conn, sid := rig.srv, rig.conns[0], rig.ids[0]
+	crate := &ownerScopedTickEntity{interestTickEntity: interestTickEntity{id: 1, full: []byte("crate-full"), revision: 1}, publicFull: []byte("crate-public")}
+	if err := srv.CreateEntity(crate, sid); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetEntityVisibilityGroup(crate.id, "party")
+	rig.tick(t)
+	expectNoMessage(t, conn)
+
+	srv.JoinVisibilityGroup(sid, "party")
+	crate.onFull = func() {
+		crate.onFull = nil
+		if !srv.SetOwner(crate.id, sid+1) {
+			t.Error("SetOwner")
+		}
+	}
+	rig.tick(t)
+	if got := readSpaceTokens(t, conn); !slices.Equal(got, []string{"crate-public"}) {
+		t.Fatalf("entry after a revoke during serialization = %q", got)
+	}
+
+	if !srv.SetOwner(crate.id, sid) {
+		t.Fatal("SetOwner")
+	}
+	crate.onFull = func() {
+		crate.onFull = nil
+		srv.SetOwner(crate.id, 0)
+	}
+	snapshot, err := srv.entitySnapshotForSession(sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot) != 1 || string(snapshot[0].Data) != "crate-public" {
+		t.Fatalf("connect snapshot after a revoke during serialization = %+v", snapshot)
+	}
+}
+
+// TestOwnerRevokeDuringEventualSerializationSendsPublicDatagram uses a real
+// WebTransport peer: the owner's private datagram change is chosen, then a
+// revoke lands while its compact bytes are serialized. The datagram carries
+// the public change, and the in-flight record (used for retries after loss)
+// is public too.
+func TestOwnerRevokeDuringEventualSerializationSendsPublicDatagram(t *testing.T) {
+	s, peer, stream, sid := replicationTestPeer(t, 0)
+	crate := &racingOwnerEntity{ownerScopedTickEntity: ownerScopedTickEntity{
+		interestTickEntity: interestTickEntity{id: 1, full: []byte("crate-full"), revision: 1},
+		publicFull:         []byte("crate-public"),
+		publicCompact:      []byte("public-compact"),
+		ownerMask:          0b10,
+	}}
+	if err := s.CreateEntity(crate, sid); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.runBroadcastTick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"crate-full"}) {
+		t.Fatalf("spawn = %q", got)
+	}
+	crate.flush, crate.compact, crate.flushMask, crate.revision = []byte("delta"), []byte("private-compact"), 0b11, 2
+	crate.onCompact = func() {
+		if !s.SetOwner(crate.id, sid+1) {
+			t.Error("SetOwner")
+		}
+	}
+	if err := s.runBroadcastTick(); err != nil {
+		t.Fatal(err)
+	}
+	got := receiveReplicationDatagram(t, peer)
+	if bytes.Contains(got, []byte("private-compact")) || !bytes.Contains(got, []byte("public-compact")) {
+		t.Fatalf("datagram after a revoke during serialization = %q", got)
+	}
+	tracker := s.eventualTrackers[sid]
+	if len(tracker.inFlight) != 1 {
+		t.Fatalf("in flight = %v", tracker.inFlight)
+	}
+	for _, changes := range tracker.inFlight {
+		if len(changes) != 1 || !changes[0].public || changes[0].mask != 0b01 {
+			t.Fatalf("in-flight change = %+v, want the public change", changes)
+		}
+	}
+}
+
+// TestOwnershipGrantFollowsCurrentOwner: the pass snapshots an A→B refresh,
+// then (from OnUpdates, standing in for another goroutine) ownership moves on
+// to C before delivery. B is not granted C's private state; the next pass
+// clears B with the public view.
+func TestOwnershipGrantFollowsCurrentOwner(t *testing.T) {
+	rig := newSpaceTestRig(t, true, 1)
+	srv, conn, b := rig.srv, rig.conns[0], rig.ids[0]
+	a, c := b+10, b+20
+	avatar := &interestTickEntity{id: 1, full: []byte("avatar-full")}
+	crate := &ownerScopedTickEntity{interestTickEntity: interestTickEntity{id: 2, x: 1, full: []byte("crate-full"), revision: 1}, publicFull: []byte("crate-public")}
+	rig.spaceAvatar(t, b, avatar)
+	if err := srv.CreateEntity(crate, a); err != nil {
+		t.Fatal(err)
+	}
+	rig.tick(t)
+	got := readSpaceTokens(t, conn)
+	if slices.Sort(got); !slices.Equal(got, []string{"avatar-full", "crate-public"}) {
+		t.Fatalf("entered = %q", got)
+	}
+
+	if !srv.SetOwner(crate.id, b) {
+		t.Fatal("SetOwner")
+	}
+	// A spawn nobody sees makes OnUpdates run.
+	if err := srv.CreateEntityIn(9, &interestTickEntity{id: 50, full: []byte("hidden-full")}); err != nil {
+		t.Fatal(err)
+	}
+	srv.OnUpdates(func([][]byte) {
+		if !srv.SetOwner(crate.id, c) {
+			t.Error("SetOwner")
+		}
+	})
+	rig.tick(t)
+	srv.OnUpdates(nil)
+	expectNoMessage(t, conn)
+	rig.tick(t)
+	if got := readSpaceTokens(t, conn); !slices.Equal(got, []string{"crate-public"}) {
+		t.Fatalf("refresh after the later change = %q", got)
 	}
 }

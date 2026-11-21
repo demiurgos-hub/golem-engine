@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net"
@@ -1001,29 +1002,58 @@ func TestSpaceSwitchEventHoldReleasesUnswitchedAndKeepsUnplannedOnce(t *testing.
 	}
 }
 
-// waitForEntityResync waits until the EntityResync inbox holds n IDs for sid.
-func waitForEntityResync(t *testing.T, s *Server, sid int64, n int) {
+// entityResyncInbox returns the IDs stored for sid, sorted.
+func entityResyncInbox(s *Server, sid int64) []int64 {
+	s.entityResyncMu.Lock()
+	defer s.entityResyncMu.Unlock()
+	var ids []int64
+	for id := range s.entityResyncInbox[sid] {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// entityResyncSentinel is a SpaceAck transition no test plans.
+const entityResyncSentinel = 1 << 40
+
+// sendEntityResyncs writes EntityResync control frames for ids on the client
+// stream, then a SpaceAck sentinel, and waits for the sentinel: the connection
+// goroutine handles control frames in order, so every request has been stored
+// or dropped by then. The sentinel is consumed (and ignored) right away.
+func sendEntityResyncs(t *testing.T, s *Server, stream io.Reader, sid int64, ids ...int64) {
 	t.Helper()
-	for deadline := time.Now().Add(3 * time.Second); ; {
-		s.entityResyncMu.Lock()
-		got := len(s.entityResyncInbox[sid])
-		s.entityResyncMu.Unlock()
-		if got == n {
-			return
+	writer := stream.(io.Writer)
+	for _, id := range ids {
+		if _, err := writer.Write(netwire.AppendFrame(nil, golemnet.ClientEntityResyncControlFrame(id))); err != nil {
+			t.Fatal(err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("EntityResync inbox for session %d has %d IDs, want %d", sid, got, n)
-		}
-		time.Sleep(time.Millisecond)
+	}
+	if _, err := writer.Write(netwire.AppendFrame(nil, golemnet.ClientSpaceAckControlFrame(entityResyncSentinel))); err != nil {
+		t.Fatal(err)
+	}
+	waitForSpaceAck(t, s, sid, entityResyncSentinel)
+	s.applySpaceAcks()
+}
+
+// expectStreamMarker queues a marker frame and checks it is the next frame
+// the client reads, so nothing else was sent before it.
+func expectStreamMarker(t *testing.T, s *Server, stream io.Reader, sid int64) {
+	t.Helper()
+	if err := s.listener.SendBatch(sid, [][]byte{s.listener.Wrap([]byte("marker"))}); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"marker"}) {
+		t.Fatalf("frame before the marker = %q", got)
 	}
 }
 
-// TestEntityResyncSendsStreamFullStateForKnownEntities uses a real WebTransport
-// peer in datagram mode: an EntityResync request for an entity the session
-// knows answers with that entity's full state in the session's current owner
-// or public view on the ordered stream; unknown, deleted and other-space
-// entities are ignored.
-func TestEntityResyncSendsStreamFullStateForKnownEntities(t *testing.T) {
+// TestEntityResyncAnsweredByReplicationPass uses a real WebTransport peer in
+// datagram mode: an EntityResync request is stored only for an entity the
+// session knows, and the next replication pass answers it on the ordered
+// stream with the entity's full state in the session's current owner or
+// public view; unknown and other-space entities are dropped on receipt.
+func TestEntityResyncAnsweredByReplicationPass(t *testing.T) {
 	for _, interestMode := range []bool{false, true} {
 		name, cellSize := "broadcast", 0.0
 		if interestMode {
@@ -1031,7 +1061,6 @@ func TestEntityResyncSendsStreamFullStateForKnownEntities(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			s, _, stream, sid := replicationTestPeer(t, cellSize)
-			writer := stream.(io.Writer)
 			avatar := &interestTickEntity{id: 1, full: []byte("avatar-full"), revision: 1}
 			crate := &ownerScopedTickEntity{interestTickEntity: interestTickEntity{id: 2, x: 1, full: []byte("crate-full"), revision: 1}, publicFull: []byte("crate-public")}
 			elsewhere := &interestTickEntity{id: 3, full: []byte("elsewhere-full"), revision: 1}
@@ -1052,49 +1081,165 @@ func TestEntityResyncSendsStreamFullStateForKnownEntities(t *testing.T) {
 			if interestMode {
 				run = s.runInterestTick
 			}
-			if err := run(); err != nil {
-				t.Fatal(err)
+			tick := func() {
+				t.Helper()
+				if err := run(); err != nil {
+					t.Fatal(err)
+				}
 			}
+			tick()
 			spawned := append(decodeServerTokens(t, mustReadReliableFrame(t, stream)), decodeServerTokens(t, mustReadReliableFrame(t, stream))...)
 			if slices.Sort(spawned); !slices.Equal(spawned, []string{"avatar-full", "crate-public"}) {
 				t.Fatalf("spawn frames = %q", spawned)
 			}
-			resync := func(ids ...int64) {
-				t.Helper()
-				for _, id := range ids {
-					if _, err := writer.Write(netwire.AppendFrame(nil, golemnet.ClientEntityResyncControlFrame(id))); err != nil {
-						t.Fatal(err)
-					}
-				}
-				waitForEntityResync(t, s, sid, len(ids))
-				s.drainMessages()
-			}
 
-			// The crate is known in its public view; the other-space entity
-			// and an unknown ID are ignored.
-			resync(2, 3, 99)
+			// Only the known crate is stored; drainMessages does not answer.
+			sendEntityResyncs(t, s, stream, sid, 2, 3, 99)
+			if got := entityResyncInbox(s, sid); !slices.Equal(got, []int64{2}) {
+				t.Fatalf("stored requests = %v, want [2]", got)
+			}
+			s.drainMessages()
+			tick()
 			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"crate-public"}) {
 				t.Fatalf("resync frame = %q", got)
 			}
-			// The next frame answers the next request: nothing else was sent.
-			resync(1)
-			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"avatar-full"}) {
-				t.Fatalf("avatar resync frame = %q", got)
+			if got := entityResyncInbox(s, sid); len(got) != 0 {
+				t.Fatalf("requests left after the pass = %v", got)
 			}
-			// The view follows the current owner.
+			sendEntityResyncs(t, s, stream, sid, 1, 2)
+			tick()
+			// In ID order, one logical frame each.
+			if got := append(decodeServerTokens(t, mustReadReliableFrame(t, stream)), decodeServerTokens(t, mustReadReliableFrame(t, stream))...); !slices.Equal(got, []string{"avatar-full", "crate-public"}) {
+				t.Fatalf("resync frames = %q", got)
+			}
+			// The view follows the current owner (the grant comes first).
 			if !s.SetOwner(crate.id, sid) {
 				t.Fatal("SetOwner")
 			}
-			resync(2)
+			tick()
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"crate-full"}) {
+				t.Fatalf("ownership grant = %q", got)
+			}
+			sendEntityResyncs(t, s, stream, sid, 2)
+			tick()
 			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"crate-full"}) {
 				t.Fatalf("owner resync frame = %q", got)
 			}
+			tick()
+			expectStreamMarker(t, s, stream, sid)
+		})
+	}
+}
+
+// TestEntityResyncBurstBeyondHeldRecordCap: a burst of more than 256
+// requests (one per evicted entity) is stored and answered in full by one
+// pass, which leaves the blind broadcast path for it.
+func TestEntityResyncBurstBeyondHeldRecordCap(t *testing.T) {
+	s, _, stream, sid := replicationTestPeer(t, 0)
+	const n = 300
+	want := make([]string, 0, n)
+	ids := make([]int64, 0, n)
+	for i := int64(1); i <= n; i++ {
+		full := fmt.Sprintf("e%d-full", i)
+		if err := s.CreateEntity(&interestTickEntity{id: i, full: []byte(full), revision: 1}); err != nil {
+			t.Fatal(err)
+		}
+		want, ids = append(want, full), append(ids, i)
+	}
+	readAll := func(count int) []string {
+		t.Helper()
+		var got []string
+		for len(got) < count {
+			got = append(got, decodeServerTokens(t, mustReadReliableFrame(t, stream))...)
+		}
+		slices.Sort(got)
+		return got
+	}
+	slices.Sort(want)
+	if err := s.runBroadcastTick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readAll(n); !slices.Equal(got, want) {
+		t.Fatalf("spawned %d frames", len(got))
+	}
+	s.interestMu.Lock()
+	blind := !s.shouldFilterBroadcastLocked(s.listener.SessionIDs(), s.reg.All(), false)
+	s.interestMu.Unlock()
+	if !blind {
+		t.Fatal("setup: the quiet pass should be blind-eligible")
+	}
+	sendEntityResyncs(t, s, stream, sid, ids...)
+	if got := entityResyncInbox(s, sid); len(got) != n {
+		t.Fatalf("stored %d requests, want %d", len(got), n)
+	}
+	if err := s.runBroadcastTick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readAll(n); !slices.Equal(got, want) {
+		t.Fatalf("resync answered %d frames, want %d", len(got), n)
+	}
+	if err := s.runBroadcastTick(); err != nil {
+		t.Fatal(err)
+	}
+	expectStreamMarker(t, s, stream, sid)
+}
+
+// TestEntityResyncNotAnsweredAcrossSpaceBoundary: a request for an entity
+// that moves to another space before the pass (as from a Post) is not
+// answered; the session gets the entity's exit instead.
+func TestEntityResyncNotAnsweredAcrossSpaceBoundary(t *testing.T) {
+	for _, interestMode := range []bool{false, true} {
+		name, cellSize := "broadcast", 0.0
+		if interestMode {
+			name, cellSize = "interest", 8
+		}
+		t.Run(name, func(t *testing.T) {
+			s, _, stream, sid := replicationTestPeer(t, cellSize)
+			s.SetRemovalSerializer(func(id int64, _ uint64) ([]byte, error) { return []byte(fmt.Sprintf("removed:%d", id)), nil })
+			avatar := &interestTickEntity{id: 1, full: []byte("avatar-full"), revision: 1}
+			crate := &interestTickEntity{id: 2, x: 1, full: []byte("crate-full"), revision: 1}
+			opts := AvatarOptions{}
+			if interestMode {
+				opts.FOIRadius, opts.FOIMargin = 10, 1
+			}
+			if err := s.SpawnAvatar(&Session{ID: sid}, avatar, opts); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.CreateEntity(crate); err != nil {
+				t.Fatal(err)
+			}
+			run := s.runBroadcastTick
+			if interestMode {
+				run = s.runInterestTick
+			}
+			if err := run(); err != nil {
+				t.Fatal(err)
+			}
+			decodeServerTokens(t, mustReadReliableFrame(t, stream))
+			decodeServerTokens(t, mustReadReliableFrame(t, stream))
+			sendEntityResyncs(t, s, stream, sid, crate.id)
+			if got := entityResyncInbox(s, sid); !slices.Equal(got, []int64{crate.id}) {
+				t.Fatalf("stored requests = %v", got)
+			}
+			if err := s.SetEntitySpace(crate.id, 5); err != nil {
+				t.Fatal(err)
+			}
+			if err := run(); err != nil {
+				t.Fatal(err)
+			}
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"removed:2"}) {
+				t.Fatalf("pass after the move = %q", got)
+			}
+			if err := run(); err != nil {
+				t.Fatal(err)
+			}
+			expectStreamMarker(t, s, stream, sid)
 		})
 	}
 }
 
 // TestEntityResyncIgnoredOnStreamStateLane: sessions that never receive
-// compact datagram records get nothing for a resync request.
+// compact datagram records have their resync requests dropped on receipt.
 func TestEntityResyncIgnoredOnStreamStateLane(t *testing.T) {
 	s, _, stream, sid := replicationTestPeerWith(t, ServerConfig{Transport: golemnet.TransportWebTransport, StateUpdateLane: StateUpdateLaneStream})
 	avatar := &interestTickEntity{id: 1, full: []byte("avatar-full"), revision: 1}
@@ -1107,17 +1252,14 @@ func TestEntityResyncIgnoredOnStreamStateLane(t *testing.T) {
 	if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"avatar-full"}) {
 		t.Fatalf("spawn frame = %q", got)
 	}
-	if _, err := stream.(io.Writer).Write(netwire.AppendFrame(nil, golemnet.ClientEntityResyncControlFrame(avatar.id))); err != nil {
+	sendEntityResyncs(t, s, stream, sid, avatar.id)
+	if got := entityResyncInbox(s, sid); len(got) != 0 {
+		t.Fatalf("stored requests = %v", got)
+	}
+	if err := s.runBroadcastTick(); err != nil {
 		t.Fatal(err)
 	}
-	waitForEntityResync(t, s, sid, 1)
-	s.drainMessages()
-	if err := s.listener.SendBatch(sid, [][]byte{s.listener.Wrap([]byte("marker"))}); err != nil {
-		t.Fatal(err)
-	}
-	if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"marker"}) {
-		t.Fatalf("frame after ignored resync = %q", got)
-	}
+	expectStreamMarker(t, s, stream, sid)
 }
 
 // revisionBumpEntity counts BumpStateRevision calls.

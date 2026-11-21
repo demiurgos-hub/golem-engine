@@ -16,9 +16,10 @@ type sessionSpacePlan struct {
 	// gated holds incremental deltas on the ordered stream until the client
 	// acknowledges the latest transition with SpaceAck.
 	gated bool
-	// orphanRevisions holds, for a session without an FOI, the entities it
-	// knew when RemoveFOI ran and their revisions then; the transition exits
-	// them.
+	// orphanRevisions holds the entities a session knew when RemoveFOI ran
+	// and their revisions (0 = live revision), for the pass that exits them:
+	// a transition of a session without an FOI, or the first pass after
+	// AssignFOI (takeFOIOrphansLocked).
 	orphanRevisions map[int64]uint64
 }
 
@@ -243,16 +244,46 @@ func (s *Server) beginSpaceTransitionEvents(plans map[int64]sessionSpacePlan) {
 // Exits of orphaned entities (plan.orphanRevisions) that are no longer
 // registered use their recorded revisions.
 func (s *Server) deliverSpaceTransition(sessionID int64, transport golemnet.Transport, diff interest.Diff, tick *replicationTick, plan sessionSpacePlan, scope replicationScope) (eventualStateSendStats, bool, error) {
-	var stats eventualStateSendStats
-	defer s.finishSpaceAnnouncement(sessionID)
 	webTransport := transport == golemnet.TransportWebTransport
 	if webTransport {
 		s.listener.SetSessionEventTransition(sessionID, plan.transition, true)
 	}
-	scratch := tick.replicationScratch
-	datagramCapable := s.usesDatagramStateUpdates() && webTransport
-	frames := make([][]byte, 0, len(diff.Exited)+len(diff.Stayed)+len(diff.Entered)+2)
+	stats, disconnected, err := s.queueSpaceTransition(sessionID, transport, diff, tick, plan, scope)
+	if err != nil || disconnected {
+		return stats, disconnected, err
+	}
+	// Same FIFO stream: events held since the space changed land after
+	// SpaceSettled.
+	s.releaseTransitionEvents(sessionID)
+	if !webTransport {
+		// Without datagram lanes neither deltas nor events can overtake the
+		// stream; a later SpaceAck is harmless. WebTransport sessions keep the
+		// gate even on the stream state lane, because their events may still
+		// use datagram lanes.
+		s.releaseSpaceGate(sessionID, plan.transition)
+	}
+	return stats, false, nil
+}
 
+// queueSpaceTransition builds and queues one session's transition frames and
+// then ends its announcement of the old space, on every exit. The world
+// frames, the enqueue and the end of the announcement happen under announceMu
+// held for writing, so a world push or space event from any goroutine (which
+// holds it for reading across its recipient selection and enqueue) either
+// precedes the transition frames, chosen for the old space, or follows them,
+// chosen for the new one. Entity frames are serialized before taking the lock.
+func (s *Server) queueSpaceTransition(sessionID int64, transport golemnet.Transport, diff interest.Diff, tick *replicationTick, plan sessionSpacePlan, scope replicationScope) (stats eventualStateSendStats, disconnected bool, err error) {
+	locked := false
+	defer func() {
+		if !locked {
+			s.announceMu.Lock()
+		}
+		s.finishSpaceAnnouncement(sessionID)
+		s.announceMu.Unlock()
+	}()
+	scratch := tick.replicationScratch
+	datagramCapable := s.usesDatagramStateUpdates() && transport == golemnet.TransportWebTransport
+	exits := make([][]byte, 0, len(diff.Exited))
 	for _, id := range diff.Exited {
 		if datagramCapable {
 			s.clearEventualEntity(sessionID, id)
@@ -261,13 +292,9 @@ func (s *Server) deliverSpaceTransition(sessionID int64, transport golemnet.Tran
 		if err != nil {
 			return stats, false, err
 		}
-		frames = append(frames, data)
+		exits = append(exits, data)
 	}
-	frames = append(frames, WrapSpaceChanged(plan.space, plan.transition))
-	frames, err := s.appendSpaceWorldFrames(sessionID, plan, frames)
-	if err != nil {
-		return stats, false, err
-	}
+	fulls := make([][]byte, 0, len(diff.Stayed)+len(diff.Entered))
 	appendFull := func(id int64, what string) error {
 		if datagramCapable {
 			s.clearEventualEntity(sessionID, id)
@@ -277,7 +304,7 @@ func (s *Server) deliverSpaceTransition(sessionID int64, transport golemnet.Tran
 			return fmt.Errorf("full update for entity %d %s space %d: %w", id, what, plan.space, err)
 		}
 		if ok {
-			frames = append(frames, data)
+			fulls = append(fulls, data)
 		}
 		return nil
 	}
@@ -291,8 +318,18 @@ func (s *Server) deliverSpaceTransition(sessionID int64, transport golemnet.Tran
 			return stats, false, err
 		}
 	}
-	frames = append(frames, WrapSpaceSettled(plan.transition))
 
+	s.announceMu.Lock()
+	locked = true
+	frames := make([][]byte, 0, len(exits)+len(fulls)+2)
+	frames = append(frames, exits...)
+	frames = append(frames, WrapSpaceChanged(plan.space, plan.transition))
+	frames, err = s.appendSpaceWorldFrames(sessionID, plan, frames)
+	if err != nil {
+		return stats, false, err
+	}
+	frames = append(frames, fulls...)
+	frames = append(frames, WrapSpaceSettled(plan.transition))
 	sent, err := s.sendReplicationStream(sessionID, transport, golemnet.ConcatReliableFrames(frames), countAfterSend)
 	if err != nil {
 		if isDisconnectedSessionSend(err) {
@@ -301,16 +338,6 @@ func (s *Server) deliverSpaceTransition(sessionID int64, transport golemnet.Tran
 		return stats, false, err
 	}
 	stats.add(sent)
-	// Same FIFO stream: events held since the space changed land after
-	// SpaceSettled.
-	s.releaseTransitionEvents(sessionID)
-	if !webTransport {
-		// Without datagram lanes neither deltas nor events can overtake the
-		// stream; a later SpaceAck is harmless. WebTransport sessions keep the
-		// gate even on the stream state lane, because their events may still
-		// use datagram lanes.
-		s.releaseSpaceGate(sessionID, plan.transition)
-	}
 	return stats, false, nil
 }
 

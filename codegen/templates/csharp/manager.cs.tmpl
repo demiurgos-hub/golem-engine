@@ -25,6 +25,15 @@ namespace {{.GoPackage}}
         private int _heldCount;
         // Advanced by Clear so a callback that clears stops a replay.
         private ulong _clearEpoch;
+        // How often one pending resync is requested again after its recovery full state was rejected as stale.
+        private const int MaxResyncRetries = 3;
+        // Entities whose evicted records still need a full state of at least Revision.
+        private sealed class PendingResync
+        {
+            public ulong Revision;
+            public int Retries;
+        }
+        private readonly Dictionary<long, PendingResync> _pendingResync = new Dictionary<long, PendingResync>();
         private Action<object> _onSpawn;
         private Action<object> _onUpdate;
         private Action<long> _onRemove;
@@ -51,7 +60,10 @@ namespace {{.GoPackage}}
         /// <summary>
         /// Registers a callback fired with an entity id when the compact records held for that entity are evicted
         /// before its spawn arrived. Those datagrams were already acknowledged, so the server will not resend them;
-        /// GameClient registers a callback that requests a full state of the entity.
+        /// GameClient registers a callback that requests a full state of the entity. The manager remembers the request
+        /// until a full state at least as new as the evicted records applies, or the entity is removed or cleared; when
+        /// a full state for it is rejected as stale (a newer datagram overtook it), the callback fires again, at most
+        /// three times.
         /// </summary>
         public void OnResyncNeeded(Action<long> fn) { _onResyncNeeded = fn; }
 
@@ -72,6 +84,7 @@ namespace {{.GoPackage}}
             _heldCompact.Clear();
             _heldOrder.Clear();
             _heldCount = 0;
+            _pendingResync.Clear();
         }
 {{range .Entities}}
         public void Register{{.Name}}(Func<long, Synced{{.Name}}> factory) { _{{.LowerName}}Factory = factory; }
@@ -102,6 +115,7 @@ namespace {{.GoPackage}}
                 var revision = update.EntityRemoved.Revision;
                 if (IsStale(id, revision)) return;
                 _lastRevisions[id] = revision;
+                _pendingResync.Remove(id);
                 RemoveEntity(id);
                 DropHeldCompact(id);
             }
@@ -150,9 +164,16 @@ namespace {{.GoPackage}}
             while (_heldCount >= MaxHeldCompactUpdates && _heldOrder.Count > 0)
             {
                 var evicted = _heldOrder[0];
+                var revision = HeldRevision(_heldCompact[evicted]);
                 DropHeldCompact(evicted);
                 if (_onResyncNeeded != null)
                 {
+                    if (!_pendingResync.TryGetValue(evicted, out var pending))
+                    {
+                        pending = new PendingResync();
+                        _pendingResync[evicted] = pending;
+                    }
+                    if (revision > pending.Revision) pending.Revision = revision;
                     _onResyncNeeded(evicted);
                     if (_clearEpoch != epoch) return;
                 }
@@ -165,6 +186,40 @@ namespace {{.GoPackage}}
             }
             held.Add((byte[])frame.Clone());
             _heldCount++;
+        }
+
+        // The newest revision among held compact records.
+        private static ulong HeldRevision(List<byte[]> held)
+        {
+            ulong newest = 0;
+            foreach (var frame in held)
+            {
+                var reader = new PbReader(frame);
+                reader.Int64();
+                var revision = reader.Uint64();
+                if (revision > newest) newest = revision;
+            }
+            return newest;
+        }
+
+        // Request a resync again when a full state for an entity with a pending resync is rejected as stale, up to
+        // MaxResyncRetries times.
+        private void StaleFullState(long id)
+        {
+            if (!_pendingResync.TryGetValue(id, out var pending)) return;
+            if (pending.Retries >= MaxResyncRetries || _onResyncNeeded == null)
+            {
+                _pendingResync.Remove(id);
+                return;
+            }
+            pending.Retries++;
+            _onResyncNeeded(id);
+        }
+
+        // Forget a pending resync once a full state at least as new as the evicted records applied.
+        private void AppliedFullState(long id, ulong revision)
+        {
+            if (_pendingResync.TryGetValue(id, out var pending) && revision >= pending.Revision) _pendingResync.Remove(id);
         }
 
         // Discard the records held for id and its place in the eviction order.
@@ -199,12 +254,17 @@ namespace {{.GoPackage}}
         {
             var id = state.EntityId;
             var revision = state.Revision;
-            if (IsStale(id, revision)) return;
+            if (IsStale(id, revision))
+            {
+                StaleFullState(id);
+                return;
+            }
             var isNew = !_entities.TryGetValue(id, out var existing);
             var entity = isNew ? _{{.LowerName}}Factory(id) : (Synced{{.Name}})existing;
             if (isNew) _entities[id] = entity;
             entity.ApplyState(state);
             _lastRevisions[id] = revision;
+            AppliedFullState(id, revision);
             if (isNew)
             {
                 var epoch = _clearEpoch;

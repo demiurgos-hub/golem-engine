@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -204,9 +205,9 @@ type Server struct {
 	spaceAckMu    sync.Mutex
 	spaceAckInbox map[int64]uint64
 
-	// EntityResync requests waiting for the tick: per session, the IDs of
-	// entities whose held compact records the client evicted, kept outside
-	// msgQueue (entity_resync.go).
+	// EntityResync requests waiting for the next replication pass: per
+	// session, the IDs of known entities whose held compact records the
+	// client evicted, kept outside msgQueue (entity_resync.go).
 	entityResyncMu    sync.Mutex
 	entityResyncInbox map[int64]map[int64]struct{}
 
@@ -230,12 +231,27 @@ type Server struct {
 	sessionAvatar map[int64]int64 // sessionID → entityID (or avatarSpawnPending)
 	avatarSession map[int64]int64 // entityID → sessionID
 
+	// announceMu orders space-dependent sends with space transitions: a
+	// transition holds it for writing while it builds its world frames, queues
+	// its frames and clears its announcement (queueSpaceTransition); world
+	// pushes, SendStoredWorldData and Space.BroadcastServerEvent hold it for
+	// reading across recipient (or value) selection and the enqueue. So a send
+	// from any goroutine either lands before a session's transition frames,
+	// chosen for its old space, or after them, chosen for its new space.
+	// Lock order: announceMu before interestMu. Never take it while holding
+	// interestMu, eventHoldMu or a listener lock, and never nest read locks.
+	announceMu sync.RWMutex
+	// testHookWorldPushSelected, when set by tests, runs in PushWorldData
+	// between recipient selection and the enqueue.
+	testHookWorldPushSelected func()
+
 	// interestMu guards interest.Manager, visibility.Manager, broadcastKnown and
 	// the session space maps through Server APIs (AssignFOI, RemoveFOI,
 	// visibility group ops, SessionsKnowing, session space APIs and moves,
 	// UpdateGrid+ComputeDiffs, broadcast known-set updates).
 	// Lock order with the registry: interestMu before the registry mutex.
 	// Lock order with avatarMu: interestMu before avatarMu when both are needed.
+	// Lock order with announceMu: announceMu before interestMu.
 	// Never hold interestMu across network sends, FullUpdate, or registry hooks.
 	// Visibility policy is point-in-time: mutations after a replication/snapshot
 	// decision apply on the next pass via known-set enter/exit transitions.
@@ -568,6 +584,13 @@ func (s *Server) Owner(entityID int64) (sessionID int64, owned bool) {
 // field dirty, so the refresh or space-transition full state carries a newer
 // revision than a late datagram record serialized for the previous owner view,
 // which clients then discard as stale.
+//
+// The registry owner changes before the revision is bumped, and replication
+// depends on that order: it chooses each recipient's view and serializes
+// later, then re-checks ownership after producing owner-view bytes and sends
+// the public view instead when the recipient lost the entity meanwhile. Bytes
+// stamped with the bumped revision therefore always fail that re-check, while
+// bytes serialized before the bump are older than the refresh. Keep the order.
 func (s *Server) SetOwner(entityID, sessionID int64) bool {
 	s.interestMu.Lock()
 	defer s.interestMu.Unlock()
@@ -583,6 +606,8 @@ func (s *Server) SetOwner(entityID, sessionID int64) bool {
 	if oldOwner == sessionID {
 		return true
 	}
+	// Owner first, revision second: replication's post-serialization
+	// ownership re-check relies on this order.
 	if !s.reg.SetOwner(entityID, sessionID) {
 		return false
 	}
@@ -947,15 +972,20 @@ func (s *Server) SetEntityVisibilityGroup(entityID int64, group string) {
 }
 
 // AssignFOI associates a session with a circular field of interest centred
-// on the given entity. Panics if interest management is not enabled (CellSize <= 0).
+// on the given entity. When the session's previous FOI was removed with
+// RemoveFOI, the next replication pass removes from the client every entity it
+// still holds from that FOI that the new field of interest does not cover;
+// those it covers get a full state. Panics if interest management is not
+// enabled (CellSize <= 0).
 // Concurrency-safe with other Server FOI APIs via interestMu.
 func (s *Server) AssignFOI(sessionID, entityID int64, radius, margin float64) {
 	if s.interest == nil {
 		panic("golem: AssignFOI called but interest management is not enabled (CellSize <= 0)")
 	}
 	s.interestMu.Lock()
-	// A new FOI diff takes over from entities orphaned by RemoveFOI.
-	delete(s.foiOrphanKnown, sessionID)
+	// Entities orphaned by an earlier RemoveFOI stay in foiOrphanKnown: the
+	// next replication pass exits those the new field of interest does not
+	// cover (takeFOIOrphansLocked).
 	hadFOI := s.interest.HasFOI(sessionID)
 	s.interest.AssignFOI(sessionID, entityID, radius, margin)
 	if !hadFOI {
@@ -972,7 +1002,8 @@ func (s *Server) AssignFOI(sessionID, entityID int64, radius, margin float64) {
 // RemoveFOI removes a session's field of interest and clears its known set.
 // The client keeps the entities it knew, frozen, until a later space
 // transition of the session (for example after SetSessionSpace) removes them,
-// or until AssignFOI starts a new field of interest.
+// or until the first replication pass after AssignFOI removes those outside
+// the new field of interest.
 // Panics if interest management is not enabled.
 // Concurrency-safe with other Server FOI APIs via interestMu.
 func (s *Server) RemoveFOI(sessionID int64) {
@@ -1013,6 +1044,44 @@ func (s *Server) keepFOIOrphansLocked(sessionID int64, known map[int64]struct{})
 	}
 }
 
+// takeFOIOrphansLocked hands the RemoveFOI orphans of every session that has
+// an FOI again (a diff this pass) to that diff: each orphan the diff does not
+// enter, keep or exit is added to Exited, so the client drops what it kept
+// from the removed FOI. The returned map holds each such session's orphan
+// revisions for wrappedExitWithFallback; the sessions' orphan sets are
+// dropped. Sessions without an FOI keep theirs. Caller holds interestMu.
+func (s *Server) takeFOIOrphansLocked(diffs map[int64]*interest.Diff) map[int64]map[int64]uint64 {
+	if len(s.foiOrphanKnown) == 0 {
+		return nil
+	}
+	var taken map[int64]map[int64]uint64
+	for sid, orphans := range s.foiOrphanKnown {
+		diff := diffs[sid]
+		if diff == nil {
+			continue
+		}
+		listed := make(map[int64]struct{}, len(diff.Entered)+len(diff.Stayed)+len(diff.Exited))
+		for _, ids := range [][]int64{diff.Entered, diff.Stayed, diff.Exited} {
+			for _, id := range ids {
+				listed[id] = struct{}{}
+			}
+		}
+		start := len(diff.Exited)
+		for id := range orphans {
+			if _, ok := listed[id]; !ok {
+				diff.Exited = append(diff.Exited, id)
+			}
+		}
+		slices.Sort(diff.Exited[start:])
+		if taken == nil {
+			taken = make(map[int64]map[int64]uint64)
+		}
+		taken[sid] = orphans
+		delete(s.foiOrphanKnown, sid)
+	}
+	return taken
+}
+
 // recordOrphanRemovals stores the removal revisions of entities deleted this
 // tick that sessions still hold as RemoveFOI orphans, so their later exits are
 // not discarded by clients as stale. Tick goroutine only.
@@ -1050,7 +1119,9 @@ func (s *Server) hasFOI(sessionID int64) bool {
 //
 // Sessions whose announced space defines name in its own store
 // (Space(id).World()) keep that space's value and are skipped; use
-// Space(id).PushWorldData for them.
+// Space(id).PushWorldData for them. Recipient selection and the enqueue are
+// atomic with space transitions, so the push is ordered with them from any
+// goroutine.
 func (s *Server) PushWorldData(name string) error {
 	d := s.World.Get(name)
 	if d == nil {
@@ -1061,8 +1132,14 @@ func (s *Server) PushWorldData(name string) error {
 		return err
 	}
 	frame := WrapWorldUpdate(data)
+	s.announceMu.RLock()
+	defer s.announceMu.RUnlock()
 	if overriding := s.spacesOverridingWorld(name); len(overriding) > 0 {
-		return s.listener.SendRawTo(s.sessionsOutsideSpaces(overriding), frame)
+		recipients := s.sessionsOutsideSpaces(overriding)
+		if s.testHookWorldPushSelected != nil {
+			s.testHookWorldPushSelected()
+		}
+		return s.listener.SendRawTo(recipients, frame)
 	}
 	return s.listener.BroadcastRaw(frame)
 }
@@ -1093,8 +1170,11 @@ func (s *Server) SendWorldData(sessionID int64, data WorldData) error {
 // PushWorldData).
 // Marshal failures, oversize reliable frames, and disconnected sessions
 // propagate. Prefer SendWorldData when delivering a per-session value that
-// must not replace Server.World.
+// must not replace Server.World. Resolving the value and the enqueue are
+// atomic with space transitions, from any goroutine.
 func (s *Server) SendStoredWorldData(sessionID int64, name string) error {
+	s.announceMu.RLock()
+	defer s.announceMu.RUnlock()
 	d := s.storedWorldForSession(sessionID, name)
 	if d == nil {
 		return nil
@@ -1230,9 +1310,10 @@ func (s *Server) enqueueDisconnect(sess *Session) {
 }
 
 // drainMessages processes all queued session events in FIFO order on the tick
-// goroutine, then the SpaceAcks and EntityResync requests stored meanwhile. Called once per tick before
+// goroutine, then the SpaceAcks stored meanwhile. Called once per tick before
 // entity ticks so that handlers such as CreateEntity and DeleteEntity are safe
-// without additional synchronization.
+// without additional synchronization. EntityResync requests are answered by
+// the replication pass instead (entity_resync.go).
 func (s *Server) drainMessages() {
 	for {
 		select {
@@ -1276,7 +1357,6 @@ func (s *Server) drainMessages() {
 			}
 		default:
 			s.applySpaceAcks()
-			s.applyEntityResyncs()
 			return
 		}
 	}
@@ -1465,21 +1545,23 @@ func (s *Server) runBroadcastTick() error {
 	deltasFlushed := len(result.Deltas)
 	live := s.reg.All()
 	sessionIDs := s.listener.SessionIDs()
+	resyncs := s.takeEntityResyncs()
 
 	s.interestMu.Lock()
-	filter := s.shouldFilterBroadcastLocked(sessionIDs, live)
+	filter := s.shouldFilterBroadcastLocked(sessionIDs, live, len(resyncs) > 0)
 	s.interestMu.Unlock()
 
 	if filter {
-		return s.runBroadcastTickFiltered(result, deltasFlushed)
+		return s.runBroadcastTickFiltered(result, deltasFlushed, resyncs)
 	}
 	return s.runBroadcastTickBlind(result, deltasFlushed)
 }
 
 // shouldFilterBroadcastLocked reports whether broadcast replication must run
-// the per-session known-set path. Caller must hold interestMu.
-func (s *Server) shouldFilterBroadcastLocked(sessionIDs []int64, live []Entity) bool {
-	if s.spacesActiveLocked() {
+// the per-session known-set path. Pending EntityResync requests force it,
+// since only per-session delivery answers them. Caller must hold interestMu.
+func (s *Server) shouldFilterBroadcastLocked(sessionIDs []int64, live []Entity, resyncsPending bool) bool {
+	if resyncsPending || s.spacesActiveLocked() {
 		return true
 	}
 	if s.visibility.HasGroupedEntities() {
@@ -1650,12 +1732,14 @@ func (s *Server) runBroadcastTickBlind(result registry.FlushResult, deltasFlushe
 }
 
 // runBroadcastTickFiltered performs per-session known-set replication when
-// visibility groups, owner-scoped payloads, or ownership refreshes require it.
-func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlushed int) error {
+// visibility groups, owner-scoped payloads, ownership refreshes or
+// EntityResync requests require it.
+func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlushed int, resyncs map[int64]map[int64]struct{}) error {
 	tick, err := s.prepareReplicationTick(result)
 	if err != nil {
 		return err
 	}
+	tick.entityResyncs = resyncs
 	// Capture before the callback so a disconnected recipient can lose known state.
 	sessionIDs := s.listener.SessionIDs()
 	if err := s.prepareEventualFrames(tick, sessionIDs); err != nil {
@@ -1888,6 +1972,9 @@ func copyInterestDiffs(in map[int64]*interest.Diff) map[int64]*interest.Diff {
 func (s *Server) runInterestTick() error {
 	// Registered first so it runs last, after the replication observers.
 	defer s.releaseHeldSessionEvents()
+	// Taken before the diffs: every request names an entity the session knew
+	// no later than this pass's known-set decision.
+	resyncs := s.takeEntityResyncs()
 	// Manager diffs are reused: copy while locked, before flushing or callbacks.
 	s.interestMu.Lock()
 	s.interest.UpdateGrid(s.reg)
@@ -1900,6 +1987,8 @@ func (s *Server) runInterestTick() error {
 		spacePlans = s.planInterestSpacesLocked(computed)
 	}
 	diffs := copyInterestDiffs(computed)
+	// Sessions with an FOI again exit what they kept from a removed FOI.
+	orphanRevisions := s.takeFOIOrphansLocked(diffs)
 	ownershipPending := s.snapshotOwnershipRefreshLocked()
 	s.interestMu.Unlock()
 	// Before onUpdates can send events: switching sessions hold their events
@@ -1914,6 +2003,7 @@ func (s *Server) runInterestTick() error {
 	if err != nil {
 		return err
 	}
+	tick.entityResyncs = resyncs
 	if s.onUpdates != nil && len(tick.updates) > 0 {
 		s.onUpdates(tick.updates)
 	}
@@ -1947,6 +2037,8 @@ func (s *Server) runInterestTick() error {
 			for id := range plan.orphanRevisions {
 				diff.Exited = append(diff.Exited, id)
 			}
+		} else if revisions := orphanRevisions[sid]; revisions != nil {
+			plan.orphanRevisions = revisions
 		}
 		sent, disconnected, err := s.deliverReplicationDiff(sid, transport, *diff, tick, ownershipPending, replicationFOI, plan)
 		total.add(sent)

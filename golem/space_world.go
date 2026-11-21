@@ -46,8 +46,10 @@ func (sp *Space) World() *world.Store {
 // every session announced in this space. It returns nil when the space's
 // store does not define name or no session is connected, and a non-nil error
 // when serialization fails or the frame exceeds the 256 KiB reliable cap.
-// Sessions in other spaces receive nothing. Called on the tick goroutine, the
-// push is ordered with the space transitions replication sends.
+// Sessions in other spaces receive nothing. Recipient selection and the
+// enqueue are atomic with space transitions, so the push is ordered with them
+// from any goroutine: a session switching into this space gets the value
+// either inside its transition or after it.
 func (sp *Space) PushWorldData(name string) error {
 	store := sp.srv.spaceWorld(sp.id)
 	if store == nil {
@@ -61,7 +63,10 @@ func (sp *Space) PushWorldData(name string) error {
 	if err != nil {
 		return err
 	}
-	return sp.srv.listener.SendRawTo(sp.Sessions(), WrapWorldUpdate(data))
+	frame := WrapWorldUpdate(data)
+	sp.srv.announceMu.RLock()
+	defer sp.srv.announceMu.RUnlock()
+	return sp.srv.listener.SendRawTo(sp.Sessions(), frame)
 }
 
 // spaceWorld returns the store of space without creating it.

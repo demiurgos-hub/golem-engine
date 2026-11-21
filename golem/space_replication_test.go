@@ -348,7 +348,7 @@ func TestSpaceTransitionCarriesEntitiesAndRestoresSingleSpacePath(t *testing.T) 
 		active := srv.spacesActiveLocked()
 		filter := false
 		if !interestMode {
-			filter = srv.shouldFilterBroadcastLocked(srv.listener.SessionIDs(), srv.reg.All())
+			filter = srv.shouldFilterBroadcastLocked(srv.listener.SessionIDs(), srv.reg.All(), false)
 		}
 		srv.interestMu.Unlock()
 		if active || filter {
@@ -904,32 +904,84 @@ func TestSpaceSpectatorRemoveFOIThenSwitchRemovesOldEntities(t *testing.T) {
 	expectNoMessage(t, conn)
 }
 
-// TestSpaceAssignFOIDropsOrphanedKnownSet: a new FOI takes over from the
-// entities orphaned by RemoveFOI.
-func TestSpaceAssignFOIDropsOrphanedKnownSet(t *testing.T) {
+// TestSpaceAssignFOIInAnotherSpaceExitsOrphans: RemoveFOI, then AssignFOI
+// anchored in space 3 before the next pass. The pass's transition removes the
+// space-0 entities the client kept from the removed FOI, then enters space 3.
+func TestSpaceAssignFOIInAnotherSpaceExitsOrphans(t *testing.T) {
 	rig := newSpaceTestRig(t, true, 1)
 	srv, conn, sid := rig.srv, rig.conns[0], rig.ids[0]
 	anchor := &interestTickEntity{id: 1, full: []byte("anchor-full")}
-	if err := srv.CreateEntity(anchor); err != nil {
+	crate := &interestTickEntity{id: 2, x: 1, full: []byte("crate-full")}
+	beacon := &interestTickEntity{id: 3, full: []byte("beacon-full")}
+	for _, e := range []*interestTickEntity{anchor, crate} {
+		if err := srv.CreateEntity(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := srv.CreateEntityIn(3, beacon); err != nil {
 		t.Fatal(err)
 	}
 	srv.AssignFOI(sid, anchor.id, 10, 1)
 	rig.tick(t)
-	readSpaceTokens(t, conn)
+	if got := readSpaceTokens(t, conn); len(got) != 2 {
+		t.Fatalf("entered = %q", got)
+	}
+
 	srv.RemoveFOI(sid)
+	srv.AssignFOI(sid, beacon.id, 10, 1)
+	rig.tick(t)
+	assertTransition(t, readSpaceTokens(t, conn), 3, 1, []string{"removed:1", "removed:2"}, nil, []string{"beacon-full"})
 	srv.interestMu.Lock()
-	orphans := len(srv.foiOrphanKnown[sid])
+	orphans := len(srv.foiOrphanKnown)
 	srv.interestMu.Unlock()
-	if orphans != 1 {
-		t.Fatalf("orphaned known set = %d entries, want 1", orphans)
+	if orphans != 0 {
+		t.Fatal("the pass kept the orphaned known set")
 	}
-	srv.AssignFOI(sid, anchor.id, 10, 1)
-	srv.interestMu.Lock()
-	_, kept := srv.foiOrphanKnown[sid]
-	srv.interestMu.Unlock()
-	if kept {
-		t.Fatal("AssignFOI kept the orphaned known set")
+	rig.tick(t)
+	expectNoMessage(t, conn)
+}
+
+// TestAssignFOIAfterRemoveFOIExitsOutOfRangeOrphans: in a single-space game,
+// RemoveFOI then AssignFOI on another anchor removes the kept entities the new
+// field of interest does not cover; one it covers gets a full state and no
+// exit. A deleted orphan exits with its removal revision.
+func TestAssignFOIAfterRemoveFOIExitsOutOfRangeOrphans(t *testing.T) {
+	rig := newSpaceTestRig(t, true, 1)
+	srv, conn, sid := rig.srv, rig.conns[0], rig.ids[0]
+	srv.SetRemovalSerializer(func(id int64, revision uint64) ([]byte, error) {
+		return []byte(fmt.Sprintf("removed:%d@%d", id, revision)), nil
+	})
+	a := &interestTickEntity{id: 1, full: []byte("a-full"), revision: 3}
+	crate := &interestTickEntity{id: 2, x: 8, full: []byte("crate-full"), revision: 4}
+	doomed := &interestTickEntity{id: 4, x: -2, full: []byte("doomed-full"), revision: 7}
+	b := &interestTickEntity{id: 3, x: 16, full: []byte("b-full")}
+	for _, e := range []*interestTickEntity{a, crate, doomed, b} {
+		if err := srv.CreateEntity(e); err != nil {
+			t.Fatal(err)
+		}
 	}
+	srv.AssignFOI(sid, a.id, 10, 1)
+	rig.tick(t)
+	got := readSpaceTokens(t, conn)
+	if slices.Sort(got); !slices.Equal(got, []string{"a-full", "crate-full", "doomed-full"}) {
+		t.Fatalf("entered = %q", got)
+	}
+
+	srv.RemoveFOI(sid)
+	rig.tick(t)
+	expectNoMessage(t, conn) // frozen while the session has no FOI
+	srv.DeleteEntity(doomed.id)
+	rig.tick(t)
+	expectNoMessage(t, conn)
+
+	srv.AssignFOI(sid, b.id, 10, 1)
+	rig.tick(t)
+	got = readSpaceTokens(t, conn)
+	if slices.Sort(got); !slices.Equal(got, []string{"b-full", "crate-full", "removed:1@3", "removed:4@8"}) {
+		t.Fatalf("pass after AssignFOI = %q", got)
+	}
+	rig.tick(t)
+	expectNoMessage(t, conn)
 }
 
 // TestSpaceDeletedLocalAnchorReplacedByGlobalAnchor: deleting a local FOI
@@ -977,4 +1029,70 @@ func TestSpaceDeletedLocalAnchorReplacedByGlobalAnchor(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSpaceOffTickWorldPushOrderedWithTransition: an off-tick
+// Server.PushWorldData picks a switching session as a recipient while it is
+// still announced in space 0, then stalls (test hook) until after the pass has
+// planned the session's transition into a space that overrides the name. The
+// transition waits for the push, so the global value lands before the
+// transition and the destination value it carries wins on the client.
+func TestSpaceOffTickWorldPushOrderedWithTransition(t *testing.T) {
+	spaceModes(t, func(t *testing.T, interestMode bool) {
+		rig := newSpaceTestRigWith(t, interestMode, 1, nil, func(srv *Server) {
+			srv.World.Set(&sessionWorldData{name: "fog", payload: []byte("global-fog")})
+			srv.Space(4).World().Set(&sessionWorldData{name: "fog", payload: []byte("cave-fog")})
+		})
+		srv, conn, sid := rig.srv, rig.conns[0], rig.ids[0]
+		if got := readSpaceTokens(t, conn); !slices.Equal(got, []string{"world:global-fog"}) {
+			t.Fatalf("connect world = %q", got)
+		}
+		avatar := &interestTickEntity{id: 1, full: []byte("avatar-full")}
+		rig.spaceAvatar(t, sid, avatar)
+		rig.tick(t)
+		readSpaceTokens(t, conn)
+
+		selected, release := make(chan struct{}), make(chan struct{})
+		srv.testHookWorldPushSelected = func() {
+			close(selected)
+			<-release
+		}
+		pushed := make(chan error, 1)
+		go func() { pushed <- srv.PushWorldData("fog") }()
+		<-selected
+		srv.testHookWorldPushSelected = nil
+
+		if err := srv.SetEntitySpace(avatar.id, 4); err != nil {
+			t.Fatal(err)
+		}
+		ticked := make(chan error, 1)
+		go func() { ticked <- rig.run() }()
+		for deadline := time.Now().Add(3 * time.Second); ; {
+			srv.interestMu.Lock()
+			planned := srv.sentSpace[sid] == 4
+			srv.interestMu.Unlock()
+			if planned {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the transition was not planned")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		// Give the pass time to reach the transition enqueue.
+		time.Sleep(50 * time.Millisecond)
+		close(release)
+		if err := <-pushed; err != nil {
+			t.Fatal(err)
+		}
+		if err := <-ticked; err != nil {
+			t.Fatal(err)
+		}
+		rig.assertKnownInsideSentSpace(t)
+		got := readSpaceTokens(t, conn)
+		if len(got) == 0 || got[0] != "world:global-fog" {
+			t.Fatalf("tokens = %q, want the push before the transition", got)
+		}
+		assertTransitionWithWorld(t, got[1:], 4, 1, nil, []string{"world:cave-fog"}, []string{"avatar-full"}, nil)
+	})
 }

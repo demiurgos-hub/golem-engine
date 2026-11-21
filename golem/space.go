@@ -289,11 +289,16 @@ func (sp *Space) Sessions() []int64 { return sp.srv.SessionsInSpace(sp.id) }
 // BroadcastServerEvent sends one marshalled ServerEvent to every session
 // announced in this space, on the chosen delivery lane with the same stream
 // fallback as Server.BroadcastServerEvent. Sessions in other spaces receive
-// nothing. Sessions that disconnect meanwhile are skipped.
+// nothing. Sessions that disconnect meanwhile are skipped. Recipient
+// selection and the enqueue are atomic with space transitions, so the event
+// is ordered with them from any goroutine.
 func (sp *Space) BroadcastServerEvent(delivery EventDelivery, event []byte) error {
+	wrapped := WrapServerEvent(event)
+	sp.srv.announceMu.RLock()
+	defer sp.srv.announceMu.RUnlock()
 	sessions := sp.Sessions()
 	if len(sessions) == 0 {
 		return nil
 	}
-	return sp.srv.listener.SendEventTo(sessions, delivery, event, WrapServerEvent(event))
+	return sp.srv.listener.SendEventTo(sessions, delivery, event, wrapped)
 }

@@ -64,6 +64,9 @@ type replicationTick struct {
 	updates           [][]byte
 	ownerScopedDeltas bool
 	eventualCache     *eventualStateTickCache
+	// entityResyncs holds the pass's EntityResync requests per session; a
+	// session in a space transition consumes its own without an answer.
+	entityResyncs map[int64]map[int64]struct{}
 }
 
 func (s *Server) prepareReplicationTick(result registry.FlushResult) (*replicationTick, error) {
@@ -141,8 +144,10 @@ const (
 
 // deliverReplicationDiff reports a disconnected send separately from preparation
 // errors, so caller-owned known-set cleanup cannot swallow serializer failures.
-// A plan with a transition delivers the space transition instead; a gated plan
-// sends this session's incremental deltas on the ordered stream.
+// A plan with a transition delivers the space transition instead (its carried
+// and entered full states also answer the session's EntityResync requests); a
+// gated plan sends this session's incremental deltas on the ordered stream.
+// Exits of RemoveFOI orphans use plan.orphanRevisions.
 func (s *Server) deliverReplicationDiff(sessionID int64, transport golemnet.Transport, diff interest.Diff, tick *replicationTick, ownershipPending map[int64]ownershipRefresh, scope replicationScope, plan sessionSpacePlan) (eventualStateSendStats, bool, error) {
 	if plan.transition != 0 {
 		return s.deliverSpaceTransition(sessionID, transport, diff, tick, plan, scope)
@@ -221,7 +226,7 @@ func (s *Server) deliverReplicationDiff(sessionID int64, transport golemnet.Tran
 		if datagramCapable {
 			s.clearEventualEntity(sessionID, id)
 		}
-		data, err := s.wrappedExit(tick, id, scope)
+		data, err := s.wrappedExitWithFallback(tick, id, scope, plan.orphanRevisions)
 		if err != nil {
 			return stats, false, err
 		}
@@ -232,6 +237,12 @@ func (s *Server) deliverReplicationDiff(sessionID int64, transport golemnet.Tran
 	streamFrames, err = s.appendOwnershipRefreshFrames(sessionID, ownershipPending, diff.Stayed, wrappedFull, wrappedPublicFull, streamFrames)
 	if err != nil {
 		return stats, false, err
+	}
+	if datagramCapable {
+		streamFrames, err = s.appendEntityResyncFrames(sessionID, tick.entityResyncs[sessionID], diff.Stayed, tick, streamFrames)
+		if err != nil {
+			return stats, false, err
+		}
 	}
 
 	if len(streamFrames) > 0 {
