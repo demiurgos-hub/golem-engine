@@ -41,12 +41,27 @@ func AppendFrame(dst, payload []byte) []byte {
 // EventRecordTag starts a datagram frame that carries one marshalled ServerEvent.
 // Compact state records start with a nonzero entity ID varint, so the tag never
 // collides with state on a shared datagram lane.
+//
+// An event record is either untagged, [EventRecordTag][ServerEvent], or tagged
+// with the session's space transition, [EventRecordTag][EventRecordTag]
+// [uvarint transition][ServerEvent]. A valid non-empty ServerEvent never starts
+// with a zero byte (field number 0 is invalid), so a second zero byte always
+// marks the tagged form; an empty untagged event is the lone tag byte.
 const EventRecordTag byte = 0
 
-// EventRecordBytes returns the datagram payload size of one event record.
+// EventRecordBytes returns the datagram payload size of one untagged event record.
 func EventRecordBytes(event []byte) int { return FrameHeaderBytes + 1 + len(event) }
 
-// AppendEventRecord appends one length-prefixed, tagged event frame, without size validation.
+// EventRecordTransitionBytes returns the datagram payload size of the event
+// record AppendEventRecordTransition writes for transition.
+func EventRecordTransitionBytes(event []byte, transition uint64) int {
+	if transition == 0 {
+		return EventRecordBytes(event)
+	}
+	return FrameHeaderBytes + 2 + uvarintBytes(transition) + len(event)
+}
+
+// AppendEventRecord appends one length-prefixed, untagged event frame, without size validation.
 func AppendEventRecord(dst, event []byte) []byte {
 	start := len(dst)
 	dst = append(dst, 0, 0, 0, 0, EventRecordTag)
@@ -54,12 +69,55 @@ func AppendEventRecord(dst, event []byte) []byte {
 	return append(dst, event...)
 }
 
-// EventRecord borrows the ServerEvent bytes of a tagged datagram frame.
-func EventRecord(frame []byte) ([]byte, bool) {
-	if len(frame) == 0 || frame[0] != EventRecordTag {
-		return nil, false
+// AppendEventRecordTransition appends one length-prefixed event frame tagged
+// with a session's space transition, without size validation. Transition 0
+// writes the untagged record, so sessions that never changed space receive
+// the same bytes as AppendEventRecord.
+func AppendEventRecordTransition(dst, event []byte, transition uint64) []byte {
+	if transition == 0 {
+		return AppendEventRecord(dst, event)
 	}
-	return frame[1:], true
+	start := len(dst)
+	dst = append(dst, 0, 0, 0, 0, EventRecordTag, EventRecordTag)
+	dst = binary.AppendUvarint(dst, transition)
+	dst = append(dst, event...)
+	binary.BigEndian.PutUint32(dst[start:start+FrameHeaderBytes], uint32(len(dst)-start-FrameHeaderBytes))
+	return dst
+}
+
+// EventRecord borrows the ServerEvent bytes of a tagged or untagged datagram
+// event frame; see EventRecordTransition.
+func EventRecord(frame []byte) ([]byte, bool) {
+	_, event, ok := EventRecordTransition(frame)
+	return event, ok
+}
+
+// EventRecordTransition borrows the ServerEvent bytes of a datagram event
+// frame and returns its space transition (0 for an untagged record). ok is
+// false for frames that do not start with EventRecordTag and for tagged
+// records whose transition varint is truncated or overlong; callers that see
+// the tag byte but ok false must drop the frame rather than read it as state.
+func EventRecordTransition(frame []byte) (transition uint64, event []byte, ok bool) {
+	if len(frame) == 0 || frame[0] != EventRecordTag {
+		return 0, nil, false
+	}
+	if len(frame) == 1 || frame[1] != EventRecordTag {
+		return 0, frame[1:], true
+	}
+	transition, n := binary.Uvarint(frame[2:])
+	if n <= 0 {
+		return 0, nil, false
+	}
+	return transition, frame[2+n:], true
+}
+
+func uvarintBytes(v uint64) int {
+	n := 1
+	for v >= 0x80 {
+		v >>= 7
+		n++
+	}
+	return n
 }
 
 // ReadFrame reads one complete frame, enforcing the logical size cap before allocation.

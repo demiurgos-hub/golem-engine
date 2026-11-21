@@ -827,6 +827,9 @@ func TestGenerateGoSharedTemplateRoutesDatagramEventDeliveries(t *testing.T) {
 			{Name: "Cast", Target: "entity", Delivery: "reliable_ordered"},
 			{Name: "Toast", Target: "session", Delivery: "reliable_unordered"},
 			{Name: "Weather", Target: "broadcast"},
+			{Name: "Ping", Target: "entity", FOIOnly: true},
+			{Name: "Notice", Target: "session"},
+			{Name: "Quake", Target: "entity"},
 		},
 	}
 
@@ -840,13 +843,20 @@ func TestGenerateGoSharedTemplateRoutesDatagramEventDeliveries(t *testing.T) {
 		"if err := b.srv.SendServerEvent(sid, golem.EventUnreliable, data); err != nil {",
 		"if err := b.srv.BroadcastServerEvent(golem.EventReliableOrdered, data); err != nil {",
 		"return b.srv.SendServerEvent(sessionID, golem.EventReliableUnordered, se.Marshal())",
-		"return b.srv.BroadcastEvent(golem.WrapServerEvent(se.Marshal()))",
+		"return b.srv.BroadcastServerEvent(golem.EventStream, se.Marshal())",
+		"if err := b.srv.SendServerEvent(sid, golem.EventStream, data); err != nil {",
+		"return b.srv.SendServerEvent(sessionID, golem.EventStream, se.Marshal())",
+		"if err := b.srv.BroadcastServerEvent(golem.EventStream, data); err != nil {",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("generated event senders missing %q\n%s", want, content)
 		}
 	}
-	if got := strings.Count(content, "golem.WrapServerEvent("); got != 1 {
-		t.Fatalf("stream-wrapped event senders = %d, want only the stream event", got)
+	// Stream events use the server event APIs too, so a space switch can hold
+	// them behind its transition instead of raw sends bypassing it.
+	for _, bypass := range []string{"golem.WrapServerEvent(", "b.srv.Send(", "b.srv.BroadcastEvent("} {
+		if strings.Contains(content, bypass) {
+			t.Fatalf("generated event senders still use %q\n%s", bypass, content)
+		}
 	}
 }

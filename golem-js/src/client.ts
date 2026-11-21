@@ -633,6 +633,12 @@ export class GameClient {
     (oldSpace: number, newSpace: number) => void
   >();
   private _spaceTransition?: number;
+  /**
+   * Latest transition announced on this connection; survives SpaceSettled.
+   * Datagram event records of an older transition (untagged ones count as 0)
+   * are dropped.
+   */
+  private _currentTransition = 0;
   private _heldBatches: Uint8Array[] = [];
   private _heldBytes = 0;
 
@@ -653,11 +659,19 @@ export class GameClient {
     this.entities.onResyncNeeded?.((entityId) => this._requestEntityResync(entityId));
   }
 
-  /** Ask the server for a full state of an entity whose held compact records were evicted. */
+  /**
+   * Ask the server for a full state of an entity whose held compact records
+   * were evicted. A failed send closes the connection: the entity would
+   * otherwise stay without state.
+   */
   private _requestEntityResync(entityId: number): void {
     const channel = this._channel;
     if (channel?.connected) {
-      channel.send(encodeEntityResync(entityId));
+      try {
+        channel.send(encodeEntityResync(entityId));
+      } catch {
+        this._failConnection("entity resync send failed");
+      }
     }
   }
 
@@ -1347,6 +1361,7 @@ export class GameClient {
   private _applySpaceChanged(payload: Uint8Array): void {
     const { space, transition } = decodeSpaceChanged(payload);
     this._spaceTransition = transition;
+    this._currentTransition = transition;
     const oldSpace = this._space;
     this._space = space;
     if (oldSpace === space) {
@@ -1363,8 +1378,10 @@ export class GameClient {
 
   /**
    * Close the matching transition, apply the batches held during it in arrival
-   * order (the generated managers' revision fence drops superseded state) and
-   * acknowledge it with SpaceAck.
+   * order (the generated managers' revision fence drops superseded state, and
+   * event records of an older transition are dropped) and acknowledge it with
+   * SpaceAck. A failed SpaceAck send closes the connection, since the server
+   * would keep the session gated.
    */
   private _applySpaceSettled(payload: Uint8Array): void {
     const transition = decodeSpaceSettled(payload);
@@ -1382,7 +1399,11 @@ export class GameClient {
     }
     const channel = this._channel;
     if (this._isCurrentGeneration(generation) && channel?.connected) {
-      channel.send(encodeSpaceAck(transition));
+      try {
+        channel.send(encodeSpaceAck(transition));
+      } catch {
+        this._failConnection("space ack send failed");
+      }
     }
   }
 
@@ -1417,7 +1438,12 @@ export class GameClient {
       if (!this._isCurrentGeneration(generation)) return;
       // Event records start with a zero tag; a compact record's varint entity ID never does.
       if (frame.byteLength > 0 && frame[0] === eventRecordTag) {
-        this.events?.applyRaw(frame.subarray(1));
+        const record = decodeEventRecord(frame);
+        // Records of a transition the session already left (or malformed
+        // ones) are dropped.
+        if (record !== undefined && record.transition >= this._currentTransition) {
+          this.events?.applyRaw(record.event);
+        }
         continue;
       }
       this.entities.applyCompactUpdate(frame);
@@ -1436,9 +1462,10 @@ export class GameClient {
     this._heldBytes = 0;
   }
 
-  /** Drop per-connection replica state: entities, space and any open transition. */
+  /** Drop per-connection replica state: entities, space, transitions and any open transition. */
   private _clearSessionState(): void {
     this._space = 0;
+    this._currentTransition = 0;
     this._clearSpaceTransition();
     this.entities.clear?.();
   }
@@ -2437,6 +2464,29 @@ function decodeSpaceSettled(bytes: Uint8Array): number {
     else r.skip(wire);
   }
   return transition;
+}
+
+/**
+ * Decode a datagram event record: `00 <event>` (transition 0) or
+ * `00 00 <uvarint transition> <event>`. A valid non-empty ServerEvent never
+ * starts with a zero byte, so a second zero marks the tagged form. Returns
+ * undefined for a truncated or overlong transition varint.
+ */
+function decodeEventRecord(frame: Uint8Array): { transition: number; event: Uint8Array } | undefined {
+  if (frame.byteLength < 2 || frame[1] !== eventRecordTag) {
+    return { transition: 0, event: frame.subarray(1) };
+  }
+  let transition = 0;
+  let scale = 1;
+  for (let pos = 2; pos < frame.byteLength && pos < 12; pos++) {
+    const b = frame[pos];
+    transition += (b & 0x7f) * scale;
+    if (b < 0x80) {
+      return { transition, event: frame.subarray(pos + 1) };
+    }
+    scale *= 128;
+  }
+  return undefined;
 }
 
 /** Decode WorldCleared{string name = 1}. */

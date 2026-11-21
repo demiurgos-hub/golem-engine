@@ -2534,3 +2534,119 @@ test("GameClient sends EntityResync when the entity manager reports evicted reco
   resync(0x0102030405);
   assert.deepEqual(channel.sent.map((bytes) => Array.from(bytes)), [[0x00, 0x4f, 0x47, 0x53, 0x04, 0, 0, 0, 1, 2, 3, 4, 5]]);
 });
+
+// Datagram event records: `00 <event>` untagged (transition 0) or
+// `00 00 <uvarint transition> <event>`.
+function eventRecord(transition, text) {
+  const event = Array.from(text, (c) => c.charCodeAt(0));
+  if (transition === 0) return new Uint8Array([0, ...event]);
+  const varint = [];
+  for (let v = transition; ; v = Math.floor(v / 128)) {
+    if (v < 128) { varint.push(v); break; }
+    varint.push((v % 128) | 0x80);
+  }
+  return new Uint8Array([0, 0, ...varint, ...event]);
+}
+
+function eventSpaceClient(channelClass = SpaceChannel) {
+  const entities = fencedEntities();
+  const channels = [];
+  const client = new GameClient({
+    entityManager: entities,
+    eventManager: { applyRaw: (bytes) => entities.log.push(`event ${String.fromCharCode(...bytes)}`) },
+    decode: (bytes) => bytes,
+    encode: () => new Uint8Array(),
+    encodePacket: packetBytes,
+    createChannel: (options) => {
+      const channel = new channelClass(options.transport);
+      channels.push(channel);
+      return channel;
+    },
+  });
+  const connect = () => {
+    client.connect({ transport: "webtransport", url: "https://example.test" });
+    channels.at(-1).open();
+    return channels.at(-1);
+  };
+  return { client, entities, connect };
+}
+
+test("GameClient drops datagram event records of a transition it already left", () => {
+  const { client, entities, connect } = eventSpaceClient();
+  const channel = connect();
+  entities.log.length = 0;
+
+  // Untagged events apply before any switch.
+  channel.unreliable(framedBatchBytes([eventRecord(0, "pre")]));
+  assert.deepEqual(entities.log, ["event pre"]);
+
+  // Held during the transition: the pre-switch event is dropped on replay.
+  channel.stream(spaceChangedField(7, 1));
+  channel.unreliable(framedBatchBytes([eventRecord(0, "held-old")]));
+  channel.ordered(framedBatchBytes([eventRecord(1, "held-current")]));
+  channel.stream(spaceSettledField(1));
+  assert.deepEqual(entities.log, ["event pre", "event held-current"]);
+
+  // Live after the settle.
+  channel.unreliable(framedBatchBytes([eventRecord(0, "live-old"), eventRecord(1, "live-current")]));
+  assert.deepEqual(entities.log, ["event pre", "event held-current", "event live-current"]);
+
+  // A newer transition makes transition 1 stale; malformed records are dropped
+  // rather than read as compact state.
+  channel.stream(spaceChangedField(8, 300), spaceSettledField(300));
+  channel.unreliable(framedBatchBytes([eventRecord(1, "stale"), new Uint8Array([0, 0, 0x80]), eventRecord(300, "fresh")]));
+  assert.deepEqual(entities.log, ["event pre", "event held-current", "event live-current", "event fresh"]);
+
+  // Reconnecting resets the transition: untagged events apply again.
+  client.disconnect();
+  const next = connect();
+  entities.log.length = 0;
+  next.unreliable(framedBatchBytes([eventRecord(0, "reconnected")]));
+  assert.deepEqual(entities.log, ["event reconnected"]);
+  client.disconnect();
+});
+
+class FailingSendSpaceChannel extends SpaceChannel {
+  send() { throw new Error("write failed"); }
+}
+
+test("GameClient closes the connection when a SpaceAck or EntityResync send fails", () => {
+  for (const control of ["space ack", "entity resync"]) {
+    const entities = fencedEntities();
+    let resync;
+    entities.onResyncNeeded = (fn) => { resync = fn; return () => {}; };
+    const disconnects = [];
+    const channels = [];
+    const client = new GameClient({
+      entityManager: entities,
+      decode: (bytes) => bytes,
+      encode: () => new Uint8Array(),
+      encodePacket: packetBytes,
+      createChannel: (options) => {
+        const channel = new FailingSendSpaceChannel(options.transport);
+        channels.push(channel);
+        return channel;
+      },
+    });
+    client.onDisconnect((info) => disconnects.push(info));
+    client.connect({ transport: "webtransport", url: "https://example.test" });
+    const channel = channels.at(-1);
+    channel.open();
+    const previousError = console.error;
+    console.error = () => {};
+    try {
+      if (control === "space ack") {
+        channel.stream(spaceChangedField(3, 1), spaceSettledField(1));
+      } else {
+        resync(5);
+      }
+    } finally {
+      console.error = previousError;
+    }
+    assert.equal(disconnects.length, 1, control);
+    assert.equal(disconnects[0].wasClean, false, control);
+    assert.match(disconnects[0].error.message, new RegExp(`${control} send failed`), control);
+    assert.equal(channel.closeCalls, 1, control);
+    assert.equal(client.connected, false, control);
+  }
+});

@@ -31,6 +31,10 @@ type inboundDispatcher struct {
 	once    sync.Once
 	// space is this connection's open space transition (dispatcher-only).
 	space spaceTransitionState
+	// transition is the latest space transition announced on this connection
+	// (dispatcher-only). It survives SpaceSettled; datagram event records
+	// tagged with an older transition (untagged ones count as 0) are dropped.
+	transition uint64
 }
 
 // newInboundDispatcher creates a paused serialized inbound event dispatcher.
@@ -150,16 +154,18 @@ func NewGameClient(options GameClientOptions) *GameClient {
 
 // requestEntityResync asks the server for a full state of entityID after the
 // entity manager evicted compact records held for it. It runs on the inbound
-// dispatcher goroutine and does nothing while disconnected.
+// dispatcher goroutine and does nothing while disconnected. A failed send
+// fails the connection: the entity would otherwise stay without state.
 func (c *GameClient) requestEntityResync(entityID int64) {
 	c.mu.Lock()
 	channel := c.channel
+	d := c.inbound
 	c.mu.Unlock()
 	if channel == nil {
 		return
 	}
 	if err := channel.Send(netwire.AppendEntityResyncControl(nil, entityID)); err != nil {
-		c.setLastErr(sanitizeURLError(err))
+		c.failConnection(d, sanitizeURLError(err))
 	}
 }
 
@@ -656,12 +662,19 @@ func (c *GameClient) handleMessage(d *inboundDispatcher, data []byte) {
 
 // handleCompactStateBatch applies every frame of one datagram batch. A callback
 // that disconnects stops dispatcher d, and the remaining frames are skipped.
+// Event records tagged with a transition older than the connection's current
+// one belong to a space the session already left and are dropped, as are
+// malformed event records.
 func (c *GameClient) handleCompactStateBatch(d *inboundDispatcher, data []byte) {
 	_ = decodeLengthPrefixedFrames(data, func(frame []byte) {
 		if d != nil && d.isDone() {
 			return
 		}
-		if event, ok := netwire.EventRecord(frame); ok {
+		if len(frame) > 0 && frame[0] == netwire.EventRecordTag {
+			transition, event, ok := netwire.EventRecordTransition(frame)
+			if !ok || (d != nil && transition < d.transition) {
+				return
+			}
 			if c.events != nil {
 				c.events.ApplyRaw(event)
 			}

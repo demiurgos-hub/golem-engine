@@ -37,6 +37,61 @@ func TestEventRecordGoldenBytes(t *testing.T) {
 	}
 }
 
+func TestEventRecordTransitionTagging(t *testing.T) {
+	event := []byte{0x0a, 0x01}
+	// Transition 0 keeps the untagged golden bytes.
+	if got, want := AppendEventRecordTransition(nil, event, 0), AppendEventRecord(nil, event); !bytes.Equal(got, want) {
+		t.Fatalf("transition 0 record = %x; want untagged %x", got, want)
+	}
+	if EventRecordTransitionBytes(event, 0) != EventRecordBytes(event) {
+		t.Fatal("transition 0 size differs from the untagged size")
+	}
+	got := AppendEventRecordTransition([]byte{0xff}, event, 300)
+	if want := unhex(t, "ff000000060000ac020a01"); !bytes.Equal(got, want) {
+		t.Fatalf("tagged record = %x; want %x", got, want)
+	}
+	if len(got)-1 != EventRecordTransitionBytes(event, 300) {
+		t.Fatalf("tagged record size %d differs from EventRecordTransitionBytes", len(got)-1)
+	}
+	frame := got[1+FrameHeaderBytes:]
+	if transition, decoded, ok := EventRecordTransition(frame); !ok || transition != 300 || !bytes.Equal(decoded, event) {
+		t.Fatalf("decoded = %d, %x, %v", transition, decoded, ok)
+	}
+	if decoded, ok := EventRecord(frame); !ok || !bytes.Equal(decoded, event) {
+		t.Fatalf("EventRecord on a tagged frame = %x, %v", decoded, ok)
+	}
+	if transition, decoded, ok := EventRecordTransition(unhex(t, "000a01")); !ok || transition != 0 || !bytes.Equal(decoded, event) {
+		t.Fatalf("untagged decode = %d, %x, %v", transition, decoded, ok)
+	}
+
+	// Empty events stay unambiguous in both forms.
+	emptyUntagged := AppendEventRecord(nil, nil)[FrameHeaderBytes:]
+	if transition, decoded, ok := EventRecordTransition(emptyUntagged); !ok || transition != 0 || len(decoded) != 0 {
+		t.Fatalf("empty untagged = %x: %d, %x, %v", emptyUntagged, transition, decoded, ok)
+	}
+	emptyTagged := AppendEventRecordTransition(nil, nil, 7)[FrameHeaderBytes:]
+	if !bytes.Equal(emptyTagged, []byte{0, 0, 7}) {
+		t.Fatalf("empty tagged = %x", emptyTagged)
+	}
+	if transition, decoded, ok := EventRecordTransition(emptyTagged); !ok || transition != 7 || len(decoded) != 0 {
+		t.Fatalf("empty tagged decode = %d, %x, %v", transition, decoded, ok)
+	}
+
+	// Malformed tagged records and non-event frames are rejected.
+	for _, frame := range [][]byte{
+		nil,
+		{},
+		{0, 0},
+		{0, 0, 0x80},
+		{0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01},
+		{0x01, 0x00},
+	} {
+		if transition, decoded, ok := EventRecordTransition(frame); ok {
+			t.Fatalf("frame %x decoded as %d, %x", frame, transition, decoded)
+		}
+	}
+}
+
 func TestPacketGoldenBytes(t *testing.T) {
 	for _, tt := range []struct {
 		name  string

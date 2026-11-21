@@ -56,6 +56,7 @@ func (c *GameClient) OnSpaceChanged(fn func(oldSpace, newSpace SpaceID)) {
 func (c *GameClient) applySpaceChanged(d *inboundDispatcher, space SpaceID, transition uint64) {
 	d.space.open = true
 	d.space.transition = transition
+	d.transition = transition
 	c.mu.Lock()
 	if c.inbound != d {
 		c.mu.Unlock()
@@ -73,7 +74,9 @@ func (c *GameClient) applySpaceChanged(d *inboundDispatcher, space SpaceID, tran
 // applySpaceSettled closes the matching open transition, applies the batches
 // held back during it in arrival order and acknowledges it with SpaceAck. The
 // generated managers' revision fence discards any held state the stream has
-// already superseded.
+// already superseded, and held event records of an older transition are
+// dropped. A failed SpaceAck send fails the connection: the server would keep
+// the session gated forever.
 func (c *GameClient) applySpaceSettled(d *inboundDispatcher, transition uint64) {
 	if !d.space.open || d.space.transition != transition {
 		return
@@ -94,7 +97,7 @@ func (c *GameClient) applySpaceSettled(d *inboundDispatcher, transition uint64) 
 		return
 	}
 	if err := channel.Send(netwire.AppendSpaceAckControl(nil, transition)); err != nil {
-		c.setLastErr(sanitizeURLError(err))
+		c.failConnection(d, sanitizeURLError(err))
 	}
 }
 

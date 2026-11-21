@@ -34,6 +34,8 @@ type spaceTransferEntity struct {
 // colliders, attach destination physics, run the deferred traversal-cancel
 // callbacks, and attach destination navigation. A failing source detach rolls
 // back the destination bodies and leaves the registry and colliders unchanged.
+// Sessions whose avatar or FOI anchor moved hold their server events until
+// their transition is queued (space_events.go).
 func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 	dst := s.runtime(t.To)
 	var moves []spaceTransferEntity
@@ -90,9 +92,7 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 		return err
 	}
 	if len(moves) == 0 {
-		s.interestMu.Lock()
-		bad, moved := s.reg.SetSpaces(t.Entities, t.To)
-		s.interestMu.Unlock()
+		bad, moved := s.setSpacesHoldingEvents(t)
 		if !moved {
 			return fmt.Errorf("golem: %s: entity %d is not published", op, bad)
 		}
@@ -166,9 +166,7 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 	// space, but the batch still commits: its source bodies are gone.
 	syncErr := synchronizeRetired(op, retired)
 
-	s.interestMu.Lock()
-	bad, moved := s.reg.SetSpaces(t.Entities, t.To)
-	s.interestMu.Unlock()
+	bad, moved := s.setSpacesHoldingEvents(t)
 	if !moved {
 		// Unreachable after validation; keep the registry and colliders.
 		runDeferred()
@@ -436,4 +434,20 @@ func destroyTransferBodies(dps *physicsService, created map[int64]p.BodyHandle) 
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+// setSpacesHoldingEvents moves the registry spaces of t's entities under
+// interestMu, so the batch is atomic for session-space readers, and then makes
+// every session whose space now differs from its announced one hold its
+// server events. It returns SetSpaces' result.
+func (s *Server) setSpacesHoldingEvents(t SpaceTransfer) (int64, bool) {
+	s.interestMu.Lock()
+	bad, moved := s.reg.SetSpaces(t.Entities, t.To)
+	var switching []int64
+	if moved {
+		switching = s.appendMovedSessionSwitchesLocked(nil, t.Entities)
+	}
+	s.interestMu.Unlock()
+	s.holdSessionEvents(switching...)
+	return bad, moved
 }

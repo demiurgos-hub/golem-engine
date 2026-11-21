@@ -144,7 +144,8 @@ func (s *Server) clearSessionSpaceLocked(sessionID int64) {
 
 // releaseSpaceGate ends stream-only delta and event delivery for a session
 // once its latest transition is acknowledged, or right after the transition
-// for sessions without datagram lanes. Fields sent on the stream while gated
+// for sessions without datagram lanes. The session's event transition tag
+// stays, so its datagram events keep naming the acknowledged transition. Fields sent on the stream while gated
 // are marked dirty again so the first datagrams carry their current values: a
 // datagram may overtake a gated stream delta, which the client then discards
 // as older. Tick goroutine only.
@@ -206,15 +207,21 @@ func (s *Server) applySpaceAcks() {
 	}
 }
 
-// beginSpaceTransitionEvents keeps the datagram-lane server events of the
-// listed sessions on the ordered stream until their transition is
-// acknowledged, so no event sent from now on can overtake the transition
-// frames. Call without interestMu.
+// beginSpaceTransitionEvents prepares the server events of the sessions whose
+// plans carry a transition: they are held until the transition frames are
+// queued (so events sent from OnUpdates follow SpaceSettled), then use the
+// ordered stream until the transition is acknowledged, and their datagram
+// records carry the new transition afterwards. Call without interestMu.
 func (s *Server) beginSpaceTransitionEvents(plans map[int64]sessionSpacePlan) {
+	var held []int64
 	for sid, plan := range plans {
 		if plan.transition != 0 {
-			s.listener.SetSessionEventsStreamOnly(sid, true)
+			held = append(held, sid)
 		}
+	}
+	s.holdSessionEvents(held...)
+	for _, sid := range held {
+		s.listener.SetSessionEventTransition(sid, plans[sid].transition, true)
 	}
 }
 
@@ -228,17 +235,19 @@ func (s *Server) beginSpaceTransitionEvents(plans map[int64]sessionSpacePlan) {
 // few logical stream frames as the reliable frame cap allows; protobuf
 // concatenation keeps every envelope field and clients process them in order.
 //
-// Before anything is queued, the session's datagram-lane server events switch
-// to the stream until the transition is acknowledged. Once the frames are
-// queued the session counts as announced in the new space. Exits of orphaned
-// entities (plan.orphanRevisions) that are no longer registered use their
-// recorded revisions.
+// Before anything is queued, a WebTransport session's datagram-lane server
+// events switch to the stream until the transition is acknowledged, and its
+// datagram event records carry the new transition from then on. Once the
+// frames are queued the session counts as announced in the new space and the
+// events it held since its space changed are flushed behind SpaceSettled.
+// Exits of orphaned entities (plan.orphanRevisions) that are no longer
+// registered use their recorded revisions.
 func (s *Server) deliverSpaceTransition(sessionID int64, transport golemnet.Transport, diff interest.Diff, tick *replicationTick, plan sessionSpacePlan, scope replicationScope) (eventualStateSendStats, bool, error) {
 	var stats eventualStateSendStats
 	defer s.finishSpaceAnnouncement(sessionID)
 	webTransport := transport == golemnet.TransportWebTransport
 	if webTransport {
-		s.listener.SetSessionEventsStreamOnly(sessionID, true)
+		s.listener.SetSessionEventTransition(sessionID, plan.transition, true)
 	}
 	scratch := tick.replicationScratch
 	datagramCapable := s.usesDatagramStateUpdates() && webTransport
@@ -292,6 +301,9 @@ func (s *Server) deliverSpaceTransition(sessionID int64, transport golemnet.Tran
 		return stats, false, err
 	}
 	stats.add(sent)
+	// Same FIFO stream: events held since the space changed land after
+	// SpaceSettled.
+	s.releaseTransitionEvents(sessionID)
 	if !webTransport {
 		// Without datagram lanes neither deltas nor events can overtake the
 		// stream; a later SpaceAck is harmless. WebTransport sessions keep the

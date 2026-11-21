@@ -88,19 +88,59 @@ namespace GolemEngine.Unity
         }
 
         /// <summary>
-        /// Reads a server event record from one length-prefixed datagram frame.
-        /// Event records start with a zero tag byte, which a compact state
-        /// record's varint entity ID never does.
+        /// Reads a server event record from one length-prefixed datagram frame,
+        /// ignoring its space transition tag; see the overload with a transition.
         /// </summary>
         public static bool TryGetEventRecord(byte[] frame, out byte[] serverEvent)
         {
+            return TryGetEventRecord(frame, out _, out serverEvent);
+        }
+
+        /// <summary>
+        /// Reads a server event record from one length-prefixed datagram frame.
+        /// Event records start with a zero tag byte, which a compact state
+        /// record's varint entity ID never does. An untagged record
+        /// (<c>00 event</c>) has transition 0; a tagged record is
+        /// <c>00 00 uvarint(transition) event</c> (a valid non-empty ServerEvent
+        /// never starts with a zero byte). Returns false for other frames and for
+        /// tagged records whose transition varint is truncated or overlong.
+        /// </summary>
+        public static bool TryGetEventRecord(byte[] frame, out ulong transition, out byte[] serverEvent)
+        {
+            transition = 0;
+            serverEvent = null;
             if (frame == null || frame.Length == 0 || frame[0] != EventRecordTag)
             {
-                serverEvent = null;
                 return false;
             }
-            serverEvent = new byte[frame.Length - 1];
-            Array.Copy(frame, 1, serverEvent, 0, serverEvent.Length);
+            var offset = 1;
+            if (frame.Length >= 2 && frame[1] == EventRecordTag)
+            {
+                ulong value = 0;
+                var shift = 0;
+                offset = 2;
+                while (true)
+                {
+                    if (offset >= frame.Length || shift > 63)
+                    {
+                        return false;
+                    }
+                    var b = frame[offset++];
+                    if (shift == 63 && b > 1)
+                    {
+                        return false;
+                    }
+                    value |= (ulong)(b & 0x7f) << shift;
+                    if (b < 0x80)
+                    {
+                        break;
+                    }
+                    shift += 7;
+                }
+                transition = value;
+            }
+            serverEvent = new byte[frame.Length - offset];
+            Array.Copy(frame, offset, serverEvent, 0, serverEvent.Length);
             return true;
         }
 

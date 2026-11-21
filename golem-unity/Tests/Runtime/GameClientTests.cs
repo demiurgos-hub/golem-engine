@@ -520,6 +520,116 @@ namespace GolemEngine.Unity.Tests
             }
         }
 
+        [Test]
+        public void DropsDatagramEventRecordsOfOlderTransitions()
+        {
+            var manager = new FencedEntityManager();
+            var transport = new RecordingTransport(GolemDatagramProtocol.MaxWebTransportDatagramBytes);
+            var client = new GameClient(
+                manager,
+                bytes => bytes,
+                cmd => (byte[])cmd,
+                frames => ClientPacket(frames),
+                _ => transport,
+                eventManager: new LoggingEventManager(manager.Log));
+            client.Connect("https://example.invalid/wt");
+
+            // Untagged events apply before any switch.
+            InvokeBatch(client, "ReceiveCompactStateBatch", EventBatch(0, "pre"));
+            Assert.That(manager.Log, Is.EqualTo(new[] { "event pre" }));
+
+            // Held during the transition: the pre-switch event is dropped on replay.
+            InvokePrivate(client, "HandleMessage", SpaceChangedField(7, 1));
+            InvokeBatch(client, "ReceiveCompactStateBatch", EventBatch(0, "held-old"));
+            InvokeBatch(client, "ReceiveCompactStateBatch", EventBatch(1, "held-current"));
+            InvokePrivate(client, "HandleMessage", SpaceSettledField(1));
+            Assert.That(manager.Log, Is.EqualTo(new[] { "event pre", "event held-current" }));
+
+            // Live after the settle.
+            InvokeBatch(client, "ReceiveCompactStateBatch", Concat(EventBatch(0, "live-old"), EventBatch(1, "live-current")));
+            Assert.That(manager.Log, Is.EqualTo(new[] { "event pre", "event held-current", "event live-current" }));
+
+            // A newer transition makes transition 1 stale; malformed records are dropped, not read as state.
+            InvokePrivate(client, "HandleMessage", Concat(SpaceChangedField(8, 300), SpaceSettledField(300)));
+            InvokeBatch(client, "ReceiveCompactStateBatch", Concat(
+                EventBatch(1, "stale"),
+                GolemDatagramProtocol.EncodeLengthPrefixedFrame(new byte[] { 0, 0, 0x80 }),
+                EventBatch(300, "fresh")));
+            Assert.That(manager.Log, Is.EqualTo(new[] { "event pre", "event held-current", "event live-current", "event fresh" }));
+
+            // Reconnecting resets the transition: untagged events apply again.
+            client.Disconnect();
+            client.Connect("https://example.invalid/wt");
+            manager.Log.Clear();
+            InvokeBatch(client, "ReceiveCompactStateBatch", EventBatch(0, "reconnected"));
+            Assert.That(manager.Log, Is.EqualTo(new[] { "event reconnected" }));
+        }
+
+        [Test]
+        public void FailedSpaceAckOrEntityResyncSendClosesConnection()
+        {
+            foreach (var control in new[] { "space_ack", "entity_resync" })
+            {
+                var manager = new ResyncEntityManager();
+                var transport = new RecordingTransport(GolemDatagramProtocol.MaxWebTransportDatagramBytes);
+                var client = SpaceClient(manager, transport);
+                var disconnects = new List<GolemDisconnectInfo>();
+                client.DisconnectedEvent += info => disconnects.Add(info);
+                client.Connect("https://example.invalid/wt");
+                transport.SendFailure = new InvalidOperationException("write failed for https://example.invalid/wt?ticket=secret");
+#if UNITY_5_3_OR_NEWER
+                // The .NET policy consumer stubs Unity's logger; the Unity runner fails on unexpected errors.
+                UnityEngine.TestTools.LogAssert.Expect(
+                    UnityEngine.LogType.Error,
+                    new System.Text.RegularExpressions.Regex(control + "_send_failed"));
+#endif
+                if (control == "space_ack")
+                {
+                    InvokePrivate(client, "HandleMessage", Concat(SpaceChangedField(3, 1), SpaceSettledField(1)));
+                }
+                else
+                {
+                    manager.Resync(5);
+                }
+
+                Assert.That(disconnects, Has.Count.EqualTo(1), control);
+                Assert.That(disconnects[0].WasClean, Is.False, control);
+                Assert.That(disconnects[0].Reason, Is.EqualTo(control + "_send_failed"));
+                Assert.That(disconnects[0].Phase, Is.EqualTo(GolemDisconnectPhase.Send), control);
+                Assert.That(disconnects[0].Error, Is.Not.Null, control);
+                Assert.That(disconnects[0].Error.Message, Does.Not.Contain("secret"), control);
+                Assert.That(client.Connected, Is.False, control);
+            }
+        }
+
+        /// <summary>One length-prefixed datagram event record, tagged with transition when it is non-zero.</summary>
+        private static byte[] EventBatch(ulong transition, string text)
+        {
+            var record = new List<byte> { GolemDatagramProtocol.EventRecordTag };
+            if (transition != 0)
+            {
+                record.Add(GolemDatagramProtocol.EventRecordTag);
+                for (var v = transition; ; v >>= 7)
+                {
+                    if (v < 0x80)
+                    {
+                        record.Add((byte)v);
+                        break;
+                    }
+                    record.Add((byte)((v & 0x7f) | 0x80));
+                }
+            }
+            record.AddRange(System.Text.Encoding.ASCII.GetBytes(text));
+            return GolemDatagramProtocol.EncodeLengthPrefixedFrame(record.ToArray());
+        }
+
+        private sealed class LoggingEventManager : IEventManager
+        {
+            private readonly List<string> _log;
+            public LoggingEventManager(List<string> log) { _log = log; }
+            public void ApplyRaw(byte[] bytes) { _log.Add("event " + System.Text.Encoding.ASCII.GetString(bytes)); }
+        }
+
         private class LoggingWorldManager : IWorldManager
         {
             protected readonly List<string> Log;
@@ -697,8 +807,16 @@ namespace GolemEngine.Unity.Tests
             public event Action<byte[]> ReliableOrderedMessageEvent;
             public event Action<byte[]> EventualStateMessageEvent;
             public event Action<GolemDisconnectInfo> DisconnectedEvent;
+            public Exception SendFailure { get; set; }
             public void Connect(string url) { ConnectedEvent?.Invoke(); }
-            public void Send(byte[] bytes) { Sent.Add(bytes); }
+            public void Send(byte[] bytes)
+            {
+                if (SendFailure != null)
+                {
+                    throw SendFailure;
+                }
+                Sent.Add(bytes);
+            }
             public void SendUnreliable(byte[] bytes) { UnreliableSent.Add(bytes); }
             public void SendReliableUnordered(byte[] bytes) { ReliableUnorderedSent.Add(bytes); }
             public void SendReliableOrdered(byte[] bytes) { ReliableOrderedSent.Add(bytes); }

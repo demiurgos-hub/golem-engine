@@ -134,8 +134,19 @@ func (s *Server) releaseAvatarReservation(sessionID int64) {
 	}
 }
 
-// commitAvatar binds sessionID to entityID after a successful spawn.
+// commitAvatar binds sessionID to entityID after a successful spawn. The
+// avatar may move the session to its space, so the session then holds its
+// server events until that transition is queued.
 func (s *Server) commitAvatar(sessionID, entityID int64) error {
+	if err := s.bindAvatar(sessionID, entityID); err != nil {
+		return err
+	}
+	s.holdEventsIfSwitchPending(sessionID)
+	return nil
+}
+
+// bindAvatar records the avatar indexes of a pending reservation.
+func (s *Server) bindAvatar(sessionID, entityID int64) error {
 	s.avatarMu.Lock()
 	defer s.avatarMu.Unlock()
 	id, ok := s.sessionAvatar[sessionID]
@@ -151,15 +162,20 @@ func (s *Server) commitAvatar(sessionID, entityID int64) error {
 }
 
 // clearAvatarByEntity removes avatar index entries for entityID in O(1).
-// Safe under concurrent SpawnAvatar / Avatar / disconnect; does not touch the registry.
+// Safe under concurrent SpawnAvatar / Avatar / disconnect; does not touch the
+// registry. Losing its avatar may move the session to its explicit space, so
+// the session then holds its server events until that transition is queued.
+// Call without interestMu.
 func (s *Server) clearAvatarByEntity(entityID int64) {
 	s.avatarMu.Lock()
-	defer s.avatarMu.Unlock()
 	sessionID, ok := s.avatarSession[entityID]
-	if !ok {
-		return
+	if ok {
+		s.unlinkAvatarLocked(sessionID, entityID)
 	}
-	s.unlinkAvatarLocked(sessionID, entityID)
+	s.avatarMu.Unlock()
+	if ok {
+		s.holdEventsIfSwitchPending(sessionID)
+	}
 }
 
 // takeAvatarBySession removes and returns the avatar entity ID for sessionID.

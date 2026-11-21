@@ -49,10 +49,21 @@ type Session struct {
 	closeOnce  sync.Once
 	abortOnce  sync.Once
 
-	// eventsStreamOnly sends datagram-lane server events as their stream
-	// frame instead, keeping them ordered with the reliable stream while the
-	// server waits for a space transition acknowledgement.
-	eventsStreamOnly atomic.Bool
+	// eventLane packs the session's server event lane state so off-tick
+	// senders never see a torn pair: eventStreamOnlyBit sends datagram-lane
+	// events as their stream frame instead, keeping them ordered with the
+	// reliable stream while the server waits for a space transition
+	// acknowledgement; the low 63 bits hold the session's latest space
+	// transition, which tags datagram event records once non-zero.
+	eventLane atomic.Uint64
+
+	// eventHolding queues server events in eventHeld instead of sending them
+	// while the session may be about to change space; FlushSessionEvents
+	// sends them in order. eventHoldMu guards eventHeld and serializes the
+	// flush with senders that saw eventHolding set.
+	eventHolding atomic.Bool
+	eventHoldMu  sync.Mutex
+	eventHeld    []heldEvent
 
 	// Cumulative successful writes (for LogReplicationStats deltas).
 	wireDatagramOK atomic.Uint64

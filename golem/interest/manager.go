@@ -47,6 +47,7 @@ type Manager struct {
 	grid           *Grid                                   // space 0 grid
 	grids          map[registry.SpaceID]*Grid              // grids of spaces other than 0, created on demand
 	fois           map[int64]*FOI                          // sessionID → FOI
+	anchorFOIs     map[int64]map[int64]struct{}            // anchor entity ID → sessions whose FOI it anchors
 	known          map[int64]map[int64]struct{}            // sessionID → set of currently known entity IDs
 	globals        map[int64]struct{}                      // space-0 entity IDs flagged as global
 	globalsBySpace map[registry.SpaceID]map[int64]struct{} // globals of spaces other than 0
@@ -67,6 +68,7 @@ func NewManager(cellSize float64) *Manager {
 		grid:           NewGrid(cellSize),
 		grids:          make(map[registry.SpaceID]*Grid),
 		fois:           make(map[int64]*FOI),
+		anchorFOIs:     make(map[int64]map[int64]struct{}),
 		known:          make(map[int64]map[int64]struct{}),
 		globals:        make(map[int64]struct{}),
 		globalsBySpace: make(map[registry.SpaceID]map[int64]struct{}),
@@ -95,6 +97,15 @@ func interestPosition(e registry.Entity) (float64, float64) {
 // the given entity. The margin provides hysteresis: entities must exceed
 // radius+margin to exit the FOI, preventing boundary flicker.
 func (m *Manager) AssignFOI(sessionID, entityID int64, radius, margin float64) {
+	if old, ok := m.fois[sessionID]; ok {
+		m.unindexAnchor(sessionID, old.EntityID)
+	}
+	sessions := m.anchorFOIs[entityID]
+	if sessions == nil {
+		sessions = make(map[int64]struct{}, 1)
+		m.anchorFOIs[entityID] = sessions
+	}
+	sessions[sessionID] = struct{}{}
 	m.fois[sessionID] = &FOI{
 		EntityID: entityID,
 		Radius:   radius,
@@ -111,12 +122,33 @@ func (m *Manager) AssignFOI(sessionID, entityID int64, radius, margin float64) {
 // the session can remove them later.
 func (m *Manager) RemoveFOI(sessionID int64) map[int64]struct{} {
 	known := m.known[sessionID]
+	if foi, ok := m.fois[sessionID]; ok {
+		m.unindexAnchor(sessionID, foi.EntityID)
+	}
 	delete(m.fois, sessionID)
 	delete(m.known, sessionID)
 	delete(m.diffs, sessionID)
 	delete(m.diffScratch, sessionID)
 	delete(m.sessionSpace, sessionID)
 	return known
+}
+
+func (m *Manager) unindexAnchor(sessionID, entityID int64) {
+	sessions := m.anchorFOIs[entityID]
+	delete(sessions, sessionID)
+	if len(sessions) == 0 {
+		delete(m.anchorFOIs, entityID)
+	}
+}
+
+// AppendAnchoredSessions appends to dst the sessions whose field of interest
+// is anchored to entityID, in no particular order, and returns the extended
+// slice.
+func (m *Manager) AppendAnchoredSessions(dst []int64, entityID int64) []int64 {
+	for sid := range m.anchorFOIs[entityID] {
+		dst = append(dst, sid)
+	}
+	return dst
 }
 
 // HasFOI reports whether a session has an assigned field of interest.

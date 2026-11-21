@@ -44,6 +44,9 @@ namespace GolemEngine.Unity
         private uint _space;
         private bool _spaceTransitionOpen;
         private ulong _spaceTransition;
+        // Latest transition announced on this connection; survives SpaceSettled. Datagram event records of an
+        // older transition (untagged ones count as 0) are dropped.
+        private ulong _currentTransition;
         private List<byte[]> _heldBatches = new List<byte[]>();
         private int _heldBytes;
 
@@ -122,7 +125,10 @@ namespace GolemEngine.Unity
             }
         }
 
-        /// <summary>Sends the EntityResync control frame for entityId on the current connection, if any.</summary>
+        /// <summary>
+        /// Sends the EntityResync control frame for entityId on the current connection, if any. A failed send fails
+        /// the connection: the entity would otherwise stay without state.
+        /// </summary>
         private void RequestEntityResync(long entityId)
         {
             IGolemTransport transport;
@@ -132,7 +138,14 @@ namespace GolemEngine.Unity
             }
             if (transport != null && transport.Connected)
             {
-                transport.Send(EncodeEntityResync(entityId));
+                try
+                {
+                    transport.Send(EncodeEntityResync(entityId));
+                }
+                catch (Exception)
+                {
+                    FailControlSend("entity_resync_send_failed", "golem-unity: EntityResync send failed");
+                }
             }
         }
         public IWorldManager World { get; }
@@ -1376,6 +1389,7 @@ namespace GolemEngine.Unity
             {
                 _spaceTransitionOpen = true;
                 _spaceTransition = transition;
+                _currentTransition = transition;
                 oldSpace = _space;
                 _space = space;
             }
@@ -1387,7 +1401,9 @@ namespace GolemEngine.Unity
 
         /// <summary>
         /// Closes the matching transition, applies batches held during it in arrival order (the generated
-        /// managers' revision fence drops superseded state) and acknowledges it with SpaceAck.
+        /// managers' revision fence drops superseded state, and event records of an older transition are dropped)
+        /// and acknowledges it with SpaceAck. A failed SpaceAck send fails the connection, since the server would
+        /// keep the session gated.
         /// </summary>
         private void ApplySpaceSettled(byte[] payload, int generation)
         {
@@ -1417,7 +1433,14 @@ namespace GolemEngine.Unity
             }
             if (transport != null && transport.Connected)
             {
-                transport.Send(EncodeSpaceAck(transition));
+                try
+                {
+                    transport.Send(EncodeSpaceAck(transition));
+                }
+                catch (Exception)
+                {
+                    FailControlSend("space_ack_send_failed", "golem-unity: SpaceAck send failed");
+                }
             }
         }
 
@@ -1456,14 +1479,27 @@ namespace GolemEngine.Unity
             }
             if (overflow)
             {
-                FailConnection("space_transition_overflow");
+                FailConnection(
+                    "space_transition_overflow",
+                    new InvalidOperationException("golem-unity: datagram batches held during a space transition exceed the limit"),
+                    GolemDisconnectPhase.Receive,
+                    GolemDisconnectCategory.Protocol);
                 return;
             }
             HandleCompactStateBatch(bytes, generation);
         }
 
+        /// <summary>
+        /// Fails the connection after a SpaceAck or EntityResync control frame could not be sent. The transport's
+        /// exception is not forwarded, since its text may repeat the connection URL.
+        /// </summary>
+        private void FailControlSend(string reason, string message)
+        {
+            FailConnection(reason, new InvalidOperationException(message), GolemDisconnectPhase.Send, GolemDisconnectCategory.TransportBackend);
+        }
+
         /// <summary>Closes the established connection after a client protocol failure and reports it once.</summary>
-        private void FailConnection(string reason)
+        private void FailConnection(string reason, Exception error, GolemDisconnectPhase phase, GolemDisconnectCategory category)
         {
             string transportName;
             lock (_connectionGate)
@@ -1479,12 +1515,20 @@ namespace GolemEngine.Unity
             var info = new GolemDisconnectInfo(
                 false,
                 reason: reason,
-                error: new InvalidOperationException("golem-unity: datagram batches held during a space transition exceed the limit"),
+                error: error,
                 transport: transportName,
-                phase: GolemDisconnectPhase.Receive,
-                category: GolemDisconnectCategory.Protocol);
+                phase: phase,
+                category: category);
             GolemUnityLog.LogDisconnect(transportName ?? "unknown", info);
             DisconnectedEvent?.Invoke(info);
+        }
+
+        private ulong CurrentTransition()
+        {
+            lock (_spaceGate)
+            {
+                return _currentTransition;
+            }
         }
 
         private void ResetSpace()
@@ -1492,6 +1536,7 @@ namespace GolemEngine.Unity
             lock (_spaceGate)
             {
                 _space = 0;
+                _currentTransition = 0;
                 ClearSpaceTransitionLocked();
             }
         }
@@ -1606,9 +1651,14 @@ namespace GolemEngine.Unity
                 {
                     return;
                 }
-                if (GolemDatagramProtocol.TryGetEventRecord(frame, out var serverEvent))
+                if (frame.Length > 0 && frame[0] == GolemDatagramProtocol.EventRecordTag)
                 {
-                    Events?.ApplyRaw(serverEvent);
+                    // Records of a transition the session already left, and malformed records, are dropped.
+                    if (GolemDatagramProtocol.TryGetEventRecord(frame, out var transition, out var serverEvent) &&
+                        transition >= CurrentTransition())
+                    {
+                        Events?.ApplyRaw(serverEvent);
+                    }
                     return;
                 }
                 compactEntities.ApplyCompactUpdate(frame);

@@ -210,6 +210,13 @@ type Server struct {
 	entityResyncMu    sync.Mutex
 	entityResyncInbox map[int64]map[int64]struct{}
 
+	// Sessions holding their server events because their space may change
+	// (space_events.go). The value records that an end-of-pass release kept
+	// the session once because its switch was still unplanned. eventHoldMu is
+	// a leaf lock: never take interestMu while holding it.
+	eventHoldMu sync.Mutex
+	eventHolds  map[int64]bool
+
 	// Per-space service coordination (space_runtime.go, space_transfer.go).
 	navigationBySpace map[SpaceID]*navigationService // non-zero spaces' navigation (lifeMu; written before Run)
 	simulatingSpaces  bool                           // per-space step loop running with several runtimes
@@ -817,13 +824,17 @@ func (s *Server) BroadcastEvent(data []byte) error {
 // SendServerEvent sends one marshalled ServerEvent to a session on the chosen
 // delivery lane. Sessions without that datagram lane, such as WebSocket
 // clients, receive it on the reliable stream. Generated event senders call
-// this for events whose schema sets a datagram delivery.
+// this for every delivery. An event sent to a session whose space changes on
+// this tick, before the replication pass that announces the change, is held
+// and sent on the stream right after the transition (space_events.go), and
+// datagram-lane events then use the stream until the client acknowledges it.
 func (s *Server) SendServerEvent(sessionID int64, delivery EventDelivery, event []byte) error {
 	return s.listener.SendEvent(sessionID, delivery, event, WrapServerEvent(event))
 }
 
 // BroadcastServerEvent sends one marshalled ServerEvent to every connected
-// session on the chosen delivery lane, with the same stream fallback.
+// session on the chosen delivery lane, with the same stream fallback and
+// space-switch ordering as SendServerEvent.
 func (s *Server) BroadcastServerEvent(delivery EventDelivery, event []byte) error {
 	return s.listener.BroadcastEvent(delivery, event, WrapServerEvent(event))
 }
@@ -943,7 +954,6 @@ func (s *Server) AssignFOI(sessionID, entityID int64, radius, margin float64) {
 		panic("golem: AssignFOI called but interest management is not enabled (CellSize <= 0)")
 	}
 	s.interestMu.Lock()
-	defer s.interestMu.Unlock()
 	// A new FOI diff takes over from entities orphaned by RemoveFOI.
 	delete(s.foiOrphanKnown, sessionID)
 	hadFOI := s.interest.HasFOI(sessionID)
@@ -951,6 +961,11 @@ func (s *Server) AssignFOI(sessionID, entityID int64, radius, margin float64) {
 	if !hadFOI {
 		// Kept while the anchor is missing; replaced once it resolves.
 		s.interest.SetSessionSpace(sessionID, s.fallbackSessionSpaceLocked(sessionID))
+	}
+	pending := s.switchPendingLocked(sessionID)
+	s.interestMu.Unlock()
+	if pending {
+		s.holdSessionEvents(sessionID)
 	}
 }
 
@@ -972,11 +987,20 @@ func (s *Server) removeFOI(sessionID int64, keepOrphans bool) {
 		panic("golem: RemoveFOI called but interest management is not enabled (CellSize <= 0)")
 	}
 	s.interestMu.Lock()
-	defer s.interestMu.Unlock()
 	known := s.interest.RemoveFOI(sessionID)
-	if !keepOrphans || len(known) == 0 {
-		return
+	pending := s.switchPendingLocked(sessionID)
+	if keepOrphans && len(known) > 0 {
+		s.keepFOIOrphansLocked(sessionID, known)
 	}
+	s.interestMu.Unlock()
+	if pending {
+		s.holdSessionEvents(sessionID)
+	}
+}
+
+// keepFOIOrphansLocked remembers the entities a session knew when its FOI was
+// removed. Caller holds interestMu.
+func (s *Server) keepFOIOrphansLocked(sessionID int64, known map[int64]struct{}) {
 	// Revisions start at 0 (use the live revision); recordOrphanRemovals
 	// stores the removal revision of orphans deleted before the transition.
 	orphans := s.foiOrphanKnown[sessionID]
@@ -1429,6 +1453,8 @@ func (s *Server) runLoop(ctx context.Context) error {
 // known-set diffs (enter/stay/exit). A visibility mutation after this decision
 // takes effect on the next pass; interestMu is never held across sends.
 func (s *Server) runBroadcastTick() error {
+	// Registered first so it runs last, after the replication observers.
+	defer s.releaseHeldSessionEvents()
 	result, err := s.reg.FlushAll()
 	if err != nil {
 		return err
@@ -1860,6 +1886,8 @@ func copyInterestDiffs(in map[int64]*interest.Diff) map[int64]*interest.Diff {
 
 // runInterestTick performs per-session interest-filtered sends.
 func (s *Server) runInterestTick() error {
+	// Registered first so it runs last, after the replication observers.
+	defer s.releaseHeldSessionEvents()
 	// Manager diffs are reused: copy while locked, before flushing or callbacks.
 	s.interestMu.Lock()
 	s.interest.UpdateGrid(s.reg)
@@ -1874,8 +1902,8 @@ func (s *Server) runInterestTick() error {
 	diffs := copyInterestDiffs(computed)
 	ownershipPending := s.snapshotOwnershipRefreshLocked()
 	s.interestMu.Unlock()
-	// Before onUpdates can send events: switching sessions' datagram-lane
-	// events must not overtake their transition frames.
+	// Before onUpdates can send events: switching sessions hold their events
+	// until their transition frames are queued.
 	s.beginSpaceTransitionEvents(spacePlans)
 	result, err := s.reg.FlushAll()
 	if err != nil {

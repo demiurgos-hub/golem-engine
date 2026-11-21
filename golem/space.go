@@ -218,15 +218,20 @@ func (s *Server) transferBusy(op string) error {
 // avatar or explicit space only seeds it when the FOI is assigned.
 //
 // The change is announced to the client on the next replication pass as a
-// space transition. Concurrency-safe; the setting is dropped on disconnect.
+// space transition; server events sent to the session until then follow the
+// transition. Concurrency-safe; the setting is dropped on disconnect.
 func (s *Server) SetSessionSpace(sessionID int64, space SpaceID) {
 	s.interestMu.Lock()
-	defer s.interestMu.Unlock()
 	if space == 0 {
 		delete(s.sessionSpaceExplicit, sessionID)
-		return
+	} else {
+		s.sessionSpaceExplicit[sessionID] = space
 	}
-	s.sessionSpaceExplicit[sessionID] = space
+	pending := s.switchPendingLocked(sessionID)
+	s.interestMu.Unlock()
+	if pending {
+		s.holdSessionEvents(sessionID)
+	}
 }
 
 // SessionSpace returns the session's effective space: the space of its FOI

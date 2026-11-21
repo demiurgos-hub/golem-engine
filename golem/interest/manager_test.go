@@ -2,6 +2,7 @@ package interest
 
 import (
 	"reflect"
+	"slices"
 	"sort"
 	"testing"
 
@@ -474,4 +475,35 @@ func mapKeys(m map[int64]struct{}) []int64 {
 		out = append(out, id)
 	}
 	return out
+}
+
+func TestAppendAnchoredSessionsFollowsAssignAndRemove(t *testing.T) {
+	m := NewManager(10)
+	anchored := func(entityID int64) []int64 {
+		got := m.AppendAnchoredSessions(nil, entityID)
+		slices.Sort(got)
+		return got
+	}
+	m.AssignFOI(1, 100, 5, 1)
+	m.AssignFOI(2, 100, 5, 1)
+	m.AssignFOI(3, 200, 5, 1)
+	if got := anchored(100); !slices.Equal(got, []int64{1, 2}) {
+		t.Fatalf("anchored to 100 = %v", got)
+	}
+	// Reassigning moves the session to its new anchor.
+	m.AssignFOI(2, 200, 5, 1)
+	if got := anchored(100); !slices.Equal(got, []int64{1}) {
+		t.Fatalf("anchored to 100 after reassign = %v", got)
+	}
+	if got := anchored(200); !slices.Equal(got, []int64{2, 3}) {
+		t.Fatalf("anchored to 200 after reassign = %v", got)
+	}
+	m.RemoveFOI(1)
+	m.RemoveFOI(9)
+	if got := anchored(100); len(got) != 0 {
+		t.Fatalf("anchored to 100 after RemoveFOI = %v", got)
+	}
+	if len(m.anchorFOIs) != 1 {
+		t.Fatalf("anchor index keeps empty entries: %v", m.anchorFOIs)
+	}
 }

@@ -28,6 +28,8 @@ Review fixes after M9 (one commit each):
 | `e009add` | No service can serve two spaces; restore reports configuration errors and checks colliders before committing; stricter v2 navigation validation; `NavAgent` drops a path from its previous space; restriction docs. |
 | `6c5cb64` | Inspector map follows the space filter; space moves travel with their deltas. |
 
+Review round 2 (uncommitted): server events stay inside their space across switches (events sent before the switching pass are held and follow `SpaceSettled`, datagram event records carry the session's non-zero transition as `00 00 <varint> <event>` and clients drop older ones), and clients close the connection when a SpaceAck or EntityResync send fails.
+
 Not fixed by decision: contact history between two entities moved together reads as "stay" (semantic choice), and older clients' handling of the new frames (no compatibility goal: games upgrade client and server together).
 
 After pushing: bump the root `go.mod` pins of `golem/collision` (`Layers.Bound`) and `golem/physics3d` (`CharacterControllerReader`), and box3d's own `physics3d` pin; until then the root builds only through the local `go.work`.
