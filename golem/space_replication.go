@@ -31,12 +31,16 @@ func (s *Server) spacesActiveLocked() bool {
 }
 
 // effectiveSessionSpaceLocked resolves a session's space: FOI anchor, then
-// avatar, then explicit space, then its deleted avatar's last space, then 0. A session with an FOI whose anchor is
-// missing keeps the interest manager's last space. Caller holds interestMu.
+// avatar, then explicit space, then its deleted avatar's last space, then 0.
+// A session with an FOI whose anchor is missing keeps the interest manager's
+// last space. Only published entities count, as in replication: an anchor or
+// avatar that is still provisional (inside CreateEntityWithSetup) may yet be
+// discarded, and must not route a space event to its session. Caller holds
+// interestMu.
 func (s *Server) effectiveSessionSpaceLocked(sessionID int64) SpaceID {
 	if s.interest != nil {
 		if foi, ok := s.interest.SessionFOI(sessionID); ok {
-			if space, ok := s.reg.Space(foi.EntityID); ok {
+			if space, ok := s.reg.PublishedSpace(foi.EntityID); ok {
 				return space
 			}
 			return s.interest.SessionSpace(sessionID)
@@ -54,7 +58,7 @@ func (s *Server) fallbackSessionSpaceLocked(sessionID int64) SpaceID {
 	avatarID, ok := s.sessionAvatar[sessionID]
 	s.avatarMu.Unlock()
 	if ok && avatarID != avatarSpawnPending {
-		if space, ok := s.reg.Space(avatarID); ok {
+		if space, ok := s.reg.PublishedSpace(avatarID); ok {
 			return space
 		}
 	}

@@ -333,7 +333,9 @@ func (s *Server) SetSessionSpace(sessionID int64, space SpaceID) {
 
 // SessionSpace returns the session's effective space: the space of its FOI
 // anchor, else of its avatar, else the space set with SetSessionSpace, else
-// the last space of its deleted avatar, else 0.
+// the last space of its deleted avatar, else 0. An anchor or avatar counts
+// once it is published; while it is still provisional inside
+// CreateEntityWithSetup the session stays where it was.
 // The client learns about a change on the next replication pass; until that
 // pass has queued the session's transition, SessionsInSpace still lists the
 // session in its announced (old) space.

@@ -1442,6 +1442,51 @@ func TestSpaceOffTickWorldPushOrderedWithTransition(t *testing.T) {
 	})
 }
 
+// An FOI anchor that is still provisional does not move its session: a space
+// event sent while the anchor's setup runs is not routed to the session, so a
+// failed setup leaves the client where it was, with nothing from the other
+// space. Once the anchor is published the session follows it.
+func TestSpaceEventsIgnoreProvisionalAnchor(t *testing.T) {
+	rig := newSpaceTestRig(t, true, 1)
+	srv, conn, sid := rig.srv, rig.conns[0], rig.ids[0]
+	srv.AssignFOI(sid, 15, 10, 0)
+	rig.tick(t)
+	create := func(setupErr error) error {
+		return srv.CreateEntityWithSetupIn(7, &interestTickEntity{id: 15, full: []byte("anchor-full")}, func(Entity) (func() error, error) {
+			if got := srv.SessionSpace(sid); got != 0 {
+				t.Errorf("session space during setup = %d, want 0", got)
+			}
+			if err := srv.Space(7).BroadcastServerEvent(EventStream, []byte("cave-during-setup")); err != nil {
+				t.Error(err)
+			}
+			return nil, setupErr
+		})
+	}
+	if err := create(errors.New("setup failed")); err == nil {
+		t.Fatal("setup error was not returned")
+	}
+	rig.tick(t)
+	expectNoMessage(t, conn)
+	if got := srv.SessionSpace(sid); got != 0 {
+		t.Fatalf("session space after the failed setup = %d", got)
+	}
+
+	if err := create(nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := srv.SessionSpace(sid); got != 7 {
+		t.Fatalf("session space after publication = %d", got)
+	}
+	if err := srv.Space(7).BroadcastServerEvent(EventStream, []byte("cave-after-publish")); err != nil {
+		t.Fatal(err)
+	}
+	rig.tick(t)
+	want := []string{"changed:7:1", "anchor-full", "settled:1", "event:cave-after-publish"}
+	if got := readSpaceTokens(t, conn); !slices.Equal(got, want) {
+		t.Fatalf("tokens = %q, want %q", got, want)
+	}
+}
+
 // callbackWorldData runs a callback from MarshalUpdate, like a serializer
 // that takes game locks or calls server APIs.
 type callbackWorldData struct {
