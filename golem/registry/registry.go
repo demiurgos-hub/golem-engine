@@ -44,6 +44,13 @@ type Registry struct {
 	// without comparing Entity values (which may be non-comparable).
 	incarnation     map[int64]uint64
 	nextIncarnation uint64
+	// moveGen holds, for each published entity that changed space, the value
+	// of the never-reused moveSeq at its latest move (SpaceMoveGeneration).
+	// movedAny turns true at the first move and stays true, so readers skip
+	// the lock while no entity ever moved.
+	moveGen  map[int64]uint64
+	moveSeq  uint64
+	movedAny atomic.Bool
 }
 
 // NewRegistry creates an empty entity registry.
@@ -198,6 +205,7 @@ func (r *Registry) DeleteEntity(id int64) {
 		delete(r.entities, id)
 		delete(r.owners, id)
 		delete(r.incarnation, id)
+		delete(r.moveGen, id)
 		r.setSpaceLocked(id, 0)
 		r.dropMoveLocked(id)
 		r.despawned = append(r.despawned, id)

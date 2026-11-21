@@ -201,8 +201,11 @@ type PhysicsTransferSource struct {
 // navigation routes and destinations, pending forces and retained controller
 // velocity intent, and joints to bodies that were not moved. Physics commands
 // queued in the source space still run there; one queued before the transfer
-// that fails with a stale handle (physics3d.ErrStale), such as one addressing
-// a moved body, is dropped instead of faulting the space. Shapes the game
+// that fails with a *physics3d.StaleHandleError naming a source body the
+// transfer destroyed is dropped instead of faulting the space. Any other
+// error still faults it, including a stale handle of an unrelated body and a
+// stale collider or joint handle that was destroyed with a moved body (no API
+// lists those). Shapes the game
 // registered on a legacy collision backend itself move only through
 // SpaceTransfer.MoveShapes.
 //

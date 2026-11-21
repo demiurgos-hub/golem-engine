@@ -6,6 +6,7 @@ import (
 
 	collision "github.com/demiurgos-hub/golem-engine/golem/collision"
 	collisioncp "github.com/demiurgos-hub/golem-engine/golem/collision/cp"
+	cp "github.com/jakecoffman/cp/v2"
 )
 
 func newBackend(t *testing.T) *collisioncp.CpBackend {
@@ -379,5 +380,70 @@ func TestOverlapCircle_LayerMaskFilter(t *testing.T) {
 	ids := b.OverlapCircle(0, 0, 2, 0x2)
 	if len(ids) != 1 || ids[0] != 2 {
 		t.Fatalf("expected only entity 2 (layer 0x2), got %v", ids)
+	}
+}
+
+// TestQueriesSeeShapesUpdatedSinceTheLastStep checks that queries made right
+// after Add/Update (before any Step) find a shape where it is now and not
+// where Chipmunk last indexed it.
+func TestQueriesSeeShapesUpdatedSinceTheLastStep(t *testing.T) {
+	const all = 0xFFFFFFFF
+	b := newBackend(t)
+	b.Add(1, collision.Circle{R: 1}, all, all, false)
+	b.Add(2, collision.AABB{W: 2, H: 2}, all, all, false)
+	b.Update(1, 50, 0)
+	b.Update(2, 0, 50)
+	check := func(stage string, x1, y1, x2, y2 float64) {
+		t.Helper()
+		if got := b.OverlapBox(x1, y1, 1.5, 1.5, all); len(got) != 1 || got[0] != 1 {
+			t.Fatalf("%s: OverlapBox at circle = %v", stage, got)
+		}
+		if got := b.OverlapCircle(x2, y2, 1.5, all); len(got) != 1 || got[0] != 2 {
+			t.Fatalf("%s: OverlapCircle at box = %v", stage, got)
+		}
+		if hit, ok := b.Raycast(x1-10, y1, x1+10, y1, all); !ok || hit.EntityID != 1 {
+			t.Fatalf("%s: Raycast through circle = %+v %v", stage, hit, ok)
+		}
+		if hit, ok := b.CircleCast(x2, y2-10, .5, 0, 20, all); !ok || hit.EntityID != 2 {
+			t.Fatalf("%s: CircleCast through box = %+v %v", stage, hit, ok)
+		}
+		if got := b.OverlapCircle(0, 0, 1.5, all); len(got) != 0 {
+			t.Fatalf("%s: shapes still found at the origin: %v", stage, got)
+		}
+	}
+	check("fresh", 50, 0, 0, 50)
+
+	b.Step(0.016)
+	b.Update(1, -50, 0)
+	b.Update(2, 0, -50)
+	check("moved", -50, 0, 0, -50)
+	if got := b.OverlapBox(50, 0, 1.5, 1.5, all); len(got) != 0 {
+		t.Fatalf("moved circle found at its old position: %v", got)
+	}
+	if hits := b.RaycastAll(-10, 50, 10, 50, all); len(hits) != 0 {
+		t.Fatalf("moved box hit at its old position: %+v", hits)
+	}
+}
+
+// TestQueriesInsideALockedSpaceDoNotReindex issues a query from a Chipmunk
+// query callback, where the space is locked: the pending reindex waits for a
+// later query instead of tripping Chipmunk's lock assertion.
+func TestQueriesInsideALockedSpaceDoNotReindex(t *testing.T) {
+	const all = 0xFFFFFFFF
+	b := newBackend(t)
+	b.Add(1, collision.Circle{R: 1}, all, all, false)
+	b.Add(2, collision.Circle{R: 1}, all, all, false)
+	b.Step(0.016)
+	b.Update(2, 30, 0)
+	inside := 0
+	b.Space().BBQuery(cp.NewBBForCircle(cp.Vector{}, 2), cp.SHAPE_FILTER_ALL, func(*cp.Shape, any) {
+		inside++
+		b.OverlapCircle(30, 0, 1.5, all)
+	}, nil)
+	if inside == 0 {
+		t.Fatal("callback did not run")
+	}
+	if got := b.OverlapCircle(30, 0, 1.5, all); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("OverlapCircle after the locked query = %v", got)
 	}
 }

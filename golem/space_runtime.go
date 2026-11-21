@@ -138,6 +138,29 @@ func (s *Server) eachRuntime(fn func(*spaceRuntime) error) error {
 	return nil
 }
 
+// nilService reports whether v is nil or a typed nil of a nillable kind (such
+// as a nil backend pointer), which the collision setters treat as nil.
+func nilService(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return rv.IsNil()
+	}
+	return false
+}
+
+// pointerLike reports whether v has a kind sameService compares.
+func pointerLike(v any) bool {
+	switch reflect.ValueOf(v).Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Chan, reflect.UnsafePointer:
+		return true
+	}
+	return false
+}
+
 // sameService reports whether a and b hold the same non-nil pointer-like value
 // of the same dynamic type, so one backend, layer helper or world is not
 // installed in two spaces. Values of other kinds are never considered shared:
@@ -179,11 +202,59 @@ func (s *Server) mustUnshared(op, what string, space SpaceID, svc any, get func(
 	}
 }
 
-func collisionOf(rt *spaceRuntime) any   { return rt.collision }
-func collision3DOf(rt *spaceRuntime) any { return rt.collision3D }
-func layersOf(rt *spaceRuntime) any      { return rt.layers }
-func layers3DOf(rt *spaceRuntime) any    { return rt.layers3D }
-func navBackendOf(rt *spaceRuntime) any  { return rt.navBackend }
+// mustBackendUnshared panics when collision backend b serves another space:
+// installed as that space's backend (backendOf) or bound to that space's layer
+// helper (helperBackendOf). Checking both keeps the generated EnableCollision
+// order (backend setter, then layers setter) from panicking after the backend
+// is installed: a fresh helper bound to b then passes mustLayersUnshared.
+func (s *Server) mustBackendUnshared(op, what string, space SpaceID, b any, backendOf, helperBackendOf func(*spaceRuntime) any) {
+	if b == nil {
+		return
+	}
+	s.mustUnshared(op, what, space, b, backendOf)
+	if owner, shared := s.serviceOwner(space, b, helperBackendOf); shared {
+		panic(fmt.Sprintf("golem: %s: %s for space %d is bound to the collision layers of space %d; each space needs its own", op, what, space, owner))
+	}
+}
+
+// mustLayersUnshared panics when helper l, or the backend it is bound to,
+// serves another space. A helper bound to another space's backend would
+// register this space's shapes there.
+func (s *Server) mustLayersUnshared(op string, space SpaceID, l *collision.Layers) {
+	s.mustUnshared(op, "collision layers", space, l, layersOf)
+	s.mustBackendUnshared(op, "backend of the collision layers", space, layersBackend(l), collisionOf, layersBackendOf)
+}
+
+// mustLayers3DUnshared is mustLayersUnshared for 3D helpers.
+func (s *Server) mustLayers3DUnshared(op string, space SpaceID, l *collision3d.Layers) {
+	s.mustUnshared(op, "3D collision layers", space, l, layers3DOf)
+	s.mustBackendUnshared(op, "backend of the 3D collision layers", space, layers3DBackend(l), collision3DOf, layers3DBackendOf)
+}
+
+func collisionOf(rt *spaceRuntime) any       { return rt.collision }
+func collision3DOf(rt *spaceRuntime) any     { return rt.collision3D }
+func layersOf(rt *spaceRuntime) any          { return rt.layers }
+func layers3DOf(rt *spaceRuntime) any        { return rt.layers3D }
+func navBackendOf(rt *spaceRuntime) any      { return rt.navBackend }
+func layersBackendOf(rt *spaceRuntime) any   { return layersBackend(rt.layers) }
+func layers3DBackendOf(rt *spaceRuntime) any { return layers3DBackend(rt.layers3D) }
+
+// layersBackend returns the backend l is bound to as an untyped value, nil
+// (not a nil interface wrapped in any) when l is nil or unbound.
+func layersBackend(l *collision.Layers) any {
+	if b := l.Backend(); b != nil {
+		return b
+	}
+	return nil
+}
+
+// layers3DBackend is layersBackend for 3D helpers.
+func layers3DBackend(l *collision3d.Layers) any {
+	if b := l.Backend(); b != nil {
+		return b
+	}
+	return nil
+}
 
 func physicsWorldOf(rt *spaceRuntime) any {
 	if rt.physics == nil {
@@ -235,8 +306,30 @@ func (s *Server) servicesQuiescent(op string) error {
 // are a no-op (no panic) so entities can still be created before
 // EnableCollision / EnableCollision3D; those entities will not have shapes
 // until re-created after layers are configured.
+//
+// A configured helper must be usable, as planColliderAdd requires for
+// transfers and paired restore: an unbound helper panics in Layers.Add, and a
+// helper rebound with Bind after installation to a backend other than the
+// space's own (when both are pointer-like) or to another space's backend
+// panics here (helperBackend), before any shape is registered. The panic
+// matches the create paths' existing failure mode for an unbound helper; use
+// SetCollisionLayers to install a correctly bound helper.
 func (s *Server) registerCollider(e Entity) {
-	s.runtimeOf(e.EntityID()).registerCollider(e)
+	rt := s.runtimeOf(e.EntityID())
+	if rt == nil {
+		return
+	}
+	if _, ok := e.(ColliderProvider); ok && rt.layers.Bound() {
+		if err := s.helperBackend(rt, "collision layers", layersBackend(rt.layers), rt.collision, collisionOf); err != nil {
+			panic(fmt.Sprintf("golem: register collider: entity %d: %v", e.EntityID(), err))
+		}
+	}
+	if _, ok := e.(ColliderProvider3D); ok && rt.layers3D.Bound() {
+		if err := s.helperBackend(rt, "3D collision layers", layers3DBackend(rt.layers3D), rt.collision3D, collision3DOf); err != nil {
+			panic(fmt.Sprintf("golem: register collider: entity %d: %v", e.EntityID(), err))
+		}
+	}
+	rt.registerCollider(e)
 }
 
 // unregisterCollider removes provider shapes from the layer helpers of the
@@ -286,10 +379,10 @@ type colliderAdd struct {
 
 // planColliderAdd validates that e's collider providers can register on the
 // helpers of rt's space without panicking: every configured helper must define
-// the collider's layer and be bound to a backend. A missing helper (or a nil
-// runtime) skips that registration, as CreateEntity does. Errors read
-// "entity <id> ..." so callers prefix their operation.
-func (rt *spaceRuntime) planColliderAdd(e Entity) (colliderAdd, error) {
+// the collider's layer and be bound to a backend of this space (helperBackend).
+// A missing helper (or a nil runtime) skips that registration, as CreateEntity
+// does. Errors read "entity <id> ..." so callers prefix their operation.
+func (s *Server) planColliderAdd(rt *spaceRuntime, e Entity) (colliderAdd, error) {
 	var add colliderAdd
 	if rt == nil {
 		return add, nil
@@ -303,6 +396,9 @@ func (rt *spaceRuntime) planColliderAdd(e Entity) (colliderAdd, error) {
 		if !rt.layers.Bound() {
 			return add, fmt.Errorf("entity %d: space %d collision layers have no bound backend", id, rt.id)
 		}
+		if err := s.helperBackend(rt, "collision layers", layersBackend(rt.layers), rt.collision, collisionOf); err != nil {
+			return add, fmt.Errorf("entity %d: %w", id, err)
+		}
 		add.add2D = true
 	}
 	if p3, ok := e.(ColliderProvider3D); ok && rt.layers3D != nil {
@@ -313,9 +409,26 @@ func (rt *spaceRuntime) planColliderAdd(e Entity) (colliderAdd, error) {
 		if !rt.layers3D.Bound() {
 			return add, fmt.Errorf("entity %d: space %d 3D collision layers have no bound backend", id, rt.id)
 		}
+		if err := s.helperBackend(rt, "3D collision layers", layers3DBackend(rt.layers3D), rt.collision3D, collision3DOf); err != nil {
+			return add, fmt.Errorf("entity %d: %w", id, err)
+		}
 		add.add3D = true
 	}
 	return add, nil
+}
+
+// helperBackend checks the backend a space's layer helper is bound to,
+// which may have been rebound with Bind after the setters checked it: it must
+// be the space's own backend when the space has a pointer-like one, and never
+// another space's backend.
+func (s *Server) helperBackend(rt *spaceRuntime, what string, bound, own any, backendOf func(*spaceRuntime) any) error {
+	if own != nil && pointerLike(own) && pointerLike(bound) && !sameService(bound, own) {
+		return fmt.Errorf("space %d %s are bound to a backend other than the space's collision backend", rt.id, what)
+	}
+	if owner, shared := s.serviceOwner(rt.id, bound, backendOf); shared {
+		return fmt.Errorf("space %d %s are bound to the collision backend of space %d", rt.id, what, owner)
+	}
+	return nil
 }
 
 // checkColliderRemove reports an error when removing e's colliders from rt's
@@ -380,7 +493,7 @@ func (s *Server) planColliderMoves(op string, t SpaceTransfer) ([]colliderMove, 
 		if err := m.from.checkColliderRemove(e); err != nil {
 			return nil, fmt.Errorf("golem: %s: %w", op, err)
 		}
-		add, err := m.to.planColliderAdd(e)
+		add, err := s.planColliderAdd(m.to, e)
 		if err != nil {
 			return nil, fmt.Errorf("golem: %s: %w", op, err)
 		}
@@ -395,20 +508,23 @@ func (s *Server) planColliderMoves(op string, t SpaceTransfer) ([]colliderMove, 
 // synced to the entity's position on the destination's collision backend at
 // once, as the next collision step would, so spatial queries made later in the
 // move's tick find it where the entity is rather than at the origin. Backends
-// ignore updates of entities registered on another backend.
+// ignore updates of entities registered on another backend. A collider entity
+// is never physics-attached (attachPhysics and paired restore reject
+// ColliderProvider and ColliderProvider3D entities), so no physics body owns
+// its position here.
 func applyColliderMoves(plan []colliderMove) {
 	for _, m := range plan {
 		m.from.unregisterCollider(m.e, m.id)
 		if m.add2D {
 			m.to.layers.Add(m.id, m.shape2D, m.layer2D, m.trig2D)
-			if b := m.to.collision; b != nil && !m.to.physicsAttached(m.id) {
+			if b := m.to.collision; b != nil {
 				x, y := m.e.Position()
 				b.Update(m.id, float64(x), float64(y))
 			}
 		}
 		if m.add3D {
 			m.to.layers3D.Add(m.id, m.shape3D, m.layer3D, m.trig3D)
-			if b := m.to.collision3D; b != nil && !m.to.physicsAttached(m.id) {
+			if b := m.to.collision3D; b != nil {
 				if sp, ok := m.e.(registry.Spatial3DEntity); ok {
 					x, y, z := sp.Position3D()
 					b.Update(m.id, float64(x), float64(y), float64(z))

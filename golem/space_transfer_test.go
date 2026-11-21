@@ -1627,6 +1627,79 @@ func TestSpaceTransferIgnoresStaleCommandsQueuedBeforeTheMove(t *testing.T) {
 	}
 }
 
+// TestSpaceTransferFaultsOnStaleCommandsItDidNotRetire queues, in the tick of a
+// move, a command that fails on a stale handle the move did not retire: a body
+// that never moved, or an ErrStale naming no handle. Both still fault.
+func TestSpaceTransferFaultsOnStaleCommandsItDidNotRetire(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		command func(p.World) error
+	}{
+		{"unrelated body", func(w p.World) error {
+			return w.SetVelocity(p.BodyHandle{World: 1, Index: 99, Generation: 1}, p.Vec3{Y: 1}, p.Vec3{})
+		}},
+		{"untyped stale", func(p.World) error { return fmt.Errorf("game: %w", p.ErrStale) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewServer(ServerConfig{TickRate: 200})
+			a, b := newTransferTestWorld(1, nil), newTransferTestWorld(2, nil)
+			if err := s.SetPhysicsWorld(a); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Space(5).SetPhysicsWorld(b); err != nil {
+				t.Fatal(err)
+			}
+			crate := transferTestEntity(t, s, 0, 2, surface.Vec3{X: 2})
+			transferTestAttach(t, s, a, crate, p.FreeDynamic, PhysicsAttachmentConfig{})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			calls := 0
+			var moveErr error
+			s.OnTick(func(_ float64, s *Server) {
+				switch s.Tick() {
+				case 2:
+					if err := s.QueuePhysicsCommand(tc.command); err != nil {
+						t.Error(err)
+					}
+					moveErr = s.MoveToSpace(SpaceTransfer{To: 5, Entities: []int64{2}, RebuildPhysics: rebuildOffset(p.Vec3{X: 100}, &calls)})
+				case 6:
+					cancel()
+				}
+			})
+			err := s.Run(ctx)
+			if moveErr != nil || !errors.Is(err, p.ErrStale) || s.physics.fault == nil {
+				t.Fatalf("move = %v, Run = %v, source fault %v; want a stale fault", moveErr, err, s.physics.fault)
+			}
+		})
+	}
+}
+
+// TestSpaceTransferForgetsRetiredBodiesOnceTheQueueDrains checks the retired
+// set empties after the queue that might address it has run.
+func TestSpaceTransferForgetsRetiredBodiesOnceTheQueueDrains(t *testing.T) {
+	s, a, _ := newTransferTestServer(t)
+	crate := transferTestEntity(t, s, 0, 2, surface.Vec3{X: 2})
+	old := transferTestAttach(t, s, a, crate, p.FreeDynamic, PhysicsAttachmentConfig{})
+	startTestSpaces(t, s)
+	if err := s.QueuePhysicsCommand(func(w p.World) error { return w.SetVelocity(old, p.Vec3{}, p.Vec3{}) }); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	if err := s.MoveToSpace(SpaceTransfer{To: 5, Entities: []int64{2}, RebuildPhysics: rebuildOffset(p.Vec3{X: 100}, &calls)}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.physics.retired[p.Handle(old)]; got != s.physics.retireEpoch || got == 0 {
+		t.Fatalf("retired at %d, epoch %d", got, s.physics.retireEpoch)
+	}
+	s.tick++
+	if err := s.drainPhysics(); err != nil || s.physics.fault != nil {
+		t.Fatalf("drain = %v, fault %v", err, s.physics.fault)
+	}
+	if len(s.physics.retired) != 0 {
+		t.Fatalf("retired = %v after the queue drained", s.physics.retired)
+	}
+}
+
 func TestSpaceTransferStaleCommandQueuedAfterTheMoveStillFaults(t *testing.T) {
 	s, a, _ := newTransferTestServer(t)
 	crate := transferTestEntity(t, s, 0, 2, surface.Vec3{X: 2})

@@ -115,8 +115,13 @@ type physicsService struct {
 	trajectories         map[int64]*physicsTrajectory
 	trajectoryGeneration uint64
 	// retireEpoch advances whenever MoveToSpace destroys bodies of this world.
-	// A command queued before that fails with a stale handle without faulting.
 	retireEpoch uint64
+	// retired maps each source body handle a transfer destroyed to the
+	// retireEpoch that destruction started. A queued command whose error is a
+	// physics3d.StaleHandleError for such a body, and that was queued before
+	// that epoch, is dropped instead of faulting. Cleared whenever the queue
+	// empties, on restore and on stop.
+	retired map[p.Handle]uint64
 	// pendingDeletes maps the entities whose DeleteEntity was deferred to a
 	// queued command to the registry incarnation that command deletes;
 	// transfers reject them.
@@ -479,10 +484,13 @@ func (ps *physicsService) setFrameObserver(fn func(PhysicsFrameMetrics)) error {
 // QueuePhysicsCommand schedules a command on space 0's world for the next tick's
 // input boundary. The queue is bounded by PostQueueCapacity and never executes
 // recursively. It is tick-owned; use Server.Post when submitting from another
-// goroutine. A command error faults the space (Run ends), except an error
-// wrapping physics3d.ErrStale from a command queued before MoveToSpace removed
-// bodies from this world: such a command most likely addressed a moved body
-// and is dropped.
+// goroutine. A command error faults the space (Run ends), except a
+// *physics3d.StaleHandleError naming a body that MoveToSpace removed from this
+// world after the command was queued: that command addressed a moved body and
+// is dropped. Any other error, including a stale handle the transfer did not
+// retire or an ErrStale without a handle, still faults. Collider and joint
+// handles destroyed with a moved body are not recognized: a command that fails
+// on one of those alone still faults.
 func (s *Server) QueuePhysicsCommand(command PhysicsCommand) error {
 	return s.space0.physics.queue(command)
 }
@@ -576,8 +584,8 @@ func (ps *physicsService) drain() error {
 	ps.commands = ps.commands[count:]
 	for _, command := range commands {
 		if err := command.run(ps.world); err != nil {
-			if command.epoch < ps.retireEpoch && errors.Is(err, p.ErrStale) {
-				// Queued before a transfer removed bodies from this world.
+			if ps.retiredBefore(err, command.epoch) {
+				// Addressed a body a transfer removed after it was queued.
 				continue
 			}
 			ps.fault = err
@@ -587,7 +595,30 @@ func (ps *physicsService) drain() error {
 			return ps.fault
 		}
 	}
+	if len(ps.commands) == 0 {
+		clear(ps.retired)
+	}
 	return nil
+}
+
+// retire records that a transfer destroyed body; synchronizeRetired advances
+// retireEpoch to the recorded value once per transfer.
+func (ps *physicsService) retire(body p.BodyHandle) {
+	if ps.retired == nil {
+		ps.retired = make(map[p.Handle]uint64)
+	}
+	ps.retired[p.Handle(body)] = ps.retireEpoch + 1
+}
+
+// retiredBefore reports whether err is a stale-handle error for a body a
+// transfer destroyed after a command queued at epoch.
+func (ps *physicsService) retiredBefore(err error, epoch uint64) bool {
+	var stale *p.StaleHandleError
+	if len(ps.retired) == 0 || !errors.As(err, &stale) {
+		return false
+	}
+	retiredAt, ok := ps.retired[stale.Handle]
+	return ok && retiredAt > epoch
 }
 
 func (ps *physicsService) step(dt float64) (stepErr error) {
@@ -789,7 +820,7 @@ func (ps *physicsService) stop() {
 		return
 	}
 	ps.closed = true
-	ps.commands, ps.pendingDeletes = nil, nil
+	ps.commands, ps.pendingDeletes, ps.retired = nil, nil, nil
 	ps.trajectories = nil
 	ps.geometry, ps.geometryIdentities, ps.geometryPending = nil, nil, nil
 	if world, ok := ps.world.(p.ShutdownWorld); ok {

@@ -58,11 +58,11 @@ func (w *World) castColliderMotion(a, z ColliderMotion, tolerance float32, backf
 	}
 	ca, ok := w.colliders[a.Collider]
 	if !ok {
-		return MotionHit{}, p.ErrStale
+		return MotionHit{}, staleHandle(p.Handle(a.Collider))
 	}
 	cz, ok := w.colliders[z.Collider]
 	if !ok {
-		return MotionHit{}, p.ErrStale
+		return MotionHit{}, staleHandle(p.Handle(z.Collider))
 	}
 	result := MotionHit{A: a.Collider, B: z.Collider, Revision: w.revision}
 	worldPose := func(v p.Pose) b.WorldTransform { return b.WorldTransform{P: bp(v.Position), Q: bq(v.Rotation)} }
@@ -106,7 +106,7 @@ func (w *World) queryColliderMotion(q MotionQuery, dst []p.Hit, physicalParticip
 	}
 	query, ok := w.colliders[q.Motion.Collider]
 	if !ok {
-		return p.QueryResult{}, p.ErrStale
+		return p.QueryResult{}, staleHandle(p.Handle(q.Motion.Collider))
 	}
 	if q.Mode > p.All || q.Initial > p.BlockInitial || q.Backfaces > p.IncludeBackfaces || q.Filter.Sensors > p.OnlySensors || !q.Motion.Start.Valid() || !q.Motion.End.Valid() || !p.Finite(q.Tolerance) || q.Tolerance <= 0 {
 		return p.QueryResult{}, p.ErrInvalid
@@ -116,7 +116,7 @@ func (w *World) queryColliderMotion(q MotionQuery, dst []p.Hit, physicalParticip
 	for _, m := range q.Targets {
 		c, ok := w.colliders[m.Collider]
 		if !ok {
-			return p.QueryResult{}, p.ErrStale
+			return p.QueryResult{}, staleHandle(p.Handle(m.Collider))
 		}
 		if _, duplicate := targets[m.Collider]; duplicate || !m.Start.Valid() || !m.End.Valid() {
 			return p.QueryResult{}, p.ErrInvalid

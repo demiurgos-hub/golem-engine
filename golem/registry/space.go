@@ -54,13 +54,20 @@ func (r *Registry) SetSpace(id int64, space SpaceID) bool {
 	return true
 }
 
-// moveLocked sets a published entity's space and coalesces its pending move.
+// moveLocked sets a published entity's space, coalesces its pending move and
+// advances its move generation.
 func (r *Registry) moveLocked(id int64, space SpaceID) {
 	from := r.spaces[id]
 	if from == space {
 		return
 	}
 	r.setSpaceLocked(id, space)
+	if r.moveGen == nil {
+		r.moveGen = make(map[int64]uint64)
+	}
+	r.moveSeq++
+	r.moveGen[id] = r.moveSeq
+	r.movedAny.Store(true)
 	if i, ok := r.moveIndex[id]; ok {
 		r.moves[i].To = space
 	} else {
@@ -85,6 +92,21 @@ func (r *Registry) SetSpaces(ids []int64, space SpaceID) (int64, bool) {
 		r.moveLocked(id, space)
 	}
 	return 0, true
+}
+
+// SpaceMoveGeneration returns a value that changes whenever the entity changes
+// space (SetSpace, SetSpaces), even when it later returns to the space it
+// left: compare two readings to detect a round trip such as 0 -> 5 -> 0 that
+// comparing spaces would miss. It is 0 for an entity that never moved, and
+// resets on deletion and ReplaceWithoutHooks. While no entity has ever moved
+// it is one atomic load and takes no lock.
+func (r *Registry) SpaceMoveGeneration(id int64) uint64 {
+	if !r.movedAny.Load() {
+		return 0
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.moveGen[id]
 }
 
 // SpacesInUse reports whether any published or provisional entity is outside

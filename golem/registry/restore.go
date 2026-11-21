@@ -61,6 +61,7 @@ func (r *Registry) ReplaceWithoutHooks(entries []RestoreEntry) error {
 	r.spaces = spaces
 	r.spaceCount.Store(int64(len(spaces)))
 	r.resetMovesLocked()
+	clear(r.moveGen)
 	r.despawned, r.despawnedRevision = removed, revisions
 	return nil
 }

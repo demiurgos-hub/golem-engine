@@ -2,6 +2,7 @@ package collisioncp
 
 import (
 	"math"
+	"reflect"
 
 	"github.com/demiurgos-hub/golem-engine/golem/collision"
 	"github.com/demiurgos-hub/golem-engine/golem/collision/internal/querygeom"
@@ -30,6 +31,11 @@ type bodyEntry struct {
 type CpBackend struct {
 	space   *cp.Space
 	entries map[int64]bodyEntry
+	// dirty holds shapes whose body moved (Update) or that were just
+	// registered since the space last indexed them. Chipmunk reindexes shapes
+	// only in Space.Step, so the BBQuery-based queries flush these first to
+	// find shapes where they are now rather than where the last step left them.
+	dirty map[*cp.Shape]struct{}
 }
 
 // New creates a CpBackend with a zero-gravity space.
@@ -38,6 +44,7 @@ func New() *CpBackend {
 	return &CpBackend{
 		space:   space,
 		entries: make(map[int64]bodyEntry),
+		dirty:   make(map[*cp.Shape]struct{}),
 	}
 }
 
@@ -99,6 +106,43 @@ func (b *CpBackend) registerBody(entityID int64, body *cp.Body, shape collision.
 	b.space.AddShape(cpShape)
 
 	b.entries[entityID] = bodyEntry{body: body, shape: cpShape, trigger: trigger, dynamic: dynamic}
+	b.markDirty(cpShape)
+}
+
+// markDirty records that shape must be reindexed before the next query.
+func (b *CpBackend) markDirty(shape *cp.Shape) {
+	if b.dirty == nil {
+		b.dirty = make(map[*cp.Shape]struct{})
+	}
+	b.dirty[shape] = struct{}{}
+}
+
+// flushDirty reindexes every dirty shape so BBQuery sees current positions.
+// A locked space (a query issued from a Chipmunk callback during Step or
+// another query) cannot be reindexed; the shapes stay dirty until a later
+// query or the next Step indexes them.
+func (b *CpBackend) flushDirty() {
+	if len(b.dirty) == 0 || spaceLocked(b.space) {
+		return
+	}
+	for shape := range b.dirty {
+		if shape.Space() == b.space {
+			b.space.ReindexShape(shape)
+		}
+	}
+	clear(b.dirty)
+}
+
+// spaceLockedField locates cp.Space's unexported lock counter; the port
+// exposes no accessor, and ReindexShape asserts the space is unlocked.
+var spaceLockedField, spaceLockedKnown = reflect.TypeOf((*cp.Space)(nil)).Elem().FieldByName("locked")
+
+// spaceLocked reports whether s is inside Step or a query callback.
+func spaceLocked(s *cp.Space) bool {
+	if !spaceLockedKnown {
+		return false
+	}
+	return reflect.ValueOf(s).Elem().FieldByIndex(spaceLockedField.Index).Int() != 0
 }
 
 // Remove unregisters the entity's body and shape from the space.
@@ -110,6 +154,7 @@ func (b *CpBackend) Remove(entityID int64) {
 	b.space.RemoveShape(e.shape)
 	b.space.RemoveBody(e.body)
 	delete(b.entries, entityID)
+	delete(b.dirty, e.shape)
 }
 
 // Set replaces the shape, layer, mask, and trigger flag for a registered
@@ -146,12 +191,14 @@ func (b *CpBackend) Set(entityID int64, shape collision.Shape, layer, mask uint3
 // Update synchronises the entity's world-space position into its cp body.
 // For dynamic bodies this is a no-op: cp owns their position after
 // registration and overriding it each tick would defeat the physics solver.
+// Spatial queries made before the next Step already see the new position.
 func (b *CpBackend) Update(entityID int64, x, y float64) {
 	e, ok := b.entries[entityID]
 	if !ok || e.dynamic {
 		return
 	}
 	e.body.SetPosition(cp.Vector{X: x, Y: y})
+	b.markDirty(e.shape)
 }
 
 // SetVelocity sets the velocity of a registered entity's cp body. This is the
@@ -182,8 +229,9 @@ func (b *CpBackend) SetVelocity(entityID int64, vx, vy float64) {
 // non-positive depth are skipped (shapes merely touching, not penetrating).
 func (b *CpBackend) Step(dt float64) []collision.Contact {
 	// Advance physics; integrates dynamic bodies and resolves collision
-	// response. No-op for kinematic bodies.
+	// response. No-op for kinematic bodies. Step reindexes every shape.
 	b.space.Step(dt)
+	clear(b.dirty)
 
 	// Seen set prevents reporting the same pair twice (ShapeQuery visits
 	// each pair from both sides).
@@ -273,6 +321,7 @@ func (b *CpBackend) ReadBack(fn func(entityID int64, x, y float64)) {
 // Uses a bounding-box broadphase via space.BBQuery followed by exact
 // narrowphase per entity; no persistent shape is registered.
 func (b *CpBackend) OverlapBox(cx, cy, hw, hh float64, layerMask uint32) []int64 {
+	b.flushDirty()
 	bb := cp.NewBBForExtents(cp.Vector{X: cx, Y: cy}, hw, hh)
 	filter := cp.NewShapeFilter(cp.NO_GROUP, cp.ALL_CATEGORIES, uint(layerMask))
 
@@ -298,6 +347,7 @@ func (b *CpBackend) OverlapBox(cx, cy, hw, hh float64, layerMask uint32) []int64
 // the circle centred at (cx, cy) with the given radius.
 // Only entities whose layer has at least one bit in layerMask are returned.
 func (b *CpBackend) OverlapCircle(cx, cy, radius float64, layerMask uint32) []int64 {
+	b.flushDirty()
 	bb := cp.NewBBForCircle(cp.Vector{X: cx, Y: cy}, radius)
 	filter := cp.NewShapeFilter(cp.NO_GROUP, cp.ALL_CATEGORIES, uint(layerMask))
 
@@ -380,6 +430,7 @@ func (b *CpBackend) castSegment(px, py, qx, qy, qhw, qhh float64, layerMask uint
 	if segLen == 0 {
 		return nil
 	}
+	b.flushDirty()
 
 	// Broadphase: query the bounding box of the entire sweep.
 	minX := math.Min(px, qx)

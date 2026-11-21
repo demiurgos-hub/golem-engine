@@ -212,6 +212,40 @@ func TestNavAgentDropsPathAfterSpaceMoveDetectedByHasPath(t *testing.T) {
 	}
 }
 
+// TestNavAgentDropsPathAfterARoundTrip moves the entity 0 -> 5 -> 0 before the
+// next Tick: it is back in the space its path was planned in, but the path
+// was computed before it left, so it is dropped.
+func TestNavAgentDropsPathAfterARoundTrip(t *testing.T) {
+	s := NewServer(ServerConfig{})
+	s.SetNavBackend(&navAgentBackend{reachable: true})
+	s.Space(5).SetNavBackend(&navAgentBackend{reachable: true})
+	e := &navAgentEntity{stubEntity: stubEntity{id: 1}}
+	if err := s.CreateEntity(e); err != nil {
+		t.Fatal(err)
+	}
+	a := NavAgent{Speed: 1}
+	a.Bind(e)
+	if !a.SetDestination(s, 10, 0) {
+		t.Fatal("destination failed")
+	}
+	for _, space := range []SpaceID{5, 0} {
+		if err := s.SetEntitySpace(1, space); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.Tick(1)
+	if e.x != 0 || a.HasPath() {
+		t.Fatalf("agent kept its pre-move route after a round trip: x=%g, path %v", e.x, a.HasPath())
+	}
+	if !a.SetDestination(s, 10, 0) {
+		t.Fatal("destination after the round trip failed")
+	}
+	a.Tick(1)
+	if e.x != 1 || !a.HasPath() {
+		t.Fatalf("agent did not follow its new route: x=%g", e.x)
+	}
+}
+
 func TestNavAgentSingleSpaceFollowsPathToGoal(t *testing.T) {
 	s := NewServer(ServerConfig{})
 	s.SetNavBackend(&navAgentBackend{reachable: true})

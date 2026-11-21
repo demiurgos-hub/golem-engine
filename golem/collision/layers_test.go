@@ -336,3 +336,21 @@ func TestLayers_Bound(t *testing.T) {
 		t.Fatal("Layers after Bind reported unbound")
 	}
 }
+
+func TestLayersBindTypedNilLeavesFacadeUnbound(t *testing.T) {
+	l := NewLayers().Bind((*stubBackend)(nil))
+	if l.Bound() || l.Backend() != nil {
+		t.Fatalf("typed-nil backend bound: Bound=%v Backend=%v", l.Bound(), l.Backend())
+	}
+	b := &stubBackend{}
+	if l.Bind(b); !l.Bound() || l.Backend() != b {
+		t.Fatal("real backend not bound")
+	}
+	if l.Bind(nil); l.Bound() || l.Backend() != nil {
+		t.Fatal("nil Bind did not unbind")
+	}
+	var none *Layers
+	if none.Backend() != nil {
+		t.Fatal("nil receiver reported a backend")
+	}
+}

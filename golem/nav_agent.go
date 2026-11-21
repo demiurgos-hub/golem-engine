@@ -37,12 +37,14 @@ type NavAgent struct {
 	velX   float64
 	velY   float64
 
-	// srv, pathEntity and pathSpace record where SetDestination computed the
-	// path (srv is nil when the bound value has no EntityID), so a path planned
-	// on another space's nav backend is dropped after a space move.
-	srv        *Server
-	pathEntity int64
-	pathSpace  SpaceID
+	// srv, pathEntity, pathSpace and pathMoveGen record where SetDestination
+	// computed the path (srv is nil when the bound value has no EntityID), so a
+	// path planned on another space's nav backend is dropped after a space
+	// move, including a round trip back to the same space.
+	srv         *Server
+	pathEntity  int64
+	pathSpace   SpaceID
+	pathMoveGen uint64
 }
 
 // Bind attaches a position-aware entity to the agent. Call this from OnSpawn
@@ -65,19 +67,23 @@ func (a *NavAgent) Bind(e navMover) {
 // The agent remembers the space the path was computed in: once the entity has
 // moved to another space (MoveToSpace), Tick, HasPath, NextWaypoint and
 // RemainingDistance drop the old path, so the agent stops instead of walking a
-// route of the previous space. Call SetDestination again to path in the new
-// space.
+// route of the previous space. Any space move since SetDestination drops it,
+// even one that returned the entity to the same space before the next Tick.
+// Call SetDestination again to path in the new space.
 func (a *NavAgent) SetDestination(s *Server, toX, toY float64) bool {
 	a.ResetPath()
 	if a.entity == nil || s == nil {
 		return false
 	}
 	rt := &s.space0
-	a.srv, a.pathEntity, a.pathSpace = nil, 0, 0
+	a.srv, a.pathEntity, a.pathSpace, a.pathMoveGen = nil, 0, 0, 0
 	if e, ok := a.entity.(interface{ EntityID() int64 }); ok {
 		id := e.EntityID()
 		rt = s.runtimeOf(id)
 		a.srv, a.pathEntity = s, id
+		if s.reg != nil {
+			a.pathMoveGen = s.reg.SpaceMoveGeneration(id)
+		}
 		if rt != nil { // nil: the space has no nav backend, so no path follows
 			a.pathSpace = rt.id
 		}
@@ -91,9 +97,9 @@ func (a *NavAgent) SetDestination(s *Server, toX, toY float64) bool {
 	return true
 }
 
-// dropMovedPath clears the path when the entity is no longer in the space the
-// path was computed in. While no entity is outside space 0 this is one atomic
-// load.
+// dropMovedPath clears the path when the entity changed space since the path
+// was computed (its space or move generation differs). While no entity is
+// outside space 0 and none ever moved this is two atomic loads.
 func (a *NavAgent) dropMovedPath() {
 	s := a.srv
 	if s == nil || len(a.path) == 0 || s.reg == nil {
@@ -103,7 +109,7 @@ func (a *NavAgent) dropMovedPath() {
 	if s.reg.SpacesInUse() {
 		space, _ = s.reg.Space(a.pathEntity)
 	}
-	if space != a.pathSpace {
+	if space != a.pathSpace || s.reg.SpaceMoveGeneration(a.pathEntity) != a.pathMoveGen {
 		a.ResetPath()
 	}
 }

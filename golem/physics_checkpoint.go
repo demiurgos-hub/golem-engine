@@ -758,11 +758,25 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 			n.restoring = true
 		}
 	}
-	published := false
+	// published: some space committed. completed: the restore is coherent and
+	// readiness is open; only replays and recovery hooks remain.
+	published, completed := false, false
+	// Registered first so it runs last, after the Discard defer below. A panic
+	// before completion (a Layers or entity setter, navigation reattachment)
+	// counts as a failure: once anything is published, readiness stays closed
+	// and every space faults. The panic is then re-raised. A panic in a replay
+	// or OnPhysicsRestored hook after completion leaves the coherent restore
+	// open.
 	defer func() {
+		if rec := recover(); rec != nil {
+			if err == nil && !completed {
+				err = fmt.Errorf("golem: physics restore panicked: %v", rec)
+			}
+			defer panic(rec)
+		}
 		for _, r := range restores {
 			ps, n := r.rt.physics, r.rt.navigation
-			if err != nil && published {
+			if published && (err != nil || !completed) {
 				// Some space already committed: no space may reopen readiness.
 				ps.fault, ps.restoring = err, true
 				if n != nil {
@@ -827,7 +841,7 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 	}
 	colliders := make([]colliderAdd, len(entries))
 	for i, entry := range entries {
-		if colliders[i], err = s.runtime(entry.Space).planColliderAdd(entry.Entity); err != nil {
+		if colliders[i], err = s.planColliderAdd(s.runtime(entry.Space), entry.Entity); err != nil {
 			return fmt.Errorf("golem: physics restore: %w", err)
 		}
 	}
@@ -858,7 +872,7 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 	}
 	for _, r := range restores {
 		r.rt.physics.fault = nil
-		r.rt.physics.commands, r.rt.physics.pendingDeletes = nil, nil
+		r.rt.physics.commands, r.rt.physics.pendingDeletes, r.rt.physics.retired = nil, nil, nil
 	}
 	old := s.reg.All()
 	for _, r := range restores {
@@ -956,6 +970,7 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 	for _, r := range restores {
 		r.rt.physics.restoring = false
 	}
+	completed = true
 	for _, r := range restores {
 		for _, callback := range r.navigationFrameReplays {
 			callback()

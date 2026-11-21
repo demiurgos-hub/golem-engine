@@ -18,7 +18,7 @@ func (w *World) CreateCollider(d p.ColliderDesc) (p.ColliderHandle, error) {
 	}
 	s, ok := w.shapes[d.Shape]
 	if !ok {
-		return p.ColliderHandle{}, p.ErrStale
+		return p.ColliderHandle{}, staleHandle(p.Handle(d.Shape))
 	}
 	if !d.LocalPose.Valid() || !p.Finite(d.Density) || d.Density < 0 || !p.Finite(d.Material.Friction) || d.Material.Friction < 0 || !p.Finite(d.Material.Restitution) || d.Material.Restitution < 0 || d.Material.Restitution > 1 || !p.Finite(d.Material.RollingResistance) || d.Material.RollingResistance < 0 {
 		return p.ColliderHandle{}, p.ErrInvalid
@@ -138,7 +138,7 @@ func (w *World) DestroyCollider(h p.ColliderHandle, reason p.CleanupReason) erro
 	}
 	c, ok := w.colliders[h]
 	if !ok {
-		return p.ErrStale
+		return staleHandle(p.Handle(h))
 	}
 	v := w.bodies[c.desc.Body]
 	if v.id.GetJointCount() != 0 {

@@ -4,6 +4,7 @@ package physics3d
 
 import (
 	"errors"
+	"fmt"
 	"math"
 )
 
@@ -16,6 +17,21 @@ var (
 	ErrFaulted     = errors.New("physics3d: world faulted; coherent restoration required")
 	ErrUnsupported = errors.New("physics3d: unsupported operation")
 )
+
+// StaleHandleError reports that a backend did not find Handle: it was
+// destroyed, belongs to another world or never existed. It unwraps to
+// ErrStale, so errors.Is(err, ErrStale) still matches; errors.As recovers the
+// handle. Errors that are not about one handle, such as a closed world, stay a
+// bare ErrStale.
+type StaleHandleError struct{ Handle Handle }
+
+// Error describes the stale handle.
+func (e *StaleHandleError) Error() string {
+	return fmt.Sprintf("%v (world %d, index %d, generation %d)", ErrStale, e.Handle.World, e.Handle.Index, e.Handle.Generation)
+}
+
+// Unwrap returns ErrStale.
+func (e *StaleHandleError) Unwrap() error { return ErrStale }
 
 type Vec3 struct{ X, Y, Z float32 }
 type Quat struct{ X, Y, Z, W float32 }

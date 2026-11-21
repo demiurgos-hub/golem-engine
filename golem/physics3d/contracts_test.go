@@ -1,6 +1,8 @@
 package physics3d
 
 import (
+	"errors"
+	"fmt"
 	"math"
 	"testing"
 )
@@ -147,5 +149,17 @@ func TestOwnerAggregationOverflow(t *testing.T) {
 	r := AggregateOwners(src, dst)
 	if r.Total != 3 || r.Count != 1 || !r.Incomplete {
 		t.Fatal(r)
+	}
+}
+
+func TestStaleHandleErrorUnwrapsToErrStale(t *testing.T) {
+	h := Handle{World: 3, Index: 7, Generation: 2}
+	err := fmt.Errorf("command: %w", &StaleHandleError{Handle: h})
+	var stale *StaleHandleError
+	if !errors.Is(err, ErrStale) || !errors.As(err, &stale) || stale.Handle != h {
+		t.Fatalf("wrapped stale handle = %v", err)
+	}
+	if errors.As(ErrStale, &stale) {
+		t.Fatal("bare ErrStale matched StaleHandleError")
 	}
 }

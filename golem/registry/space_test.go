@@ -288,3 +288,39 @@ func TestSetSpacesIsAllOrNothing(t *testing.T) {
 		t.Fatalf("moves = %v, want %v", moves, want)
 	}
 }
+
+func TestSpaceMoveGenerationTracksEveryMove(t *testing.T) {
+	r := NewRegistry()
+	for _, id := range []int64{1, 2} {
+		if err := r.AddWithoutSpawn(&lifecycleTestEntity{id: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r.SpaceMoveGeneration(1) != 0 || r.movedAny.Load() {
+		t.Fatal("unmoved registry reports a move generation")
+	}
+	r.SetSpace(1, 0) // current space: no move
+	if r.SpaceMoveGeneration(1) != 0 || r.movedAny.Load() {
+		t.Fatal("a no-op move advanced the generation")
+	}
+	r.SetSpace(1, 5)
+	first := r.SpaceMoveGeneration(1)
+	r.SetSpace(1, 0)
+	back := r.SpaceMoveGeneration(1)
+	if first == 0 || back == first || r.SpacesInUse() {
+		t.Fatalf("round trip generations %d -> %d (spaces in use %v)", first, back, r.SpacesInUse())
+	}
+	if _, ok := r.SetSpaces([]int64{1, 2}, 3); !ok || r.SpaceMoveGeneration(1) == back || r.SpaceMoveGeneration(2) == 0 {
+		t.Fatal("SetSpaces did not advance generations")
+	}
+	r.DeleteEntity(2)
+	if r.SpaceMoveGeneration(2) != 0 {
+		t.Fatal("deletion kept the move generation")
+	}
+	if err := r.ReplaceWithoutHooks([]RestoreEntry{{Entity: &lifecycleTestEntity{id: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	if r.SpaceMoveGeneration(1) != 0 {
+		t.Fatal("replacement kept the move generation")
+	}
+}

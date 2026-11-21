@@ -428,3 +428,44 @@ func TestPhysicsPendingRecoveryRejectsMismatchedPairBeforePublication(t *testing
 		t.Fatal("mismatched private pair changed accepted state or leaked candidates")
 	}
 }
+
+// panicActivationEntity panics when the restore writes its activation, after
+// the registry and worlds have been replaced.
+type panicActivationEntity struct{ *physicsCheckpointEntity }
+
+func (*panicActivationEntity) SetPhysicsActive(bool) { panic("activation setter failed") }
+
+func TestPhysicsCheckpointPanicAfterPublicationKeepsReadinessClosed(t *testing.T) {
+	s, _, _, c := physicsCheckpointFixture(t)
+	options := physicsCheckpointOptions(t, s, nil)
+	factory := options.Entity
+	options.Entity = func(r snapshot.Record) (Entity, error) {
+		e, err := factory(r)
+		if err != nil {
+			return nil, err
+		}
+		return &panicActivationEntity{e.(*physicsCheckpointEntity)}, nil
+	}
+	func() {
+		defer func() {
+			if r := recover(); r != "activation setter failed" {
+				t.Fatalf("panic = %v, want the setter's panic re-raised", r)
+			}
+		}()
+		_ = s.RestorePhysicsCheckpoint(c, options)
+	}()
+	if ready, restoring, err := s.PhysicsReady(); ready || !restoring || err == nil || !strings.Contains(err.Error(), "physics restore panicked") {
+		t.Fatalf("readiness after a late panic: %v/%v/%v", ready, restoring, err)
+	}
+	if !s.navigation.restoring {
+		t.Fatal("navigation readiness reopened after a late panic")
+	}
+	// A coherent retry reopens readiness.
+	options.Entity = factory
+	if err := s.RestorePhysicsCheckpoint(c, options); err != nil {
+		t.Fatal(err)
+	}
+	if ready, restoring, err := s.PhysicsReady(); !ready || restoring || err != nil {
+		t.Fatalf("coherent retry did not reopen readiness: %v/%v/%v", ready, restoring, err)
+	}
+}

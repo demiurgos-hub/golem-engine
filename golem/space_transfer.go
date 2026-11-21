@@ -179,6 +179,7 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 			ps := m.from.physics
 			// Destroys the source body with its colliders and joints, cancels its
 			// timed trajectory and detaches its source navigation.
+			body := m.physics.body
 			if err := ps.detach(m.id, p.Teleported); err != nil {
 				failure := fmt.Errorf("golem: %s: detach entity %d from space %d physics: %w", op, m.id, m.from.id, err)
 				m.from.faultServices(failure)
@@ -187,6 +188,7 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 				runDeferred()
 				return errors.Join(failure, syncErr, rollbackTransferBodies(op, dst, created))
 			}
+			ps.retire(body)
 			if !slices.Contains(retired, ps) {
 				retired = append(retired, ps)
 			}
@@ -391,8 +393,9 @@ func (s *Server) moveTransferShapes(op string, t SpaceTransfer, froms []SpaceID,
 }
 
 // synchronizeRetired advances the retire epoch of every source physics service
-// that destroyed bodies in a transfer (so commands queued earlier for those
-// bodies no longer fault on their stale handles) and synchronizes its world.
+// that destroyed bodies in a transfer (retire recorded each destroyed body at
+// the new epoch, so commands queued earlier that fail on those bodies' stale
+// handles are dropped instead of faulting) and synchronizes its world.
 // A failing synchronization faults that space (faultServices).
 func synchronizeRetired(op string, retired []*physicsService) error {
 	var errs []error

@@ -472,7 +472,10 @@ type ServerBinder interface {
 // no layer helper is set — call SetCollisionLayers / SetCollisionLayers3D
 // (or generated EnableCollision / EnableCollision3D) before spawning or
 // snapshot-loading collidable entities. Failed duplicate insertion does not
-// register a collider.
+// register a collider. Like a helper with no bound backend (Layers.Add panics),
+// a helper rebound with Bind to a backend other than its space's own collision
+// backend, or to another space's backend, panics after registry insertion and
+// before any shape is registered or OnSpawn runs.
 //
 // With no extra owner arguments the entity is unowned (e.g. world NPC); with
 // one argument that value is the owning session ID for command authority.
@@ -714,9 +717,14 @@ func (s *Server) SetRemovalSerializer(fn RemovalSerializer) {
 // SpaceTransfer.MoveShapes, which finds both spaces' backends through
 // CollisionBackend and Space.CollisionBackend.
 // Call before Run or on the tick goroutine (not enforced). Panics when b
-// already serves another space: each space needs its own backend.
+// already serves another space, as its backend or bound to its layer helper:
+// each space needs its own backend. A typed nil (such as a nil backend
+// pointer) is treated as nil.
 func (s *Server) SetCollisionBackend(b collision.Backend) {
-	s.mustUnshared("SetCollisionBackend", "collision backend", 0, b, collisionOf)
+	if nilService(b) {
+		b = nil
+	}
+	s.mustBackendUnshared("SetCollisionBackend", "collision backend", 0, b, collisionOf, layersBackendOf)
 	s.space0.collision = b
 }
 
@@ -725,9 +733,13 @@ func (s *Server) SetCollisionBackend(b collision.Backend) {
 // it, reads corrections back via Position3DWriter, and fires OnContact3D
 // handlers. Space(id).SetCollision3DBackend configures other spaces. As with
 // SetCollisionBackend, shapes the game registers itself move only through
-// SpaceTransfer.MoveShapes. Panics when b already serves another space.
+// SpaceTransfer.MoveShapes. Panics when b already serves another space, as its
+// backend or bound to its layer helper. A typed nil is treated as nil.
 func (s *Server) SetCollision3DBackend(b collision3d.Backend) {
-	s.mustUnshared("SetCollision3DBackend", "3D collision backend", 0, b, collision3DOf)
+	if nilService(b) {
+		b = nil
+	}
+	s.mustBackendUnshared("SetCollision3DBackend", "3D collision backend", 0, b, collision3DOf, layers3DBackendOf)
 	s.space0.collision3D = b
 }
 
