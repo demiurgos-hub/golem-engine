@@ -136,3 +136,78 @@ func assertEnvelopeFields(t *testing.T, got, want []EntityUpdateField) {
 		}
 	}
 }
+
+func TestResolveProtoDataRejectsClashingMessageNames(t *testing.T) {
+	tests := []struct {
+		name     string
+		entities []EntityData
+		commands []CommandData
+		worlds   []WorldTypeData
+		types    []CustomTypeData
+		events   []EventData
+		want     []string // substrings of the error; nil means success
+	}{
+		{
+			name:     "normal schema",
+			entities: []EntityData{{Name: "Player"}},
+			commands: []CommandData{{Name: "Move"}},
+			worlds:   []WorldTypeData{{Name: "Map", DataName: "MapData"}},
+			types:    []CustomTypeData{{Name: "Vec"}},
+			events:   []EventData{{Name: "Hit"}},
+		},
+		{
+			name:  "custom type SpaceChanged",
+			types: []CustomTypeData{{Name: "SpaceChanged"}},
+			want:  []string{`"SpaceChanged"`, "custom type SpaceChanged", "built-in SpaceChanged"},
+		},
+		{
+			name:  "custom type ServerMessage",
+			types: []CustomTypeData{{Name: "ServerMessage"}},
+			want:  []string{`"ServerMessage"`, "custom type ServerMessage", "built-in ServerMessage"},
+		},
+		{
+			name:   "world data clashes with custom type",
+			types:  []CustomTypeData{{Name: "MapData"}},
+			worlds: []WorldTypeData{{Name: "Map", DataName: "MapData"}},
+			want:   []string{`"MapData"`, "world type Map", "custom type MapData"},
+		},
+		{
+			name:     "entity state clashes with custom type",
+			entities: []EntityData{{Name: "Player"}},
+			types:    []CustomTypeData{{Name: "PlayerState"}},
+			want:     []string{`"PlayerState"`, "entity Player", "custom type PlayerState"},
+		},
+		{
+			name:     "event clashes with command",
+			commands: []CommandData{{Name: "Hit", Target: "entity"}},
+			events:   []EventData{{Name: "Hit"}},
+			types:    []CustomTypeData{{Name: "HitEvent"}},
+			want:     []string{`"HitEvent"`, "event Hit", "custom type HitEvent"},
+		},
+		{
+			name:     "built-in name reserved without its envelope",
+			entities: []EntityData{{Name: "Player"}},
+			types:    []CustomTypeData{{Name: "ClientPacket"}},
+			want:     []string{`"ClientPacket"`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ResolveProtoData(&Config{}, tt.entities, tt.commands, tt.worlds, tt.types, tt.events)
+			if tt.want == nil {
+				if err != nil {
+					t.Fatalf("ResolveProtoData: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("ResolveProtoData accepted clashing message names")
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error %q does not mention %q", err, want)
+				}
+			}
+		})
+	}
+}

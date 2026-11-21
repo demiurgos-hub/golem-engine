@@ -46,35 +46,49 @@ const (
 
 // Save collects the persistent entities from the provided slice, serializes
 // each via FullUpdate(), and writes an atomic snapshot file to path.
-// The write is performed in a background goroutine; the returned channel
-// receives exactly one value: nil on success or a non-nil error on failure.
+// Serialization runs synchronously on the caller, so every record reflects the
+// moment of the call; only the file write runs in a background goroutine (see
+// WriteAsync). The returned channel receives exactly one value: nil on success
+// or a non-nil error on failure (a serialization error is delivered without
+// starting a write).
 // fingerprint should be the generated SchemaFingerprint constant from the
 // consumer's generated code (e.g. synced.SchemaFingerprint). Every entity is
 // recorded in space 0; use SaveSpaced to keep spaces.
 func Save(entities []registry.Entity, fingerprint, path string) <-chan error {
-	return saveAsync(path, func() ([]byte, error) { return Capture(entities, fingerprint) })
+	return captureThenWrite(path, func() ([]byte, error) { return Capture(entities, fingerprint) })
 }
 
 // SaveSpaced is Save for entities paired with their space, such as the result
-// of Registry.AppendSpaced. The file stays version 1 when every entity is in
-// space 0.
+// of Registry.AppendSpaced. Each record's space and state are captured together
+// on the caller. The file stays version 1 when every entity is in space 0.
 func SaveSpaced(entities []registry.SpacedEntity, fingerprint, path string) <-chan error {
-	return saveAsync(path, func() ([]byte, error) { return CaptureSpaced(entities, fingerprint) })
+	return captureThenWrite(path, func() ([]byte, error) { return CaptureSpaced(entities, fingerprint) })
 }
 
-func saveAsync(path string, capture func() ([]byte, error)) <-chan error {
+func captureThenWrite(path string, capture func() ([]byte, error)) <-chan error {
+	encoded, err := capture()
+	if err != nil {
+		errc := make(chan error, 1)
+		errc <- err
+		return errc
+	}
+	return WriteAsync(path, encoded)
+}
+
+// WriteAsync atomically writes already-captured snapshot bytes (from Capture or
+// CaptureSpaced) to path in a background goroutine, through a temporary file
+// renamed over path. data is owned by the write and must not be modified until
+// the result arrives. The returned channel receives exactly one value: nil on
+// success or a non-nil error on failure.
+func WriteAsync(path string, data []byte) <-chan error {
 	errc := make(chan error, 1)
 	go func() {
-		errc <- save(path, capture)
+		errc <- write(path, data)
 	}()
 	return errc
 }
 
-func save(path string, capture func() ([]byte, error)) error {
-	encoded, err := capture()
-	if err != nil {
-		return err
-	}
+func write(path string, encoded []byte) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, encoded, 0o644); err != nil {
 		return fmt.Errorf("snapshot: writing temp file: %w", err)

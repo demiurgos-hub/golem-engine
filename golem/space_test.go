@@ -2,13 +2,17 @@ package golem
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/demiurgos-hub/golem-engine/golem/nav/surface"
 	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
@@ -273,6 +277,157 @@ func TestLoadSnapshotRestoresSpaces(t *testing.T) {
 	}
 	if entitySpaceOf(t, r, 4) != 0 || entitySpaceOf(t, r, 9) != 7 {
 		t.Fatal("LoadSnapshot did not restore spaces")
+	}
+}
+
+// TestSaveSnapshotCapturesSpaceAndStateTogether holds the background write
+// until after the entity moves and changes state, proving the saved record's
+// space and state both come from the SaveSnapshot call.
+func TestSaveSnapshotCapturesSpaceAndStateTogether(t *testing.T) {
+	release := make(chan struct{})
+	prev := writeSnapshotAsync
+	writeSnapshotAsync = func(path string, data []byte) <-chan error {
+		errc := make(chan error, 1)
+		go func() {
+			<-release
+			errc <- <-snapshot.WriteAsync(path, data)
+		}()
+		return errc
+	}
+	t.Cleanup(func() { writeSnapshotAsync = prev })
+
+	s := spacedSnapshotServer(t)
+	moved, _ := s.Get(9)
+	path := filepath.Join(t.TempDir(), "world.snap")
+	done := s.SaveSnapshot("fp", path)
+	if err := s.MoveToSpace(SpaceTransfer{To: 3, Entities: []int64{9}}); err != nil {
+		t.Fatal(err)
+	}
+	moved.(*snapshotTestEntity).state = []byte{8}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := snapshot.Decode(data, "fp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range records {
+		if rec.EntityID == 9 && (rec.Space != 7 || !bytes.Equal(rec.StateData, []byte{2})) {
+			t.Fatalf("saved entity 9 = space %d state %v, want space 7 state [2]", rec.Space, rec.StateData)
+		}
+	}
+	if len(records) != 2 {
+		t.Fatalf("saved %d records, want 2", len(records))
+	}
+}
+
+// TestSaveSnapshotOnTickCapturesOneTick moves an entity between spaces 0 and 5
+// on alternating ticks, setting its state to the space it enters, while another
+// goroutine requests saves; every saved record must pair space and state.
+func TestSaveSnapshotOnTickCapturesOneTick(t *testing.T) {
+	s := NewServer(ServerConfig{TickRate: 200})
+	e := &snapshotTestEntity{id: 9, typeName: "Monster", state: []byte{0}}
+	if err := s.CreateEntity(e); err != nil {
+		t.Fatal(err)
+	}
+	s.OnTick(func(float64, *Server) {
+		to := SpaceID(5)
+		if e.state[0] == 5 {
+			to = 0
+		}
+		if err := s.MoveToSpace(SpaceTransfer{To: to, Entities: []int64{9}}); err != nil {
+			t.Error(err)
+		}
+		e.state = []byte{byte(to)}
+	})
+	ticked := make(chan struct{}, 1)
+	s.OnTickEnd(func(uint64, time.Duration) {
+		select {
+		case ticked <- struct{}{}:
+		default:
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- s.Run(ctx) }()
+	defer func() { cancel(); <-runDone }()
+	<-ticked
+
+	dir := t.TempDir()
+	for i := 0; i < 20; i++ {
+		path := filepath.Join(dir, fmt.Sprintf("tick-%d.snap", i))
+		if err := <-s.SaveSnapshotOnTick("fp", path); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		records, err := snapshot.Decode(data, "fp")
+		if err != nil || len(records) != 1 {
+			t.Fatalf("decode: %d records, %v", len(records), err)
+		}
+		rec := records[0]
+		if len(rec.StateData) != 1 || SpaceID(rec.StateData[0]) != rec.Space {
+			t.Fatalf("save %d recorded space %d with state %v", i, rec.Space, rec.StateData)
+		}
+	}
+}
+
+// TestSaveSnapshotOnTickPendingAtShutdownFails queues a request after the
+// tick's drain point and stops the server before the next tick.
+func TestSaveSnapshotOnTickPendingAtShutdownFails(t *testing.T) {
+	s := NewServer(ServerConfig{TickRate: 4})
+	if err := s.CreateEntity(&snapshotTestEntity{id: 4, typeName: "Monster", state: []byte{1}}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "pending.snap")
+	ctx, cancel := context.WithCancel(context.Background())
+	requested := make(chan (<-chan error), 1)
+	var once sync.Once
+	s.OnTickEnd(func(uint64, time.Duration) {
+		once.Do(func() {
+			// Drained requests were captured before OnTickEnd; this one waits
+			// for the next tick, which cancellation pre-empts.
+			requested <- s.SaveSnapshotOnTick("fp", path)
+			cancel()
+		})
+	})
+	if err := s.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run: %v", err)
+	}
+	if err := <-<-requested; !errors.Is(err, ErrServerNotRunning) {
+		t.Fatalf("pending request: %v, want ErrServerNotRunning", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed request wrote a snapshot: %v", err)
+	}
+}
+
+func TestSaveSnapshotOnTickBeforeRunAndAfterStop(t *testing.T) {
+	s := spacedSnapshotServer(t)
+	path := filepath.Join(t.TempDir(), "world.snap")
+	if err := <-s.SaveSnapshotOnTick("fp", path); err != nil {
+		t.Fatalf("before Run: %v", err)
+	}
+	if v := snapshotFileVersion(t, path); v != 2 {
+		t.Fatalf("before-Run snapshot version = %d, want 2", v)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = s.Run(ctx)
+	select {
+	case err := <-s.SaveSnapshotOnTick("fp", path+".late"):
+		if !errors.Is(err, ErrServerNotRunning) {
+			t.Fatalf("after stop: %v, want ErrServerNotRunning", err)
+		}
+	default:
+		t.Fatal("request after stop did not fail immediately")
 	}
 }
 

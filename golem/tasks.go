@@ -428,6 +428,7 @@ func (s *Server) finalizeLifecycle() {
 	s.life = lifecycleStopped
 	s.discardQueuedPostsLocked()
 	s.discardQueuedCompletionsLocked()
+	s.failSnapshotRequestsLocked()
 	s.lifeMu.Unlock()
 }
 

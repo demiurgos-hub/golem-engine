@@ -6,10 +6,18 @@ import (
 	"github.com/demiurgos-hub/golem-engine/golem/snapshot"
 )
 
+// writeSnapshotAsync is snapshot.WriteAsync; tests replace it to hold the
+// background write.
+var writeSnapshotAsync = snapshot.WriteAsync
+
 // SaveSnapshot collects the full state of all persistent entities and writes an
-// atomic snapshot file to path. The write runs in a background goroutine so the
-// game loop is never blocked. The returned channel receives exactly one value:
-// nil on success or a non-nil error on failure.
+// atomic snapshot file to path. Serialization (each entity's space and
+// FullUpdate state) runs synchronously on the caller; only the file write runs
+// in a background goroutine. Call it on the tick goroutine (a tick callback or
+// Post) or while the server is not running so that every record's space and
+// state come from the same tick; from other goroutines use SaveSnapshotOnTick.
+// The returned channel receives exactly one value: nil on success or a
+// non-nil error on failure.
 //
 // fingerprint should be the generated SchemaFingerprint constant from the
 // consumer's generated code (e.g. synced.SchemaFingerprint). It is embedded in
@@ -17,7 +25,77 @@ import (
 // Each entity's space is recorded; the file keeps snapshot format version 1
 // while every entity is in space 0.
 func (s *Server) SaveSnapshot(fingerprint, path string) <-chan error {
-	return snapshot.SaveSpaced(s.reg.AppendSpaced(nil), fingerprint, path)
+	data, err := snapshot.CaptureSpaced(s.reg.AppendSpaced(nil), fingerprint)
+	if err != nil {
+		errc := make(chan error, 1)
+		errc <- err
+		return errc
+	}
+	return writeSnapshotAsync(path, data)
+}
+
+// snapshotRequest is one pending SaveSnapshotOnTick call.
+type snapshotRequest struct {
+	fingerprint, path string
+	done              chan error
+}
+
+// SaveSnapshotOnTick is SaveSnapshot taken on the tick goroutine, so every
+// record's space and state come from one tick even when called from another
+// goroutine. While the server is running, the request is queued and captured
+// at the end of the next tick, after that tick's replication flush and before
+// OnTickEnd callbacks; requests queued together are captured in arrival order
+// at that same point. Before Run it captures immediately on the caller, like
+// SaveSnapshot. Requests made once shutdown has begun, and requests still
+// pending when Run returns, receive ErrServerNotRunning, so the channel never
+// stays empty. The returned channel receives exactly one value: nil on
+// success or a non-nil error; only the file write runs in the background.
+func (s *Server) SaveSnapshotOnTick(fingerprint, path string) <-chan error {
+	s.lifeMu.Lock()
+	life := s.life
+	var done chan error
+	switch life {
+	case lifecycleRunning:
+		done = make(chan error, 1)
+		s.snapshotRequests = append(s.snapshotRequests, snapshotRequest{fingerprint, path, done})
+	case lifecycleCreated:
+	default:
+		done = make(chan error, 1)
+		done <- ErrServerNotRunning
+	}
+	s.lifeMu.Unlock()
+	if life == lifecycleCreated {
+		// Never capture under lifeMu: FullUpdate is entity code.
+		return s.SaveSnapshot(fingerprint, path)
+	}
+	return done
+}
+
+// drainSnapshotRequests captures every pending SaveSnapshotOnTick request on
+// the tick goroutine, after the tick's replication flush.
+func (s *Server) drainSnapshotRequests() {
+	s.lifeMu.Lock()
+	pending := s.snapshotRequests
+	s.snapshotRequests = nil
+	s.lifeMu.Unlock()
+	for _, req := range pending {
+		forwardSnapshotResult(s.SaveSnapshot(req.fingerprint, req.path), req.done)
+	}
+}
+
+// failSnapshotRequestsLocked answers every pending request with
+// ErrServerNotRunning. Caller holds lifeMu after the loop has stopped.
+func (s *Server) failSnapshotRequestsLocked() {
+	for _, req := range s.snapshotRequests {
+		req.done <- ErrServerNotRunning
+	}
+	s.snapshotRequests = nil
+}
+
+// forwardSnapshotResult relays the single result of a save to done without
+// blocking the tick.
+func forwardSnapshotResult(result <-chan error, done chan<- error) {
+	go func() { done <- <-result }()
 }
 
 // LoadSnapshot reads a snapshot file, restores all entities via the provided

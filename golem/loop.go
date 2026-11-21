@@ -242,13 +242,17 @@ type Server struct {
 
 	// lifeMu gates Run/Post/SubmitTask acceptance against the linearizable
 	// lifecycle (created → running → stopping → stopped). Hold only across
-	// state checks, non-blocking postQueue sends, TrySubmitErr, and the
-	// SubmitTask start-gate open (accepted before worker work); never across
-	// callback or work execution.
+	// state checks, non-blocking postQueue sends, snapshotRequests edits,
+	// TrySubmitErr, and the SubmitTask start-gate open (accepted before worker
+	// work); never across callback or work execution.
 	lifeMu          sync.Mutex
 	life            lifecycleState
 	postQueue       chan func(*Server)
 	completionQueue chan taskCompletion
+	// snapshotRequests holds SaveSnapshotOnTick requests accepted while
+	// running; guarded by lifeMu, drained by drainSnapshotRequests after each
+	// tick's replication and failed by finalizeLifecycle.
+	snapshotRequests []snapshotRequest
 	// asyncPreferCompletion is the cross-tick round-robin preference for
 	// drainAsyncCallbacks. true means try a completion first; starts true so
 	// the first drain is completion-first, then alternates across ticks.
@@ -1384,6 +1388,8 @@ func (s *Server) runLoop(ctx context.Context) error {
 					return err
 				}
 			}
+
+			s.drainSnapshotRequests()
 
 			wall := time.Since(start)
 			for _, fn := range s.onTickEnd {

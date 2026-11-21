@@ -96,11 +96,15 @@ func (pd ProtoTemplateData) EnvelopeLayouts() ProtocolLayout {
 	return l
 }
 
-// ResolveProtoData builds and validates protocol metadata before any output is written.
+// ResolveProtoData builds and validates protocol metadata (envelope tags and
+// unique generated message names) before any output is written.
 // World validation remains with LoadWorldSchemas and keeps its separate policy.
 func ResolveProtoData(cfg *Config, entities []EntityData, commands []CommandData, worlds []WorldTypeData, customTypes []CustomTypeData, events []EventData) (ProtoTemplateData, error) {
 	pd := BuildProtoData(cfg, entities, commands, worlds, customTypes, events)
 	if err := validateProtocolLayout(*pd.Layout); err != nil {
+		return ProtoTemplateData{}, err
+	}
+	if err := validateProtoMessageNames(pd); err != nil {
 		return ProtoTemplateData{}, err
 	}
 	return pd, nil

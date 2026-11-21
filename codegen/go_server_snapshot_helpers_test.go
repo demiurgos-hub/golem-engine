@@ -491,6 +491,48 @@ func TestRuntimeSaveSnapshotWritesFile(t *testing.T) {
 	}
 }
 
+func TestRuntimeSaveSnapshotOnTickWhileRunning(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tick.snap")
+	srv, rt := NewServer(golem.ServerConfig{TickRate: 200})
+	if err := srv.CreateEntity(&SyncedProbe{token: 0x9}); err != nil {
+		t.Fatalf("CreateEntity: %v", err)
+	}
+	ticked := make(chan struct{}, 1)
+	srv.OnTickEnd(func(uint64, time.Duration) {
+		select {
+		case ticked <- struct{}{}:
+		default:
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- srv.Run(ctx) }()
+	<-ticked
+	if err := <-rt.SaveSnapshotOnTick(path); err != nil {
+		t.Fatalf("SaveSnapshotOnTick: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("SaveSnapshotOnTick did not write file: %v", err)
+	}
+	cancel()
+	<-runDone
+}
+
+func TestRunSnapshotAutosaveAfterStopFailsWithoutWriting(t *testing.T) {
+	srv, rt := NewServer(golem.ServerConfig{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = srv.Run(ctx)
+	path := filepath.Join(t.TempDir(), "auto.snap")
+	err := rt.RunSnapshotAutosave(context.Background(), path, time.Millisecond)
+	if !errors.Is(err, golem.ErrServerNotRunning) {
+		t.Fatalf("RunSnapshotAutosave after stop: %v, want ErrServerNotRunning", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stopped autosave must not create snapshot: %v", err)
+	}
+}
+
 func TestRuntimeLoadSnapshotIfExistsRestoresGeneratedEntity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "world.snap")
 	src, rt := NewServer(golem.ServerConfig{})
