@@ -124,3 +124,16 @@ func BenchmarkReplicationTickSingleSpace(b *testing.B) {
 	b.Run("broadcast_two_spaces", func(b *testing.B) { benchmarkReplicationTick(b, 0, false, benchTwoSpaces) })
 	b.Run("interest_two_spaces", func(b *testing.B) { benchmarkReplicationTick(b, 8, false, benchTwoSpaces) })
 }
+
+// BenchmarkQuietTickDrains measures the per-tick inbox drains with nothing
+// queued (SpaceAcks, EntityResync requests, SaveSnapshotOnTick requests),
+// which check their queued flags instead of taking a lock.
+func BenchmarkQuietTickDrains(b *testing.B) {
+	s := NewServer(ServerConfig{})
+	b.ReportAllocs()
+	for b.Loop() {
+		s.applySpaceAcks()
+		_ = s.takeEntityResyncs()
+		s.drainSnapshotRequests()
+	}
+}

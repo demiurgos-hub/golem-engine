@@ -25,7 +25,15 @@ type replicationScratch struct {
 	eventualFrames     map[int64]eventualPreparedFrame
 	eventualDirty      []eventualStateChange
 	eventualPrepared   []eventualPreparedFrame
-	spaced             []registry.SpacedEntity // live entities with spaces (filtered broadcast)
+	spaced             []registry.SpacedEntity // live entities with spaces (filtered broadcast); emptied by releaseSpaced
+}
+
+// releaseSpaced drops the entity pointers the filtered broadcast pass left in
+// spaced, keeping its capacity, so deleted entities are not retained between
+// passes.
+func (s *replicationScratch) releaseSpaced() {
+	clear(s.spaced)
+	s.spaced = s.spaced[:0]
 }
 
 // reset clears the reused per-tick lookup maps while preserving capacity.

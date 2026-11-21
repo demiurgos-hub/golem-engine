@@ -116,16 +116,16 @@ function pickEntity(entities: EntityRecord[], plane: Plane, a: number, b: number
 }
 
 export function WorldMap() {
-  const { filteredEntities: listEntities, selectedId, selectEntity, plane, setPlane, selectedTargetId, spaces, filters } = useInspector();
+  const { filteredEntities: listEntities, selectedId, selectEntity, plane, setPlane, selectedTargetId, spaces, effectiveFilters } = useInspector();
   const { schema } = useEntityStore();
   // Spaces share coordinates, so the map shows one space at a time by default,
   // chosen among the spaces the space filter lets through.
   const [spaceChoice, setSpaceChoice] = useState<{ target: string | null; space: MapSpace } | null>(null);
   const chosenSpace = spaceChoice?.target === selectedTargetId ? spaceChoice.space : null;
-  const mapSpaces = useMemo(() => mapSpacesFor(spaces, filters.spaces), [spaces, filters.spaces]);
+  const mapSpaces = useMemo(() => mapSpacesFor(spaces, effectiveFilters.spaces), [spaces, effectiveFilters.spaces]);
   const mapSpace = effectiveMapSpace(chosenSpace, mapSpaces);
   const filteredEntities = useMemo(() => mapEntities(listEntities, mapSpace), [listEntities, mapSpace]);
-  const spaceFilterKey = filters.spaces.join(',');
+  const spaceFilterKey = effectiveFilters.spaces.join(',');
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const [camera, setCamera] = useState<Camera>(DEFAULT_CAMERA);

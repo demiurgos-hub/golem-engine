@@ -201,15 +201,20 @@ type Server struct {
 	nextEventualToken    uint64
 
 	// SpaceAcks waiting for the tick: the latest acknowledged transition per
-	// session, kept outside msgQueue so none is ever dropped.
-	spaceAckMu    sync.Mutex
-	spaceAckInbox map[int64]uint64
+	// session, kept outside msgQueue so none is ever dropped. spaceAckQueued
+	// is set under spaceAckMu after an insert and cleared by the take, so a
+	// quiet tick checks it without taking the lock.
+	spaceAckMu     sync.Mutex
+	spaceAckInbox  map[int64]uint64
+	spaceAckQueued atomic.Bool
 
 	// EntityResync requests waiting for the next replication pass: per
 	// session, the IDs of known entities whose held compact records the
 	// client evicted, kept outside msgQueue (entity_resync.go).
-	entityResyncMu    sync.Mutex
-	entityResyncInbox map[int64]map[int64]struct{}
+	// entityResyncQueued follows the spaceAckQueued protocol.
+	entityResyncMu     sync.Mutex
+	entityResyncInbox  map[int64]map[int64]struct{}
+	entityResyncQueued atomic.Bool
 
 	// Sessions holding their server events because their space may change
 	// (space_events.go). The value records that an end-of-pass release kept
@@ -288,7 +293,11 @@ type Server struct {
 	// snapshotRequests holds SaveSnapshotOnTick requests accepted while
 	// running; guarded by lifeMu, drained by drainSnapshotRequests after each
 	// tick's replication and failed by finalizeLifecycle.
-	snapshotRequests []snapshotRequest
+	// snapshotRequestsQueued is set under lifeMu after an append and cleared
+	// whenever the list is taken or failed, so a tick without requests does
+	// not take lifeMu.
+	snapshotRequests       []snapshotRequest
+	snapshotRequestsQueued atomic.Bool
 	// asyncPreferCompletion is the cross-tick round-robin preference for
 	// drainAsyncCallbacks. true means try a completion first; starts true so
 	// the first drain is completion-first, then alternates across ticks.
@@ -1793,8 +1802,13 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 	if s.onUpdates != nil && len(tick.updates) > 0 {
 		s.onUpdates(tick.updates)
 	}
-	live := s.reg.AppendSpaced(tick.spaced[:0])
-	tick.spaced = live
+	// Read after OnUpdates, which may create, delete or move entities. Entity
+	// spaces change only on this goroutine, so plain holds for the pass. The
+	// reused buffer keeps this read allocation-free; while every entity is in
+	// space 0 the registry fills it without space lookups.
+	tick.spaced = s.reg.AppendSpaced(tick.spaced[:0])
+	live, plain := tick.spaced, !s.reg.SpacesInUse()
+	defer tick.releaseSpaced()
 	s.interestMu.Lock()
 	ownershipPending := s.snapshotOwnershipRefreshLocked()
 	s.interestMu.Unlock()
@@ -1805,7 +1819,7 @@ func (s *Server) runBroadcastTickFiltered(result registry.FlushResult, deltasFlu
 			s.clearBroadcastKnownSession(sid)
 			continue
 		}
-		diff, plan := s.computeBroadcastDiff(sid, live)
+		diff, plan := s.computeBroadcastDiff(sid, live, plain)
 		sent, disconnected, err := s.deliverReplicationDiff(sid, transport, diff, tick, ownershipPending, replicationVisibility, plan)
 		total.add(sent)
 		if err != nil {
@@ -1856,8 +1870,11 @@ func (s *Server) clearBroadcastKnownSession(sessionID int64) {
 // its enter/stay/exit diff with the session's space plan. Known transitions are
 // accepted here (queued sends count as known), matching interest-mode
 // semantics. Only entities in the session's space are desired; the announced
-// space changes under the same lock as the known set.
-func (s *Server) computeBroadcastDiff(sessionID int64, live []registry.SpacedEntity) (interest.Diff, sessionSpacePlan) {
+// space changes under the same lock as the known set. plain reports that no
+// entity is outside space 0 (Registry.SpacesInUse was false after live was
+// read): every live entity is then in space 0, so a session planned into
+// another space desires nothing and no per-entity space is compared.
+func (s *Server) computeBroadcastDiff(sessionID int64, live []registry.SpacedEntity, plain bool) (interest.Diff, sessionSpacePlan) {
 	s.interestMu.Lock()
 	defer s.interestMu.Unlock()
 
@@ -1876,11 +1893,23 @@ func (s *Server) computeBroadcastDiff(sessionID int64, live []registry.SpacedEnt
 		s.broadcastKnown[sessionID] = known
 	}
 
-	desired := make(map[int64]struct{}, len(live))
-	for _, se := range live {
-		id := se.Entity.EntityID()
-		if se.Space == plan.space && s.visibility.Allows(sessionID, id) {
-			desired[id] = struct{}{}
+	var desired map[int64]struct{}
+	switch {
+	case !plain:
+		desired = make(map[int64]struct{}, len(live))
+		for _, se := range live {
+			id := se.Entity.EntityID()
+			if se.Space == plan.space && s.visibility.Allows(sessionID, id) {
+				desired[id] = struct{}{}
+			}
+		}
+	case plan.space == 0:
+		desired = make(map[int64]struct{}, len(live))
+		for _, se := range live {
+			id := se.Entity.EntityID()
+			if s.visibility.Allows(sessionID, id) {
+				desired[id] = struct{}{}
+			}
 		}
 	}
 
@@ -1957,15 +1986,38 @@ func (s *Server) cleanupVisibilityOnDisconnect(sessionID int64) {
 // successful snapshot IDs become known and can be removed on the next
 // replication pass. Provider/write failures never commit known state.
 func (s *Server) entitySnapshotForSession(sessionID int64) ([]golemnet.EntitySnapshot, error) {
-	all := s.reg.AppendSpaced(nil)
-	allowed := make([]Entity, 0, len(all))
+	// While every entity is in space 0 the plain list needs no per-entity
+	// space. The recheck catches an entity that left space 0 during the read:
+	// the registry updates SpacesInUse under the lock All() reads with.
+	var (
+		plain  []Entity
+		spaced []registry.SpacedEntity
+	)
+	if !s.reg.SpacesInUse() {
+		plain = s.reg.All()
+		if s.reg.SpacesInUse() {
+			plain = nil
+		}
+	}
+	if plain == nil {
+		spaced = s.reg.AppendSpaced(nil)
+	}
+	allowed := make([]Entity, 0, len(plain)+len(spaced))
 	s.interestMu.Lock()
 	// The announced space is 0 at connect; later space changes arrive as a
-	// replication transition.
+	// replication transition. With the plain list every entity is in space 0.
 	space := s.sentSpace[sessionID]
-	for _, se := range all {
-		if se.Space == space && s.visibility.Allows(sessionID, se.Entity.EntityID()) {
-			allowed = append(allowed, se.Entity)
+	if spaced != nil {
+		for _, se := range spaced {
+			if se.Space == space && s.visibility.Allows(sessionID, se.Entity.EntityID()) {
+				allowed = append(allowed, se.Entity)
+			}
+		}
+	} else if space == 0 {
+		for _, e := range plain {
+			if s.visibility.Allows(sessionID, e.EntityID()) {
+				allowed = append(allowed, e)
+			}
 		}
 	}
 	s.interestMu.Unlock()

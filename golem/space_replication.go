@@ -188,20 +188,21 @@ func (s *Server) storeSpaceAck(sessionID int64, transition uint64) {
 		s.spaceAckInbox = make(map[int64]uint64)
 	}
 	s.spaceAckInbox[sessionID] = transition
+	s.spaceAckQueued.Store(true)
 	s.spaceAckMu.Unlock()
 }
 
 // applySpaceAcks applies every SpaceAck stored since the previous call, on the
 // tick goroutine. Acks of sessions that disconnected meanwhile find no pending
-// transition and are ignored.
+// transition and are ignored. Without stored acks it takes no lock.
 func (s *Server) applySpaceAcks() {
-	s.spaceAckMu.Lock()
-	inbox := s.spaceAckInbox
-	if len(inbox) == 0 {
-		s.spaceAckMu.Unlock()
+	if !s.spaceAckQueued.Load() {
 		return
 	}
+	s.spaceAckMu.Lock()
+	inbox := s.spaceAckInbox
 	s.spaceAckInbox = nil
+	s.spaceAckQueued.Store(false)
 	s.spaceAckMu.Unlock()
 	for sessionID, transition := range inbox {
 		s.applySpaceAck(sessionID, transition)

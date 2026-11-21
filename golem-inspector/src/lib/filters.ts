@@ -33,6 +33,34 @@ export function filterEntities(entities: Iterable<EntityRecord>, f: ClientFilter
   return out;
 }
 
+/**
+ * Drops space filter entries whose space has no entity, so a space emptied by
+ * deletion (or a selection carried over from earlier) never hides every
+ * entity. Returns `f` itself when nothing changes. The inspector applies it
+ * when reading, never to the stored filter: a space that comes back (for
+ * example after a resync's brief empty entity set) is filtered again.
+ */
+export function pruneFilterSpaces(f: ClientFilters, spaces: readonly number[]): ClientFilters {
+  if (f.spaces.length === 0) return f;
+  const kept = f.spaces.filter((s) => spaces.includes(s));
+  return kept.length === f.spaces.length ? f : { ...f, spaces: kept };
+}
+
+/** Space toggles the filter bar offers: the present spaces, only when there are several. */
+export function spaceFilterOptions(spaces: readonly number[]): readonly number[] {
+  return spaces.length > 1 ? spaces : [];
+}
+
+/**
+ * Toggles `space` in the space filter the user sees (`effective`, from
+ * pruneFilterSpaces) and stores the result, so absent spaces leave the stored
+ * filter once the user edits it.
+ */
+export function toggleFilterSpace(f: ClientFilters, effective: ClientFilters, space: number): ClientFilters {
+  const spaces = effective.spaces.includes(space) ? effective.spaces.filter((s) => s !== space) : [...effective.spaces, space];
+  return { ...f, spaces };
+}
+
 /** Returns the distinct spaces of entities in ascending order. */
 export function spacesOf(entities: Iterable<EntityRecord>): number[] {
   const seen = new Set<number>();

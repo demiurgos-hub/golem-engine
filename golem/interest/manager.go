@@ -54,7 +54,7 @@ type Manager struct {
 	entitySpace    map[int64]registry.SpaceID              // non-zero space of each tracked entity or global
 	sessionSpace   map[int64]registry.SpaceID              // non-zero last resolved space of FOI sessions
 	spaced         bool                                    // the last UpdateGrid left entities outside space 0
-	spacedBuf      []registry.SpacedEntity                 // reused AppendSpaced scratch
+	spacedBuf      []registry.SpacedEntity                 // reused AppendSpaced scratch, emptied after each use
 	removedGlobals map[int64]struct{}                      // globals deleted since last UpdateGrid (reused)
 	tracked        map[int64]struct{}                      // entity IDs currently in a grid
 	alive          map[int64]struct{}                      // reused tick-local set of entities seen during UpdateGrid
@@ -322,6 +322,9 @@ func (m *Manager) updateGridSpaced(reg *registry.Registry) {
 		}
 	}
 	m.spaced = len(m.entitySpace) > 0
+	// Keep the capacity but not the entity pointers until the next call.
+	clear(m.spacedBuf)
+	m.spacedBuf = m.spacedBuf[:0]
 }
 
 // gridFor returns the grid of space, creating it on first use.

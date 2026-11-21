@@ -215,6 +215,25 @@ func TestSpacesSetSessionSpaceAppliesUntilAnchorResolves(t *testing.T) {
 	}
 }
 
+func TestUpdateGridSpacedReleasesEntityPointers(t *testing.T) {
+	reg := registry.NewRegistry()
+	addInSpace(t, reg, 0, &testEntity{id: 1})
+	addInSpace(t, reg, 5, &testEntity{id: 2})
+	mgr := NewManager(4)
+	mgr.UpdateGrid(reg)
+	if cap(mgr.spacedBuf) == 0 {
+		t.Fatal("spaced UpdateGrid did not use the scratch buffer")
+	}
+	if len(mgr.spacedBuf) != 0 {
+		t.Fatalf("spacedBuf length = %d after UpdateGrid, want 0", len(mgr.spacedBuf))
+	}
+	for i, se := range mgr.spacedBuf[:cap(mgr.spacedBuf)] {
+		if se.Entity != nil {
+			t.Fatalf("spacedBuf[%d] still holds entity %d", i, se.Entity.EntityID())
+		}
+	}
+}
+
 func BenchmarkManagerComputeDiffsTwoSpaces(b *testing.B) {
 	reg := registry.NewRegistry()
 	mgr := NewManager(4)

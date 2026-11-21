@@ -43,15 +43,21 @@ func (s *Server) storeEntityResync(sessionID, entityID int64) {
 		s.entityResyncInbox[sessionID] = ids
 	}
 	ids[entityID] = struct{}{}
+	s.entityResyncQueued.Store(true)
 }
 
 // takeEntityResyncs returns and clears every EntityResync request stored
-// since the previous replication pass. Tick goroutine only.
+// since the previous replication pass. Tick goroutine only. Without stored
+// requests it returns nil without taking the lock.
 func (s *Server) takeEntityResyncs() map[int64]map[int64]struct{} {
+	if !s.entityResyncQueued.Load() {
+		return nil
+	}
 	s.entityResyncMu.Lock()
 	defer s.entityResyncMu.Unlock()
 	inbox := s.entityResyncInbox
 	s.entityResyncInbox = nil
+	s.entityResyncQueued.Store(false)
 	return inbox
 }
 

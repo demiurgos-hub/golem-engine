@@ -2,8 +2,10 @@ package golem
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -530,6 +532,130 @@ func TestSpaceConnectSnapshotUsesAnnouncedSpace(t *testing.T) {
 	expectNoMessage(t, conn)
 	if got := srv.SessionsKnowing(2); len(got) != 0 {
 		t.Fatalf("session %d knows the cave entity: %v", sid, got)
+	}
+}
+
+// snapshotIDs returns the entity IDs of a connect snapshot, sorted.
+func snapshotIDs(t *testing.T, srv *Server, sid int64) []int64 {
+	t.Helper()
+	frames, err := srv.entitySnapshotForSession(sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]int64, 0, len(frames))
+	for _, f := range frames {
+		ids = append(ids, f.EntityID)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// Session spaces without any entity outside space 0 take the plain entity
+// list (no per-entity space) in filtered broadcast and the connect snapshot,
+// and behave exactly like the spaced list.
+func TestSpaceSessionSpaceWithoutSpacedEntitiesUsesPlainList(t *testing.T) {
+	rig := newSpaceTestRig(t, false, 2)
+	srv := rig.srv
+	stay, away := rig.ids[0], rig.ids[1]
+	for i := int64(1); i <= 2; i++ {
+		if err := srv.CreateEntity(&interestTickEntity{id: i, full: []byte(fmt.Sprintf("full-%d", i))}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rig.tick(t)
+	for _, c := range rig.conns {
+		got := readSpaceTokens(t, c)
+		slices.Sort(got)
+		if !slices.Equal(got, []string{"full-1", "full-2"}) {
+			t.Fatalf("spawns = %q", got)
+		}
+	}
+
+	srv.SetSessionSpace(away, 5)
+	rig.tick(t)
+	if srv.reg.SpacesInUse() {
+		t.Fatal("no entity left space 0")
+	}
+	assertTransition(t, readSpaceTokens(t, rig.conns[1]), 5, 1, []string{"removed:1", "removed:2"}, nil, nil)
+	expectNoMessage(t, rig.conns[0])
+	rig.tick(t)
+	expectNoMessage(t, rig.conns[1])
+	plainStay, plainAway := snapshotIDs(t, srv, stay), snapshotIDs(t, srv, away)
+	if !slices.Equal(plainStay, []int64{1, 2}) || len(plainAway) != 0 {
+		t.Fatalf("plain connect snapshots: space 0 = %v, space 5 = %v", plainStay, plainAway)
+	}
+
+	srv.SetSessionSpace(away, 0)
+	rig.tick(t)
+	assertTransition(t, readSpaceTokens(t, rig.conns[1]), 0, 2, nil, nil, []string{"full-1", "full-2"})
+	expectNoMessage(t, rig.conns[0])
+
+	// One entity in another space switches to the spaced list.
+	if err := srv.CreateEntityIn(9, &interestTickEntity{id: 3, full: []byte("full-3")}); err != nil {
+		t.Fatal(err)
+	}
+	if !srv.reg.SpacesInUse() {
+		t.Fatal("entity 3 is in space 9")
+	}
+	if got := snapshotIDs(t, srv, stay); !slices.Equal(got, plainStay) {
+		t.Fatalf("spaced connect snapshot = %v, plain = %v", got, plainStay)
+	}
+	rig.tick(t)
+	expectNoMessage(t, rig.conns[0])
+	expectNoMessage(t, rig.conns[1])
+	scratch := srv.replicationScratch.spaced
+	if cap(scratch) == 0 || len(scratch) != 0 {
+		t.Fatalf("spaced scratch len %d cap %d after a spaced pass", len(scratch), cap(scratch))
+	}
+	for i, se := range scratch[:cap(scratch)] {
+		if se.Entity != nil {
+			t.Fatalf("spaced scratch[%d] still holds entity %d", i, se.Entity.EntityID())
+		}
+	}
+}
+
+// The tick drains of SpaceAcks and SaveSnapshotOnTick requests skip their
+// locks through queued flags that every take and the shutdown failure clear.
+func TestQuietTickQueuedFlags(t *testing.T) {
+	srv := NewServer(ServerConfig{})
+	srv.applySpaceAcks()
+	srv.storeSpaceAck(4, 7)
+	if !srv.spaceAckQueued.Load() {
+		t.Fatal("stored SpaceAck did not set the queued flag")
+	}
+	srv.applySpaceAcks()
+	if srv.spaceAckQueued.Load() || srv.spaceAckInbox != nil {
+		t.Fatal("applySpaceAcks left the inbox queued")
+	}
+	if got := srv.takeEntityResyncs(); got != nil || srv.entityResyncQueued.Load() {
+		t.Fatalf("empty EntityResync take = %v", got)
+	}
+
+	srv.lifeMu.Lock()
+	srv.life = lifecycleRunning
+	srv.lifeMu.Unlock()
+	srv.drainSnapshotRequests()
+	done := srv.SaveSnapshotOnTick("fp", filepath.Join(t.TempDir(), "a.snap"))
+	if !srv.snapshotRequestsQueued.Load() {
+		t.Fatal("queued snapshot request did not set the flag")
+	}
+	srv.drainSnapshotRequests()
+	if srv.snapshotRequestsQueued.Load() {
+		t.Fatal("drain left the snapshot flag set")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("drained snapshot: %v", err)
+	}
+	pending := srv.SaveSnapshotOnTick("fp", filepath.Join(t.TempDir(), "b.snap"))
+	srv.lifeMu.Lock()
+	srv.life = lifecycleStopped
+	srv.failSnapshotRequestsLocked()
+	srv.lifeMu.Unlock()
+	if srv.snapshotRequestsQueued.Load() {
+		t.Fatal("failing pending snapshots left the flag set")
+	}
+	if err := <-pending; !errors.Is(err, ErrServerNotRunning) {
+		t.Fatalf("pending snapshot at shutdown = %v", err)
 	}
 }
 

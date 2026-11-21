@@ -87,6 +87,7 @@ func (s *Server) SaveSnapshotOnTick(fingerprint, path string) <-chan error {
 	case lifecycleRunning:
 		done = make(chan error, 1)
 		s.snapshotRequests = append(s.snapshotRequests, snapshotRequest{fingerprint, path, done})
+		s.snapshotRequestsQueued.Store(true)
 	case lifecycleCreated:
 		// Hold Run's first tick until the capture below finishes.
 		s.preRunCaptureMu.RLock()
@@ -104,11 +105,16 @@ func (s *Server) SaveSnapshotOnTick(fingerprint, path string) <-chan error {
 }
 
 // drainSnapshotRequests captures every pending SaveSnapshotOnTick request on
-// the tick goroutine, after the tick's replication flush.
+// the tick goroutine, after the tick's replication flush. Without pending
+// requests it takes no lock.
 func (s *Server) drainSnapshotRequests() {
+	if !s.snapshotRequestsQueued.Load() {
+		return
+	}
 	s.lifeMu.Lock()
 	pending := s.snapshotRequests
 	s.snapshotRequests = nil
+	s.snapshotRequestsQueued.Store(false)
 	s.lifeMu.Unlock()
 	for _, req := range pending {
 		forwardSnapshotResult(s.saveSnapshot(req.fingerprint, req.path), req.done)
@@ -122,6 +128,7 @@ func (s *Server) failSnapshotRequestsLocked() {
 		req.done <- ErrServerNotRunning
 	}
 	s.snapshotRequests = nil
+	s.snapshotRequestsQueued.Store(false)
 }
 
 // forwardSnapshotResult relays the single result of a save to done without

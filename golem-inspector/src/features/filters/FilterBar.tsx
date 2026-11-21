@@ -1,21 +1,20 @@
 import type { CSSProperties } from 'react';
 import { useEntityStore, useInspector } from '../../hooks/useInspector';
 import { legend } from '../../lib/entityTypes';
-import { EMPTY_FILTERS, type ClientFilters } from '../../lib/filters';
+import { EMPTY_FILTERS, spaceFilterOptions, toggleFilterSpace, type ClientFilters } from '../../lib/filters';
 
 export function FilterBar() {
-  const { filters, setFilters, client, spaces } = useInspector();
+  const { filters, effectiveFilters, setFilters, client, spaces } = useInspector();
   const { schema } = useEntityStore();
   const types = legend(schema);
-  // Space toggles appear only when the world uses several spaces (or a space
-  // filter is still active), so single-space games see no extra controls.
-  const spaceOptions = [...new Set([...spaces, ...filters.spaces])].sort((a, b) => a - b);
+  // Space toggles show the present spaces, only when there are several, so
+  // single-space games see no extra controls and an emptied space disappears.
+  const spaceOptions = spaceFilterOptions(spaces);
 
   const patch = (partial: Partial<ClientFilters>) => setFilters({ ...filters, ...partial });
   const toggleType = (name: string) =>
     patch({ typeNames: filters.typeNames.includes(name) ? filters.typeNames.filter((t) => t !== name) : [...filters.typeNames, name] });
-  const toggleSpace = (space: number) =>
-    patch({ spaces: filters.spaces.includes(space) ? filters.spaces.filter((s) => s !== space) : [...filters.spaces, space] });
+  const toggleSpace = (space: number) => setFilters(toggleFilterSpace(filters, effectiveFilters, space));
 
   return (
     <div className="filter-bar">
@@ -46,11 +45,11 @@ export function FilterBar() {
           );
         })}
       </div>
-      {spaceOptions.length > 1 || filters.spaces.length > 0 ? (
+      {spaceOptions.length > 0 ? (
         <div className="filter-types" role="group" aria-label="Spaces">
           {spaceOptions.map((space) => {
-            const selected = filters.spaces.includes(space);
-            const active = filters.spaces.length === 0 || selected;
+            const selected = effectiveFilters.spaces.includes(space);
+            const active = effectiveFilters.spaces.length === 0 || selected;
             return (
               <button
                 key={space}
