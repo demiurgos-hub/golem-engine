@@ -927,6 +927,7 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 	s.spaceAckPending = make(map[int64]uint64)
 	s.spaceAnnouncing = make(map[int64]SpaceID)
 	s.foiOrphanKnown = make(map[int64]map[int64]uint64)
+	s.closedSessions = make(map[int64]struct{})
 	s.interestMu.Unlock()
 	s.avatarMu.Lock()
 	s.sessionAvatar = map[int64]int64{}

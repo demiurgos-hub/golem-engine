@@ -743,8 +743,8 @@ func TestQuietTickQueuedFlags(t *testing.T) {
 
 func TestSpaceDisconnectClearsSessionSpaceState(t *testing.T) {
 	srv := NewServer(ServerConfig{})
-	srv.SetSessionSpace(5, 2)
 	srv.interestMu.Lock()
+	srv.sessionSpaceExplicit[5] = 2
 	srv.planSessionSpaceLocked(5, 2)
 	srv.foiOrphanKnown[5] = map[int64]uint64{1: 0}
 	srv.interestMu.Unlock()
@@ -753,6 +753,62 @@ func TestSpaceDisconnectClearsSessionSpaceState(t *testing.T) {
 	defer srv.interestMu.Unlock()
 	if len(srv.sessionSpaceExplicit)+len(srv.sentSpace)+len(srv.spaceTransitionSeq)+len(srv.spaceAckPending)+len(srv.spaceAnnouncing)+len(srv.foiOrphanKnown) != 0 {
 		t.Fatal("disconnect retained session space state")
+	}
+}
+
+// SetSessionSpace for a session that is not connected stores nothing, so it
+// cannot keep broadcast replication on the filtered path for good.
+func TestSetSessionSpaceIgnoresSessionsThatAreGone(t *testing.T) {
+	rig := newSpaceTestRig(t, false, 2)
+	srv := rig.srv
+	if err := srv.CreateEntity(&interestTickEntity{id: 1, full: []byte("e-full")}); err != nil {
+		t.Fatal(err)
+	}
+	rig.tick(t)
+	state := func() (explicit int, filtered bool) {
+		srv.interestMu.Lock()
+		defer srv.interestMu.Unlock()
+		return len(srv.sessionSpaceExplicit), srv.shouldFilterBroadcastLocked(srv.listener.SessionIDs(), srv.reg.All(), false)
+	}
+	check := func(what string) {
+		t.Helper()
+		rig.tick(t)
+		if explicit, filtered := state(); explicit != 0 || filtered {
+			t.Fatalf("%s: explicit entries = %d, filtered broadcast = %v", what, explicit, filtered)
+		}
+	}
+
+	srv.SetSessionSpace(987654, 3)
+	check("unknown session")
+
+	// The tick's disconnect cleanup can run while the listener still lists
+	// the session.
+	early := rig.ids[0]
+	srv.cleanupVisibilityOnDisconnect(early)
+	srv.SetSessionSpace(early, 3)
+	check("cleaned-up session the listener still lists")
+
+	// A real disconnect: the listener drops the session, then the tick cleans up.
+	gone := rig.ids[1]
+	_ = rig.conns[1].conn.CloseNow()
+	for deadline := time.Now().Add(3 * time.Second); ; {
+		if _, listed := srv.listener.SessionTransport(gone); !listed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("listener kept the closed session")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	srv.SetSessionSpace(gone, 3) // before the tick's cleanup
+	srv.drainMessages()
+	srv.SetSessionSpace(gone, 3) // after it
+	check("disconnected session")
+	srv.interestMu.Lock()
+	_, marked := srv.closedSessions[gone]
+	srv.interestMu.Unlock()
+	if marked {
+		t.Fatal("a session the listener dropped stayed marked closed")
 	}
 }
 

@@ -293,9 +293,15 @@ func (s *Server) transferBusy(op string) error {
 //
 // The change is announced to the client on the next replication pass as a
 // space transition; server events sent to the session until then follow the
-// transition. Concurrency-safe; the setting is dropped on disconnect.
+// transition. Concurrency-safe; the setting is dropped on disconnect, and a
+// call for a session that is not connected (unknown, or already disconnected)
+// is ignored.
 func (s *Server) SetSessionSpace(sessionID int64, space SpaceID) {
 	s.interestMu.Lock()
+	if _, closed := s.closedSessions[sessionID]; closed {
+		s.interestMu.Unlock()
+		return
+	}
 	if space == 0 {
 		delete(s.sessionSpaceExplicit, sessionID)
 	} else {
@@ -303,6 +309,16 @@ func (s *Server) SetSessionSpace(sessionID int64, space SpaceID) {
 	}
 	pending := s.switchPendingLocked(sessionID)
 	s.interestMu.Unlock()
+	// The listener is never called under interestMu, so check afterwards: a
+	// session it does not list is gone for good (or never existed) and its
+	// disconnect cleanup may already have run, so nothing else would remove
+	// the entry.
+	if _, listed := s.listener.SessionTransport(sessionID); !listed {
+		s.interestMu.Lock()
+		delete(s.sessionSpaceExplicit, sessionID)
+		s.interestMu.Unlock()
+		return
+	}
 	if pending {
 		s.holdSessionEvents(sessionID)
 	}

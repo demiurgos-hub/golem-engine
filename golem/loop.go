@@ -168,6 +168,7 @@ type Server struct {
 	spaceAckPending      map[int64]uint64             // latest transition awaiting SpaceAck per session (interestMu)
 	spaceAnnouncing      map[int64]SpaceID            // old announced space of planned, unsent transitions (interestMu)
 	foiOrphanKnown       map[int64]map[int64]uint64   // RemoveFOI known sets: entity ID → revision (interestMu)
+	closedSessions       map[int64]struct{}           // sessions cleaned up on disconnect that the listener may still list (interestMu)
 	space0               spaceRuntime                 // space 0's services; always present
 	spaces               map[SpaceID]*spaceRuntime    // non-zero spaces with services (tick-owned)
 	spaceOrder           []*spaceRuntime              // spaces' runtimes in ascending ID order
@@ -370,6 +371,7 @@ func NewServer(cfg ServerConfig) *Server {
 		spaceAckPending:       make(map[int64]uint64),
 		spaceAnnouncing:       make(map[int64]SpaceID),
 		foiOrphanKnown:        make(map[int64]map[int64]uint64),
+		closedSessions:        make(map[int64]struct{}),
 	}
 	if cfg.CellSize > 0 {
 		s.interest = interest.NewManager(cfg.CellSize)
@@ -1967,14 +1969,38 @@ func (s *Server) cleanupVisibilityForRemovals(removalIDs []int64) {
 }
 
 // cleanupVisibilityOnDisconnect clears session group membership, broadcast
-// known state and session space state. Interest FOI cleanup remains in
-// cleanupAvatarOnDisconnect.
+// known state and session space state, and marks the session closed so a
+// later SetSessionSpace cannot store state for it again. Interest FOI cleanup
+// remains in cleanupAvatarOnDisconnect.
 func (s *Server) cleanupVisibilityOnDisconnect(sessionID int64) {
 	s.interestMu.Lock()
-	defer s.interestMu.Unlock()
 	s.visibility.RemoveSession(sessionID)
 	delete(s.broadcastKnown, sessionID)
 	s.clearSessionSpaceLocked(sessionID)
+	s.closedSessions[sessionID] = struct{}{}
+	closed := make([]int64, 0, len(s.closedSessions))
+	for sid := range s.closedSessions {
+		closed = append(closed, sid)
+	}
+	s.interestMu.Unlock()
+
+	// The listener drops a session after its disconnect hook, so this cleanup
+	// can run while the listener still lists it. Once the listener has dropped
+	// a session, its own lookup refuses the session and the mark can go.
+	gone := closed[:0]
+	for _, sid := range closed {
+		if _, listed := s.listener.SessionTransport(sid); !listed {
+			gone = append(gone, sid)
+		}
+	}
+	if len(gone) == 0 {
+		return
+	}
+	s.interestMu.Lock()
+	for _, sid := range gone {
+		delete(s.closedSessions, sid)
+	}
+	s.interestMu.Unlock()
 }
 
 // entitySnapshotForSession returns connect-time entity frames visible to
