@@ -26,17 +26,15 @@ const (
 	serverMessageWorldClearedField = 6
 )
 
-// ServerMessage contains one decoded server envelope field.
+// ServerMessage contains one decoded server envelope field. A stream frame
+// decodes into one of these per field, so the type stays small: the field
+// number says what Payload is.
 type ServerMessage struct {
 	// Field is the ServerMessage field number: 1 entity update, 2 world update,
 	// 3 server event, 4 space changed, 5 space settled, 6 world cleared.
 	Field int
 	// Payload is the field's length-delimited payload, which may be empty.
 	Payload []byte
-
-	EntityUpdate []byte
-	WorldUpdate  []byte
-	ServerEvent  []byte
 }
 
 func decodeServerMessages(data []byte) ([]ServerMessage, error) {
@@ -48,16 +46,7 @@ func decodeServerMessages(data []byte) ([]ServerMessage, error) {
 			r.Skip(wire)
 			continue
 		}
-		msg := ServerMessage{Field: field, Payload: r.Bytes()}
-		switch field {
-		case serverMessageEntityField:
-			msg.EntityUpdate = msg.Payload
-		case serverMessageWorldField:
-			msg.WorldUpdate = msg.Payload
-		case serverMessageEventField:
-			msg.ServerEvent = msg.Payload
-		}
-		out = append(out, msg)
+		out = append(out, ServerMessage{Field: field, Payload: r.Bytes()})
 	}
 	return out, nil
 }

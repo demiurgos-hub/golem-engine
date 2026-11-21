@@ -948,6 +948,9 @@ func LoadWorldSchemas(worldDir string, customTypes map[string]CustomTypeData) ([
 		}
 		worldTypes = append(worldTypes, wt)
 	}
+	if err := validateWorldManagerNames(worldTypes); err != nil {
+		return nil, err
+	}
 	return worldTypes, nil
 }
 

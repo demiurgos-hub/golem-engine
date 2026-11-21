@@ -630,32 +630,33 @@ func (c *GameClient) handleMessage(d *inboundDispatcher, data []byte) {
 		case serverMessageSpaceChangedField:
 			space, transition := decodeSpaceChanged(msg.Payload)
 			c.applySpaceChanged(d, space, transition)
-			continue
 		case serverMessageSpaceSettledField:
 			c.applySpaceSettled(d, decodeSpaceSettled(msg.Payload))
-			continue
 		case serverMessageWorldClearedField:
 			c.applyWorldCleared(decodeWorldCleared(msg.Payload))
-			continue
-		}
-		if len(msg.EntityUpdate) > 0 && c.decodeEntity != nil && c.entities != nil {
-			update, err := c.decodeEntity(msg.EntityUpdate)
-			if err == nil {
-				c.entities.ApplyUpdate(update)
-			} else {
-				c.setLastErr(err)
+		case serverMessageEntityField:
+			// Entity, world and event fields with an empty payload carry nothing.
+			if len(msg.Payload) > 0 && c.decodeEntity != nil && c.entities != nil {
+				update, err := c.decodeEntity(msg.Payload)
+				if err == nil {
+					c.entities.ApplyUpdate(update)
+				} else {
+					c.setLastErr(err)
+				}
 			}
-		}
-		if len(msg.WorldUpdate) > 0 && c.decodeWorld != nil && c.world != nil {
-			update, err := c.decodeWorld(msg.WorldUpdate)
-			if err == nil {
-				c.world.ApplyUpdate(update)
-			} else {
-				c.setLastErr(err)
+		case serverMessageWorldField:
+			if len(msg.Payload) > 0 && c.decodeWorld != nil && c.world != nil {
+				update, err := c.decodeWorld(msg.Payload)
+				if err == nil {
+					c.world.ApplyUpdate(update)
+				} else {
+					c.setLastErr(err)
+				}
 			}
-		}
-		if len(msg.ServerEvent) > 0 && c.events != nil {
-			c.events.ApplyRaw(msg.ServerEvent)
+		case serverMessageEventField:
+			if len(msg.Payload) > 0 && c.events != nil {
+				c.events.ApplyRaw(msg.Payload)
+			}
 		}
 	}
 }
