@@ -41,6 +41,12 @@ func (s *Server) SetEntitySpace(id int64, space SpaceID) error {
 	return s.MoveToSpace(SpaceTransfer{To: space, Entities: []int64{id}})
 }
 
+// DefaultTransferMaxPenetration is the penetration, in metres, that
+// MoveToSpace tolerates when it admits a rebuilt body and
+// SpaceTransfer.Placement leaves MaxPenetration zero. It covers the contact
+// slop of bodies at rest.
+const DefaultTransferMaxPenetration float32 = 0.01
+
 // SpaceTransfer describes entities that move to one space together, such as a
 // player's avatar with the crate it carries.
 type SpaceTransfer struct {
@@ -72,6 +78,16 @@ type SpaceTransfer struct {
 	// shapes or bodies it did not return, both on error and on success; on
 	// success the returned bodies belong to their new attachments.
 	RebuildPhysics func(dst p.World, src []PhysicsTransferSource) (map[int64]p.BodyHandle, error)
+	// Placement is the penetration tolerance used to admit the rebuilt bodies
+	// in the destination world. A zero MaxPenetration selects
+	// DefaultTransferMaxPenetration: a body that rests on the ground or on
+	// another moved body sits a few millimetres inside its support, so a
+	// transfer that tolerated no penetration would reject every settled body.
+	// Each body is admitted with the larger of this tolerance and its own
+	// PhysicsAttachmentConfig.Placement.MaxPenetration. Set a tiny positive
+	// value (such as 1e-6) to reject any real penetration. A negative or
+	// non-finite value rejects the transfer.
+	Placement PhysicsPlacementPolicy
 	// MoveShapes moves the shapes the game registered itself on legacy
 	// collision backends (outside the layer helpers, which move schema
 	// colliders automatically) for every entity of the batch that changes
@@ -155,8 +171,10 @@ type PhysicsTransferSource struct {
 // Physics-attached entities are rebuilt before anything changes: RebuildPhysics
 // runs once on the destination world and must return a body for every moved
 // physics entity; each body is admitted like AttachPhysics (owner binding,
-// complete-volume placement with the entity's PhysicsPlacementPolicy,
-// navigation mode) and must keep the source body's motion mode and, when both
+// complete-volume placement, navigation mode), except that placement uses the
+// transfer's tolerance (SpaceTransfer.Placement, 1 cm by default) or the
+// entity's own PhysicsPlacementPolicy when that is larger, so bodies at rest
+// are accepted. Each body must keep the source body's motion mode and, when both
 // worlds implement physics3d.CharacterControllerReader, its character
 // controller configuration (every field except velocity intent; a body may
 // neither gain nor lose a controller). Without the reader in either world the

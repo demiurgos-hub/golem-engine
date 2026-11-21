@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -1900,4 +1901,63 @@ func TestEntitySetupRejectedDuringSpaceSimulation(t *testing.T) {
 	if _, ok := s.Get(9); ok {
 		t.Fatal("rejected setup published the entity")
 	}
+}
+
+// A transfer admits rebuilt bodies with its own penetration tolerance: 1 cm by
+// default, the transfer's when set, or the entity's own when that is larger.
+func TestSpaceTransferPlacementTolerance(t *testing.T) {
+	const strict = float32(1e-6)
+	for _, tc := range []struct {
+		name             string
+		transfer, entity float32
+		want             float32
+	}{
+		{"default", 0, 0, DefaultTransferMaxPenetration},
+		{"transfer override", .05, 0, .05},
+		{"strict transfer", strict, 0, strict},
+		{"entity tolerance is larger", .02, .2, .2},
+		{"entity tolerance is smaller", 0, .001, DefaultTransferMaxPenetration},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, a, b := newTransferTestServer(t)
+			crate := transferTestEntity(t, s, 0, 2, surface.Vec3{X: 2})
+			transferTestAttach(t, s, a, crate, p.FreeDynamic, PhysicsAttachmentConfig{Placement: PhysicsPlacementPolicy{MaxPenetration: tc.entity}})
+			var tolerances []float32
+			b.placement = func(_ p.BodyHandle, _ p.Pose, tolerance float32) (bool, error) {
+				tolerances = append(tolerances, tolerance)
+				// A body at rest: 3 mm inside its support.
+				return tolerance >= .003, nil
+			}
+			calls := 0
+			err := s.MoveToSpace(SpaceTransfer{To: 5, Entities: []int64{2}, RebuildPhysics: rebuildOffset(p.Vec3{}, &calls),
+				Placement: PhysicsPlacementPolicy{MaxPenetration: tc.transfer}})
+			if len(tolerances) != 1 || tolerances[0] != tc.want {
+				t.Fatalf("admission tolerances = %v, want [%v]", tolerances, tc.want)
+			}
+			space, _ := s.EntitySpace(2)
+			if tc.want >= .003 {
+				if err != nil || space != 5 {
+					t.Fatalf("settled body was not moved: space %d, %v", space, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "SpaceTransfer.Placement") || space != 0 || len(b.bodies) != 0 || s.physics.agents[2] == nil {
+				t.Fatalf("strict transfer: err=%v space=%d destination bodies=%d", err, space, len(b.bodies))
+			}
+		})
+	}
+
+	t.Run("invalid", func(t *testing.T) {
+		for _, bad := range []float32{-1, float32(math.NaN()), float32(math.Inf(1))} {
+			s, a, b := newTransferTestServer(t)
+			crate := transferTestEntity(t, s, 0, 2, surface.Vec3{X: 2})
+			transferTestAttach(t, s, a, crate, p.FreeDynamic, PhysicsAttachmentConfig{})
+			calls := 0
+			err := s.MoveToSpace(SpaceTransfer{To: 5, Entities: []int64{2}, RebuildPhysics: rebuildOffset(p.Vec3{}, &calls),
+				Placement: PhysicsPlacementPolicy{MaxPenetration: bad}})
+			if space, _ := s.EntitySpace(2); !errors.Is(err, p.ErrInvalid) || calls != 0 || space != 0 || len(b.bodies) != 0 {
+				t.Fatalf("tolerance %v: err=%v rebuild calls=%d space=%d", bad, err, calls, space)
+			}
+		}
+	})
 }

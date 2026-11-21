@@ -42,6 +42,9 @@ type spaceTransferEntity struct {
 // Sessions whose avatar or FOI anchor moved hold their server events until
 // their transition is queued (space_events.go).
 func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
+	if !p.Finite(t.Placement.MaxPenetration) || t.Placement.MaxPenetration < 0 {
+		return fmt.Errorf("golem: %s: SpaceTransfer.Placement.MaxPenetration must be finite and not negative: %w", op, p.ErrInvalid)
+	}
 	dst := s.runtime(t.To)
 	var moves []spaceTransferEntity
 	physicsMoves := 0
@@ -455,13 +458,26 @@ func (s *Server) rebuildTransferPhysics(op string, t SpaceTransfer, dst *spaceRu
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("golem: %s: rebuild physics: %w", op, err), rollbackTransferBodies(op, dst, created))
 	}
-	if err := s.admitTransferBodies(op, dps, moves, created); err != nil {
+	if err := s.admitTransferBodies(op, dps, t.Placement, moves, created); err != nil {
 		return nil, errors.Join(err, rollbackTransferBodies(op, dst, created))
 	}
 	return created, nil
 }
 
-func (s *Server) admitTransferBodies(op string, dps *physicsService, moves []spaceTransferEntity, created map[int64]p.BodyHandle) error {
+// transferPlacement returns the policy that admits one rebuilt body: the
+// transfer's tolerance (DefaultTransferMaxPenetration when zero) or the
+// entity's own, whichever permits more.
+func transferPlacement(transfer, entity PhysicsPlacementPolicy) PhysicsPlacementPolicy {
+	if transfer.MaxPenetration == 0 {
+		transfer.MaxPenetration = DefaultTransferMaxPenetration
+	}
+	if entity.MaxPenetration > transfer.MaxPenetration {
+		return entity
+	}
+	return transfer
+}
+
+func (s *Server) admitTransferBodies(op string, dps *physicsService, placement PhysicsPlacementPolicy, moves []spaceTransferEntity, created map[int64]p.BodyHandle) error {
 	wanted := make(map[int64]bool)
 	for _, m := range moves {
 		if m.physics != nil {
@@ -512,8 +528,9 @@ func (s *Server) admitTransferBodies(op string, dps *physicsService, moves []spa
 		if m.nav && !physicsNavigationMode(state.Mode) {
 			return fmt.Errorf("golem: %s: rebuilt body mode of entity %d cannot carry its navigation attachment", op, m.id)
 		}
-		if err := dps.validatePlacement(h, state.Pose, m.physics.config.Placement); err != nil {
-			return fmt.Errorf("golem: %s: rebuilt body of entity %d: %w", op, m.id, err)
+		policy := transferPlacement(placement, m.physics.config.Placement)
+		if err := dps.validatePlacement(h, state.Pose, policy); err != nil {
+			return fmt.Errorf("golem: %s: rebuilt body of entity %d (penetration tolerance %g m, see SpaceTransfer.Placement): %w", op, m.id, policy.MaxPenetration, err)
 		}
 		if state.Owner == 0 {
 			binder, ok := dps.world.(p.OwnerBinder)
