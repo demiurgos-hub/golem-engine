@@ -80,7 +80,10 @@ replace github.com/demiurgos-hub/golem-engine/golem/physics3d => %q
 			schema.BuildWorldTypeData(schema.WorldSchemaFile{World: "LDtkMap", Source: &schema.WorldSourceDef{Format: "ldtk", URLPrefix: "/maps/", Extract: []schema.WorldExtractDef{{Name: "limit", Type: "int64"}}}}, types),
 			schema.BuildWorldTypeData(schema.WorldSchemaFile{World: "ItemList", Source: &schema.WorldSourceDef{Format: "catalog", Type: "Item"}}, types),
 		)
-		pd = schema.BuildProtoData(&schema.Config{Simulation: schema.SimulationConfig{Dimensions: 2}}, pd.Entities, pd.Commands, worlds, pd.CustomTypes, pd.Events)
+		// Badge's var "id" shares its name with no generated member; NewSyncedBadge
+		// must still compile with it as a parameter.
+		entities := append(pd.Entities, schema.BuildEntityData(schema.SchemaFile{Entity: "Badge", Vars: map[string]schema.SchemaVarDef{"id": {Type: "int32", Tag: 1}}}, 2, types))
+		pd = schema.BuildProtoData(&schema.Config{Simulation: schema.SimulationConfig{Dimensions: 2}}, entities, pd.Commands, worlds, pd.CustomTypes, pd.Events)
 		out := filepath.Join(dir, target)
 		imp := "github.com/demiurgos-hub/golem-engine/golem"
 		if target == "client" {
@@ -108,6 +111,7 @@ replace github.com/demiurgos-hub/golem-engine/golem/physics3d => %q
 			writeConsumerFile(t, out, "world_manager_test.go", goWorldManagerContract)
 		} else {
 			writeConsumerFile(t, out, "state_test.go", goFullStateContract)
+			writeConsumerFile(t, out, "badge_test.go", goBadgeContract)
 		}
 	}
 	runConsumer(t, dir, "go", "mod", "tidy")
@@ -117,6 +121,21 @@ replace github.com/demiurgos-hub/golem-engine/golem/physics3d => %q
 	}
 	runConsumer(t, dir, "go", args...)
 }
+
+const goBadgeContract = `package generated
+
+import "testing"
+
+func TestVarNamedIDConstructor(t *testing.T) {
+	b := NewSyncedBadge(1, 2, 7, 42)
+	if b.EntityID() != 42 || b.Id() != 7 {
+		t.Fatalf("NewSyncedBadge: entity %d id %d", b.EntityID(), b.Id())
+	}
+	if NewSyncedBadge(1, 2, 7).EntityID() != 0 {
+		t.Fatal("NewSyncedBadge without entity ID")
+	}
+}
+`
 
 func TestResolutionGeneratedJSConsumer(t *testing.T) {
 	root, err := filepath.Abs("..")

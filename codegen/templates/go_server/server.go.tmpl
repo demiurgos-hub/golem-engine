@@ -63,12 +63,13 @@ type Synced{{.Name}} struct {
 }
 
 func NewSynced{{.Name}}(posX float32, posY float32{{if .Is3D}}, posZ float32{{end}}{{range .AllVars}}, {{.FieldName}} {{.GoType}}{{end}}, entityID ...int64) *Synced{{.Name}} {
-	id := int64(0)
+	// _id cannot clash with a var parameter: SnakeToCamel never emits '_'.
+	var _id int64
 	if len(entityID) > 0 {
-		id = entityID[0]
+		_id = entityID[0]
 	}
 	return &Synced{{.Name}}{
-		entityID: id,
+		entityID: _id,
 		posX:     posX,
 		posY:     posY,
 {{- if .Is3D}}

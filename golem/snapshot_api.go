@@ -27,7 +27,32 @@ var writeSnapshotAsync = snapshot.WriteAsync
 // space has physics: bodies, bindings and navigation are not (paired physics
 // checkpoints save those; SaveContentSnapshot and LoadSnapshotStrict reject
 // servers with physics).
+//
+// Before Run, a concurrent Run waits for this capture to finish before its
+// first tick.
 func (s *Server) SaveSnapshot(fingerprint, path string) <-chan error {
+	if s.enterPreRunCapture() {
+		defer s.preRunCaptureMu.RUnlock()
+	}
+	return s.saveSnapshot(fingerprint, path)
+}
+
+// enterPreRunCapture takes the pre-Run capture read lock and reports true when
+// the server has not started Run, so Run's first tick waits for the caller's
+// synchronous capture; the caller releases it with preRunCaptureMu.RUnlock.
+// It reports false, holding nothing, once Run has started.
+func (s *Server) enterPreRunCapture() bool {
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+	if s.life != lifecycleCreated {
+		return false
+	}
+	s.preRunCaptureMu.RLock()
+	return true
+}
+
+// saveSnapshot is SaveSnapshot without the pre-Run capture gate.
+func (s *Server) saveSnapshot(fingerprint, path string) <-chan error {
 	data, err := snapshot.CaptureSpaced(s.reg.AppendSpaced(nil), fingerprint)
 	if err != nil {
 		errc := make(chan error, 1)
@@ -49,7 +74,8 @@ type snapshotRequest struct {
 // at the end of the next tick, after that tick's replication flush and before
 // OnTickEnd callbacks; requests queued together are captured in arrival order
 // at that same point. Before Run it captures immediately on the caller, like
-// SaveSnapshot. Requests made once shutdown has begun, and requests still
+// SaveSnapshot, and a concurrent Run waits for that capture before its first
+// tick. Requests made once shutdown has begun, and requests still
 // pending when Run returns, receive ErrServerNotRunning, so the channel never
 // stays empty. The returned channel receives exactly one value: nil on
 // success or a non-nil error; only the file write runs in the background.
@@ -62,6 +88,8 @@ func (s *Server) SaveSnapshotOnTick(fingerprint, path string) <-chan error {
 		done = make(chan error, 1)
 		s.snapshotRequests = append(s.snapshotRequests, snapshotRequest{fingerprint, path, done})
 	case lifecycleCreated:
+		// Hold Run's first tick until the capture below finishes.
+		s.preRunCaptureMu.RLock()
 	default:
 		done = make(chan error, 1)
 		done <- ErrServerNotRunning
@@ -69,7 +97,8 @@ func (s *Server) SaveSnapshotOnTick(fingerprint, path string) <-chan error {
 	s.lifeMu.Unlock()
 	if life == lifecycleCreated {
 		// Never capture under lifeMu: FullUpdate is entity code.
-		return s.SaveSnapshot(fingerprint, path)
+		defer s.preRunCaptureMu.RUnlock()
+		return s.saveSnapshot(fingerprint, path)
 	}
 	return done
 }
@@ -82,7 +111,7 @@ func (s *Server) drainSnapshotRequests() {
 	s.snapshotRequests = nil
 	s.lifeMu.Unlock()
 	for _, req := range pending {
-		forwardSnapshotResult(s.SaveSnapshot(req.fingerprint, req.path), req.done)
+		forwardSnapshotResult(s.saveSnapshot(req.fingerprint, req.path), req.done)
 	}
 }
 

@@ -270,7 +270,15 @@ type Server struct {
 	// state checks, non-blocking postQueue sends, snapshotRequests edits,
 	// TrySubmitErr, and the SubmitTask start-gate open (accepted before worker
 	// work); never across callback or work execution.
-	lifeMu          sync.Mutex
+	lifeMu sync.Mutex
+	// preRunCaptureMu keeps Run's first tick from overlapping a snapshot
+	// capture taken on the caller before Run. SaveSnapshot,
+	// SaveSnapshotOnTick and SaveContentSnapshot take RLock while still
+	// holding lifeMu when they observe lifecycleCreated and release it after
+	// their synchronous capture; Run takes and releases the write lock after
+	// leaving lifeMu (never under it: FullUpdate is entity code that may
+	// call Post) and before starting the listener and tick loop.
+	preRunCaptureMu sync.RWMutex
 	life            lifecycleState
 	postQueue       chan func(*Server)
 	completionQueue chan taskCompletion
@@ -1383,6 +1391,10 @@ func (s *Server) drainMessages() {
 // mark stopped. No Post or SubmitTask completion callback runs after Run
 // returns. Work that ignores context cancellation can delay return indefinitely.
 //
+// A SaveSnapshot, SaveSnapshotOnTick or SaveContentSnapshot capture that began
+// on another goroutine before Run linearized lifecycleRunning finishes before
+// Run starts the listener or the first tick; Run waits for it.
+//
 // If the caller context is already cancelled, Run linearizes stopping under
 // lifeMu before the tick loop or Post/SubmitTask acceptance, then shuts down
 // the independent run context and pool without entering the loop. Live caller
@@ -1420,6 +1432,10 @@ func (s *Server) Run(ctx context.Context) error {
 		return nil
 	})
 	s.lifeMu.Unlock()
+	// Wait for snapshot captures that started before Run (see
+	// preRunCaptureMu); later ones observe lifecycleRunning and queue.
+	s.preRunCaptureMu.Lock()
+	s.preRunCaptureMu.Unlock()
 
 	// Stop accepting before cancelling workers when the caller context ends.
 	stopAfter := context.AfterFunc(ctx, func() {

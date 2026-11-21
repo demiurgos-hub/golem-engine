@@ -1,7 +1,6 @@
 package schema
 
 import (
-	"fmt"
 	"reflect"
 	"testing"
 )
@@ -127,36 +126,63 @@ func TestNormalizeVarVisibility(t *testing.T) {
 	}
 }
 
-func TestCheckReservedGeneratedMethodVars(t *testing.T) {
+func TestCheckReservedGeneratedNames(t *testing.T) {
 	cases := []struct {
 		name    string
-		varName string
-		wantErr bool
+		vars    []string
+		dims    int
+		wantErr string
 	}{
-		{name: "snake server", varName: "server", wantErr: true},
-		{name: "snake bind_server", varName: "bind_server", wantErr: true},
-		{name: "literal Server", varName: "Server", wantErr: true},
-		{name: "literal BindServer", varName: "BindServer", wantErr: true},
-		{name: "camel bindServer", varName: "bindServer", wantErr: true},
-		{name: "allowed health", varName: "health", wantErr: false},
-		{name: "allowed server_id", varName: "server_id", wantErr: false},
+		{name: "snake server", vars: []string{"server"}, wantErr: `var "server" generates getter Server, which clashes with generated method Server`},
+		{name: "snake bind_server", vars: []string{"bind_server"}, wantErr: `var "bind_server" generates getter BindServer, which clashes with generated method BindServer`},
+		{name: "literal Server", vars: []string{"Server"}, wantErr: `var "Server" generates getter Server, which clashes with generated method Server`},
+		{name: "literal BindServer", vars: []string{"BindServer"}, wantErr: `var "BindServer" generates getter BindServer, which clashes with generated method BindServer`},
+		{name: "camel bindServer", vars: []string{"bindServer"}, wantErr: `var "bindServer" generates getter BindServer, which clashes with generated method BindServer`},
+		{name: "bump_state_revision", vars: []string{"bump_state_revision"}, wantErr: `var "bump_state_revision" generates getter BumpStateRevision, which clashes with generated method BumpStateRevision`},
+		{name: "state_revision", vars: []string{"state_revision"}, wantErr: `var "state_revision" generates getter StateRevision, which clashes with generated method StateRevision`},
+		{name: "type_name", vars: []string{"type_name"}, wantErr: `var "type_name" generates getter TypeName, which clashes with generated method TypeName`},
+		{name: "full_update", vars: []string{"full_update"}, wantErr: `var "full_update" generates getter FullUpdate, which clashes with generated method FullUpdate`},
+		{name: "setter position", vars: []string{"position"}, wantErr: `var "position" generates getter Position, which clashes with generated method Position`},
+		{name: "setter only", vars: []string{"physics_rotation"}, wantErr: `var "physics_rotation" generates setter SetPhysicsRotation, which clashes with generated method SetPhysicsRotation`},
+		{name: "3D variant method in 2D", vars: []string{"position3_d"}, wantErr: `var "position3_d" generates getter Position3D, which clashes with generated method Position3D`},
+		{name: "entity-specific method", vars: []string{"get_synced_player"}, wantErr: `var "get_synced_player" generates getter GetSyncedPlayer, which clashes with generated method GetSyncedPlayer`},
+		{name: "C# type name", vars: []string{"player_state"}, wantErr: `var "player_state" generates getter PlayerState, which clashes with generated type name PlayerState`},
+		{name: "message field", vars: []string{"entity_id"}, wantErr: `var "entity_id" generates getter EntityId, which clashes with generated message field EntityId`},
+		{name: "message method", vars: []string{"marshal"}, wantErr: `var "marshal" generates getter Marshal, which clashes with generated message method Marshal`},
+		{name: "client method", vars: []string{"apply_delta"}, wantErr: `var "apply_delta" generates getter ApplyDelta, which clashes with generated method ApplyDelta`},
+		{name: "struct field dirty", vars: []string{"dirty"}, wantErr: `var "dirty" generates field dirty, which clashes with generated struct field dirty`},
+		{name: "struct field mu", vars: []string{"mu"}, wantErr: `var "mu" generates field mu, which clashes with generated struct field mu`},
+		{name: "struct field last_flush_mask", vars: []string{"last_flush_mask"}, wantErr: `var "last_flush_mask" generates getter LastFlushMask, which clashes with generated method LastFlushMask`},
+		{name: "TS constructor", vars: []string{"constructor"}, wantErr: `var "constructor" generates field constructor, which clashes with generated member constructor`},
+		{name: "posZ in 3D", vars: []string{"posZ"}, dims: 3, wantErr: `var "posZ" generates getter PosZ, which clashes with generated member PosZ`},
+		{name: "var getter vs var setter", vars: []string{"hp", "set_hp"}, wantErr: `var "set_hp" generates getter SetHp, which clashes with setter SetHp of var "hp"`},
+		{name: "var case duplicate", vars: []string{"max_hp", "maxHp"}, wantErr: `var "max_hp" generates getter MaxHp, which clashes with getter MaxHp of var "maxHp"`},
+		{name: "allowed health", vars: []string{"health"}},
+		{name: "allowed server_id", vars: []string{"server_id"}},
+		{name: "allowed id", vars: []string{"id"}},
+		{name: "allowed revision_count", vars: []string{"revision_count"}},
+		{name: "allowed posZ in 2D", vars: []string{"posZ"}},
+		{name: "allowed several", vars: []string{"hp", "max_hp", "speed"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkReservedGeneratedMethodVars("Player", map[string]SchemaVarDef{
-				tc.varName: {Type: "int32", Tag: 1},
-			})
-			if tc.wantErr && err == nil {
-				t.Fatal("expected rejection")
+			vars := make(map[string]SchemaVarDef, len(tc.vars))
+			for i, name := range tc.vars {
+				vars[name] = SchemaVarDef{Type: "int32", Tag: i + 1}
 			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("unexpected error: %v", err)
+			dims := tc.dims
+			if dims == 0 {
+				dims = 2
 			}
-			if tc.wantErr {
-				want := fmt.Sprintf(`entity "Player": var name %q is reserved because it collides with generated Server/BindServer methods`, tc.varName)
-				if err.Error() != want {
-					t.Fatalf("error = %q, want %q", err.Error(), want)
+			err := checkReservedGeneratedNames("Player", dims, vars)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
 				}
+				return
+			}
+			if want := `entity "Player": ` + tc.wantErr; err == nil || err.Error() != want {
+				t.Fatalf("error = %v, want %q", err, want)
 			}
 		})
 	}

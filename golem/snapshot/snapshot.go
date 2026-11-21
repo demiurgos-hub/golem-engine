@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/demiurgos-hub/golem-engine/golem/pb"
@@ -76,25 +78,78 @@ func captureThenWrite(path string, capture func() ([]byte, error)) <-chan error 
 }
 
 // WriteAsync atomically writes already-captured snapshot bytes (from Capture or
-// CaptureSpaced) to path in a background goroutine, through a temporary file
-// renamed over path. data is owned by the write and must not be modified until
-// the result arrives. The returned channel receives exactly one value: nil on
-// success or a non-nil error on failure.
+// CaptureSpaced) to path in a background goroutine, through a uniquely named
+// temporary file in path's directory that is synced and renamed over path
+// (mode 0644). data is owned by the write and must not be modified until the
+// result arrives. Writes to the same path (compared as cleaned absolute paths)
+// run one at a time in the order of their WriteAsync calls, so the file ends
+// with the bytes of the last call. The returned channel receives exactly one
+// value: nil on success or a non-nil error on failure.
 func WriteAsync(path string, data []byte) <-chan error {
 	errc := make(chan error, 1)
+	key := writeChainKey(path)
+	done := make(chan struct{})
+	writeChains.mu.Lock()
+	prev := writeChains.last[key]
+	writeChains.last[key] = done
+	writeChains.mu.Unlock()
 	go func() {
-		errc <- write(path, data)
+		if prev != nil {
+			<-prev
+		}
+		err := write(path, data)
+		writeChains.mu.Lock()
+		if writeChains.last[key] == done {
+			delete(writeChains.last, key)
+		}
+		writeChains.mu.Unlock()
+		close(done)
+		errc <- err
 	}()
 	return errc
 }
 
-func write(path string, encoded []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, encoded, 0o644); err != nil {
+// writeChains orders WriteAsync calls per destination: last maps each cleaned
+// absolute path to the done channel of its most recent write, which the next
+// write to that path waits on. An entry is removed once its write finishes and
+// no later write has replaced it.
+var writeChains = struct {
+	mu   sync.Mutex
+	last map[string]chan struct{}
+}{last: make(map[string]chan struct{})}
+
+func writeChainKey(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return filepath.Clean(path)
+}
+
+func write(path string, encoded []byte) (err error) {
+	file, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*.tmp")
+	if err != nil {
+		return fmt.Errorf("snapshot: creating temp file: %w", err)
+	}
+	tmp := file.Name()
+	defer func() {
+		if err != nil {
+			file.Close()
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err = file.Write(encoded); err != nil {
 		return fmt.Errorf("snapshot: writing temp file: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	if err = file.Sync(); err != nil {
+		return fmt.Errorf("snapshot: syncing temp file: %w", err)
+	}
+	if err = file.Close(); err != nil {
+		return fmt.Errorf("snapshot: closing temp file: %w", err)
+	}
+	if err = os.Chmod(tmp, 0o644); err != nil {
+		return fmt.Errorf("snapshot: setting temp file mode: %w", err)
+	}
+	if err = os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("snapshot: renaming snapshot file: %w", err)
 	}
 	return nil
