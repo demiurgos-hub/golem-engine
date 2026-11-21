@@ -16,23 +16,30 @@ Milestones M1–M9 are implemented on `feature/spaces`:
 | M8 Inspector | `64bfff9` |
 | M9 Reconciliation | `1dfe839` |
 
-Review fixes after M9 (one commit each):
+Review fixes, round 1 (after M9, one commit each):
 
 | Commit | Fixes |
 | --- | --- |
 | `18226e6` | Datagram-lane events stay on the stream until SpaceAck (also for stream-lane WebTransport sessions); SpaceAcks bypass the droppable queue; world pushes and space events keep the old space until the transition is queued; a spectator's RemoveFOI orphans exit on its next switch; a deleted FOI anchor replaced by a global one exits; `AppendSpaced` skips lookups when unused. |
 | `5ffbaf5` | Go/C# held-record eviction order; EntityResync control frame (`"\x00OGS\x04"` + entity ID) answered with a stream full state; `SetOwner` advances the state revision; batches and replays stop once a callback disconnects or clears. |
 | `05ef1d2` | `SaveSnapshot` serializes on the caller (`snapshot.WriteAsync` writes); `SaveSnapshotOnTick` and tick-time autosave; clashing generated protobuf message names are rejected; multi-envelope stream frames documented. |
-| `c43bc3c` | Transfers detach every source before the registry moves, run traversal cancels before navigation reattaches, reject unbound layers (`Layers.Bound`), queued deletions and geometry bodies, drop stale pre-transfer commands, guard setup, attaches and the legacy collision phase, sync moved colliders and source worlds. |
+| `c43bc3c` | Transfers detach every source before the registry moves, run traversal cancels before navigation reattaches, reject unbound layers (`Layers.Bound`), queued deletions and geometry bodies, drop stale pre-transfer commands (narrowed in `fcf80ee`), guard setup, attaches and the legacy collision phase, sync moved colliders and source worlds. |
 | `7b342ec` | Rebuilt characters keep their controller settings (`physics3d.CharacterControllerReader`, `PhysicsTransferSource.Controller`). |
 | `e009add` | No service can serve two spaces; restore reports configuration errors and checks colliders before committing; stricter v2 navigation validation; `NavAgent` drops a path from its previous space; restriction docs. |
 | `6c5cb64` | Inspector map follows the space filter; space moves travel with their deltas. |
 
-Review round 2 (uncommitted): server events stay inside their space across switches (events sent before the switching pass are held and follow `SpaceSettled`, datagram event records carry the session's non-zero transition as `00 00 <varint> <event>` and clients drop older ones), and clients close the connection when a SpaceAck or EntityResync send fails. Also in round 2: `AssignFOI` after `RemoveFOI` exits the orphans the new FOI does not cover (single-space too), owner-view bytes are re-checked against the current owner after serialization, EntityResync requests are stored only for known entities, without a cap, and answered inside the next replication pass (generated managers re-request after a stale recovery, at most three times), and world pushes and space events are ordered with transitions from any goroutine (`announceMu`). Snapshots: a capture started before `Run` holds back the first tick (`preRunCaptureMu`), writes use unique temp files and finish in request order per path, and entity var names whose generated getters, setters or fields clash with generated entity members are rejected. Transfers now check source bodies and worlds before the destructive phase, fault every affected space (physics and navigation readiness) on a later backend failure, compare entities by registry incarnation (`Registry.Incarnation`, also used by the physics step and deferred deletions), keep traversal-cancel callbacks from moving an entity before its navigation is reattached, and move game-registered collision shapes through `SpaceTransfer.MoveShapes` (with read-only `CollisionBackend` getters; `DetachPhysics` / `DetachNavigation` are busy during a transfer). Backend checks: only commands failing with a `physics3d.StaleHandleError` for a body a transfer destroyed after they were queued are dropped (collider/joint handles of moved bodies still fault), typed-nil backends count as nil (`Layers.Bind` and the setters), a restore that panics after publication keeps readiness closed, the Chipmunk backend reindexes shapes moved or added since its last `Step` before querying, layer helpers cannot share a backend across spaces (`Layers.Backend`), and `NavAgent` drops its route after a round trip (`Registry.SpaceMoveGeneration`).
+Review fixes, round 2 (one commit each, on top of `a1ad376`):
 
-Round 2, increment 6: the inspector applies the space filter without spaces that have no entities (`pruneFilterSpaces`, stored filter kept) and resets filters on target change, and single-space games skip per-entity space work in filtered broadcast and the connect snapshot, release replication scratch pointers and take no inbox locks on quiet ticks, measured against `e3c4ab0` (`-count 6`, interleaved) as equal B/op and allocs for blind broadcast, interest, `BenchmarkManagerComputeDiffs` and eventual state, one allocation and 3.4 KB less for filtered broadcast, pass times within noise, and quiet-tick drains at 3.4 ns instead of about 40 ns.
+| Commit | Fixes |
+| --- | --- |
+| `c772826` | Server events stay inside their space across switches: events sent before the switching pass are held per session and follow `SpaceSettled` (generated stream-lane events included); once a session has switched, its datagram event records carry the transition (`00 00 <varint> <event>`) and clients drop older ones; clients close the connection when a SpaceAck or EntityResync send fails. |
+| `106c5fb` | `AssignFOI` after `RemoveFOI` exits the orphans the new FOI does not cover (single-space too); owner-view bytes are re-checked against the current owner after serialization; EntityResync requests are stored only for known entities, without a cap, and answered inside the next replication pass (generated managers re-request after a stale answer, at most three times); world pushes and space events are ordered with transitions from any goroutine (`announceMu`). |
+| `cd78d94` | A snapshot capture started before `Run` holds back the first tick (`preRunCaptureMu`); snapshot writes use unique temp files and finish in request order per path; entity var names whose generated getters, setters or fields clash with generated entity members are rejected, and a var named `id` no longer breaks the generated Go constructor. |
+| `bd22fc2` | Transfers check source bodies and worlds before the destructive phase (`preflightTransferSources`) and fault every affected space (physics and navigation readiness) on a later backend failure; entities are compared by registry incarnation (`Registry.Incarnation`, also used by the physics step and deferred deletions); traversal-cancel callbacks cannot move an entity before its navigation is reattached; `SpaceTransfer.MoveShapes` moves game-registered collision shapes, with read-only `CollisionBackend` getters; `DetachPhysics` / `DetachNavigation` are busy during a transfer. |
+| `fcf80ee` | Only commands failing with a `physics3d.StaleHandleError` for a body a transfer destroyed after they were queued are dropped (collider and joint handles of moved bodies still fault); typed-nil backends count as nil (`Layers.Bind` and the setters); a restore that panics after publication keeps readiness closed; the Chipmunk backend reindexes shapes moved or added since its last `Step` before querying; layer helpers cannot share a backend across spaces (`Layers.Backend`); `NavAgent` drops its route after a round trip (`Registry.SpaceMoveGeneration`). |
+| `820a78f` | The inspector ignores filter spaces without entities (`pruneFilterSpaces`, stored filter kept) and resets filters on target change; single-space games skip per-entity space work in filtered broadcast and the connect snapshot, release replication scratch pointers and take no inbox locks on quiet ticks. Measured against `e3c4ab0` (`-count 6`, interleaved): equal B/op and allocs for blind broadcast, interest, `BenchmarkManagerComputeDiffs` and eventual state; one allocation and 3.4 KB less for filtered broadcast; pass times within noise; quiet-tick drains at 3.4 ns instead of about 40 ns. |
 
-Not fixed by decision: contact history between two entities moved together reads as "stay" (semantic choice), and older clients' handling of the new frames (no compatibility goal: games upgrade client and server together).
+Not fixed by decision: legacy contact events identify pairs by entity ID, so a pair of entities moved together keeps its contact history and reports "stay" (pairs split by a move exit; semantic choice), and older clients' handling of the new frames (no compatibility goal: games upgrade client and server together).
 
 After pushing: bump the root `go.mod` pins of `golem/collision` (`Layers.Bound`, `Layers.Backend`) and `golem/physics3d` (`CharacterControllerReader`, `StaleHandleError`), and box3d's own `physics3d` pin (it now needs `StaleHandleError`); until then the root builds only through the local `go.work`.
 
@@ -45,6 +52,14 @@ Known follow-ups:
 - Space-scoped generated `EventBroadcaster`, deferred because `Broadcast<X>InSpace` may collide with schema event names; use `Space(id).BroadcastServerEvent` meanwhile.
 - Pre-existing, found in M2 and not fixed: ownership-refresh full states and oversized stream-fallback deltas travel on the reliable stream and can be overtaken by datagrams from later ticks. `cd202ae` fixed only the spawn case; transitions themselves are covered by the SpaceAck gate.
 - Generated client code adds its own top-level names (`Client`, `EntityManager`, `Synced<E>` and others) that a custom type could clash with in one client language; the new proto-name check does not cover them.
+- Found in round 2, not fixed:
+  - Entity var names that are keywords of a target language are not validated.
+  - Generated names of different entities (such as generated constants) can still clash; the var-name check only covers one entity's own members.
+  - Raw stream frames sent with `Server.Send` / `BroadcastEvent` are not held by the event hold.
+  - Creating a missing FOI anchor in another space with `CreateEntityIn` does not mark the session for event holding: the switch is planned, but events from that tick's `Post` / `OnTick` are not held.
+  - An off-tick space change racing a pass's event release may flush that session's held events one pass early.
+  - Collider and joint handles destroyed with a moved body still fault commands queued for them (no API lists them, so only the moved body's own stale handle is dropped).
+  - `TestBroadcastBlindDecisionMutationReconciledNextPass` (`golem/visibility_replication_test.go`) is flaky under full-suite load.
 - Pre-existing flaky hub test `TestShutdownClosesSocketsWithServiceRestart`.
 - The `golem-threlte` browser test was not run (Playwright Chromium build 1243 missing).
 
@@ -121,6 +136,7 @@ Each milestone is committed separately and ends green on `go test ./...` from th
   - New APIs: `SetSessionSpace(sessionID, space)`, `SessionSpace(sessionID)`, `SessionsInSpace(space)` (by announced space).
   - `MoveToSpace(SpaceTransfer)`: in this milestone, for entities without physics or navigation.
   - `Space(id).BroadcastServerEvent(...)` sends to `SessionsInSpace`. Existing broadcasts stay global.
+  - *Updated after review:* `SessionsInSpace` and `Space(id).BroadcastServerEvent` use the announced space (the old one until the switching pass has queued its transition), ordered with transitions from any goroutine (`announceMu`). Server events sent to a session before the pass that plans its switch are held and follow `SpaceSettled`, and once a session has switched its datagram event records carry the transition so clients drop older ones (see Status).
 - **Broadcast mode:**
   - `shouldFilterBroadcastLocked` (`:1373`) also returns true when `SpacesInUse()` or any session space is non-zero.
   - `computeBroadcastDiff` (`:1617`) adds a same-space check.
@@ -190,8 +206,10 @@ Each milestone is committed separately and ends green on `go test ./...` from th
   - `World` and `PushWorldData`.
 
   Existing `Server` methods act on space 0.
+
+  *Updated after review:* these legacy collision, layer-helper and 2D navigation setters may run before `Run` or on the tick goroutine (documented, not enforced); a setter installing a service in a new space creates that space's runtime. No service may serve two spaces: the setters panic when the value already serves another space, including a backend reached through another space's layer helper (`Layers.Backend`).
 - **Tick** (`loop.go:1262-1319`): collision runs per space in ascending order. The legacy `onContact`/`onContact3D` callbacks and `dispatchContactEvents` run once per tick with contacts merged across spaces. The pair maps stay on `Server`, since ids are unique and pairs never cross spaces.
-- **Entity-keyed paths:** `registerCollider` and `unregisterCollider` (`collider.go:73-93`) use the entity's space. `NavAgent.SetDestination` (`nav_agent.go:54`) uses its entity's space. `MoveToSpace` moves legacy colliders between layers.
+- **Entity-keyed paths:** `registerCollider` and `unregisterCollider` (`collider.go:73-93`) use the entity's space. `NavAgent.SetDestination` (`nav_agent.go:54`) uses its entity's space. `MoveToSpace` moves legacy colliders between layers (*updated after review:* after the registry move, see M6; shapes the game registered on a backend itself move only through `SpaceTransfer.MoveShapes`).
 - **Codegen:** `Runtime.EnableSpaceCollision(space, backend)` and its 3D variant (`codegen/templates/go_server/shared.go.tmpl:60-96`).
 - **Tests:** `collider_lifecycle_test.go`, `spatial_test.go`, `collision_events_test.go`, `nav_agent_test.go` per space; codegen `go_server_template_test.go`.
 
@@ -205,8 +223,8 @@ Each milestone is committed separately and ends green on `go test ./...` from th
   - physics: `SetPhysicsWorld`, `OnPhysicsContact`, `ObservePhysicsFrames`, `QueuePhysicsCommand`, the geometry APIs, `PhysicsReady`;
   - navigation: `SetSurfaceNavigation`, `NavigationReady`, `NavigationStats`, the build, restore and `NavigationFrame` APIs.
 
-  Serviced spaces are configured before `Run`. `PhysicsFrameMetrics` and the navigation metrics get a `Space` field.
-- **Entity-keyed APIs** resolve the entity's space. `AttachPhysics` rejects a body from another world (check `Handle.World` against the space's world).
+  Physics worlds and surface navigation are configured before `Run` (*updated after review:* the setters return an error once `Run` has started or when the world or backend already serves another space; creating or removing serviced spaces after `Run` stays deferred). `PhysicsFrameMetrics` and the navigation metrics get a `Space` field.
+- **Entity-keyed APIs** resolve the entity's space. `AttachPhysics` rejects a body from another world (check `Handle.World` against the space's world). *Updated after review:* `p.World` exposes no world identity, so the root rejects a body attached in, or recognized by, another space's world (`foreignPhysicsBody`), and Box3D rejects other worlds' handles itself.
 - **Tick:** each phase runs for every serviced space in ascending order: drain, navigation prepare, physics step or navigation advance, reconcile. Fault, readiness and restoring state are per space. A fault in any space still ends `Run`.
 - **Transfer:**
 
@@ -215,14 +233,30 @@ Each milestone is committed separately and ends green on `go test ./...` from th
       To       SpaceID
       Entities []int64
       RebuildPhysics func(dst p.World, src []PhysicsTransferSource) (map[int64]p.BodyHandle, error)
+      MoveShapes     func(to SpaceID, moves []ShapeMove) error // added after review
   }
   ```
 
-  1. **Validate everything first:** each entity exists, is published and not being deleted, with no duplicates, and the destination has the services the entity needs. Return `ErrBusy` while any space is stepping, dispatching, restoring or holds a prepared navigation frame. A contact callback must use `Server.Post`.
-  2. **Rebuild:** create the replacement bodies and joints in the destination while the source bodies still exist, and admit them. On failure, roll back with nothing changed.
-  3. **Commit:** detach source physics and navigation, move colliders, set the registry space, reattach navigation with the same config but no destination intent, and attach physics with the stored config and motion policy. The new body anchor defines the entity position.
+  *Order and guarantees updated after review.* The approved plan moved colliders before the registry and reattached navigation before attaching physics, and promised that a failed move changes nothing. The implementation (`golem/space_transfer.go`, documented on `MoveToSpace` in `golem/space.go`) runs:
 
-  **Not carried over** (documented): trajectories, contact history, navigation route and intent, pending forces, queued source commands, and joints to bodies that weren't moved.
+  1. **Validate everything first:** each entity exists, is published, is listed once, is not being deleted (including a deletion deferred from a physics callback), is not awaiting navigation reattachment from an outer transfer, and is not attached to a body of loaded physics geometry. The destination has the services the entity needs: a physics world plus `RebuildPhysics` for a physics attachment, surface navigation for a navigation attachment, and no staged agent may arrive without a body in a physics space. Schema colliders need bound layer helpers in both spaces and a destination layer. Return `ErrBusy` while any space is stepping, dispatching, restoring or holds a prepared navigation frame, during the per-space simulation phase and during the legacy collision phase; callbacks must use `Server.Post`.
+  2. **Rebuild:** call `RebuildPhysics` once with the synchronized source states (including the source character controller configuration) while the source bodies still exist, and admit each returned body like `AttachPhysics` (same motion mode and, when both worlds report it, the same controller configuration). Then check that the callback changed no moving entity (space, deletion, attachments, registry incarnation).
+  3. **Preflight:** every source body is still alive in a source world that accepts mutations and has not faulted, so the destructive phase cannot fail on a body the callback destroyed.
+  4. **`MoveShapes`** (optional, also for batches without physics or navigation) moves the game's own collision shapes, followed by the same no-change check.
+
+     A transfer rejected up to here changes nothing: the returned bodies are destroyed, and only a failure to destroy them faults the destination.
+  5. **Commit** (traversal-cancel callbacks of the detached source agents are deferred):
+     1. Detach every source attachment: physics (destroying the body and its joints and cancelling its trajectory), then navigation. If a source body still cannot be destroyed, the source and destination spaces fault, the rebuilt bodies are destroyed and the registry and colliders stay unchanged; entities detached before the failure have lost their source bodies, and `MoveShapes` has already run.
+     2. Synchronize each source world that lost bodies; a failure faults that space, but the commit continues.
+     3. Set the registry space of every entity (under `interestMu`; sessions that now switch hold their server events).
+     4. Move schema colliders to the destination layers at the entity's current position.
+     5. Attach physics to each new body with the stored config; the new body's gameplay anchor defines the entity position.
+     6. Run the deferred traversal-cancel callbacks with the entities already in the destination; a nested move of a moved navigation entity returns `ErrBusy` until step 7.
+     7. Reattach navigation with the same config but no destination intent, unless a callback deleted the entity, attached navigation itself or detached the physics a staged agent needs.
+
+     A backend failure during or after the commit faults the affected spaces (`Run` ends; navigation readiness closes), and the move may be partly applied.
+
+  **Not carried over** (documented): trajectories, physics contact history, navigation route and intent, pending forces and controller velocity intent, and joints to bodies that weren't moved. Queued source commands still run in the source space (*updated after review:* one queued before the transfer that fails with a `physics3d.StaleHandleError` for a source body the transfer destroyed is dropped instead of faulting; every other error, including a stale collider or joint handle of a moved body, still faults). Legacy contact events identify pairs by entity ID, so a pair moved together reports "stay" and a pair split by the move exits.
 - **Tests:**
   - multi-space versions of `physicsTestWorld` (`physics_test.go:14`) and `navigationTestServer` (`navigation_test.go:170`);
   - new `space_transfer_test.go`: avatar plus crate plus jointed cart in one batch; rollback on rebuild error; mid-frame rejection; no double step; nav agent idle after reattach; faults;

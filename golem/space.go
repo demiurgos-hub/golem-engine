@@ -197,7 +197,7 @@ type PhysicsTransferSource struct {
 //     entity, attached navigation itself, or detached the physics a staged
 //     agent needs.
 //
-// Not carried to the destination: timed trajectories, contact history,
+// Not carried to the destination: timed trajectories, physics contact history,
 // navigation routes and destinations, pending forces and retained controller
 // velocity intent, and joints to bodies that were not moved. Physics commands
 // queued in the source space still run there; one queued before the transfer
