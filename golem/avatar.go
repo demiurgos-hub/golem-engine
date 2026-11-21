@@ -174,7 +174,12 @@ func (s *Server) bindAvatar(sessionID, entityID int64) error {
 // avatar's last space (sessionSpaceKept) unless it has an explicit space, so
 // the death of an avatar does not move its player; when the explicit space
 // differs, the session holds its server events until that transition is
-// queued. Call while the entity is still registered and without interestMu.
+// queued. That last space is where the avatar is now, also when it moved
+// since the last replication pass: a session whose FOI is anchored on the
+// avatar gets the interest manager's missing-anchor space updated too, so
+// both replication modes agree. (An FOI anchored on another entity keeps the
+// space of the last pass when that entity is deleted.) Call while the entity
+// is still registered and without interestMu.
 func (s *Server) clearAvatarByEntity(entityID int64) {
 	s.avatarMu.Lock()
 	_, ok := s.avatarSession[entityID]
@@ -182,7 +187,7 @@ func (s *Server) clearAvatarByEntity(entityID int64) {
 	if !ok {
 		return
 	}
-	space, _ := s.reg.Space(entityID)
+	space, _ := s.reg.PublishedSpace(entityID)
 	// Unlink and remember the space under interestMu, so no reader of the
 	// session's space sees one without the other.
 	s.interestMu.Lock()
@@ -194,10 +199,20 @@ func (s *Server) clearAvatarByEntity(entityID int64) {
 	s.avatarMu.Unlock()
 	pending := false
 	if ok {
-		if _, closed := s.closedSessions[sessionID]; space != 0 && !closed {
+		_, closed := s.closedSessions[sessionID]
+		if space != 0 && !closed {
 			s.sessionSpaceKept[sessionID] = space
 		} else {
 			delete(s.sessionSpaceKept, sessionID)
+		}
+		// With an FOI anchored on the avatar, the interest manager supplies
+		// the space while the anchor is missing. It only knows the space of
+		// the last replication pass, which is stale when the avatar moved
+		// since, so tell it where the avatar was when it went.
+		if s.interest != nil && !closed {
+			if foi, anchored := s.interest.SessionFOI(sessionID); anchored && foi.EntityID == entityID {
+				s.interest.SetSessionSpace(sessionID, space)
+			}
 		}
 		pending = s.switchPendingLocked(sessionID)
 	}

@@ -867,6 +867,36 @@ func TestSpaceSessionKeepsDeletedAvatarSpace(t *testing.T) {
 	})
 }
 
+// An avatar that changes space and is deleted before one replication pass
+// leaves its session in the space it died in, with or without interest
+// management: the session is told about the space change once.
+func TestSpaceSessionFollowsAvatarMovedAndDeletedInOneTick(t *testing.T) {
+	spaceModes(t, func(t *testing.T, interestMode bool) {
+		rig := newSpaceTestRig(t, interestMode, 1)
+		srv, conn, sid := rig.srv, rig.conns[0], rig.ids[0]
+		rig.spaceAvatar(t, sid, &interestTickEntity{id: 1, full: []byte("avatar-full")})
+		if err := srv.CreateEntityIn(7, &interestTickEntity{id: 2, full: []byte("cave-full")}); err != nil {
+			t.Fatal(err)
+		}
+		rig.tick(t)
+		readSpaceTokens(t, conn)
+		if err := srv.SetEntitySpace(1, 7); err != nil {
+			t.Fatal(err)
+		}
+		srv.DeleteEntity(1)
+		if got := srv.SessionSpace(sid); got != 7 {
+			t.Fatalf("session space after the avatar died = %d, want 7", got)
+		}
+		rig.tick(t)
+		got := readSpaceTokens(t, conn)
+		if indexOf(got, "removed:1") < 0 || indexOf(got, "changed:7:1") < 0 || got[len(got)-1] != "settled:1" || srv.SessionSpace(sid) != 7 {
+			t.Fatalf("tokens %q, session space %d", got, srv.SessionSpace(sid))
+		}
+		rig.tick(t)
+		expectNoMessage(t, conn)
+	})
+}
+
 // SetSessionSpace forgets the deleted avatar's space, so space 0 can be chosen.
 func TestSetSessionSpaceForgetsDeletedAvatarSpace(t *testing.T) {
 	rig := newSpaceTestRig(t, false, 1)
