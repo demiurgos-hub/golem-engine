@@ -49,6 +49,11 @@ type Session struct {
 	closeOnce  sync.Once
 	abortOnce  sync.Once
 
+	// eventsStreamOnly sends datagram-lane server events as their stream
+	// frame instead, keeping them ordered with the reliable stream while the
+	// server waits for a space transition acknowledgement.
+	eventsStreamOnly atomic.Bool
+
 	// Cumulative successful writes (for LogReplicationStats deltas).
 	wireDatagramOK atomic.Uint64
 	streamBatchOK  atomic.Uint64

@@ -117,7 +117,7 @@ func (s *Server) sessionsOutsideSpaces(spaces map[SpaceID]struct{}) []int64 {
 	defer s.interestMu.Unlock()
 	out := all[:0]
 	for _, sid := range all {
-		if _, skip := spaces[s.sentSpace[sid]]; !skip {
+		if _, skip := spaces[s.announcedSpaceLocked(sid)]; !skip {
 			out = append(out, sid)
 		}
 	}
@@ -141,7 +141,7 @@ func (s *Server) storedWorldForSession(sessionID int64, name string) world.Data 
 		return s.World.Get(name)
 	}
 	s.interestMu.Lock()
-	space := s.sentSpace[sessionID]
+	space := s.announcedSpaceLocked(sessionID)
 	s.interestMu.Unlock()
 	return s.resolveWorld(space, name)
 }

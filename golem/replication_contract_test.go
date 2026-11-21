@@ -21,13 +21,21 @@ import (
 // after the tick sender returns and reuses its scratch.
 func replicationTestPeer(t testing.TB, cellSize float64) (*Server, *webtransport.Session, io.Reader, int64) {
 	t.Helper()
+	return replicationTestPeerWith(t, ServerConfig{CellSize: cellSize})
+}
+
+// replicationTestPeerWith is replicationTestPeer with a caller config; Addr and
+// DevSelfSignedCert are filled in.
+func replicationTestPeerWith(t testing.TB, cfg ServerConfig) (*Server, *webtransport.Session, io.Reader, int64) {
+	t.Helper()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	addr := pc.LocalAddr().String()
 	_ = pc.Close()
-	s := NewServer(ServerConfig{Addr: addr, CellSize: cellSize, DevSelfSignedCert: true})
+	cfg.Addr, cfg.DevSelfSignedCert = addr, true
+	s := NewServer(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- s.listener.ListenAndServe(ctx) }()
@@ -489,17 +497,8 @@ func TestSpaceTransitionGatesDatagramsUntilSpaceAck(t *testing.T) {
 			if _, err := writer.Write(netwire.AppendFrame(nil, golemnet.ClientSpaceAckControlFrame(1))); err != nil {
 				t.Fatal(err)
 			}
-			for acks := 0; acks < 2; {
-				select {
-				case m := <-s.msgQueue:
-					if m.kind == msgSpaceAck {
-						acks++
-						s.applySpaceAck(m.sess.ID, m.transition)
-					}
-				case <-time.After(3 * time.Second):
-					t.Fatal("SpaceAck was not delivered")
-				}
-			}
+			waitForSpaceAck(t, s, sid, 1)
+			s.applySpaceAcks()
 			s.interestMu.Lock()
 			_, pending := s.spaceAckPending[sid]
 			s.interestMu.Unlock()
@@ -537,5 +536,177 @@ func TestSpaceTransitionGatesDatagramsUntilSpaceAck(t *testing.T) {
 			}
 			expectNoReplicationDatagram(t, peer)
 		})
+	}
+}
+
+// waitForSpaceAck waits until the SpaceAck inbox holds transition for sid.
+func waitForSpaceAck(t *testing.T, s *Server, sid int64, transition uint64) {
+	t.Helper()
+	for deadline := time.Now().Add(3 * time.Second); ; {
+		s.spaceAckMu.Lock()
+		got := s.spaceAckInbox[sid]
+		s.spaceAckMu.Unlock()
+		if got == transition {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("SpaceAck %d was not delivered (inbox has %d)", transition, got)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestSpaceTransitionKeepsDatagramEventsOnStreamUntilSpaceAck uses a real
+// WebTransport peer in datagram mode: while a transition is unacknowledged,
+// datagram-lane events for the session use the ordered stream, so they arrive
+// after SpaceSettled; after the ack they use datagrams again. In interest mode
+// an event sent from OnUpdates on the switch tick also stays ahead of the
+// transition on the stream.
+func TestSpaceTransitionKeepsDatagramEventsOnStreamUntilSpaceAck(t *testing.T) {
+	for _, interestMode := range []bool{false, true} {
+		name, cellSize := "broadcast", 0.0
+		if interestMode {
+			name, cellSize = "interest", 8
+		}
+		t.Run(name, func(t *testing.T) {
+			s, peer, stream, sid := replicationTestPeer(t, cellSize)
+			s.SetRemovalSerializer(func(id int64, _ uint64) ([]byte, error) { return []byte("removed"), nil })
+			avatar := &replicationContractEntity{interestTickEntity: interestTickEntity{id: 1, full: []byte("avatar-full"), revision: 1}}
+			opts := AvatarOptions{}
+			if interestMode {
+				opts.FOIRadius, opts.FOIMargin = 10, 1
+			}
+			if err := s.SpawnAvatar(&Session{ID: sid}, avatar, opts); err != nil {
+				t.Fatal(err)
+			}
+			run := s.runBroadcastTick
+			if interestMode {
+				run = s.runInterestTick
+			}
+			tick := func() {
+				t.Helper()
+				if err := run(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tick()
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"avatar-full"}) {
+				t.Fatalf("spawn frame = %q", got)
+			}
+			if err := s.SendServerEvent(sid, EventUnreliable, []byte("evt-before")); err != nil {
+				t.Fatal(err)
+			}
+			if got := receiveReplicationDatagram(t, peer); !bytes.Contains(got, []byte("evt-before")) {
+				t.Fatalf("event before transition = %q", got)
+			}
+
+			if err := s.MoveToSpace(SpaceTransfer{To: 3, Entities: []int64{avatar.id}}); err != nil {
+				t.Fatal(err)
+			}
+			if interestMode {
+				// A spawn nobody sees makes OnUpdates run on the switch tick.
+				if err := s.CreateEntityIn(9, &interestTickEntity{id: 50, full: []byte("hidden-full")}); err != nil {
+					t.Fatal(err)
+				}
+				s.OnUpdates(func([][]byte) {
+					if err := s.SendServerEvent(sid, EventUnreliable, []byte("evt-on-updates")); err != nil {
+						t.Error(err)
+					}
+				})
+			}
+			tick()
+			s.OnUpdates(nil)
+			if interestMode {
+				if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"event:evt-on-updates"}) {
+					t.Fatalf("OnUpdates event on the switch tick = %q", got)
+				}
+			}
+			got := decodeServerTokens(t, mustReadReliableFrame(t, stream))
+			if !slices.Equal(got, []string{"changed:3:1", "avatar-full", "settled:1"}) {
+				t.Fatalf("transition frame = %q", got)
+			}
+			if err := s.SendServerEvent(sid, EventUnreliable, []byte("evt-gated")); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Space(3).BroadcastServerEvent(EventReliableOrdered, []byte("evt-space")); err != nil {
+				t.Fatal(err)
+			}
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"event:evt-gated"}) {
+				t.Fatalf("gated event = %q", got)
+			}
+			if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"event:evt-space"}) {
+				t.Fatalf("gated space event = %q", got)
+			}
+			expectNoReplicationDatagram(t, peer)
+
+			if _, err := stream.(io.Writer).Write(netwire.AppendFrame(nil, golemnet.ClientSpaceAckControlFrame(1))); err != nil {
+				t.Fatal(err)
+			}
+			waitForSpaceAck(t, s, sid, 1)
+			s.drainMessages()
+			if err := s.SendServerEvent(sid, EventUnreliable, []byte("evt-after")); err != nil {
+				t.Fatal(err)
+			}
+			if got := receiveReplicationDatagram(t, peer); !bytes.Contains(got, []byte("evt-after")) {
+				t.Fatalf("event after ack = %q", got)
+			}
+		})
+	}
+}
+
+// TestSpaceTransitionStreamLaneWebTransportKeepsGateUntilSpaceAck: a
+// WebTransport session whose state updates use the stream still has datagram
+// event lanes, so the gate and stream-only events last until its SpaceAck.
+func TestSpaceTransitionStreamLaneWebTransportKeepsGateUntilSpaceAck(t *testing.T) {
+	s, peer, stream, sid := replicationTestPeerWith(t, ServerConfig{Transport: golemnet.TransportWebTransport, StateUpdateLane: StateUpdateLaneStream})
+	avatar := &interestTickEntity{id: 1, full: []byte("avatar-full"), revision: 1}
+	if err := s.SpawnAvatar(&Session{ID: sid}, avatar, AvatarOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.runBroadcastTick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"avatar-full"}) {
+		t.Fatalf("spawn frame = %q", got)
+	}
+	if err := s.SetEntitySpace(avatar.id, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.runBroadcastTick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"changed:2:1", "avatar-full", "settled:1"}) {
+		t.Fatalf("transition frame = %q", got)
+	}
+	s.interestMu.Lock()
+	_, pending := s.spaceAckPending[sid]
+	s.interestMu.Unlock()
+	if !pending {
+		t.Fatal("stream-lane WebTransport session released the gate before its SpaceAck")
+	}
+	if err := s.SendServerEvent(sid, EventReliableUnordered, []byte("evt-gated")); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeServerTokens(t, mustReadReliableFrame(t, stream)); !slices.Equal(got, []string{"event:evt-gated"}) {
+		t.Fatalf("gated event = %q", got)
+	}
+	expectNoReplicationDatagram(t, peer)
+
+	if _, err := stream.(io.Writer).Write(netwire.AppendFrame(nil, golemnet.ClientSpaceAckControlFrame(1))); err != nil {
+		t.Fatal(err)
+	}
+	waitForSpaceAck(t, s, sid, 1)
+	s.drainMessages()
+	s.interestMu.Lock()
+	_, pending = s.spaceAckPending[sid]
+	s.interestMu.Unlock()
+	if pending {
+		t.Fatal("SpaceAck did not release the gate")
+	}
+	if err := s.SendServerEvent(sid, EventUnreliable, []byte("evt-after")); err != nil {
+		t.Fatal(err)
+	}
+	if got := receiveReplicationDatagram(t, peer); !bytes.Contains(got, []byte("evt-after")) {
+		t.Fatalf("event after ack = %q", got)
 	}
 }

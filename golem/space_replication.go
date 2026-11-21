@@ -16,6 +16,10 @@ type sessionSpacePlan struct {
 	// gated holds incremental deltas on the ordered stream until the client
 	// acknowledges the latest transition with SpaceAck.
 	gated bool
+	// orphanRevisions holds, for a session without an FOI, the entities it
+	// knew when RemoveFOI ran and their revisions then; the transition exits
+	// them.
+	orphanRevisions map[int64]uint64
 }
 
 // spacesActiveLocked reports whether any space bookkeeping can affect this
@@ -58,13 +62,18 @@ func (s *Server) fallbackSessionSpaceLocked(sessionID int64) SpaceID {
 // planSessionSpaceLocked compares a session's space for this pass with the
 // announced space and starts a transition when they differ. The announced space
 // changes together with the known-set decision made under the same lock, so a
-// session's known set always lies inside its announced space. Caller holds
-// interestMu.
+// session's known set always lies inside its announced space. Until the
+// transition frames are queued, spaceAnnouncing keeps the old space so session
+// lists used for world pushes and space events still match what the client was
+// told. Caller holds interestMu.
 func (s *Server) planSessionSpaceLocked(sessionID int64, space SpaceID) sessionSpacePlan {
 	plan := sessionSpacePlan{from: s.sentSpace[sessionID], space: space}
 	if plan.from != space {
 		seq := s.spaceTransitionSeq[sessionID] + 1
 		s.spaceTransitionSeq[sessionID] = seq
+		if _, unsent := s.spaceAnnouncing[sessionID]; !unsent {
+			s.spaceAnnouncing[sessionID] = plan.from
+		}
 		if space == 0 {
 			delete(s.sentSpace, sessionID)
 		} else {
@@ -88,12 +97,38 @@ func (s *Server) planInterestSpacesLocked(diffs map[int64]*interest.Diff) map[in
 	return plans
 }
 
+// announcedSpaceLocked returns the space the client was last told about: the
+// old space while a planned transition has not been queued yet, otherwise
+// sentSpace. Caller holds interestMu.
+func (s *Server) announcedSpaceLocked(sessionID int64) SpaceID {
+	if space, unsent := s.spaceAnnouncing[sessionID]; unsent {
+		return space
+	}
+	return s.sentSpace[sessionID]
+}
+
+// finishSpaceAnnouncement drops the old announced space of a session once its
+// transition frames are queued, or once the transition will never be sent.
+func (s *Server) finishSpaceAnnouncement(sessionID int64) {
+	s.interestMu.Lock()
+	delete(s.spaceAnnouncing, sessionID)
+	s.interestMu.Unlock()
+}
+
 // planSessionWithoutFOI plans an interest-mode session that has no FOI. Such a
-// session never knows entities, but still learns about space changes.
+// session never knows entities, but still learns about space changes. A plan
+// with a transition takes over the entities the session knew when its FOI was
+// removed (RemoveFOI) as orphanRevisions, so the transition removes them;
+// without a transition they stay frozen on the client.
 func (s *Server) planSessionWithoutFOI(sessionID int64) sessionSpacePlan {
 	s.interestMu.Lock()
 	defer s.interestMu.Unlock()
-	return s.planSessionSpaceLocked(sessionID, s.fallbackSessionSpaceLocked(sessionID))
+	plan := s.planSessionSpaceLocked(sessionID, s.fallbackSessionSpaceLocked(sessionID))
+	if plan.transition != 0 {
+		plan.orphanRevisions = s.foiOrphanKnown[sessionID]
+		delete(s.foiOrphanKnown, sessionID)
+	}
+	return plan
 }
 
 // clearSessionSpaceLocked drops all space state of a disconnected session.
@@ -103,14 +138,16 @@ func (s *Server) clearSessionSpaceLocked(sessionID int64) {
 	delete(s.sentSpace, sessionID)
 	delete(s.spaceTransitionSeq, sessionID)
 	delete(s.spaceAckPending, sessionID)
+	delete(s.spaceAnnouncing, sessionID)
+	delete(s.foiOrphanKnown, sessionID)
 }
 
-// releaseSpaceGate ends stream-only delta delivery for a session once its
-// latest transition is acknowledged, or right after the transition for
-// sessions that never use eventual datagrams. Fields sent on the stream while
-// gated are marked dirty again so the first datagrams carry their current
-// values: a datagram may overtake a gated stream delta, which the client then
-// discards as older.
+// releaseSpaceGate ends stream-only delta and event delivery for a session
+// once its latest transition is acknowledged, or right after the transition
+// for sessions without datagram lanes. Fields sent on the stream while gated
+// are marked dirty again so the first datagrams carry their current values: a
+// datagram may overtake a gated stream delta, which the client then discards
+// as older. Tick goroutine only.
 func (s *Server) releaseSpaceGate(sessionID int64, transition uint64) bool {
 	s.interestMu.Lock()
 	pending, ok := s.spaceAckPending[sessionID]
@@ -121,6 +158,7 @@ func (s *Server) releaseSpaceGate(sessionID int64, transition uint64) bool {
 	if !ok || pending != transition {
 		return false
 	}
+	s.listener.SetSessionEventsStreamOnly(sessionID, false)
 	if s.eventualTrackers != nil {
 		if t := s.eventualTrackers[sessionID]; t != nil {
 			t.releaseGated(func(id int64) bool {
@@ -138,6 +176,48 @@ func (s *Server) applySpaceAck(sessionID int64, transition uint64) {
 	s.releaseSpaceGate(sessionID, transition)
 }
 
+// storeSpaceAck records a client's SpaceAck for the next drainMessages. Only
+// the most recent acknowledgement per session is kept (clients acknowledge
+// transitions in order), so the inbox cannot overflow and an acknowledgement
+// is never dropped like an ordinary queued message.
+func (s *Server) storeSpaceAck(sessionID int64, transition uint64) {
+	s.spaceAckMu.Lock()
+	if s.spaceAckInbox == nil {
+		s.spaceAckInbox = make(map[int64]uint64)
+	}
+	s.spaceAckInbox[sessionID] = transition
+	s.spaceAckMu.Unlock()
+}
+
+// applySpaceAcks applies every SpaceAck stored since the previous call, on the
+// tick goroutine. Acks of sessions that disconnected meanwhile find no pending
+// transition and are ignored.
+func (s *Server) applySpaceAcks() {
+	s.spaceAckMu.Lock()
+	inbox := s.spaceAckInbox
+	if len(inbox) == 0 {
+		s.spaceAckMu.Unlock()
+		return
+	}
+	s.spaceAckInbox = nil
+	s.spaceAckMu.Unlock()
+	for sessionID, transition := range inbox {
+		s.applySpaceAck(sessionID, transition)
+	}
+}
+
+// beginSpaceTransitionEvents keeps the datagram-lane server events of the
+// listed sessions on the ordered stream until their transition is
+// acknowledged, so no event sent from now on can overtake the transition
+// frames. Call without interestMu.
+func (s *Server) beginSpaceTransitionEvents(plans map[int64]sessionSpacePlan) {
+	for sid, plan := range plans {
+		if plan.transition != 0 {
+			s.listener.SetSessionEventsStreamOnly(sid, true)
+		}
+	}
+}
+
 // deliverSpaceTransition sends one session's replication for a pass that
 // changes its announced space. The stream carries, in order: exits, then
 // SpaceChanged, then world data, then the full state of every carried (Stayed)
@@ -147,17 +227,28 @@ func (s *Server) applySpaceAck(sessionID int64, transition uint64) {
 // full state already uses the current owner view. Frames are packed into as
 // few logical stream frames as the reliable frame cap allows; protobuf
 // concatenation keeps every envelope field and clients process them in order.
+//
+// Before anything is queued, the session's datagram-lane server events switch
+// to the stream until the transition is acknowledged. Once the frames are
+// queued the session counts as announced in the new space. Exits of orphaned
+// entities (plan.orphanRevisions) that are no longer registered use their
+// recorded revisions.
 func (s *Server) deliverSpaceTransition(sessionID int64, transport golemnet.Transport, diff interest.Diff, tick *replicationTick, plan sessionSpacePlan, scope replicationScope) (eventualStateSendStats, bool, error) {
 	var stats eventualStateSendStats
+	defer s.finishSpaceAnnouncement(sessionID)
+	webTransport := transport == golemnet.TransportWebTransport
+	if webTransport {
+		s.listener.SetSessionEventsStreamOnly(sessionID, true)
+	}
 	scratch := tick.replicationScratch
-	datagramCapable := s.usesDatagramStateUpdates() && transport == golemnet.TransportWebTransport
+	datagramCapable := s.usesDatagramStateUpdates() && webTransport
 	frames := make([][]byte, 0, len(diff.Exited)+len(diff.Stayed)+len(diff.Entered)+2)
 
 	for _, id := range diff.Exited {
 		if datagramCapable {
 			s.clearEventualEntity(sessionID, id)
 		}
-		data, err := s.wrappedExit(tick, id, scope)
+		data, err := s.wrappedExitWithFallback(tick, id, scope, plan.orphanRevisions)
 		if err != nil {
 			return stats, false, err
 		}
@@ -201,9 +292,38 @@ func (s *Server) deliverSpaceTransition(sessionID int64, transport golemnet.Tran
 		return stats, false, err
 	}
 	stats.add(sent)
-	if !datagramCapable {
-		// Stream-only sessions have nothing to gate; a later SpaceAck is harmless.
+	if !webTransport {
+		// Without datagram lanes neither deltas nor events can overtake the
+		// stream; a later SpaceAck is harmless. WebTransport sessions keep the
+		// gate even on the stream state lane, because their events may still
+		// use datagram lanes.
 		s.releaseSpaceGate(sessionID, plan.transition)
 	}
 	return stats, false, nil
+}
+
+// wrappedExitWithFallback is wrappedExit for a transition's exits. The exit of
+// an entity that is no longer registered and was not removed this tick uses
+// its revision from fallback, so clients do not discard the removal as older
+// than the state they hold.
+func (s *Server) wrappedExitWithFallback(tick *replicationTick, id int64, scope replicationScope, fallback map[int64]uint64) ([]byte, error) {
+	revision, ok := fallback[id]
+	if !ok {
+		return s.wrappedExit(tick, id, scope)
+	}
+	if _, removed := tick.wrappedRemovals[id]; removed {
+		return s.wrappedExit(tick, id, scope)
+	}
+	if _, live := s.reg.Get(id); live {
+		return s.wrappedExit(tick, id, scope)
+	}
+	reason := removalVisibilityExit
+	if scope == replicationFOI {
+		reason = removalFOIExit
+	}
+	data, err := s.serializeRemoval(id, revision, reason)
+	if err != nil {
+		return nil, err
+	}
+	return s.listener.Wrap(data), nil
 }

@@ -106,13 +106,17 @@ func (m *Manager) AssignFOI(sessionID, entityID int64, radius, margin float64) {
 }
 
 // RemoveFOI removes a session's field of interest and clears its known set
-// and space.
-func (m *Manager) RemoveFOI(sessionID int64) {
+// and space. It returns the cleared known set (nil without an FOI), which the
+// caller now owns: those entities were never exited, so a caller that keeps
+// the session can remove them later.
+func (m *Manager) RemoveFOI(sessionID int64) map[int64]struct{} {
+	known := m.known[sessionID]
 	delete(m.fois, sessionID)
 	delete(m.known, sessionID)
 	delete(m.diffs, sessionID)
 	delete(m.diffScratch, sessionID)
 	delete(m.sessionSpace, sessionID)
+	return known
 }
 
 // HasFOI reports whether a session has an assigned field of interest.
@@ -424,9 +428,8 @@ func (m *Manager) ComputeDiffsFiltered(allow func(sessionID, entityID int64) boo
 		}
 		if !ok {
 			// The anchor is missing or global: no spatial diff, globals only.
-			if spaced {
-				m.exitOtherSpaces(diff.Space, knownSet, diff)
-			}
+			// Live local entities of the session's space stay known (frozen).
+			m.exitStaleKnown(spaced, diff.Space, knownSet, diff)
 			m.appendGlobalsFiltered(sessionID, globals, knownSet, diff, allow)
 			diffs[sessionID] = diff
 			continue
@@ -487,11 +490,14 @@ func (m *Manager) ComputeDiffsFiltered(allow func(sessionID, entityID int64) boo
 	return diffs
 }
 
-// exitOtherSpaces exits known live entities whose space is not space. Deleted
-// entities keep their existing exit paths.
-func (m *Manager) exitOtherSpaces(space registry.SpaceID, knownSet map[int64]struct{}, diff *Diff) {
+// exitStaleKnown is the known sweep of the globals-only branch, which has no
+// spatial candidates: it exits known entities that are no longer alive
+// (including deleted globals and a deleted former anchor) and, when spaced,
+// live entities whose space is not space.
+func (m *Manager) exitStaleKnown(spaced bool, space registry.SpaceID, knownSet map[int64]struct{}, diff *Diff) {
 	for id := range knownSet {
-		if _, alive := m.alive[id]; alive && m.entitySpace[id] != space {
+		_, alive := m.alive[id]
+		if !alive || (spaced && m.entitySpace[id] != space) {
 			diff.Exited = append(diff.Exited, id)
 			delete(knownSet, id)
 		}

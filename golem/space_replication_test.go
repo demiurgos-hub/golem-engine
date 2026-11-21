@@ -538,11 +538,12 @@ func TestSpaceDisconnectClearsSessionSpaceState(t *testing.T) {
 	srv.SetSessionSpace(5, 2)
 	srv.interestMu.Lock()
 	srv.planSessionSpaceLocked(5, 2)
+	srv.foiOrphanKnown[5] = map[int64]uint64{1: 0}
 	srv.interestMu.Unlock()
 	srv.cleanupVisibilityOnDisconnect(5)
 	srv.interestMu.Lock()
 	defer srv.interestMu.Unlock()
-	if len(srv.sessionSpaceExplicit)+len(srv.sentSpace)+len(srv.spaceTransitionSeq)+len(srv.spaceAckPending) != 0 {
+	if len(srv.sessionSpaceExplicit)+len(srv.sentSpace)+len(srv.spaceTransitionSeq)+len(srv.spaceAckPending)+len(srv.spaceAnnouncing)+len(srv.foiOrphanKnown) != 0 {
 		t.Fatal("disconnect retained session space state")
 	}
 }
@@ -752,4 +753,228 @@ func TestSpaceWorldExcludedNamesStayCallerDelivered(t *testing.T) {
 	rig.tick(t)
 	assertTransitionWithWorld(t, readSpaceTokens(t, caveConn), 0, 2, nil,
 		[]string{"world:global-fog", "world:day", "cleared:music"}, nil, nil)
+}
+
+// TestSpaceAckAppliedWhenMessageQueueIsFull: a SpaceAck bypasses the bounded
+// message queue, so a full queue cannot leave the session gated forever, and
+// the queued messages are not displaced.
+func TestSpaceAckAppliedWhenMessageQueueIsFull(t *testing.T) {
+	srv := NewServer(ServerConfig{Transport: golemnet.TransportWebSocket, StateUpdateLane: StateUpdateLaneStream})
+	srv.interestMu.Lock()
+	plan := srv.planSessionSpaceLocked(3, 5)
+	srv.interestMu.Unlock()
+	for i := 0; i < msgQueueCap; i++ {
+		srv.msgQueue <- pendingMsg{kind: msgMessage, sess: &Session{ID: 3}}
+	}
+	srv.enqueueSpaceAck(&Session{ID: 3}, plan.transition)
+	if len(srv.msgQueue) != msgQueueCap {
+		t.Fatalf("queue length = %d, want %d", len(srv.msgQueue), msgQueueCap)
+	}
+	messages := 0
+	srv.OnMessage(func(*Session, []byte) { messages++ })
+	srv.drainMessages()
+	if messages != msgQueueCap {
+		t.Fatalf("drained %d messages, want %d", messages, msgQueueCap)
+	}
+	srv.interestMu.Lock()
+	_, pending := srv.spaceAckPending[3]
+	active := srv.spacesActiveLocked()
+	srv.interestMu.Unlock()
+	if pending {
+		t.Fatal("SpaceAck was dropped with a full message queue")
+	}
+	if !active {
+		t.Fatal("announced space 5 must keep spaces active")
+	}
+	srv.spaceAckMu.Lock()
+	left := len(srv.spaceAckInbox)
+	srv.spaceAckMu.Unlock()
+	if left != 0 {
+		t.Fatalf("SpaceAck inbox kept %d entries", left)
+	}
+}
+
+// TestSpaceWorldPushFromOnUpdatesOnSwitchTick: during the pass that plans a
+// transition, the session still counts as announced in its old space until
+// its transition is queued. A world push from OnUpdates reaches only sessions
+// announced in the destination; the switching session gets the pushed value
+// inside its transition, after SpaceChanged.
+func TestSpaceWorldPushFromOnUpdatesOnSwitchTick(t *testing.T) {
+	spaceModes(t, func(t *testing.T, interestMode bool) {
+		rig := newSpaceTestRigWith(t, interestMode, 2, nil, func(srv *Server) {
+			srv.Space(4).World().Set(&sessionWorldData{name: "fog", payload: []byte("cave-fog-1")})
+		})
+		srv := rig.srv
+		mover, resident := rig.ids[0], rig.ids[1]
+		moverConn, residentConn := rig.conns[0], rig.conns[1]
+		for _, c := range rig.conns {
+			if got := readSpaceTokens(t, c); !slices.Equal(got, []string{"cleared:fog"}) {
+				t.Fatalf("connect world = %q", got)
+			}
+		}
+		a := &interestTickEntity{id: 1, full: []byte("a-full")}
+		b := &interestTickEntity{id: 2, full: []byte("b-full")}
+		rig.spaceAvatar(t, mover, a)
+		rig.spaceAvatar(t, resident, b)
+		if err := srv.SetEntitySpace(b.id, 4); err != nil {
+			t.Fatal(err)
+		}
+		rig.tick(t)
+		if got := readSpaceTokens(t, moverConn); !slices.Equal(got, []string{"a-full"}) {
+			t.Fatalf("mover space 0 = %q", got)
+		}
+		assertTransitionWithWorld(t, readSpaceTokens(t, residentConn), 4, 1, nil, []string{"world:cave-fog-1"}, nil, []string{"b-full"})
+
+		if err := srv.SetEntitySpace(a.id, 4); err != nil {
+			t.Fatal(err)
+		}
+		// A spawn nobody sees makes OnUpdates run on the switch tick.
+		if err := srv.CreateEntityIn(9, &interestTickEntity{id: 50, full: []byte("hidden-full")}); err != nil {
+			t.Fatal(err)
+		}
+		var inCave, inOverworld []int64
+		srv.OnUpdates(func([][]byte) {
+			inCave, inOverworld = srv.SessionsInSpace(4), srv.SessionsInSpace(0)
+			srv.Space(4).World().Set(&sessionWorldData{name: "fog", payload: []byte("cave-fog-2")})
+			if err := srv.Space(4).PushWorldData("fog"); err != nil {
+				t.Error(err)
+			}
+		})
+		rig.tick(t)
+		srv.OnUpdates(nil)
+		if !slices.Equal(inCave, []int64{resident}) || !slices.Equal(inOverworld, []int64{mover}) {
+			t.Fatalf("OnUpdates saw SessionsInSpace(4) = %v, (0) = %v", inCave, inOverworld)
+		}
+		if got := readSpaceTokens(t, residentConn); !slices.Equal(got, []string{"world:cave-fog-2", "a-full"}) {
+			t.Fatalf("resident = %q", got)
+		}
+		assertTransitionWithWorld(t, readSpaceTokens(t, moverConn), 4, 1, nil, []string{"world:cave-fog-2"}, []string{"a-full"}, []string{"b-full"})
+		if got := srv.SessionsInSpace(4); !slices.Equal(got, []int64{mover, resident}) {
+			t.Fatalf("SessionsInSpace(4) after the pass = %v", got)
+		}
+	})
+}
+
+// TestSpaceSpectatorRemoveFOIThenSwitchRemovesOldEntities: a session that
+// drops its FOI keeps the entities it knew frozen; its next space transition
+// removes them, including one deleted meanwhile (with its removal revision).
+func TestSpaceSpectatorRemoveFOIThenSwitchRemovesOldEntities(t *testing.T) {
+	rig := newSpaceTestRig(t, true, 1)
+	srv, conn, sid := rig.srv, rig.conns[0], rig.ids[0]
+	srv.SetRemovalSerializer(func(id int64, revision uint64) ([]byte, error) {
+		return []byte(fmt.Sprintf("removed:%d@%d", id, revision)), nil
+	})
+	anchor := &interestTickEntity{id: 1, full: []byte("anchor-full"), revision: 3}
+	crate := &interestTickEntity{id: 2, x: 1, full: []byte("crate-full"), revision: 5}
+	arena := &interestTickEntity{id: 3, full: []byte("arena-full")}
+	for _, e := range []*interestTickEntity{anchor, crate} {
+		if err := srv.CreateEntity(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := srv.CreateEntityIn(7, arena); err != nil {
+		t.Fatal(err)
+	}
+	srv.AssignFOI(sid, anchor.id, 10, 1)
+	rig.tick(t)
+	got := readSpaceTokens(t, conn)
+	if slices.Sort(got); !slices.Equal(got, []string{"anchor-full", "crate-full"}) {
+		t.Fatalf("entered = %q", got)
+	}
+
+	srv.RemoveFOI(sid)
+	rig.tick(t)
+	expectNoMessage(t, conn) // frozen: no removals without a transition
+	srv.DeleteEntity(crate.id)
+	rig.tick(t)
+	expectNoMessage(t, conn)
+
+	srv.SetSessionSpace(sid, 7)
+	rig.tick(t)
+	// The deleted crate exits with its removal revision (revision+1), the
+	// live anchor with its current revision.
+	assertTransition(t, readSpaceTokens(t, conn), 7, 1, []string{"removed:1@3", "removed:2@6"}, nil, nil)
+	srv.interestMu.Lock()
+	orphans := len(srv.foiOrphanKnown)
+	srv.interestMu.Unlock()
+	if orphans != 0 {
+		t.Fatal("transition kept the orphaned known set")
+	}
+	rig.tick(t)
+	expectNoMessage(t, conn)
+}
+
+// TestSpaceAssignFOIDropsOrphanedKnownSet: a new FOI takes over from the
+// entities orphaned by RemoveFOI.
+func TestSpaceAssignFOIDropsOrphanedKnownSet(t *testing.T) {
+	rig := newSpaceTestRig(t, true, 1)
+	srv, conn, sid := rig.srv, rig.conns[0], rig.ids[0]
+	anchor := &interestTickEntity{id: 1, full: []byte("anchor-full")}
+	if err := srv.CreateEntity(anchor); err != nil {
+		t.Fatal(err)
+	}
+	srv.AssignFOI(sid, anchor.id, 10, 1)
+	rig.tick(t)
+	readSpaceTokens(t, conn)
+	srv.RemoveFOI(sid)
+	srv.interestMu.Lock()
+	orphans := len(srv.foiOrphanKnown[sid])
+	srv.interestMu.Unlock()
+	if orphans != 1 {
+		t.Fatalf("orphaned known set = %d entries, want 1", orphans)
+	}
+	srv.AssignFOI(sid, anchor.id, 10, 1)
+	srv.interestMu.Lock()
+	_, kept := srv.foiOrphanKnown[sid]
+	srv.interestMu.Unlock()
+	if kept {
+		t.Fatal("AssignFOI kept the orphaned known set")
+	}
+}
+
+// TestSpaceDeletedLocalAnchorReplacedByGlobalAnchor: deleting a local FOI
+// anchor and anchoring on a global entity on the same tick still removes the
+// deleted anchor on the client and from the known set.
+func TestSpaceDeletedLocalAnchorReplacedByGlobalAnchor(t *testing.T) {
+	for _, spaced := range []bool{false, true} {
+		t.Run(fmt.Sprintf("spaced=%v", spaced), func(t *testing.T) {
+			rig := newSpaceTestRig(t, true, 1)
+			srv, conn, sid := rig.srv, rig.conns[0], rig.ids[0]
+			space := SpaceID(0)
+			if spaced {
+				space = 6
+			}
+			anchor := &interestTickEntity{id: 1, full: []byte("anchor-full")}
+			global := &interestTickEntity{id: 2, x: 500, global: true, full: []byte("global-full")}
+			for _, e := range []*interestTickEntity{anchor, global} {
+				if err := srv.CreateEntityIn(space, e); err != nil {
+					t.Fatal(err)
+				}
+			}
+			srv.AssignFOI(sid, anchor.id, 10, 1)
+			rig.tick(t)
+			tokens := readSpaceTokens(t, conn)
+			if spaced {
+				assertTransition(t, tokens, 6, 1, nil, nil, []string{"anchor-full", "global-full"})
+			} else if slices.Sort(tokens); !slices.Equal(tokens, []string{"anchor-full", "global-full"}) {
+				t.Fatalf("entered = %q", tokens)
+			}
+
+			srv.DeleteEntity(anchor.id)
+			srv.AssignFOI(sid, global.id, 10, 1)
+			rig.tick(t)
+			if got := readSpaceTokens(t, conn); !slices.Equal(got, []string{"removed:1"}) {
+				t.Fatalf("after anchor swap = %q", got)
+			}
+			srv.interestMu.Lock()
+			_, known := srv.interest.Known(sid)[anchor.id]
+			srv.interestMu.Unlock()
+			if known {
+				t.Fatal("deleted anchor is still known")
+			}
+			if got := srv.SessionsKnowing(anchor.id); len(got) != 0 {
+				t.Fatalf("SessionsKnowing(deleted anchor) = %v", got)
+			}
+		})
+	}
 }

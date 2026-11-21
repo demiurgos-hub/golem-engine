@@ -160,8 +160,9 @@ func TestSpacesMissingAnchorKeepsLastSpace(t *testing.T) {
 
 	reg.DeleteEntity(anchor.id)
 	mgr.UpdateGrid(reg)
-	// Globals-only branch: the space is kept and known locals stay silently.
-	assertDiff(t, "anchor missing", mgr.ComputeDiffs()[100], 5, nil, []int64{4}, nil)
+	// Globals-only branch: the space is kept and live known locals stay
+	// silently; the deleted anchor itself exits.
+	assertDiff(t, "anchor missing", mgr.ComputeDiffs()[100], 5, nil, []int64{4}, []int64{1})
 	if mgr.SessionSpace(100) != 5 {
 		t.Fatalf("session space = %d, want 5", mgr.SessionSpace(100))
 	}

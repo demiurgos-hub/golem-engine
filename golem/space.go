@@ -170,8 +170,9 @@ func (s *Server) SetSessionSpace(sessionID int64, space SpaceID) {
 
 // SessionSpace returns the session's effective space: the space of its FOI
 // anchor, else of its avatar, else the space set with SetSessionSpace, else 0.
-// The client learns about a change on the next replication pass; until then
-// SessionsInSpace still lists the session in its announced space.
+// The client learns about a change on the next replication pass; until that
+// pass has queued the session's transition, SessionsInSpace still lists the
+// session in its announced (old) space.
 func (s *Server) SessionSpace(sessionID int64) SpaceID {
 	s.interestMu.Lock()
 	defer s.interestMu.Unlock()
@@ -179,16 +180,18 @@ func (s *Server) SessionSpace(sessionID int64) SpaceID {
 }
 
 // SessionsInSpace returns the connected sessions whose announced space is
-// space, that is, the space whose entities they currently replicate. Every
-// session starts in space 0 and changes space only through a replication
-// space transition, so this matches what each client has been told.
+// space. Every session starts in space 0 and changes space only through a
+// replication space transition; a session counts as announced in its new
+// space once the transition frames (SpaceChanged onwards) are queued, so this
+// matches what each client has been told, even from OnUpdates on the
+// replication pass that plans the transition.
 func (s *Server) SessionsInSpace(space SpaceID) []int64 {
 	all := s.listener.SessionIDs()
 	s.interestMu.Lock()
 	defer s.interestMu.Unlock()
 	var out []int64
 	for _, sid := range all {
-		if s.sentSpace[sid] == space {
+		if s.announcedSpaceLocked(sid) == space {
 			out = append(out, sid)
 		}
 	}

@@ -60,7 +60,7 @@ func (s *Server) SpawnAvatar(sess *Session, e Entity, opts AvatarOptions) error 
 
 	if err := s.commitAvatar(sess.ID, entityID); err != nil {
 		if foiAssigned {
-			s.RemoveFOI(sess.ID)
+			s.removeFOI(sess.ID, false)
 		}
 		s.DeleteEntity(entityID)
 		s.releaseAvatarReservation(sess.ID)
@@ -195,7 +195,7 @@ func (s *Server) unlinkAvatarLocked(sessionID, entityID int64) {
 // either mutex across registry hooks.
 func (s *Server) cleanupAvatarOnDisconnect(sessionID int64) {
 	if s.interest != nil {
-		s.RemoveFOI(sessionID)
+		s.removeFOI(sessionID, false)
 	}
 
 	entityID, had := s.takeAvatarBySession(sessionID)

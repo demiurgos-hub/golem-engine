@@ -99,6 +99,13 @@ func (r *Registry) AppendSpaced(dst []SpacedEntity) []SpacedEntity {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	dst = slices.Grow(dst, len(r.entities))
+	if len(r.spaces) == 0 {
+		// Every entity is in space 0: skip the per-entity space lookup.
+		for _, e := range r.entities {
+			dst = append(dst, SpacedEntity{Entity: e})
+		}
+		return dst
+	}
 	for id, e := range r.entities {
 		dst = append(dst, SpacedEntity{Entity: e, Space: r.spaces[id]})
 	}

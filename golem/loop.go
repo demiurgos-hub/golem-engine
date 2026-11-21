@@ -37,7 +37,6 @@ const (
 	msgReliableOrdered   msgKind = 4
 	msgEventualFeedback  msgKind = 5
 	msgDisconnect        msgKind = 6
-	msgSpaceAck          msgKind = 7
 )
 
 // pendingMsg is a session event queued from a connection goroutine to be
@@ -47,7 +46,6 @@ type pendingMsg struct {
 	sess             *Session
 	data             []byte
 	eventualFeedback []golemnet.EventualStateDelivery
-	transition       uint64 // msgSpaceAck
 }
 
 const msgQueueCap = 4096
@@ -167,6 +165,8 @@ type Server struct {
 	sentSpace            map[int64]SpaceID            // spaces announced to clients (non-zero; interestMu)
 	spaceTransitionSeq   map[int64]uint64             // last space transition counter per session (interestMu)
 	spaceAckPending      map[int64]uint64             // latest transition awaiting SpaceAck per session (interestMu)
+	spaceAnnouncing      map[int64]SpaceID            // old announced space of planned, unsent transitions (interestMu)
+	foiOrphanKnown       map[int64]map[int64]uint64   // RemoveFOI known sets: entity ID → revision (interestMu)
 	space0               spaceRuntime                 // space 0's services; always present
 	spaces               map[SpaceID]*spaceRuntime    // non-zero spaces with services (tick-owned)
 	spaceOrder           []*spaceRuntime              // spaces' runtimes in ascending ID order
@@ -198,6 +198,11 @@ type Server struct {
 	eventualScratch      eventualStateSendScratch
 	eventualTrackers     map[int64]*eventualStateTracker
 	nextEventualToken    uint64
+
+	// SpaceAcks waiting for the tick: the latest acknowledged transition per
+	// session, kept outside msgQueue so none is ever dropped.
+	spaceAckMu    sync.Mutex
+	spaceAckInbox map[int64]uint64
 
 	// Per-space service coordination (space_runtime.go, space_transfer.go).
 	navigationBySpace map[SpaceID]*navigationService // non-zero spaces' navigation (lifeMu; written before Run)
@@ -308,6 +313,8 @@ func NewServer(cfg ServerConfig) *Server {
 		sentSpace:             make(map[int64]SpaceID),
 		spaceTransitionSeq:    make(map[int64]uint64),
 		spaceAckPending:       make(map[int64]uint64),
+		spaceAnnouncing:       make(map[int64]SpaceID),
+		foiOrphanKnown:        make(map[int64]map[int64]uint64),
 	}
 	if cfg.CellSize > 0 {
 		s.interest = interest.NewManager(cfg.CellSize)
@@ -895,6 +902,8 @@ func (s *Server) AssignFOI(sessionID, entityID int64, radius, margin float64) {
 	}
 	s.interestMu.Lock()
 	defer s.interestMu.Unlock()
+	// A new FOI diff takes over from entities orphaned by RemoveFOI.
+	delete(s.foiOrphanKnown, sessionID)
 	hadFOI := s.interest.HasFOI(sessionID)
 	s.interest.AssignFOI(sessionID, entityID, radius, margin)
 	if !hadFOI {
@@ -904,15 +913,56 @@ func (s *Server) AssignFOI(sessionID, entityID int64, radius, margin float64) {
 }
 
 // RemoveFOI removes a session's field of interest and clears its known set.
+// The client keeps the entities it knew, frozen, until a later space
+// transition of the session (for example after SetSessionSpace) removes them,
+// or until AssignFOI starts a new field of interest.
 // Panics if interest management is not enabled.
 // Concurrency-safe with other Server FOI APIs via interestMu.
 func (s *Server) RemoveFOI(sessionID int64) {
+	s.removeFOI(sessionID, true)
+}
+
+// removeFOI removes a session's FOI. With keepOrphans, the entities the session
+// knew are remembered so its next space transition removes them; disconnect
+// and avatar rollback paths skip that.
+func (s *Server) removeFOI(sessionID int64, keepOrphans bool) {
 	if s.interest == nil {
 		panic("golem: RemoveFOI called but interest management is not enabled (CellSize <= 0)")
 	}
 	s.interestMu.Lock()
 	defer s.interestMu.Unlock()
-	s.interest.RemoveFOI(sessionID)
+	known := s.interest.RemoveFOI(sessionID)
+	if !keepOrphans || len(known) == 0 {
+		return
+	}
+	// Revisions start at 0 (use the live revision); recordOrphanRemovals
+	// stores the removal revision of orphans deleted before the transition.
+	orphans := s.foiOrphanKnown[sessionID]
+	if orphans == nil {
+		orphans = make(map[int64]uint64, len(known))
+		s.foiOrphanKnown[sessionID] = orphans
+	}
+	for id := range known {
+		orphans[id] = 0
+	}
+}
+
+// recordOrphanRemovals stores the removal revisions of entities deleted this
+// tick that sessions still hold as RemoveFOI orphans, so their later exits are
+// not discarded by clients as stale. Tick goroutine only.
+func (s *Server) recordOrphanRemovals(result registry.FlushResult) {
+	if len(result.Removals) == 0 {
+		return
+	}
+	s.interestMu.Lock()
+	defer s.interestMu.Unlock()
+	for _, orphans := range s.foiOrphanKnown {
+		for i, id := range result.Removals {
+			if _, ok := orphans[id]; ok {
+				orphans[id] = result.RemovalRevisions[i]
+			}
+		}
+	}
 }
 
 // hasFOI reports whether sessionID currently has an assigned FOI.
@@ -1099,10 +1149,10 @@ func (s *Server) enqueueEventualStateFeedback(sess *Session, feedback []golemnet
 }
 
 // enqueueSpaceAck is installed on the Listener as the SpaceAck hook. It runs on
-// the connection goroutine and pushes the acknowledged transition counter for
-// tick-time dispatch.
+// the connection goroutine and stores the acknowledged transition counter for
+// tick-time dispatch outside the bounded message queue (see storeSpaceAck).
 func (s *Server) enqueueSpaceAck(sess *Session, transition uint64) {
-	s.enqueue(pendingMsg{kind: msgSpaceAck, sess: sess, transition: transition})
+	s.storeSpaceAck(sess.ID, transition)
 }
 
 // enqueueDisconnect is installed on the Listener as the OnDisconnect hook. It
@@ -1114,8 +1164,9 @@ func (s *Server) enqueueDisconnect(sess *Session) {
 }
 
 // drainMessages processes all queued session events in FIFO order on the tick
-// goroutine. Called once per tick before entity ticks so that handlers such as
-// CreateEntity and DeleteEntity are safe without additional synchronization.
+// goroutine, then the SpaceAcks stored meanwhile. Called once per tick before
+// entity ticks so that handlers such as CreateEntity and DeleteEntity are safe
+// without additional synchronization.
 func (s *Server) drainMessages() {
 	for {
 		select {
@@ -1143,8 +1194,6 @@ func (s *Server) drainMessages() {
 				}
 			case msgEventualFeedback:
 				s.applyEventualStateFeedback(m.sess.ID, m.eventualFeedback)
-			case msgSpaceAck:
-				s.applySpaceAck(m.sess.ID, m.transition)
 			case msgDisconnect:
 				// Listener disconnect events always carry a non-nil *Session.
 				if s.eventualTrackers != nil {
@@ -1160,6 +1209,7 @@ func (s *Server) drainMessages() {
 				s.cleanupVisibilityOnDisconnect(m.sess.ID)
 			}
 		default:
+			s.applySpaceAcks()
 			return
 		}
 	}
@@ -1779,6 +1829,9 @@ func (s *Server) runInterestTick() error {
 	diffs := copyInterestDiffs(computed)
 	ownershipPending := s.snapshotOwnershipRefreshLocked()
 	s.interestMu.Unlock()
+	// Before onUpdates can send events: switching sessions' datagram-lane
+	// events must not overtake their transition frames.
+	s.beginSpaceTransitionEvents(spacePlans)
 	result, err := s.reg.FlushAll()
 	if err != nil {
 		return err
@@ -1798,22 +1851,29 @@ func (s *Server) runInterestTick() error {
 	var total eventualStateSendStats
 	for _, sid := range sessionIDs {
 		transport, connected := s.listener.SessionTransport(sid)
+		plan := spacePlans[sid]
 		if !connected {
+			if plan.transition != 0 {
+				s.finishSpaceAnnouncement(sid)
+			}
 			continue
 		}
 		diff, ok := diffs[sid]
-		plan := spacePlans[sid]
 		if !ok {
 			if !spacesActive {
 				continue
 			}
 			// Sessions without an FOI know no entities but still learn about
-			// space changes through an empty transition.
+			// space changes through a transition that only removes what they
+			// knew when their FOI was removed.
 			plan = s.planSessionWithoutFOI(sid)
 			if plan.transition == 0 {
 				continue
 			}
 			diff = &interest.Diff{Space: plan.space}
+			for id := range plan.orphanRevisions {
+				diff.Exited = append(diff.Exited, id)
+			}
 		}
 		sent, disconnected, err := s.deliverReplicationDiff(sid, transport, *diff, tick, ownershipPending, replicationFOI, plan)
 		total.add(sent)
@@ -1824,6 +1884,7 @@ func (s *Server) runInterestTick() error {
 			continue
 		}
 	}
+	s.recordOrphanRemovals(result)
 	s.cleanupVisibilityForRemovals(result.Removals)
 	s.storeReplicationSnapshot(total.streamBatchedFrames, total.streamWireMsgs, total.datagramBatchedFrames, total.datagramWirePayloads, len(result.Deltas))
 	return nil

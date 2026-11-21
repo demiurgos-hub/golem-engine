@@ -21,9 +21,10 @@ const (
 )
 
 // SendEvent queues one marshalled ServerEvent for a session. Datagram
-// deliveries carry it as a tagged event record; a session without that lane
-// receives streamFrame, its wrapped ServerMessage, on the reliable stream.
-// An event too large for its datagram lane fails for every session.
+// deliveries carry it as a tagged event record; a session without that lane,
+// or one marked with SetSessionEventsStreamOnly, receives streamFrame, its
+// wrapped ServerMessage, on the reliable stream. An event too large for its
+// datagram lane fails for every session.
 func (l *Listener) SendEvent(sessionID int64, delivery EventDelivery, event, streamFrame []byte) error {
 	record, err := eventRecord(delivery, event, streamFrame)
 	if err != nil {
@@ -98,8 +99,21 @@ func eventRecord(delivery EventDelivery, event, streamFrame []byte) ([]byte, err
 	}
 }
 
+// SetSessionEventsStreamOnly makes datagram-lane server events for a
+// connected session use the reliable stream (on) or their datagram lane again
+// (off). While on, such events stay ordered with the stream, so they can
+// arrive before datagram events sent earlier. Unknown sessions are ignored.
+func (l *Listener) SetSessionEventsStreamOnly(sessionID int64, on bool) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if s, ok := l.sessions[sessionID]; ok {
+		s.eventsStreamOnly.Store(on)
+	}
+}
+
 func (s *Session) sendEvent(delivery EventDelivery, record, streamFrame []byte) error {
 	switch {
+	case delivery == EventStream || s.eventsStreamOnly.Load():
 	case delivery == EventUnreliable && s.datagrams != nil:
 		return s.SendUnreliable(record)
 	case delivery == EventReliableOrdered && s.protocol != nil:

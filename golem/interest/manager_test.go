@@ -402,3 +402,76 @@ func TestComputeDiffsUnfilteredCompatibility(t *testing.T) {
 		t.Fatalf("ComputeDiffs vs nil filter entered: %v vs %v", unfiltered.Entered, nilFilter.Entered)
 	}
 }
+
+func TestComputeDiffsDeletedLocalAnchorExitsWithGlobalAnchor(t *testing.T) {
+	// A deleted local anchor replaced by a global anchor on the same tick runs
+	// the globals-only branch, which has no spatial sweep: the deleted local
+	// must still exit, while live known locals stay frozen.
+	reg := registry.NewRegistry()
+	anchor := &testEntity{id: 1}
+	near := &testEntity{id: 2, x: 1}
+	global := &testEntity{id: 3, x: 100, y: 100, global: true}
+	for _, e := range []*testEntity{anchor, near, global} {
+		if err := reg.Add(e); err != nil {
+			t.Fatalf("Add(%d): %v", e.id, err)
+		}
+	}
+	mgr := NewManager(2)
+	mgr.AssignFOI(10, anchor.id, 5, 1)
+	mgr.UpdateGrid(reg)
+	if got, want := sortedIDs(mgr.ComputeDiffs()[10].Entered), []int64{1, 2, 3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("initial entered = %v, want %v", got, want)
+	}
+
+	reg.DeleteEntity(anchor.id)
+	mgr.AssignFOI(10, global.id, 5, 1)
+	mgr.UpdateGrid(reg)
+	diff := mgr.ComputeDiffs()[10]
+	if got, want := sortedIDs(diff.Exited), []int64{1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("exited = %v, want %v", got, want)
+	}
+	if got, want := sortedIDs(diff.Stayed), []int64{3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("stayed = %v, want %v", got, want)
+	}
+	known := mgr.Known(10)
+	if _, ok := known[anchor.id]; ok {
+		t.Fatal("deleted anchor must leave the known set")
+	}
+	if _, ok := known[near.id]; !ok {
+		t.Fatal("live known local must stay known in the globals-only branch")
+	}
+	if diff := mgr.ComputeDiffs()[10]; len(diff.Exited) != 0 {
+		t.Fatalf("repeated exit: %v", diff.Exited)
+	}
+}
+
+func TestRemoveFOIReturnsKnownSet(t *testing.T) {
+	reg := registry.NewRegistry()
+	for _, e := range []*testEntity{{id: 1}, {id: 2, x: 1}} {
+		if err := reg.Add(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mgr := NewManager(2)
+	if known := mgr.RemoveFOI(10); known != nil {
+		t.Fatalf("RemoveFOI without FOI = %v, want nil", known)
+	}
+	mgr.AssignFOI(10, 1, 5, 1)
+	mgr.UpdateGrid(reg)
+	mgr.ComputeDiffs()
+	known := mgr.RemoveFOI(10)
+	if got := sortedIDs(mapKeys(known)); !reflect.DeepEqual(got, []int64{1, 2}) {
+		t.Fatalf("RemoveFOI known = %v, want [1 2]", got)
+	}
+	if mgr.HasFOI(10) || mgr.Known(10) != nil {
+		t.Fatal("RemoveFOI must clear the FOI and known set")
+	}
+}
+
+func mapKeys(m map[int64]struct{}) []int64 {
+	out := make([]int64, 0, len(m))
+	for id := range m {
+		out = append(out, id)
+	}
+	return out
+}
