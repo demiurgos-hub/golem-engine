@@ -4,10 +4,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 
@@ -81,16 +82,19 @@ func captureThenWrite(path string, capture func() ([]byte, error)) <-chan error 
 
 // WriteAsync atomically writes already-captured snapshot bytes (from Capture or
 // CaptureSpaced) to path in a background goroutine, through a uniquely named
-// temporary file in path's directory that is synced and renamed over path
-// (mode 0644). data is owned by the write and must not be modified until the
-// result arrives. Writes to the same path (compared as cleaned absolute paths)
-// run one at a time in the order of their WriteAsync calls, so the file ends
-// with the bytes of the last call. The returned channel receives exactly one
-// value: nil on success or a non-nil error on failure.
+// temporary file in path's directory (".<name>-<digits>.tmp") that is synced
+// and renamed over path. The file is created with mode 0644 less the process
+// umask, like os.WriteFile. data is owned by the write and must not be
+// modified until the result arrives. Writes to the same path (compared as
+// cleaned absolute paths) run one at a time in the order of their WriteAsync
+// calls, so the file ends with the bytes of the last call. The returned
+// channel receives exactly one value: nil on success or a non-nil error on
+// failure.
 //
-// The first write to a path in a process removes the temporary files an
-// earlier, crashed process left for that path, so only one process may write
-// a given snapshot file at a time.
+// A temporary file is removed when its write fails. One left behind by a
+// process that crashed mid-write stays on disk: the writer never deletes a
+// file it did not create, because a name alone does not show that a file is
+// disposable.
 func WriteAsync(path string, data []byte) <-chan error {
 	errc := make(chan error, 1)
 	key := writeChainKey(path)
@@ -103,7 +107,6 @@ func WriteAsync(path string, data []byte) <-chan error {
 		if prev != nil {
 			<-prev
 		}
-		sweepLeftovers(path, key)
 		err := write(path, data)
 		writeChains.mu.Lock()
 		if writeChains.last[key] == done {
@@ -119,17 +122,11 @@ func WriteAsync(path string, data []byte) <-chan error {
 // writeChains orders writes per destination: last maps each cleaned absolute
 // path to the done channel of its most recent write, which the next write to
 // that path waits on. An entry is removed once its write finishes and no
-// later write has replaced it. swept holds the destinations whose leftover
-// temporary files this process has already removed.
+// later write has replaced it.
 var writeChains = struct {
-	mu    sync.Mutex
-	last  map[string]chan struct{}
-	swept map[string]struct{}
-}{last: make(map[string]chan struct{}), swept: make(map[string]struct{})}
-
-// maxSweptPaths bounds the swept set; a process that writes more distinct
-// snapshot paths than this (uniquely named files) stops sweeping new ones.
-const maxSweptPaths = 1024
+	mu   sync.Mutex
+	last map[string]chan struct{}
+}{last: make(map[string]chan struct{})}
 
 func writeChainKey(path string) string {
 	if abs, err := filepath.Abs(path); err == nil {
@@ -138,44 +135,24 @@ func writeChainKey(path string) string {
 	return filepath.Clean(path)
 }
 
-// sweepLeftovers removes, once per destination and process, the temporary
-// files of path that a crashed process left behind. It runs inside path's
-// write chain, so no write of this process to path is in flight. Only names
-// that write itself can create match: ".<base>-<digits>.tmp".
-func sweepLeftovers(path, key string) {
-	writeChains.mu.Lock()
-	_, done := writeChains.swept[key]
-	if !done && len(writeChains.swept) < maxSweptPaths {
-		writeChains.swept[key] = struct{}{}
-	} else {
-		done = true
-	}
-	writeChains.mu.Unlock()
-	if done {
-		return
-	}
-	dir := filepath.Dir(path)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	prefix := "." + filepath.Base(path) + "-"
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".tmp") {
-			continue
+// createTemp creates a new, uniquely named temporary file for path in path's
+// directory. Unlike os.CreateTemp (mode 0600, which a later chmod to 0644
+// would widen past the umask), it creates the file with mode 0644 and lets
+// the operating system apply the process umask, as os.WriteFile does, so a
+// restrictive umask keeps protecting saved state.
+func createTemp(path string) (*os.File, error) {
+	prefix := filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+"-")
+	for attempt := 0; ; attempt++ {
+		name := prefix + strconv.FormatUint(uint64(rand.Uint32()), 10) + ".tmp"
+		file, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err == nil || !os.IsExist(err) || attempt == 10_000 {
+			return file, err
 		}
-		middle := name[len(prefix) : len(name)-len(".tmp")]
-		if middle == "" || strings.Trim(middle, "0123456789") != "" {
-			// Another destination's temporary file, such as "<base>-1".
-			continue
-		}
-		_ = os.Remove(filepath.Join(dir, name))
 	}
 }
 
 func write(path string, encoded []byte) (err error) {
-	file, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*.tmp")
+	file, err := createTemp(path)
 	if err != nil {
 		return fmt.Errorf("snapshot: creating temp file: %w", err)
 	}
@@ -194,9 +171,6 @@ func write(path string, encoded []byte) (err error) {
 	}
 	if err = file.Close(); err != nil {
 		return fmt.Errorf("snapshot: closing temp file: %w", err)
-	}
-	if err = os.Chmod(tmp, 0o644); err != nil {
-		return fmt.Errorf("snapshot: setting temp file mode: %w", err)
 	}
 	if err = os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("snapshot: renaming snapshot file: %w", err)

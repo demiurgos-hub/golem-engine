@@ -38,12 +38,24 @@ func TestWriteAsyncSamePathEndsWithLastCall(t *testing.T) {
 	}
 	assertOnlyFile(t, dir, "world.snap")
 	if runtime.GOOS != "windows" {
+		// 0644 less the process umask, exactly like a plain os.WriteFile.
+		plain := filepath.Join(dir, "plain")
+		if err := os.WriteFile(plain, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		want, err := os.Stat(plain)
+		if err != nil {
+			t.Fatal(err)
+		}
 		info, err := os.Stat(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if mode := info.Mode().Perm(); mode != 0o644 {
-			t.Fatalf("mode = %v, want 0644", mode)
+		if info.Mode().Perm() != want.Mode().Perm() {
+			t.Fatalf("mode = %v, want %v as os.WriteFile gives", info.Mode().Perm(), want.Mode().Perm())
+		}
+		if err := os.Remove(plain); err != nil {
+			t.Fatal(err)
 		}
 	}
 	writeChains.mu.Lock()

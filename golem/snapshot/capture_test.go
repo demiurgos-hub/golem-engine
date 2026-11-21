@@ -168,46 +168,33 @@ func TestCaptureParallelPropagatesPanic(t *testing.T) {
 	t.Fatal("capture returned after an entity panicked")
 }
 
-// The first write to a path removes the temporary files a crashed process
-// left for that path, and nothing else.
-func TestWriteAsyncRemovesLeftoverTempFiles(t *testing.T) {
+// The writer never deletes a file it did not create. A finished save may
+// carry a name that looks like another destination's temporary file; saving
+// that other destination must leave it alone, and so must a second save.
+func TestWriteAsyncLeavesLookalikeFilesAlone(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "world.snap")
-	leftovers := []string{".world.snap-123456.tmp", ".world.snap-7.tmp"}
-	kept := []string{
-		".world.snap-1-99.tmp", // temporary file of the destination "world.snap-1"
-		".world.snap-.tmp",
-		".world.snap-12a.tmp",
-		".other.snap-55.tmp",
-		"world.snap-123.tmp",
+	lookalike := filepath.Join(dir, ".world-1.tmp")
+	if err := <-WriteAsync(lookalike, []byte("first save")); err != nil {
+		t.Fatal(err)
 	}
-	for _, name := range append(append([]string{}, leftovers...), kept...) {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+	stray := filepath.Join(dir, ".world-123456.tmp")
+	if err := os.WriteFile(stray, []byte("not ours"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	world := filepath.Join(dir, "world")
+	for _, content := range []string{"second save", "third save"} {
+		if err := <-WriteAsync(world, []byte(content)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := <-WriteAsync(path, []byte("saved")); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range leftovers {
-		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
-			t.Fatalf("leftover %s was not removed (%v)", name, err)
+	for path, want := range map[string]string{lookalike: "first save", stray: "not ours", world: "third save"} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Fatalf("%s = %q, %v; want %q", filepath.Base(path), got, err, want)
 		}
 	}
-	for _, name := range append(kept, "world.snap") {
-		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-	}
-	// Only the first write of a process sweeps.
-	late := filepath.Join(dir, ".world.snap-42.tmp")
-	if err := os.WriteFile(late, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-WriteAsync(path, []byte("saved again")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(late); err != nil {
-		t.Fatalf("a later write swept again: %v", err)
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 3 {
+		t.Fatalf("directory holds %d entries (%v), want the three files and no temporary file", len(entries), err)
 	}
 }
