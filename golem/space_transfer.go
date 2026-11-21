@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	p "github.com/demiurgos-hub/golem-engine/golem/physics3d"
+	"github.com/demiurgos-hub/golem-engine/golem/registry"
 )
 
 // spaceTransferEntity is one moving entity with physics or navigation
@@ -28,12 +29,16 @@ type spaceTransferEntity struct {
 
 // applySpaceMove validates every entity of t, including its legacy collider
 // transfer and the services it needs in t.To, rebuilds physics bodies in the
-// destination world, and then commits in this order: detach every source
-// attachment (physics and navigation), move the registry space (under
-// interestMu, so the batch is atomic for session-space readers), move legacy
-// colliders, attach destination physics, run the deferred traversal-cancel
-// callbacks, and attach destination navigation. A failing source detach rolls
-// back the destination bodies and leaves the registry and colliders unchanged.
+// destination world, checks that every source body is still alive in a usable
+// world (preflightTransferSources), calls t.MoveShapes, and then commits in
+// this order: detach every source attachment (physics and navigation), move
+// the registry space (under interestMu, so the batch is atomic for
+// session-space readers), move legacy colliders, attach destination physics,
+// run the deferred traversal-cancel callbacks, and attach destination
+// navigation. Anything rejected before the detach loop changes nothing (the
+// rebuilt bodies are destroyed; failing to destroy them faults the
+// destination). A backend failure from the detach loop on faults every
+// affected space (faultServices) and may leave the move partly applied.
 // Sessions whose avatar or FOI anchor moved hold their server events until
 // their transition is queued (space_events.go).
 func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
@@ -48,6 +53,11 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 		}
 		froms[i] = from
 		src := s.runtime(from)
+		if _, pending := s.navReattachPending[id]; pending {
+			// A traversal-cancel callback of an outer transfer runs before this
+			// entity's navigation is reattached in its new space.
+			return fmt.Errorf("golem: %s: entity %d is awaiting navigation reattachment after a space transfer: %w", op, id, p.ErrBusy)
+		}
 		if n := src.nav(); n != nil && n.deleting[id] {
 			return fmt.Errorf("golem: %s: entity %d is being deleted", op, id)
 		}
@@ -92,6 +102,15 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 		return err
 	}
 	if len(moves) == 0 {
+		if t.MoveShapes != nil {
+			if shapes := s.transferShapeMoves(t, froms, nil); len(shapes) != 0 {
+				s.transferring = true
+				defer s.finishTransfer()
+				if err := s.moveTransferShapes(op, t, froms, nil, colliders, shapes); err != nil {
+					return err
+				}
+			}
+		}
 		bad, moved := s.setSpacesHoldingEvents(t)
 		if !moved {
 			return fmt.Errorf("golem: %s: entity %d is not published", op, bad)
@@ -110,8 +129,20 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 		}
 		// RebuildPhysics must not call Server APIs; make sure it changed nothing
 		// the commit relies on before anything changes.
-		if err := s.transferUnchanged(op, t, froms, moves, colliders); err != nil {
-			return errors.Join(err, destroyTransferBodies(dst.phys(), created))
+		if err := s.transferUnchanged(op, "RebuildPhysics", t, froms, moves, colliders); err != nil {
+			return errors.Join(err, rollbackTransferBodies(op, dst, created))
+		}
+		// The detach loop must not fail on a dead body or an unusable world:
+		// check every source before the destructive phase.
+		if err := preflightTransferSources(op, moves); err != nil {
+			return errors.Join(err, rollbackTransferBodies(op, dst, created))
+		}
+	}
+	if t.MoveShapes != nil {
+		if shapes := s.transferShapeMoves(t, froms, moves); len(shapes) != 0 {
+			if err := s.moveTransferShapes(op, t, froms, moves, colliders, shapes); err != nil {
+				return errors.Join(err, rollbackTransferBodies(op, dst, created))
+			}
 		}
 	}
 
@@ -137,9 +168,11 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 		}
 	}
 
-	// Detach every source first. A failure here leaves the registry and
-	// colliders unchanged; entities detached before it have lost their source
-	// bodies, which cannot be restored, and the faulted space ends Run.
+	// Detach every source first; this starts the destructive phase. The
+	// preflight makes a failure here a backend failure: it leaves the registry
+	// and colliders unchanged, but entities detached before it have lost their
+	// source bodies, which cannot be restored, and MoveShapes has already moved
+	// the game's shapes. The source and the destination fault (Run ends).
 	var retired []*physicsService
 	for _, m := range moves {
 		if m.physics != nil {
@@ -147,11 +180,12 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 			// Destroys the source body with its colliders and joints, cancels its
 			// timed trajectory and detaches its source navigation.
 			if err := ps.detach(m.id, p.Teleported); err != nil {
-				ps.fault = err
 				failure := fmt.Errorf("golem: %s: detach entity %d from space %d physics: %w", op, m.id, m.from.id, err)
+				m.from.faultServices(failure)
+				dst.faultServices(failure)
 				syncErr := synchronizeRetired(op, retired)
 				runDeferred()
-				return errors.Join(failure, syncErr, destroyTransferBodies(dst.phys(), created))
+				return errors.Join(failure, syncErr, rollbackTransferBodies(op, dst, created))
 			}
 			if !slices.Contains(retired, ps) {
 				retired = append(retired, ps)
@@ -168,24 +202,53 @@ func (s *Server) applySpaceMove(op string, t SpaceTransfer) error {
 
 	bad, moved := s.setSpacesHoldingEvents(t)
 	if !moved {
-		// Unreachable after validation; keep the registry and colliders.
+		// Unreachable after validation; keep the registry and colliders. The
+		// detached entities are attached nowhere now: fault the destination and
+		// every space that lost bodies.
+		failure := fmt.Errorf("golem: %s: entity %d is not published", op, bad)
+		dst.faultServices(failure)
+		for _, ps := range retired {
+			ps.space.faultServices(failure)
+		}
 		runDeferred()
-		return errors.Join(fmt.Errorf("golem: %s: entity %d is not published", op, bad), syncErr, destroyTransferBodies(dst.phys(), created))
+		return errors.Join(failure, syncErr, rollbackTransferBodies(op, dst, created))
 	}
 	applyColliderMoves(colliders)
 
 	for _, m := range moves {
 		if m.physics != nil {
 			old := m.physics
-			a := &physicsAttachment{id: m.id, body: m.body, entity: old.entity, position: old.position, writer: old.writer,
+			a := &physicsAttachment{id: m.id, body: m.body, entity: old.entity, incarnation: old.incarnation, position: old.position, writer: old.writer,
 				rotation: old.rotation, velocity: old.velocity, activation: old.activation, config: old.config,
 				localAnchor: m.state.Pose.Inverse().Compose(m.state.Anchor)}
 			dst.physics.agents[m.id], dst.physics.bodies[m.body] = a, m.id
 			dst.physics.write(a, m.state, true)
 		}
 	}
+	// Until navigation is reattached below, a cancel callback must not move
+	// these entities again: the nested move would find no agent to carry and
+	// this transfer would then skip the reattachment.
+	var reattach []int64
+	for _, m := range moves {
+		if m.nav {
+			reattach = append(reattach, m.id)
+		}
+	}
+	if len(reattach) != 0 {
+		if s.navReattachPending == nil {
+			s.navReattachPending = make(map[int64]struct{})
+		}
+		for _, id := range reattach {
+			s.navReattachPending[id] = struct{}{}
+		}
+		defer func() {
+			for _, id := range reattach {
+				delete(s.navReattachPending, id)
+			}
+		}()
+	}
 	runDeferred()
-	// A cancel callback may have moved, deleted or re-attached the entity.
+	// A cancel callback may have deleted or re-attached the entity.
 	for _, m := range moves {
 		if !m.nav {
 			continue
@@ -213,17 +276,19 @@ func (s *Server) finishTransfer() {
 	}
 }
 
-// transferUnchanged checks, after RebuildPhysics, that every entity is still
-// published in the space validation found it in, is the same entity, is not
-// being deleted and keeps the source attachments the commit will detach.
-func (s *Server) transferUnchanged(op string, t SpaceTransfer, froms []SpaceID, moves []spaceTransferEntity, colliders []colliderMove) error {
+// transferUnchanged checks, after RebuildPhysics or MoveShapes (named by
+// phase), that every entity is still published in the space validation found
+// it in, is the same entity (registry incarnation: Entity values may be
+// non-comparable), is not being deleted and keeps the source attachments the
+// commit will detach.
+func (s *Server) transferUnchanged(op, phase string, t SpaceTransfer, froms []SpaceID, moves []spaceTransferEntity, colliders []colliderMove) error {
 	for i, id := range t.Entities {
 		if space, ok := s.reg.PublishedSpace(id); !ok || space != froms[i] {
-			return fmt.Errorf("golem: %s: entity %d changed during RebuildPhysics", op, id)
+			return fmt.Errorf("golem: %s: entity %d changed during %s", op, id, phase)
 		}
 		src := s.runtime(froms[i])
 		if n := src.nav(); n != nil && n.deleting[id] || src.phys().deletePending(id) {
-			return fmt.Errorf("golem: %s: entity %d changed during RebuildPhysics", op, id)
+			return fmt.Errorf("golem: %s: entity %d changed during %s", op, id, phase)
 		}
 	}
 	for _, m := range moves {
@@ -233,30 +298,110 @@ func (s *Server) transferUnchanged(op string, t SpaceTransfer, froms []SpaceID, 
 		}
 		n := m.from.nav()
 		if physics != m.physics || (n != nil && n.agents[m.id] != nil) != m.nav {
-			return fmt.Errorf("golem: %s: entity %d attachments changed during RebuildPhysics", op, m.id)
+			return fmt.Errorf("golem: %s: entity %d attachments changed during %s", op, m.id, phase)
+		}
+		if m.physics != nil {
+			if inc, ok := s.reg.Incarnation(m.id); !ok || inc != m.physics.incarnation {
+				return fmt.Errorf("golem: %s: entity %d changed during %s", op, m.id, phase)
+			}
 		}
 	}
 	for _, c := range colliders {
-		if e, ok := s.reg.Get(c.id); !ok || e != c.e {
-			return fmt.Errorf("golem: %s: entity %d changed during RebuildPhysics", op, c.id)
+		if inc, ok := s.reg.Incarnation(c.id); !ok || inc != c.incarnation {
+			return fmt.Errorf("golem: %s: entity %d changed during %s", op, c.id, phase)
 		}
 	}
 	return nil
 }
 
+// preflightTransferSources checks, before the destructive phase, that every
+// moving physics entity's source service accepts mutations, its world has not
+// faulted (Box3D still answers Body in a faulted world) and its source body is
+// still alive, so the detach loop cannot fail on a body RebuildPhysics
+// destroyed through another reference or on an unusable world.
+func preflightTransferSources(op string, moves []spaceTransferEntity) error {
+	checked := make(map[*physicsService]bool)
+	for _, m := range moves {
+		if m.physics == nil {
+			continue
+		}
+		ps := m.from.physics
+		if !checked[ps] {
+			if err := ps.mutable(); err != nil {
+				return fmt.Errorf("golem: %s: space %d physics: %w", op, m.from.id, err)
+			}
+			if fault := ps.world.Metrics().Fault; fault != nil {
+				return fmt.Errorf("golem: %s: space %d physics world: %w: %v", op, m.from.id, p.ErrFaulted, fault)
+			}
+			checked[ps] = true
+		}
+		state, err := ps.world.Body(m.physics.body)
+		if err == nil && state.Handle != m.physics.body {
+			err = p.ErrStale
+		}
+		if err != nil {
+			return fmt.Errorf("golem: %s: source body of entity %d in space %d: %w", op, m.id, m.from.id, err)
+		}
+	}
+	return nil
+}
+
+// transferShapeMoves lists the entities of t that change space, for
+// SpaceTransfer.MoveShapes, with their destination position: the rebuilt
+// body's gameplay anchor for a physics entity, else the entity's Position3D,
+// else its 2D Position with Z = 0.
+func (s *Server) transferShapeMoves(t SpaceTransfer, froms []SpaceID, moves []spaceTransferEntity) []ShapeMove {
+	anchors := make(map[int64]p.Vec3)
+	for _, m := range moves {
+		if m.physics != nil {
+			anchors[m.id] = m.state.Anchor.Position
+		}
+	}
+	var out []ShapeMove
+	for i, id := range t.Entities {
+		if froms[i] == t.To {
+			continue
+		}
+		position, ok := anchors[id]
+		if !ok {
+			if e, found := s.reg.Get(id); found {
+				if sp, is3D := e.(registry.Spatial3DEntity); is3D {
+					x, y, z := sp.Position3D()
+					position = p.Vec3{X: x, Y: y, Z: z}
+				} else {
+					x, y := e.Position()
+					position = p.Vec3{X: x, Y: y}
+				}
+			}
+		}
+		out = append(out, ShapeMove{Entity: id, From: froms[i], Position: position})
+	}
+	return out
+}
+
+// moveTransferShapes calls t.MoveShapes (s.transferring is set) and then
+// checks that the hook changed no moving entity. A hook error changes nothing
+// on the engine's side. A hook that changed an entity has already moved its
+// shapes, which the engine cannot undo; the move is still rejected.
+func (s *Server) moveTransferShapes(op string, t SpaceTransfer, froms []SpaceID, moves []spaceTransferEntity, colliders []colliderMove, shapes []ShapeMove) error {
+	if err := t.MoveShapes(t.To, shapes); err != nil {
+		return fmt.Errorf("golem: %s: move shapes: %w", op, err)
+	}
+	return s.transferUnchanged(op, "MoveShapes", t, froms, moves, colliders)
+}
+
 // synchronizeRetired advances the retire epoch of every source physics service
 // that destroyed bodies in a transfer (so commands queued earlier for those
 // bodies no longer fault on their stale handles) and synchronizes its world.
-// A failing synchronization faults that space.
+// A failing synchronization faults that space (faultServices).
 func synchronizeRetired(op string, retired []*physicsService) error {
 	var errs []error
 	for _, ps := range retired {
 		ps.retireEpoch++
 		if err := ps.world.Synchronize(); err != nil {
-			if ps.fault == nil {
-				ps.fault = err
-			}
-			errs = append(errs, fmt.Errorf("golem: %s: synchronize space %d physics: %w", op, ps.space.id, err))
+			err = fmt.Errorf("golem: %s: synchronize space %d physics: %w", op, ps.space.id, err)
+			ps.space.faultServices(err)
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
@@ -266,7 +411,10 @@ func synchronizeRetired(op string, retired []*physicsService) error {
 // controllers, when the source world reports them) of the moving physics
 // entities, calls RebuildPhysics once on the destination world and admits each
 // returned body. On any failure every returned body is destroyed and nothing
-// else has changed. Admitted bodies are recorded in moves.
+// else has changed (failing to destroy them faults the destination). Admitted
+// bodies are recorded in moves. A failing source Synchronize is a plain
+// rejection: it only fails for a closed, faulted or busy world and changes no
+// state.
 func (s *Server) rebuildTransferPhysics(op string, t SpaceTransfer, dst *spaceRuntime, moves []spaceTransferEntity) (map[int64]p.BodyHandle, error) {
 	dps := dst.physics
 	var sources []PhysicsTransferSource
@@ -302,10 +450,10 @@ func (s *Server) rebuildTransferPhysics(op string, t SpaceTransfer, dst *spaceRu
 	}
 	created, err := t.RebuildPhysics(dps.world, sources)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("golem: %s: rebuild physics: %w", op, err), destroyTransferBodies(dps, created))
+		return nil, errors.Join(fmt.Errorf("golem: %s: rebuild physics: %w", op, err), rollbackTransferBodies(op, dst, created))
 	}
 	if err := s.admitTransferBodies(op, dps, moves, created); err != nil {
-		return nil, errors.Join(err, destroyTransferBodies(dps, created))
+		return nil, errors.Join(err, rollbackTransferBodies(op, dst, created))
 	}
 	return created, nil
 }
@@ -408,6 +556,18 @@ func checkTransferController(dps *physicsService, m *spaceTransferEntity, h p.Bo
 		return errors.New("rebuilt body changes its character controller settings")
 	}
 	return nil
+}
+
+// rollbackTransferBodies destroys the bodies RebuildPhysics returned and
+// faults the destination when that fails: bodies the engine could not destroy
+// stay in its world, owned by nothing.
+func rollbackTransferBodies(op string, dst *spaceRuntime, created map[int64]p.BodyHandle) error {
+	err := destroyTransferBodies(dst.phys(), created)
+	if err != nil {
+		err = fmt.Errorf("golem: %s: destroy rebuilt bodies in space %d: %w", op, dst.id, err)
+		dst.faultServices(err)
+	}
+	return err
 }
 
 // destroyTransferBodies removes the bodies RebuildPhysics returned (with their

@@ -85,6 +85,27 @@ func (sp *Space) SetCollisionBackend(b CollisionBackend) {
 	sp.srv.ensureRuntime(sp.id).collision = b
 }
 
+// CollisionBackend returns this space's 2D collision backend, or nil when the
+// space has none. Space(0).CollisionBackend is Server.CollisionBackend. It is
+// read-only access for game code that registers its own shapes, such as a
+// SpaceTransfer.MoveShapes hook, and never creates the space's runtime. Call
+// on the tick goroutine or before Run.
+func (sp *Space) CollisionBackend() CollisionBackend {
+	if rt := sp.srv.runtime(sp.id); rt != nil {
+		return rt.collision
+	}
+	return nil
+}
+
+// CollisionBackend3D returns this space's 3D collision backend, or nil, like
+// CollisionBackend.
+func (sp *Space) CollisionBackend3D() CollisionBackend3D {
+	if rt := sp.srv.runtime(sp.id); rt != nil {
+		return rt.collision3D
+	}
+	return nil
+}
+
 // SetCollision3DBackend attaches a 3D collision backend to this space, with the
 // same per-space update and merged OnContact3D semantics as
 // SetCollisionBackend. Call before Run or on the tick goroutine (not

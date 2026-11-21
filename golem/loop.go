@@ -224,6 +224,9 @@ type Server struct {
 	collisionStepping bool                           // legacy collision phase, including its contact callbacks
 	transferring      bool                           // MoveToSpace rebuild/commit in progress
 	transferDeletes   []int64                        // DeleteEntity calls deferred until the transfer finishes
+	// navReattachPending holds the entities whose transfer runs traversal-cancel
+	// callbacks before reattaching their navigation; MoveToSpace rejects them.
+	navReattachPending map[int64]struct{}
 
 	// Avatar indexes (session ↔ entity). Protected by avatarMu; never hold
 	// avatarMu while calling registry hooks or interest AssignFOI/RemoveFOI.
@@ -556,6 +559,7 @@ func (s *Server) DeleteEntity(id int64) {
 		s.unregisterCollider(e)
 	}
 	s.reg.DeleteEntity(id)
+	ps.clearPendingDelete(id)
 }
 
 // Get returns the entity with the given ID, or (nil, false) if not found.
@@ -706,8 +710,9 @@ func (s *Server) SetRemovalSerializer(fn RemovalSerializer) {
 // handlers. Space(id).SetCollisionBackend configures other spaces.
 // Shape registration (Add/Remove) remains in game code. MoveToSpace moves only
 // schema colliders (ColliderProvider) registered through the layer helper;
-// shapes the game registers on a backend itself stay where they are, so remove
-// and re-register them on the destination's backend after MoveToSpace returns.
+// move shapes the game registers on a backend itself in
+// SpaceTransfer.MoveShapes, which finds both spaces' backends through
+// CollisionBackend and Space.CollisionBackend.
 // Call before Run or on the tick goroutine (not enforced). Panics when b
 // already serves another space: each space needs its own backend.
 func (s *Server) SetCollisionBackend(b collision.Backend) {
@@ -719,12 +724,24 @@ func (s *Server) SetCollisionBackend(b collision.Backend) {
 // When set, each tick syncs space-0 3D entity positions into the backend, steps
 // it, reads corrections back via Position3DWriter, and fires OnContact3D
 // handlers. Space(id).SetCollision3DBackend configures other spaces. As with
-// SetCollisionBackend, shapes the game registers itself are not moved by
-// MoveToSpace; re-register them after it returns. Panics when b already
-// serves another space.
+// SetCollisionBackend, shapes the game registers itself move only through
+// SpaceTransfer.MoveShapes. Panics when b already serves another space.
 func (s *Server) SetCollision3DBackend(b collision3d.Backend) {
 	s.mustUnshared("SetCollision3DBackend", "3D collision backend", 0, b, collision3DOf)
 	s.space0.collision3D = b
+}
+
+// CollisionBackend returns space 0's 2D collision backend, or nil. It is
+// read-only access for game code that registers its own shapes, such as a
+// SpaceTransfer.MoveShapes hook. Call on the tick goroutine or before Run.
+func (s *Server) CollisionBackend() collision.Backend {
+	return s.space0.collision
+}
+
+// CollisionBackend3D returns space 0's 3D collision backend, or nil, like
+// CollisionBackend.
+func (s *Server) CollisionBackend3D() collision3d.Backend {
+	return s.space0.collision3D
 }
 
 // OnContact registers a callback invoked after each collision step when at

@@ -90,6 +90,9 @@ type physicsAttachment struct {
 	activation       PhysicsActivationWriter
 	config           PhysicsAttachmentConfig
 	localAnchor      p.Pose
+	// incarnation is the registry incarnation of entity when it attached; the
+	// step compares it instead of the Entity value, which may be non-comparable.
+	incarnation uint64
 }
 
 type physicsService struct {
@@ -114,9 +117,10 @@ type physicsService struct {
 	// retireEpoch advances whenever MoveToSpace destroys bodies of this world.
 	// A command queued before that fails with a stale handle without faulting.
 	retireEpoch uint64
-	// pendingDeletes holds the entities whose DeleteEntity was deferred to a
-	// queued command; transfers reject them.
-	pendingDeletes map[int64]struct{}
+	// pendingDeletes maps the entities whose DeleteEntity was deferred to a
+	// queued command to the registry incarnation that command deletes;
+	// transfers reject them.
+	pendingDeletes map[int64]uint64
 }
 
 // SetPhysicsWorld installs space 0's tick-owned physics world before Run; it
@@ -227,7 +231,8 @@ func (s *Server) attachPhysics(rt *spaceRuntime, id int64, body p.BodyHandle, cf
 	if !validPhysicsState(state) || state.Handle != body || state.Owner != 0 && state.Owner != id || state.Anchor.Position != (p.Vec3{X: x, Y: y, Z: z}) {
 		return errors.New("golem: physics body owner or gameplay anchor does not match entity")
 	}
-	a := &physicsAttachment{id: id, body: body, entity: e, position: position, writer: writer,
+	incarnation, _ := s.reg.Incarnation(id)
+	a := &physicsAttachment{id: id, body: body, entity: e, incarnation: incarnation, position: position, writer: writer,
 		config: cfg, localAnchor: state.Pose.Inverse().Compose(state.Anchor)}
 	if cfg.BindRotation {
 		a.rotation, _ = e.(PhysicsRotationWriter)
@@ -291,8 +296,12 @@ func (s *Server) foreignPhysicsBody(ps *physicsService, body p.BodyHandle) error
 
 // DetachPhysics destroys an attachment and its owned body. It is idempotent.
 // During accepted-frame callbacks of the entity's space it queues removal for
-// the next tick.
+// the next tick. It returns an error wrapping physics3d.ErrBusy during a space
+// transfer (SpaceTransfer.RebuildPhysics and MoveShapes).
 func (s *Server) DetachPhysics(id int64) error {
+	if err := s.transferBusy("DetachPhysics"); err != nil {
+		return err
+	}
 	return s.runtimeOf(id).phys().detachEntity(id)
 }
 
@@ -508,19 +517,42 @@ func (ps *physicsService) mutable() error {
 	return nil
 }
 
+// queueDelete defers DeleteEntity(id) to the command queue. Repeated calls
+// queue once, an unknown entity queues nothing, and the queued command deletes
+// only the incarnation it was queued for, sparing a replacement registered
+// with the same ID before the queue drains.
 func (ps *physicsService) queueDelete(id int64) error {
+	incarnation, exists := ps.server.reg.Incarnation(id)
+	if !exists {
+		return nil
+	}
+	if pending, ok := ps.pendingDeletes[id]; ok && pending == incarnation {
+		return nil
+	}
 	if err := ps.queue(func(p.World) error {
-		delete(ps.pendingDeletes, id)
-		ps.server.DeleteEntity(id)
+		if pending, ok := ps.pendingDeletes[id]; ok && pending == incarnation {
+			delete(ps.pendingDeletes, id)
+		}
+		if current, ok := ps.server.reg.Incarnation(id); ok && current == incarnation {
+			ps.server.DeleteEntity(id)
+		}
 		return ps.fault
 	}); err != nil {
 		return err
 	}
 	if ps.pendingDeletes == nil {
-		ps.pendingDeletes = make(map[int64]struct{})
+		ps.pendingDeletes = make(map[int64]uint64)
 	}
-	ps.pendingDeletes[id] = struct{}{}
+	ps.pendingDeletes[id] = incarnation
 	return nil
+}
+
+// clearPendingDelete forgets a deferred deletion once id was deleted another
+// way; the queued command then finds a different (or no) incarnation.
+func (ps *physicsService) clearPendingDelete(id int64) {
+	if ps != nil && len(ps.pendingDeletes) != 0 {
+		delete(ps.pendingDeletes, id)
+	}
 }
 
 // deletePending reports whether DeleteEntity(id) waits in the command queue.
@@ -597,9 +629,9 @@ func (ps *physicsService) step(dt float64) (stepErr error) {
 		if readErr != nil {
 			return readErr
 		}
-		entity, exists := s.Get(id)
+		incarnation, exists := s.reg.Incarnation(id)
 		x, y, z := a.position.Position3D()
-		if !exists || entity != a.entity || !validPhysicsState(state) || state.Anchor.Position != (p.Vec3{X: x, Y: y, Z: z}) {
+		if !exists || incarnation != a.incarnation || !validPhysicsState(state) || state.Anchor.Position != (p.Vec3{X: x, Y: y, Z: z}) {
 			return fmt.Errorf("golem: physics entity %d was changed outside its pose authority", id)
 		}
 		if f.Contains(id) && !physicsNavigationMode(state.Mode) {

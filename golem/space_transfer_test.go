@@ -27,6 +27,11 @@ type transferTestWorld struct {
 	// destroyErr, when set, fails DestroyBody for the handles it returns an
 	// error for.
 	destroyErr func(p.BodyHandle) error
+	// syncErr, when set, fails Synchronize when it returns an error.
+	syncErr func() error
+	// fault is reported as Metrics().Fault, like a faulted Box3D world that
+	// still answers Body.
+	fault error
 	// controllers holds the enabled BodyDesc.Controller of each body, reported
 	// through physics3d.CharacterControllerReader.
 	controllers map[p.BodyHandle]p.CharacterControllerConfig
@@ -91,6 +96,21 @@ func (w *transferTestWorld) DestroyBody(h p.BodyHandle, reason p.CleanupReason) 
 		}
 	}
 	return nil
+}
+
+func (w *transferTestWorld) Synchronize() error {
+	if w.syncErr != nil {
+		if err := w.syncErr(); err != nil {
+			return err
+		}
+	}
+	return w.physicsTestWorld.Synchronize()
+}
+
+func (w *transferTestWorld) Metrics() p.Metrics {
+	m := w.physicsTestWorld.Metrics()
+	m.Fault = w.fault
+	return m
 }
 
 func (w *transferTestWorld) Simulate(f p.Frame) (p.FrameResult, error) {
@@ -954,49 +974,511 @@ func withTransferCollision(s *Server) (*pointBackend2D, *pointBackend2D) {
 	return b0, b5
 }
 
-func TestSpaceTransferSourceDestroyFailureChangesNothing(t *testing.T) {
+func TestSpaceTransferSourceDestroyFailureFaultsBothSpaces(t *testing.T) {
+	for _, stuckID := range []int64{1, 2} {
+		t.Run(fmt.Sprintf("body %d", stuckID), func(t *testing.T) {
+			s, a, b := newTransferTestServer(t)
+			b0, b5 := withTransferCollision(s)
+			first := transferTestEntity(t, s, 0, 1, surface.Vec3{X: 1})
+			second := transferTestEntity(t, s, 0, 2, surface.Vec3{X: 2})
+			collider := newSpaceCollider(3)
+			createIn(t, s, 0, collider)
+			bodies := map[int64]p.BodyHandle{
+				1: transferTestAttach(t, s, a, first, p.FreeDynamic, PhysicsAttachmentConfig{}),
+				2: transferTestAttach(t, s, a, second, p.FreeDynamic, PhysicsAttachmentConfig{}),
+			}
+			stuck := bodies[stuckID]
+			a.destroyErr = func(h p.BodyHandle) error {
+				if h == stuck {
+					return errors.New("body is locked")
+				}
+				return nil
+			}
+			calls := 0
+			var moveErr error
+			s.OnTick(func(float64, *Server) {
+				if s.Tick() == 1 {
+					moveErr = s.MoveToSpace(SpaceTransfer{To: 5, Entities: []int64{1, 2, 3}, RebuildPhysics: rebuildOffset(p.Vec3{X: 100}, &calls)})
+				}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			runErr := s.Run(ctx)
+			if moveErr == nil || !strings.Contains(moveErr.Error(), "body is locked") {
+				t.Fatalf("move with a failing source destroy = %v", moveErr)
+			}
+			if runErr == nil || !strings.Contains(runErr.Error(), "body is locked") {
+				t.Fatalf("Run after the failed move = %v, want the transfer fault", runErr)
+			}
+			for _, id := range []int64{1, 2, 3} {
+				if space, _ := s.EntitySpace(id); space != 0 {
+					t.Fatalf("entity %d moved to space %d", id, space)
+				}
+			}
+			if _, ok := b0.shapes[3]; !ok {
+				t.Fatal("collider left the source backend")
+			}
+			if _, ok := b5.shapes[3]; ok {
+				t.Fatal("collider registered in the destination backend")
+			}
+			if len(b.bodies) != 0 || len(s.runtime(5).physics.agents) != 0 {
+				t.Fatalf("destination kept %d bodies and %d attachments", len(b.bodies), len(s.runtime(5).physics.agents))
+			}
+			if s.physics.agents[stuckID] == nil || s.physics.agents[stuckID].body != stuck {
+				t.Fatal("the entity whose body survived lost its source attachment")
+			}
+			for _, space := range []SpaceID{0, 5} {
+				if ready, _, err := s.Space(space).PhysicsReady(); ready || err == nil {
+					t.Fatalf("space %d physics reported ready after the failed move (%v)", space, err)
+				}
+				if r := s.Space(space).NavigationReady(); r.Ready || r.Err == nil {
+					t.Fatalf("space %d navigation reported ready after the failed move: %+v", space, r)
+				}
+			}
+		})
+	}
+}
+
+func TestSpaceTransferPreflightRejectsUnusableSources(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(a *transferTestWorld, h p.BodyHandle) func(p.World, []PhysicsTransferSource)
+		want    string
+	}{
+		{"body destroyed by the callback", func(a *transferTestWorld, h p.BodyHandle) func(p.World, []PhysicsTransferSource) {
+			return func(p.World, []PhysicsTransferSource) {
+				if err := a.DestroyBody(h, p.Deleted); err != nil {
+					panic(err)
+				}
+			}
+		}, "source body of entity 2"},
+		{"faulted source world", func(a *transferTestWorld, _ p.BodyHandle) func(p.World, []PhysicsTransferSource) {
+			a.fault = errors.New("native solver fault")
+			return func(p.World, []PhysicsTransferSource) {}
+		}, "native solver fault"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, a, b := newTransferTestServer(t)
+			b0, b5 := withTransferCollision(s)
+			crate := transferTestEntity(t, s, 0, 2, surface.Vec3{X: 2})
+			h := transferTestAttach(t, s, a, crate, p.FreeDynamic, PhysicsAttachmentConfig{})
+			createIn(t, s, 0, newSpaceCollider(3))
+			startTestSpaces(t, s)
+			during := tc.prepare(a, h)
+			calls, shapeCalls := 0, 0
+			rebuild := rebuildOffset(p.Vec3{X: 100}, &calls)
+			err := s.MoveToSpace(SpaceTransfer{To: 5, Entities: []int64{2, 3},
+				RebuildPhysics: func(dst p.World, src []PhysicsTransferSource) (map[int64]p.BodyHandle, error) {
+					during(dst, src)
+					return rebuild(dst, src)
+				},
+				MoveShapes: func(SpaceID, []ShapeMove) error { shapeCalls++; return nil },
+			})
+			if err == nil || !strings.Contains(err.Error(), tc.want) || calls != 1 || shapeCalls != 0 {
+				t.Fatalf("move = %v (rebuild calls %d, shape calls %d)", err, calls, shapeCalls)
+			}
+			for _, id := range []int64{2, 3} {
+				if space, _ := s.EntitySpace(id); space != 0 {
+					t.Fatalf("entity %d moved to space %d", id, space)
+				}
+			}
+			if _, ok := b0.shapes[3]; !ok || len(b5.shapes) != 0 {
+				t.Fatal("rejected move changed colliders")
+			}
+			if len(b.bodies) != 0 || s.physics.agents[2] == nil || s.physics.agents[2].body != h {
+				t.Fatalf("rejected move kept %d rebuilt bodies or dropped the source attachment", len(b.bodies))
+			}
+			if s.physics.fault != nil || s.runtime(5).physics.fault != nil {
+				t.Fatalf("rejected move faulted: source %v, destination %v", s.physics.fault, s.runtime(5).physics.fault)
+			}
+		})
+	}
+}
+
+func TestSpaceTransferRollbackDestroyFailureFaultsDestination(t *testing.T) {
 	s, a, b := newTransferTestServer(t)
-	b0, b5 := withTransferCollision(s)
-	first := transferTestEntity(t, s, 0, 1, surface.Vec3{X: 1})
-	second := transferTestEntity(t, s, 0, 2, surface.Vec3{X: 2})
-	collider := newSpaceCollider(3)
-	createIn(t, s, 0, collider)
-	transferTestAttach(t, s, a, first, p.FreeDynamic, PhysicsAttachmentConfig{})
-	stuck := transferTestAttach(t, s, a, second, p.FreeDynamic, PhysicsAttachmentConfig{})
+	crate := transferTestEntity(t, s, 0, 2, surface.Vec3{X: 2})
+	transferTestAttach(t, s, a, crate, p.FreeDynamic, PhysicsAttachmentConfig{})
 	startTestSpaces(t, s)
-	a.destroyErr = func(h p.BodyHandle) error {
-		if h == stuck {
-			return errors.New("body is locked")
+	b.destroyErr = func(p.BodyHandle) error { return errors.New("destination locked") }
+	calls := 0
+	rebuild := rebuildOffset(p.Vec3{X: 100}, &calls)
+	err := s.MoveToSpace(SpaceTransfer{To: 5, Entities: []int64{2}, RebuildPhysics: func(dst p.World, src []PhysicsTransferSource) (map[int64]p.BodyHandle, error) {
+		out, _ := rebuild(dst, src)
+		return out, errors.New("rebuild gave up")
+	}})
+	if err == nil || !strings.Contains(err.Error(), "rebuild gave up") || !strings.Contains(err.Error(), "destination locked") {
+		t.Fatalf("move = %v", err)
+	}
+	if space, _ := s.EntitySpace(2); space != 0 || s.physics.agents[2] == nil {
+		t.Fatal("rejected move changed the entity")
+	}
+	if s.physics.fault != nil {
+		t.Fatalf("source faulted: %v", s.physics.fault)
+	}
+	if ready, _, err := s.Space(5).PhysicsReady(); ready || err == nil {
+		t.Fatal("destination that kept an undestroyable body reported ready")
+	}
+	if r := s.Space(5).NavigationReady(); r.Ready {
+		t.Fatal("destination navigation reported ready")
+	}
+}
+
+func TestSpaceTransferSourceSynchronizeFailureFaultsThatSpace(t *testing.T) {
+	s, a, b := newTransferTestServer(t)
+	crate := transferTestEntity(t, s, 0, 2, surface.Vec3{X: 2})
+	transferTestAttach(t, s, a, crate, p.FreeDynamic, PhysicsAttachmentConfig{})
+	startTestSpaces(t, s)
+	destroyed := false
+	a.destroyErr = func(p.BodyHandle) error { destroyed = true; return nil }
+	a.syncErr = func() error {
+		if destroyed {
+			return errors.New("broadphase lost")
 		}
 		return nil
 	}
 	calls := 0
-	err := s.MoveToSpace(SpaceTransfer{To: 5, Entities: []int64{1, 2, 3}, RebuildPhysics: rebuildOffset(p.Vec3{X: 100}, &calls)})
-	if err == nil || !strings.Contains(err.Error(), "body is locked") {
-		t.Fatalf("move with a failing source destroy = %v", err)
+	err := s.MoveToSpace(SpaceTransfer{To: 5, Entities: []int64{2}, RebuildPhysics: rebuildOffset(p.Vec3{X: 100}, &calls)})
+	if err == nil || !strings.Contains(err.Error(), "broadphase lost") {
+		t.Fatalf("move = %v", err)
 	}
-	for _, id := range []int64{1, 2, 3} {
-		if space, _ := s.EntitySpace(id); space != 0 {
-			t.Fatalf("entity %d moved to space %d", id, space)
+	if space, _ := s.EntitySpace(2); space != 5 || s.runtime(5).physics.agents[2] == nil || len(b.owned(2)) != 1 {
+		t.Fatal("the move did not commit after its source bodies were destroyed")
+	}
+	if ready, _, err := s.PhysicsReady(); ready || err == nil {
+		t.Fatal("source with a failed synchronization reported ready")
+	}
+	if r := s.NavigationReady(); r.Ready {
+		t.Fatal("source navigation reported ready")
+	}
+	if s.runtime(5).physics.fault != nil {
+		t.Fatalf("destination faulted: %v", s.runtime(5).physics.fault)
+	}
+}
+
+// sliceCollider is a non-comparable entity value (it holds a slice) with a
+// schema collider: comparing two of them with == panics.
+type sliceCollider struct {
+	tags []string
+	*spaceCollider
+}
+
+// sliceBody is a non-comparable physics entity value.
+type sliceBody struct {
+	tags []string
+	*navigationTestEntity
+}
+
+func TestSpaceTransferAcceptsNonComparableEntities(t *testing.T) {
+	s, a, b := newTransferTestServer(t)
+	b0, b5 := withTransferCollision(s)
+	collider := sliceCollider{tags: []string{"door"}, spaceCollider: newSpaceCollider(3)}
+	if err := s.CreateEntityIn(0, collider); err != nil {
+		t.Fatal(err)
+	}
+	body := sliceBody{tags: []string{"crate"}, navigationTestEntity: &navigationTestEntity{id: 2, position: surface.Vec3{X: 2}}}
+	if err := s.CreateEntityIn(0, body); err != nil {
+		t.Fatal(err)
+	}
+	h := a.add(2, p.FreeDynamic, physicsPoint(body.position))
+	if err := s.AttachPhysics(2, h, PhysicsAttachmentConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	startTestSpaces(t, s)
+	transferTestTick(t, s, nil) // the physics step checks the entity identity
+	calls := 0
+	if err := s.MoveToSpace(SpaceTransfer{To: 5, Entities: []int64{3, 2}, RebuildPhysics: rebuildOffset(p.Vec3{X: 100}, &calls)}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{2, 3} {
+		if space, _ := s.EntitySpace(id); space != 5 {
+			t.Fatalf("entity %d in space %d", id, space)
 		}
 	}
-	if _, ok := b0.shapes[3]; !ok {
-		t.Fatal("collider left the source backend")
+	if _, ok := b0.shapes[3]; ok {
+		t.Fatal("collider stayed in the source backend")
 	}
-	if _, ok := b5.shapes[3]; ok {
-		t.Fatal("collider registered in the destination backend")
+	if _, ok := b5.shapes[3]; !ok || len(b.owned(2)) != 1 {
+		t.Fatal("collider or body did not arrive")
 	}
-	if len(b.bodies) != 0 || len(s.runtime(5).physics.agents) != 0 {
-		t.Fatalf("destination kept %d bodies and %d attachments", len(b.bodies), len(s.runtime(5).physics.agents))
+	transferTestTick(t, s, nil)
+}
+
+func TestDeferredDeleteSparesReplacementEntity(t *testing.T) {
+	s := NewServer(ServerConfig{TickRate: 200})
+	s.SetRemovalSerializer(func(int64, uint64) ([]byte, error) { return nil, nil })
+	w := newTransferTestWorld(1, nil)
+	if err := s.SetPhysicsWorld(w); err != nil {
+		t.Fatal(err)
 	}
-	if s.physics.agents[2] == nil || s.physics.agents[2].body != stuck {
-		t.Fatal("the entity whose body survived lost its source attachment")
+	original := transferTestEntity(t, s, 0, 2, surface.Vec3{X: 2})
+	transferTestAttach(t, s, w, original, p.FreeDynamic, PhysicsAttachmentConfig{})
+	w.simulate = func(f p.Frame, r *p.FrameResult) {
+		if f.ID == 1 {
+			r.Events = []p.ContactEvent{{}}
+		}
 	}
-	if s.physics.fault == nil || s.runtime(5).physics.fault != nil {
-		t.Fatalf("faults: source %v, destination %v", s.physics.fault, s.runtime(5).physics.fault)
+	queued := -1
+	if err := s.OnPhysicsContact(func([]p.ContactEvent) {
+		for range 3 {
+			s.DeleteEntity(2)
+		}
+		queued = len(s.physics.commands)
+	}); err != nil {
+		t.Fatal(err)
 	}
-	if ready, _, _ := s.PhysicsReady(); ready {
-		t.Fatal("faulted source space reported ready")
+	replacement := &navigationTestEntity{id: 2, position: surface.Vec3{X: 9}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var survived bool
+	s.OnTickEnd(func(tick uint64, _ time.Duration) {
+		switch tick {
+		case 1:
+			// Delete the original another way and reuse its ID before the
+			// deferred deletion drains.
+			s.DeleteEntity(2)
+			if err := s.CreateEntity(replacement); err != nil {
+				t.Error(err)
+			}
+		case 3:
+			e, ok := s.Get(2)
+			survived = ok && e == Entity(replacement) && !s.physics.deletePending(2)
+			cancel()
+		}
+	})
+	if err := s.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v", err)
+	}
+	if queued != 1 {
+		t.Fatalf("three deferred deletions queued %d commands", queued)
+	}
+	if !survived {
+		t.Fatal("the deferred deletion removed the replacement entity")
+	}
+}
+
+func TestSpaceTransferCancelCallbackCannotMoveTheWalkerAgain(t *testing.T) {
+	cfg := NavigationAgentConfig{Profile: "human", Speed: 2, Projection: surface.ProjectionOptions{Horizontal: .5, Up: .5, Down: .5}}
+	s := NewServer(ServerConfig{})
+	if err := s.SetSurfaceNavigation(&navigationTestBackend{revision: 1}, NavigationConfig{MovementBudget: time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Space(7).SetSurfaceNavigation(&navigationTestBackend{revision: 1}, NavigationConfig{MovementBudget: time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	transferTestEntity(t, s, 0, 1, surface.Vec3{})
+	transferTestEntity(t, s, 0, 2, surface.Vec3{X: 3})
+	if err := s.AttachNavigation(1, cfg); err != nil {
+		t.Fatal(err)
+	}
+	startTestSpaces(t, s)
+	var walkerErr, otherErr error
+	s.navigation.agents[1].traversal = &navigationTraversal{action: &transferCancelAction{cancel: func() {
+		walkerErr = s.SetEntitySpace(1, 0)
+		otherErr = s.SetEntitySpace(2, 7)
+	}}}
+	if err := s.SetEntitySpace(1, 7); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(walkerErr, p.ErrBusy) || !strings.Contains(walkerErr.Error(), "navigation reattachment") {
+		t.Fatalf("moving the walker from its cancel callback = %v, want ErrBusy", walkerErr)
+	}
+	if otherErr != nil {
+		t.Fatalf("moving another entity from the cancel callback = %v", otherErr)
+	}
+	if space, _ := s.EntitySpace(1); space != 7 || s.runtime(7).navigation.agents[1] == nil || s.navigation.agents[1] != nil {
+		t.Fatal("the walker did not end in the destination with navigation reattached")
+	}
+	if space, _ := s.EntitySpace(2); space != 7 {
+		t.Fatal("the other entity did not move")
+	}
+	if len(s.navReattachPending) != 0 {
+		t.Fatalf("reattachment marks leaked: %v", s.navReattachPending)
+	}
+	if err := s.SetEntitySpace(1, 0); err != nil || s.navigation.agents[1] == nil {
+		t.Fatalf("moving the walker back after the transfer = %v", err)
+	}
+}
+
+// moveGameShapes is a SpaceTransfer.MoveShapes hook moving the shapes the test
+// game registered itself (ids in game) between the 2D backends of two spaces.
+func moveGameShapes(s *Server, game map[int64]bool) func(SpaceID, []ShapeMove) error {
+	return func(to SpaceID, moves []ShapeMove) error {
+		for _, m := range moves {
+			if !game[m.Entity] {
+				continue
+			}
+			from, dst := s.Space(m.From).CollisionBackend(), s.Space(to).CollisionBackend()
+			from.Remove(m.Entity)
+			dst.Add(m.Entity, CollisionCircle{R: 1}, 1, 1, false)
+			dst.Update(m.Entity, float64(m.Position.X), float64(m.Position.Y))
+		}
+		return nil
+	}
+}
+
+func TestSpaceTransferMoveShapesMovesGameShapes(t *testing.T) {
+	for _, physics := range []bool{true, false} {
+		t.Run(fmt.Sprintf("physics=%v", physics), func(t *testing.T) {
+			s, a, b := newTransferTestServer(t)
+			b0, b5 := withTransferCollision(s)
+			if s.CollisionBackend() != CollisionBackend(b0) || s.Space(5).CollisionBackend() != CollisionBackend(b5) || s.Space(9).CollisionBackend() != nil || s.Space(5).CollisionBackend3D() != nil {
+				t.Fatal("collision backend getters")
+			}
+			crate := transferTestEntity(t, s, 0, 2, surface.Vec3{X: 2})
+			collider := newSpaceCollider(3)
+			collider.x, collider.y = 7, 8
+			createIn(t, s, 0, collider)
+			transferTestEntity(t, s, 0, 4, surface.Vec3{X: 4, Y: 1, Z: 6})
+			entities := []int64{3, 4}
+			if physics {
+				transferTestAttach(t, s, a, crate, p.FreeDynamic, PhysicsAttachmentConfig{})
+				entities = []int64{2, 3, 4}
+			}
+			game := map[int64]bool{2: physics, 4: true}
+			for id, ok := range game {
+				if ok {
+					b0.Add(id, CollisionCircle{R: 1}, 1, 1, false)
+				}
+			}
+			startTestSpaces(t, s)
+			var got []ShapeMove
+			calls := 0
+			move := moveGameShapes(s, game)
+			rebuildCalls := 0
+			err := s.MoveToSpace(SpaceTransfer{To: 5, Entities: entities, RebuildPhysics: rebuildOffset(p.Vec3{X: 100}, &rebuildCalls),
+				MoveShapes: func(to SpaceID, moves []ShapeMove) error {
+					calls++
+					got = append(got, moves...)
+					if !s.transferring {
+						t.Error("MoveShapes ran outside the transfer")
+					}
+					for _, m := range moves {
+						if space, _ := s.EntitySpace(m.Entity); space != m.From {
+							t.Errorf("entity %d already left space %d", m.Entity, m.From)
+						}
+					}
+					if _, ok := b0.shapes[3]; !ok {
+						t.Error("schema collider moved before MoveShapes")
+					}
+					return move(to, moves)
+				}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []ShapeMove{{Entity: 3, From: 0, Position: p.Vec3{X: 7, Y: 8}}, {Entity: 4, From: 0, Position: p.Vec3{X: 4, Y: 1, Z: 6}}}
+			if physics {
+				want = append([]ShapeMove{{Entity: 2, From: 0, Position: p.Vec3{X: 102}}}, want...)
+			}
+			if calls != 1 || !slices.Equal(got, want) {
+				t.Fatalf("MoveShapes calls %d with %+v, want %+v", calls, got, want)
+			}
+			if s.transferring {
+				t.Fatal("transfer flag left set")
+			}
+			for id := range map[int64]bool{3: true, 4: true, 2: physics} {
+				if id == 2 && !physics {
+					continue
+				}
+				if _, ok := b0.shapes[id]; ok {
+					t.Fatalf("shape %d stayed in the source backend", id)
+				}
+				if _, ok := b5.shapes[id]; !ok {
+					t.Fatalf("shape %d is missing from the destination backend", id)
+				}
+			}
+			if b5.pos[4] != [2]float64{4, 1} {
+				t.Fatalf("game shape position = %v", b5.pos[4])
+			}
+			if physics && (b5.pos[2] != [2]float64{102, 0} || len(b.owned(2)) != 1) {
+				t.Fatalf("physics game shape position = %v", b5.pos[2])
+			}
+		})
+	}
+}
+
+func TestSpaceTransferMoveShapesErrorChangesNothing(t *testing.T) {
+	s, a, b := newTransferTestServer(t)
+	b0, b5 := withTransferCollision(s)
+	crate := transferTestEntity(t, s, 0, 2, surface.Vec3{X: 2})
+	h := transferTestAttach(t, s, a, crate, p.FreeDynamic, PhysicsAttachmentConfig{})
+	createIn(t, s, 0, newSpaceCollider(3))
+	transferTestEntity(t, s, 0, 4, surface.Vec3{X: 4})
+	b0.Add(4, CollisionCircle{R: 1}, 1, 1, false)
+	startTestSpaces(t, s)
+	for _, tc := range []struct {
+		name     string
+		entities []int64
+	}{{"full", []int64{2, 3, 4}}, {"collider only", []int64{3, 4}}} {
+		calls := 0
+		rebuildCalls := 0
+		err := s.MoveToSpace(SpaceTransfer{To: 5, Entities: tc.entities, RebuildPhysics: rebuildOffset(p.Vec3{X: 100}, &rebuildCalls),
+			MoveShapes: func(SpaceID, []ShapeMove) error { calls++; return errors.New("no room") }})
+		if err == nil || !strings.Contains(err.Error(), "no room") || calls != 1 {
+			t.Fatalf("%s: move = %v (calls %d)", tc.name, err, calls)
+		}
+		for _, id := range []int64{2, 3, 4} {
+			if space, _ := s.EntitySpace(id); space != 0 {
+				t.Fatalf("%s: entity %d moved to space %d", tc.name, id, space)
+			}
+		}
+		if _, ok := b0.shapes[3]; !ok {
+			t.Fatalf("%s: schema collider left the source", tc.name)
+		}
+		if _, ok := b0.shapes[4]; !ok || len(b5.shapes) != 0 {
+			t.Fatalf("%s: shapes changed", tc.name)
+		}
+		if len(b.bodies) != 0 || s.physics.agents[2] == nil || s.physics.agents[2].body != h {
+			t.Fatalf("%s: rebuilt bodies kept (%d) or source attachment changed", tc.name, len(b.bodies))
+		}
+		if _, err := a.Body(h); err != nil {
+			t.Fatalf("%s: source body destroyed", tc.name)
+		}
+		if s.physics.fault != nil || s.runtime(5).physics.fault != nil || s.transferring {
+			t.Fatalf("%s: rejected move faulted or kept the transfer flag", tc.name)
+		}
+	}
+}
+
+func TestSpaceTransferDetachCallsAreBusyDuringTransfer(t *testing.T) {
+	s, a, _ := newTransferTestServer(t)
+	crate := transferTestEntity(t, s, 0, 2, surface.Vec3{X: 2})
+	transferTestAttach(t, s, a, crate, p.FreeDynamic, PhysicsAttachmentConfig{})
+	walker := transferTestEntity(t, s, 0, 1, surface.Vec3{X: 1})
+	transferTestAttach(t, s, a, walker, p.DrivenCharacter, PhysicsAttachmentConfig{})
+	if err := s.AttachNavigation(1, transferNavConfig); err != nil {
+		t.Fatal(err)
+	}
+	startTestSpaces(t, s)
+	errs := map[string]error{}
+	calls := 0
+	rebuild := rebuildOffset(p.Vec3{X: 100}, &calls)
+	err := s.MoveToSpace(SpaceTransfer{To: 5, Entities: []int64{1, 2},
+		RebuildPhysics: func(dst p.World, src []PhysicsTransferSource) (map[int64]p.BodyHandle, error) {
+			errs["DetachPhysics in RebuildPhysics"] = s.DetachPhysics(2)
+			errs["DetachNavigation in RebuildPhysics"] = s.DetachNavigation(1)
+			return rebuild(dst, src)
+		},
+		MoveShapes: func(SpaceID, []ShapeMove) error {
+			errs["DetachPhysics in MoveShapes"] = s.DetachPhysics(2)
+			errs["DetachNavigation in MoveShapes"] = s.DetachNavigation(1)
+			errs["AttachNavigation in MoveShapes"] = s.AttachNavigation(2, transferNavConfig)
+			return nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(errs) != 5 {
+		t.Fatalf("hooks ran %d checks", len(errs))
+	}
+	for label, err := range errs {
+		if !errors.Is(err, p.ErrBusy) {
+			t.Fatalf("%s = %v, want ErrBusy", label, err)
+		}
+	}
+	dst := s.runtime(5)
+	if dst.physics.agents[1] == nil || dst.physics.agents[2] == nil || dst.navigation.agents[1] == nil || dst.navigation.agents[2] != nil {
+		t.Fatal("a rejected detach changed the moved attachments")
 	}
 }
 

@@ -66,12 +66,50 @@ type SpaceTransfer struct {
 	// physics.
 	//
 	// Ownership: when the transfer is rolled back (the callback fails, a body is
-	// rejected, or a source cannot be detached), the engine destroys only the
-	// bodies returned in the map, with their colliders and joints. The callback
-	// owns everything else it created, such as shared shapes or bodies it did
-	// not return, both on error and on success; on success the returned bodies
-	// belong to their new attachments.
+	// rejected, MoveShapes fails, or a source cannot be detached), the engine
+	// destroys only the bodies returned in the map, with their colliders and
+	// joints. The callback owns everything else it created, such as shared
+	// shapes or bodies it did not return, both on error and on success; on
+	// success the returned bodies belong to their new attachments.
 	RebuildPhysics func(dst p.World, src []PhysicsTransferSource) (map[int64]p.BodyHandle, error)
+	// MoveShapes moves the shapes the game registered itself on legacy
+	// collision backends (outside the layer helpers, which move schema
+	// colliders automatically) for every entity of the batch that changes
+	// space. Optional. It is called once, on the tick goroutine, after
+	// RebuildPhysics and after every check that can reject the transfer, just
+	// before the commit, in Entities order; it is also called for batches
+	// without physics or navigation. Find the backends with
+	// Space(from).CollisionBackend / CollisionBackend3D and
+	// Space(to).CollisionBackend / CollisionBackend3D: remove each shape from
+	// the source backend, add it on the destination backend and Update it to
+	// ShapeMove.Position.
+	//
+	// On error the hook must leave every shape as it found it; MoveToSpace then
+	// destroys the rebuilt bodies and returns the error with nothing changed.
+	// After it succeeds the transfer commits; if a backend fails during the
+	// commit the affected spaces fault (Run ends) and the shapes stay moved.
+	// Like RebuildPhysics, it must not call Server APIs: attach and detach
+	// calls, CreateEntityWithSetup and MoveToSpace return an error wrapping
+	// physics3d.ErrBusy, DeleteEntity is deferred until the transfer has
+	// finished, and a change to a moving entity rejects the transfer (the
+	// shapes have then already moved).
+	MoveShapes func(to SpaceID, moves []ShapeMove) error
+}
+
+// ShapeMove is one entity whose game-registered collision shapes
+// SpaceTransfer.MoveShapes moves.
+type ShapeMove struct {
+	// Entity is the moving entity.
+	Entity int64
+	// From is the entity's source space.
+	From SpaceID
+	// Position is where the entity will be in the destination: the rebuilt
+	// body's gameplay anchor for a physics-attached entity, else the entity's
+	// current Position3D (registry.Spatial3DEntity), else its 2D Position as
+	// (X, Y, 0). Use it for 3D backends; for a 2D backend, map it to 2D the way
+	// the entity's Position does (the collision step syncs 2D backends from
+	// Position each tick, except for physics-attached entities).
+	Position p.Vec3
 }
 
 // PhysicsTransferSource is one physics-attached entity moved by MoveToSpace,
@@ -122,18 +160,28 @@ type PhysicsTransferSource struct {
 // worlds implement physics3d.CharacterControllerReader, its character
 // controller configuration (every field except velocity intent; a body may
 // neither gain nor lose a controller). Without the reader in either world the
-// controller check is skipped and the callback is trusted. When the
-// callback fails, changes a moving entity, or any body is rejected, every
-// returned body is destroyed (with its colliders and joints) and nothing
-// changes.
+// controller check is skipped and the callback is trusted. Every source body
+// must then still be alive in a source world that has not faulted (a callback
+// that destroyed one is caught here). Finally SpaceTransfer.MoveShapes, when
+// set, moves the game's own collision shapes.
+//
+// Guarantees: a transfer rejected before the commit (validation, the
+// callback fails or changes a moving entity, a body is rejected, a source
+// body or world is unusable, MoveShapes fails) changes nothing: every
+// returned body is destroyed with its colliders and joints. Only a backend
+// failure breaks this: if a returned body cannot be destroyed, the
+// destination faults. A backend failure during or after the commit faults
+// the affected spaces (Run ends; navigation readiness closes) and the move
+// may be partly applied.
 //
 // The commit then runs in this order:
 //  1. Every source attachment is detached: physics (destroying the source
 //     body and its joints and cancelling its timed trajectory) and navigation.
-//     If a source body cannot be destroyed, its space faults (Run ends), the
-//     rebuilt bodies are destroyed and MoveToSpace returns the error with the
-//     registry and colliders unchanged; entities detached before the failure
-//     have already lost their source bodies.
+//     If a source body still cannot be destroyed, the source and destination
+//     spaces fault (Run ends), the rebuilt bodies are destroyed and
+//     MoveToSpace returns the error with the registry and colliders
+//     unchanged; entities detached before the failure have already lost
+//     their source bodies and MoveShapes has already moved the shapes.
 //  2. Each source world that lost bodies is synchronized; a failure faults
 //     that space but the commit continues.
 //  3. The registry space of every entity changes.
@@ -145,9 +193,9 @@ type PhysicsTransferSource struct {
 //  6. Navigation traversal-cancel callbacks of the detached source agents run,
 //     with the entities already in the destination.
 //  7. Navigation is reattached in the destination with the same configuration
-//     but no destination intent (idle), unless a cancel callback moved or
-//     deleted the entity, attached navigation itself, or detached the physics
-//     a staged agent needs.
+//     but no destination intent (idle), unless a cancel callback deleted the
+//     entity, attached navigation itself, or detached the physics a staged
+//     agent needs.
 //
 // Not carried to the destination: timed trajectories, contact history,
 // navigation routes and destinations, pending forces and retained controller
@@ -155,8 +203,12 @@ type PhysicsTransferSource struct {
 // queued in the source space still run there; one queued before the transfer
 // that fails with a stale handle (physics3d.ErrStale), such as one addressing
 // a moved body, is dropped instead of faulting the space. Shapes the game
-// registered on a legacy collision backend itself are not moved; re-register
-// them after MoveToSpace returns.
+// registered on a legacy collision backend itself move only through
+// SpaceTransfer.MoveShapes.
+//
+// Until step 7 has run, the moved navigation-attached entities cannot move
+// again: a traversal-cancel callback calling MoveToSpace for one of them gets
+// an error wrapping physics3d.ErrBusy (other entities may move).
 //
 // A session whose avatar or FOI anchor moves follows it to the new space on the
 // next replication pass. The entities it already knew that moved with it are
@@ -201,8 +253,9 @@ func (s *Server) checkSpaceMutable(op string) error {
 	return s.servicesQuiescent(op)
 }
 
-// transferBusy rejects an attachment made while a transfer runs, such as from
-// SpaceTransfer.RebuildPhysics, which must not call Server APIs.
+// transferBusy rejects an attachment change made while a transfer runs, such
+// as from SpaceTransfer.RebuildPhysics or MoveShapes, which must not call
+// Server APIs.
 func (s *Server) transferBusy(op string) error {
 	if s.transferring {
 		return fmt.Errorf("golem: %s is unavailable during a space transfer: %w", op, p.ErrBusy)

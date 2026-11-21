@@ -38,6 +38,12 @@ type Registry struct {
 	spawned           []Entity
 	despawned         []int64
 	despawnedRevision []uint64
+	// incarnation identifies each lifetime of a published or provisional
+	// entity ID: an ID deleted and registered again gets a new value, so
+	// callers holding an ID across callbacks can tell a replacement apart
+	// without comparing Entity values (which may be non-comparable).
+	incarnation     map[int64]uint64
+	nextIncarnation uint64
 }
 
 // NewRegistry creates an empty entity registry.
@@ -48,6 +54,7 @@ func NewRegistry() *Registry {
 		owners:      make(map[int64]int64),
 		spaces:      make(map[int64]SpaceID),
 		moveIndex:   make(map[int64]int),
+		incarnation: make(map[int64]uint64),
 	}
 }
 
@@ -111,8 +118,30 @@ func (r *Registry) insert(space SpaceID, e Entity, ownerSessionID int64, hasOwne
 		r.owners[id] = ownerSessionID
 	}
 	r.setSpaceLocked(id, space)
+	r.assignIncarnationLocked(id)
 	r.spawned = append(r.spawned, e)
 	return nil
+}
+
+// assignIncarnationLocked gives id a new, never reused incarnation.
+func (r *Registry) assignIncarnationLocked(id int64) {
+	if r.incarnation == nil {
+		r.incarnation = make(map[int64]uint64)
+	}
+	r.nextIncarnation++
+	r.incarnation[id] = r.nextIncarnation
+}
+
+// Incarnation returns the lifetime counter of a published or provisional
+// entity, or (0, false) when id is unknown. It is assigned on insertion
+// (AddProvisional included, kept by CommitProvisional), reassigned for every
+// entity ReplaceWithoutHooks installs and dropped on deletion, so an ID that
+// is deleted and registered again never reports the same incarnation.
+func (r *Registry) Incarnation(id int64) (uint64, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	inc, ok := r.incarnation[id]
+	return inc, ok
 }
 
 // NotifySpawn calls OnSpawn when e implements Spawner.
@@ -150,7 +179,8 @@ func (r *Registry) SetOwner(entityID, sessionID int64) bool {
 }
 
 // DeleteEntity unregisters an entity by ID and records it for removal broadcast.
-// Also cleans up any ownership and space entry and drops a pending space move.
+// Also cleans up any ownership, space and incarnation entry and drops a pending
+// space move.
 // If the entity implements Remover, OnRemove is called after deletion. No-op if
 // the ID doesn't exist.
 func (r *Registry) DeleteEntity(id int64) {
@@ -158,6 +188,7 @@ func (r *Registry) DeleteEntity(id int64) {
 	if _, pending := r.provisional[id]; pending {
 		delete(r.provisional, id)
 		delete(r.owners, id)
+		delete(r.incarnation, id)
 		r.setSpaceLocked(id, 0)
 		r.mu.Unlock()
 		return
@@ -166,6 +197,7 @@ func (r *Registry) DeleteEntity(id int64) {
 	if exists {
 		delete(r.entities, id)
 		delete(r.owners, id)
+		delete(r.incarnation, id)
 		r.setSpaceLocked(id, 0)
 		r.dropMoveLocked(id)
 		r.despawned = append(r.despawned, id)

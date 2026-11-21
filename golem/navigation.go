@@ -370,9 +370,16 @@ func (n *navigationService) addAgent(id int64, cfg NavigationAgentConfig) {
 }
 
 // DetachNavigation cancels an entity's requests and releases its route. It is
-// idempotent and runs on the tick goroutine (or before Run).
-func (s *Server) DetachNavigation(id int64) {
+// idempotent and runs on the tick goroutine (or before Run). It returns an
+// error wrapping physics3d.ErrBusy, and changes nothing, during a space
+// transfer (SpaceTransfer.RebuildPhysics and MoveShapes); otherwise it
+// returns nil.
+func (s *Server) DetachNavigation(id int64) error {
+	if err := s.transferBusy("DetachNavigation"); err != nil {
+		return err
+	}
 	s.runtimeOf(id).nav().detach(id)
+	return nil
 }
 
 func (n *navigationService) detach(id int64) {

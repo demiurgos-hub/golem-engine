@@ -11,7 +11,8 @@ type RestoreEntry struct {
 }
 
 // ReplaceWithoutHooks validates and replaces every entity, owner and space in
-// one critical section and drops pending space moves, since every restored
+// one critical section, gives every restored entity a new incarnation (even
+// one keeping its ID) and drops pending space moves, since every restored
 // entity is respawned in its final space. It queues complete spawns and
 // removals for the next flush without invoking
 // OnSpawn/OnRemove. Recovery hosts must quiesce gameplay and connected clients,
@@ -53,6 +54,10 @@ func (r *Registry) ReplaceWithoutHooks(entries []RestoreEntry) error {
 		}
 	}
 	r.entities, r.owners, r.spawned = entities, owners, spawned
+	r.incarnation = make(map[int64]uint64, len(entities))
+	for id := range entities {
+		r.assignIncarnationLocked(id)
+	}
 	r.spaces = spaces
 	r.spaceCount.Store(int64(len(spaces)))
 	r.resetMovesLocked()

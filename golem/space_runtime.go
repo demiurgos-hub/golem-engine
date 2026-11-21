@@ -96,6 +96,28 @@ func (rt *spaceRuntime) nav() *navigationService {
 	return rt.navigation
 }
 
+// faultServices stops the space's services after a backend failure that left
+// them inconsistent, such as a space transfer that could not finish. Physics
+// keeps its first fault, which closes readiness and ends Run at the next
+// drain. Navigation readiness closes like a failed paired restore (restoring,
+// with err as its restoration error). A space with navigation but no physics
+// does not end Run: it reports not ready and blocks space moves and entity
+// setup until a navigation restore completes.
+func (rt *spaceRuntime) faultServices(err error) {
+	if rt == nil || err == nil {
+		return
+	}
+	if ps := rt.physics; ps != nil && ps.fault == nil {
+		ps.fault = err
+	}
+	if n := rt.navigation; n != nil {
+		n.restoring = true
+		if n.restoreErr == nil {
+			n.restoreErr = err
+		}
+	}
+}
+
 // physicsAttached reports whether id is bound to a physics body of this space,
 // in which case legacy collision neither updates nor writes back its position.
 func (rt *spaceRuntime) physicsAttached(id int64) bool {
@@ -324,9 +346,10 @@ func (rt *spaceRuntime) applyColliderAdd(id int64, add colliderAdd) {
 // colliderMove is one entity's legacy collider transfer between the layer
 // helpers of two spaces, validated before the registry move.
 type colliderMove struct {
-	e        Entity
-	id       int64
-	from, to *spaceRuntime
+	e           Entity
+	id          int64
+	incarnation uint64 // registry incarnation of e at validation
+	from, to    *spaceRuntime
 	colliderAdd
 }
 
@@ -352,7 +375,8 @@ func (s *Server) planColliderMoves(op string, t SpaceTransfer) ([]colliderMove, 
 		if from == t.To {
 			continue
 		}
-		m := colliderMove{e: e, id: id, from: s.runtime(from), to: s.runtime(t.To)}
+		incarnation, _ := s.reg.Incarnation(id)
+		m := colliderMove{e: e, id: id, incarnation: incarnation, from: s.runtime(from), to: s.runtime(t.To)}
 		if err := m.from.checkColliderRemove(e); err != nil {
 			return nil, fmt.Errorf("golem: %s: %w", op, err)
 		}

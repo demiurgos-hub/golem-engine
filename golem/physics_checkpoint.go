@@ -891,6 +891,9 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 	for _, r := range restores {
 		ps := r.rt.physics
 		ps.agents, ps.bodies = r.agents, r.bodyOwners
+		for id, a := range ps.agents {
+			a.incarnation, _ = s.reg.Incarnation(id)
+		}
 		ps.trajectories, ps.trajectoryGeneration = r.trajectories, r.trajectoryGeneration
 		ps.geometry = r.geometry
 		ps.geometryIdentities, ps.geometryPending = r.geometryIdentities, nil
