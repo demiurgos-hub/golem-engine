@@ -2042,3 +2042,91 @@ func TestSpaceTransferDoesNotReattachNavigationToAReplacementEntity(t *testing.T
 		t.Fatal("source kept the agent")
 	}
 }
+
+// The stale-handle exception covers a command error only when every failure
+// in it is a stale handle of a body the transfer destroyed. A stale handle
+// joined with an unrelated failure is a real failure and still faults.
+func TestSpaceTransferStaleExceptionNeedsEveryFailureToQualify(t *testing.T) {
+	unrelated := errors.New("joint limit exceeded")
+	for _, tc := range []struct {
+		name  string
+		build func(crate, cart error) error
+		fault bool
+	}{
+		{"wrapped", func(crate, _ error) error { return fmt.Errorf("push crate: %w", crate) }, false},
+		{"two moved bodies joined", func(crate, cart error) error { return errors.Join(crate, cart) }, false},
+		{"two moved bodies in one message", func(crate, cart error) error { return fmt.Errorf("%w; %w", crate, cart) }, false},
+		{"joined with another failure", func(crate, _ error) error { return errors.Join(crate, unrelated) }, true},
+		{"another failure first", func(crate, _ error) error { return fmt.Errorf("%w; %w", unrelated, crate) }, true},
+		{"nested join with another failure", func(crate, cart error) error {
+			return fmt.Errorf("batch: %w", errors.Join(crate, errors.Join(cart, unrelated)))
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, a, _ := newTransferTestServer(t)
+			crate := transferTestEntity(t, s, 0, 2, surface.Vec3{X: 2})
+			cart := transferTestEntity(t, s, 0, 3, surface.Vec3{X: 3})
+			oldCrate := transferTestAttach(t, s, a, crate, p.FreeDynamic, PhysicsAttachmentConfig{})
+			oldCart := transferTestAttach(t, s, a, cart, p.FreeDynamic, PhysicsAttachmentConfig{})
+			startTestSpaces(t, s)
+			if err := s.QueuePhysicsCommand(func(w p.World) error {
+				return tc.build(w.SetVelocity(oldCrate, p.Vec3{}, p.Vec3{}), w.SetVelocity(oldCart, p.Vec3{}, p.Vec3{}))
+			}); err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			if err := s.MoveToSpace(SpaceTransfer{To: 5, Entities: []int64{2, 3}, RebuildPhysics: rebuildOffset(p.Vec3{X: 100}, &calls)}); err != nil {
+				t.Fatal(err)
+			}
+			s.tick++
+			err := s.drainPhysics()
+			if faulted := err != nil || s.physics.fault != nil; faulted != tc.fault {
+				t.Fatalf("drain = %v, fault %v; want fault %v", err, s.physics.fault, tc.fault)
+			}
+			if tc.fault && !errors.Is(err, unrelated) {
+				t.Fatalf("drain error %v does not carry the real failure", err)
+			}
+		})
+	}
+}
+
+// A game that queues a physics command every tick never empties the queue.
+// Retired body handles must still be forgotten once no queued command
+// predates them, or the table grows with every transfer.
+func TestSpaceTransferForgetsRetiredBodiesWhileCommandsKeepComing(t *testing.T) {
+	s, a, b := newTransferTestServer(t)
+	crate := transferTestEntity(t, s, 0, 2, surface.Vec3{X: 2})
+	transferTestAttach(t, s, a, crate, p.FreeDynamic, PhysicsAttachmentConfig{})
+	startTestSpaces(t, s)
+	noop := func(p.World) error { return nil }
+	calls, largest := 0, 0
+	for move := 0; move < 128; move++ {
+		s.tick++
+		for _, space := range []SpaceID{0, 5} {
+			if err := s.Space(space).QueuePhysicsCommand(noop); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Runs the commands of the previous tick; the ones just queued stay.
+		if err := s.drainPhysics(); err != nil {
+			t.Fatal(err)
+		}
+		if len(s.physics.commands) == 0 || len(s.runtime(5).physics.commands) == 0 {
+			t.Fatal("the queues emptied; the test no longer covers steady traffic")
+		}
+		to := SpaceID(5)
+		if move%2 == 1 {
+			to = 0
+		}
+		if err := s.MoveToSpace(SpaceTransfer{To: to, Entities: []int64{2}, RebuildPhysics: rebuildOffset(p.Vec3{}, &calls)}); err != nil {
+			t.Fatalf("move %d: %v", move, err)
+		}
+		largest = max(largest, len(s.physics.retired), len(s.runtime(5).physics.retired))
+	}
+	if largest > 2 {
+		t.Fatalf("a retired table reached %d handles over 128 transfers", largest)
+	}
+	if len(a.bodies)+len(b.bodies) != 1 {
+		t.Fatalf("worlds hold %d bodies, want the one crate", len(a.bodies)+len(b.bodies))
+	}
+}

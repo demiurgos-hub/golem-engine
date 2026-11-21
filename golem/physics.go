@@ -117,10 +117,10 @@ type physicsService struct {
 	// retireEpoch advances whenever MoveToSpace destroys bodies of this world.
 	retireEpoch uint64
 	// retired maps each source body handle a transfer destroyed to the
-	// retireEpoch that destruction started. A queued command whose error is a
-	// physics3d.StaleHandleError for such a body, and that was queued before
-	// that epoch, is dropped instead of faulting. Cleared whenever the queue
-	// empties, on restore and on stop.
+	// retireEpoch that destruction started. A queued command whose error
+	// consists only of physics3d.StaleHandleErrors for such bodies, and that
+	// was queued before that epoch, is dropped instead of faulting. An entry
+	// goes once no queued command predates it (drain), on restore and on stop.
 	retired map[p.Handle]uint64
 	// pendingDeletes maps the entities whose DeleteEntity was deferred to a
 	// queued command to the registry incarnation that command deletes;
@@ -488,7 +488,8 @@ func (ps *physicsService) setFrameObserver(fn func(PhysicsFrameMetrics)) error {
 // *physics3d.StaleHandleError naming a body that MoveToSpace removed from this
 // world after the command was queued: that command addressed a moved body and
 // is dropped. Any other error, including a stale handle the transfer did not
-// retire or an ErrStale without a handle, still faults. Collider and joint
+// retire, an ErrStale without a handle, or such a stale handle joined with
+// another failure (errors.Join, several %w), still faults. Collider and joint
 // handles destroyed with a moved body are not recognized: a command that fails
 // on one of those alone still faults.
 func (s *Server) QueuePhysicsCommand(command PhysicsCommand) error {
@@ -595,10 +596,29 @@ func (ps *physicsService) drain() error {
 			return ps.fault
 		}
 	}
+	ps.forgetRetired()
+	return nil
+}
+
+// forgetRetired drops the retired bodies no queued command can still address:
+// all of them when the queue is empty, else those retired no later than the
+// oldest queued command's epoch (commands are queued in epoch order). A game
+// that queues a command every tick never empties the queue, so waiting for
+// that would keep every handle ever retired.
+func (ps *physicsService) forgetRetired() {
+	if len(ps.retired) == 0 {
+		return
+	}
 	if len(ps.commands) == 0 {
 		clear(ps.retired)
+		return
 	}
-	return nil
+	oldest := ps.commands[0].epoch
+	for handle, retiredAt := range ps.retired {
+		if retiredAt <= oldest {
+			delete(ps.retired, handle)
+		}
+	}
 }
 
 // retire records that a transfer destroyed body; synchronizeRetired advances
@@ -610,15 +630,32 @@ func (ps *physicsService) retire(body p.BodyHandle) {
 	ps.retired[p.Handle(body)] = ps.retireEpoch + 1
 }
 
-// retiredBefore reports whether err is a stale-handle error for a body a
-// transfer destroyed after a command queued at epoch.
+// retiredBefore reports whether err consists only of stale-handle errors for
+// bodies a transfer destroyed after a command queued at epoch. Every failure
+// in err's tree must qualify: an error that joins such a stale handle with an
+// unrelated failure is a real failure and must still fault.
 func (ps *physicsService) retiredBefore(err error, epoch uint64) bool {
-	var stale *p.StaleHandleError
-	if len(ps.retired) == 0 || !errors.As(err, &stale) {
+	if len(ps.retired) == 0 || err == nil {
 		return false
 	}
-	retiredAt, ok := ps.retired[stale.Handle]
-	return ok && retiredAt > epoch
+	// Check the type before unwrapping: StaleHandleError unwraps to ErrStale.
+	if stale, ok := err.(*p.StaleHandleError); ok {
+		retiredAt, known := ps.retired[stale.Handle]
+		return known && retiredAt > epoch
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		parts := wrapped.Unwrap()
+		for _, part := range parts {
+			if !ps.retiredBefore(part, epoch) {
+				return false
+			}
+		}
+		return len(parts) != 0
+	case interface{ Unwrap() error }:
+		return ps.retiredBefore(wrapped.Unwrap(), epoch)
+	}
+	return false
 }
 
 func (ps *physicsService) step(dt float64) (stepErr error) {
