@@ -5,9 +5,9 @@ go 1.25.4
 require (
 	github.com/alitto/pond/v2 v2.7.1
 	github.com/coder/websocket v1.8.14
-	github.com/demiurgos-hub/golem-engine/golem/collision v0.3.1-0.20261113161118-0c6a59582abb
+	github.com/demiurgos-hub/golem-engine/golem/collision v0.3.1-0.20261121202043-e7dc52314ca4
 	github.com/demiurgos-hub/golem-engine/golem/nav v0.3.1-0.20261113161118-0c6a59582abb
-	github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261113161118-0c6a59582abb
+	github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261121202043-e7dc52314ca4
 	github.com/hajimehoshi/ebiten/v2 v2.9.9
 	github.com/quic-go/quic-go v0.59.0
 	github.com/quic-go/webtransport-go v0.10.0

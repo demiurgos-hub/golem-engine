@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	github.com/demiurgos-hub/golem-engine/golem/geometry v0.0.0-20261113160310-d88e90435bea
-	github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261113161118-0c6a59582abb
+	github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261121202043-e7dc52314ca4
 	github.com/gataengine/box3d-go v0.0.0-20261019212002-2a00e926a8d9
 )
 

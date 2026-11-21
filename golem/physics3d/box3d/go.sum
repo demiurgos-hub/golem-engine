@@ -6,6 +6,8 @@ github.com/demiurgos-hub/golem-engine/golem/geometry v0.0.0-20261113160310-d88e9
 github.com/demiurgos-hub/golem-engine/golem/geometry v0.0.0-20261113160310-d88e90435bea/go.mod h1:r5JEDgAvE/+trShzySM2ksuKPetPvk006VIUcM53yZI=
 github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261113161118-0c6a59582abb h1:CPbfPBfHVOsUp42LVYrH2vlGaiNOKvr0aWPaheolde4=
 github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261113161118-0c6a59582abb/go.mod h1:KASsltyLacjdk+f5HX3H3VzcbNxba21+r0oaqpEXTO4=
+github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261121202043-e7dc52314ca4 h1:/Jp7qnfEHJGp1EwgMT0ahH2WVzWogKRZX8P0pDA3NA4=
+github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261121202043-e7dc52314ca4/go.mod h1:KASsltyLacjdk+f5HX3H3VzcbNxba21+r0oaqpEXTO4=
 github.com/go-logr/logr v1.4.3 h1:CjnDlHq8ikf6E492q6eKboGOC0T8CDaOvkHCIg8idEI=
 github.com/go-logr/logr v1.4.3/go.mod h1:9T104GzyrTigFIr8wt5mBrctHMim0Nb2HLGrmQ40KvY=
 github.com/go-task/slim-sprig/v3 v3.0.0 h1:sUs3vkvUymDpBKi3qH1YSqBQk9+9D/8M2mN1vB6EwHI=

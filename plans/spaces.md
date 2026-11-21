@@ -65,7 +65,7 @@ Review fixes, round 4 (after an independent review of `e3c4ab0..39209b7` reporte
 
 Not fixed by decision: legacy contact events identify pairs by entity ID, so a pair of entities moved together keeps its contact history and reports "stay" (pairs split by a move exit; semantic choice), and older clients' handling of the new frames (no compatibility goal: games upgrade client and server together).
 
-After pushing: bump the root `go.mod` pins of `golem/collision` (`Layers.Bound`, `Layers.Backend`) and `golem/physics3d` (`CharacterControllerReader`, `StaleHandleError`), and box3d's own `physics3d` pin (it now needs `StaleHandleError`); until then the root builds only through the local `go.work`.
+Dependency pins, bumped after the branch was pushed and merged into `develop`: the root `go.mod` pins `golem/collision` (`Layers.Bound`, `Layers.Backend`) and `golem/physics3d` (`CharacterControllerReader`, `StaleHandleError`) at `e7dc523`, and so does box3d's own `physics3d` pin. The root module and box3d build and pass their tests with `GOWORK=off`.
 
 Known follow-ups:
 - `examples/` and qualification consumers; regenerate the checked-in examples' `entities.proto` (fields 4–6).
