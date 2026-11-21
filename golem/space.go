@@ -324,7 +324,9 @@ func (s *Server) SessionSpace(sessionID int64) SpaceID {
 // replication space transition; a session counts as announced in its new
 // space once the transition frames (SpaceChanged onwards) are queued, so this
 // matches what each client has been told, even from OnUpdates on the
-// replication pass that plans the transition.
+// replication pass that plans the transition. World pushes use this list;
+// Space.BroadcastServerEvent follows each session to the space it is moving
+// to instead, because its events are held until the transition.
 func (s *Server) SessionsInSpace(space SpaceID) []int64 {
 	all := s.listener.SessionIDs()
 	s.interestMu.Lock()
@@ -357,22 +359,62 @@ func (s *Server) Space(id SpaceID) *Space {
 func (sp *Space) ID() SpaceID { return sp.id }
 
 // Sessions returns the connected sessions announced in this space; see
-// Server.SessionsInSpace.
+// Server.SessionsInSpace. BroadcastServerEvent chooses its recipients by the
+// space each session is in or moving to instead.
 func (sp *Space) Sessions() []int64 { return sp.srv.SessionsInSpace(sp.id) }
 
-// BroadcastServerEvent sends one marshalled ServerEvent to every session
-// announced in this space, on the chosen delivery lane with the same stream
-// fallback as Server.BroadcastServerEvent. Sessions in other spaces receive
-// nothing. Sessions that disconnect meanwhile are skipped. Recipient
+// BroadcastServerEvent sends one marshalled ServerEvent to every session in
+// this space, on the chosen delivery lane with the same stream fallback as
+// Server.BroadcastServerEvent. Sessions in other spaces receive nothing.
+// Sessions that disconnect meanwhile are skipped.
+//
+// Recipients are chosen by the space each session is in or moving to
+// (Server.SessionSpace), not by its announced space: a session that changed
+// space earlier on this tick receives the events of its new space, held and
+// delivered right after its transition (behind SpaceSettled), and no longer
+// receives the events of the space it is leaving. Space.Sessions still lists
+// such a session in its old space until the transition is queued. Recipient
 // selection and the enqueue are atomic with space transitions, so the event
 // is ordered with them from any goroutine.
 func (sp *Space) BroadcastServerEvent(delivery EventDelivery, event []byte) error {
 	wrapped := WrapServerEvent(event)
-	sp.srv.announceMu.RLock()
-	defer sp.srv.announceMu.RUnlock()
-	sessions := sp.Sessions()
+	s := sp.srv
+	s.announceMu.RLock()
+	defer s.announceMu.RUnlock()
+	sessions, moving := s.spaceEventRecipients(sp.id)
 	if len(sessions) == 0 {
 		return nil
 	}
-	return sp.srv.listener.SendEventTo(sessions, delivery, event, wrapped)
+	// A recipient still on its way holds the event until its transition is
+	// queued; most hold already (every space change marks its sessions), this
+	// covers the changes that do not.
+	s.holdSessionEvents(moving...)
+	return s.listener.SendEventTo(sessions, delivery, event, wrapped)
+}
+
+// spaceEventRecipients returns the connected sessions whose effective space
+// is space, and those among them whose client has not been told yet (a switch
+// is pending, or planned and not queued). Call with announceMu held.
+func (s *Server) spaceEventRecipients(space SpaceID) (sessions, moving []int64) {
+	connected := s.listener.SessionIDs()
+	s.interestMu.Lock()
+	defer s.interestMu.Unlock()
+	if !s.spacesActiveLocked() {
+		// Every session is in space 0 and knows it.
+		if space != 0 {
+			return nil, nil
+		}
+		return connected, nil
+	}
+	for _, sid := range connected {
+		effective := s.effectiveSessionSpaceLocked(sid)
+		if effective != space {
+			continue
+		}
+		sessions = append(sessions, sid)
+		if s.announcedSpaceLocked(sid) != effective {
+			moving = append(moving, sid)
+		}
+	}
+	return sessions, moving
 }

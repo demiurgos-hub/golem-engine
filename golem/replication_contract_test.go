@@ -2,6 +2,7 @@ package golem
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"encoding/binary"
@@ -709,7 +710,8 @@ type eventPeer struct {
 // WebTransport peers in datagram mode: unreliable events sent from a Post and
 // from OnTick right after MoveToSpace of the session's avatar, on the same
 // tick, arrive on the stream after SpaceSettled, while a session that does not
-// switch keeps its datagram lane in that tick. After the SpaceAck, datagram
+// switch keeps its datagram lane in that tick. Space-scoped events sent on that
+// tick go to the space the mover is moving to. After the SpaceAck, datagram
 // events carry the new transition; single-space sessions stay untagged.
 func TestSpaceSwitchHoldsEventsSentBeforePlanning(t *testing.T) {
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -810,21 +812,34 @@ func TestSpaceSwitchHoldsEventsSentBeforePlanning(t *testing.T) {
 		}
 		send(mover.sess.ID, "evt-post")
 		send(bystander.sess.ID, "evt-bystander")
+		// Space-scoped events follow the mover to the space it is moving to.
+		for space, name := range map[SpaceID]string{0: "evt-overworld", 3: "evt-cave"} {
+			if err := s.Space(space).BroadcastServerEvent(EventUnreliable, []byte(name)); err != nil {
+				t.Error(err)
+			}
+		}
 		fn := func() { send(mover.sess.ID, "evt-tick") }
 		onTick.Store(&fn)
 	})
-	// The bystander's event is not held: it leaves on its datagram lane.
-	if got := receiveEventRecords(t, bystander.peer); !slices.Equal(got, []eventRecord{{0, "evt-bystander"}}) {
-		t.Fatalf("bystander event = %+v", got)
+	// The bystander's events are not held: they leave on its datagram lane,
+	// including the event of the space the mover is leaving.
+	var bystanderEvents []eventRecord
+	for len(bystanderEvents) < 2 {
+		bystanderEvents = append(bystanderEvents, receiveEventRecords(t, bystander.peer)...)
+	}
+	slices.SortFunc(bystanderEvents, func(a, b eventRecord) int { return cmp.Compare(a.event, b.event) })
+	if !slices.Equal(bystanderEvents, []eventRecord{{0, "evt-bystander"}, {0, "evt-overworld"}}) {
+		t.Fatalf("bystander events = %+v", bystanderEvents)
 	}
 	if got := decodeServerTokens(t, mustReadReliableFrame(t, mover.stream)); !slices.Equal(got, []string{"changed:3:1", "avatar-full", "settled:1"}) {
 		t.Fatalf("transition frame = %q", got)
 	}
 	var held []string
-	for len(held) < 2 {
+	for len(held) < 3 {
 		held = append(held, decodeServerTokens(t, mustReadReliableFrame(t, mover.stream))...)
 	}
-	if !slices.Equal(held, []string{"event:evt-post", "event:evt-tick"}) {
+	// The mover gets the cave's event and never the overworld's.
+	if !slices.Equal(held, []string{"event:evt-post", "event:evt-cave", "event:evt-tick"}) {
 		t.Fatalf("events sent before planning = %q", held)
 	}
 	if got := decodeServerTokens(t, mustReadReliableFrame(t, bystander.stream)); !slices.Equal(got, []string{"removed"}) {

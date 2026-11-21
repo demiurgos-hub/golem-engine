@@ -506,6 +506,88 @@ func TestSpaceBroadcastServerEventReachesOnlyItsSpace(t *testing.T) {
 	}
 }
 
+// A space-scoped event sent on the tick a session's move was requested follows
+// the session: it receives the event of the space it moves to, after its
+// transition, and not the event of the space it leaves.
+func TestSpaceBroadcastServerEventFollowsMovingSession(t *testing.T) {
+	spaceModes(t, func(t *testing.T, interestMode bool) {
+		rig := newSpaceTestRig(t, interestMode, 2)
+		srv := rig.srv
+		mover, moverConn, stayerConn := rig.ids[0], rig.conns[0], rig.conns[1]
+		srv.SetSessionSpace(mover, 4)
+		if got := srv.Space(0).Sessions(); len(got) != 2 {
+			t.Fatalf("announced sessions of space 0 before the pass = %v", got)
+		}
+		for space, event := range map[SpaceID]string{0: "overworld-explosion", 4: "cave-door-opened"} {
+			if err := srv.Space(space).BroadcastServerEvent(EventStream, []byte(event)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// The cave event is held until the transition; the other session gets
+		// the overworld event at once.
+		if got := readSpaceTokens(t, stayerConn); !slices.Equal(got, []string{"event:overworld-explosion"}) {
+			t.Fatalf("staying session = %q", got)
+		}
+		expectNoMessage(t, moverConn)
+		rig.tick(t)
+		if got := readSpaceTokens(t, moverConn); !slices.Equal(got, []string{"changed:4:1", "settled:1", "event:cave-door-opened"}) {
+			t.Fatalf("moving session = %q", got)
+		}
+		expectNoMessage(t, stayerConn)
+	})
+}
+
+// The same for a session that follows its avatar through MoveToSpace.
+func TestSpaceBroadcastServerEventFollowsMovedAvatar(t *testing.T) {
+	spaceModes(t, func(t *testing.T, interestMode bool) {
+		rig := newSpaceTestRig(t, interestMode, 2)
+		srv := rig.srv
+		mover, moverConn, stayerConn := rig.ids[0], rig.conns[0], rig.conns[1]
+		avatar := &interestTickEntity{id: 1, full: []byte("avatar-full")}
+		rig.spaceAvatar(t, mover, avatar)
+		rig.tick(t)
+		readSpaceTokens(t, moverConn)
+		if !interestMode {
+			readSpaceTokens(t, stayerConn)
+		}
+		if err := srv.MoveToSpace(SpaceTransfer{To: 3, Entities: []int64{avatar.id}}); err != nil {
+			t.Fatal(err)
+		}
+		for space, event := range map[SpaceID]string{0: "overworld-explosion", 3: "cave-door-opened"} {
+			if err := srv.Space(space).BroadcastServerEvent(EventStream, []byte(event)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		rig.tick(t)
+		got := readSpaceTokens(t, moverConn)
+		if settled, event := indexOf(got, "settled:1"), indexOf(got, "event:cave-door-opened"); settled < 0 || event != len(got)-1 || event < settled || indexOf(got, "event:overworld-explosion") >= 0 {
+			t.Fatalf("moving session = %q", got)
+		}
+		if got := readSpaceTokens(t, stayerConn); indexOf(got, "event:overworld-explosion") < 0 || indexOf(got, "event:cave-door-opened") >= 0 {
+			t.Fatalf("staying session = %q", got)
+		}
+	})
+}
+
+// A recipient whose switch is pending holds the event even when nothing made
+// it hold before (a space change that does not mark its sessions).
+func TestSpaceBroadcastServerEventHoldsUnmarkedMovingSession(t *testing.T) {
+	rig := newSpaceTestRig(t, false, 1)
+	srv := rig.srv
+	mover, conn := rig.ids[0], rig.conns[0]
+	srv.interestMu.Lock()
+	srv.sessionSpaceExplicit[mover] = 4 // pending switch, no hold
+	srv.interestMu.Unlock()
+	if err := srv.Space(4).BroadcastServerEvent(EventStream, []byte("cave-door-opened")); err != nil {
+		t.Fatal(err)
+	}
+	expectNoMessage(t, conn)
+	rig.tick(t)
+	if got := readSpaceTokens(t, conn); !slices.Equal(got, []string{"changed:4:1", "settled:1", "event:cave-door-opened"}) {
+		t.Fatalf("moving session = %q", got)
+	}
+}
+
 func TestSpaceConnectSnapshotUsesAnnouncedSpace(t *testing.T) {
 	srv := NewServer(ServerConfig{Transport: golemnet.TransportWebSocket, StateUpdateLane: StateUpdateLaneStream})
 	srv.SetRemovalSerializer(func(id int64, _ uint64) ([]byte, error) { return []byte(fmt.Sprintf("removed:%d", id)), nil })

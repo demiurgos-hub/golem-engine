@@ -30,6 +30,12 @@ import "slices"
 // but events from that tick's Post callbacks and OnTick are not held. Space
 // changes made off the tick goroutine while a pass releases its holds may be
 // flushed one pass early.
+//
+// Space-scoped events (Space.BroadcastServerEvent) are sent to the sessions
+// whose effective space is the event's space, so a held event belongs to the
+// space its session is moving to. One gap remains: a session that changes
+// space twice before one replication pass plans it (to A, then to B) still
+// receives the events sent to A in between, delivered after it lands in B.
 
 // switchPendingLocked reports whether a session's effective space differs
 // from the space its known set follows, so that its next replication pass
