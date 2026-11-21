@@ -324,3 +324,29 @@ func TestSpaceMoveGenerationTracksEveryMove(t *testing.T) {
 		t.Fatal("replacement kept the move generation")
 	}
 }
+
+func TestGetSpacedReturnsEntityAndSpaceTogether(t *testing.T) {
+	r := NewRegistry()
+	plain, caved, pending := &lifecycleTestEntity{id: 1}, &lifecycleTestEntity{id: 2}, &lifecycleTestEntity{id: 3}
+	if err := r.AddWithoutSpawn(plain); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.AddWithoutSpawnIn(7, caved); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.AddProvisionalIn(4, pending); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		id    int64
+		want  Entity
+		space SpaceID
+	}{{1, plain, 0}, {2, caved, 7}, {3, pending, 4}} {
+		if e, space, ok := r.GetSpaced(tc.id); !ok || e != tc.want || space != tc.space {
+			t.Fatalf("GetSpaced(%d) = %v, %d, %v; want space %d", tc.id, e, space, ok, tc.space)
+		}
+	}
+	if e, space, ok := r.GetSpaced(9); ok || e != nil || space != 0 {
+		t.Fatalf("GetSpaced(unknown) = %v, %d, %v", e, space, ok)
+	}
+}

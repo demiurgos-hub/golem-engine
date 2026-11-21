@@ -565,54 +565,97 @@ func (s *Server) releaseSpacedScratch(spaced []registry.SpacedEntity) {
 	}
 }
 
-// inCollisionSpace reports whether entity id belongs to rt's space for a
-// collision ReadBack.
-func (s *Server) inCollisionSpace(rt *spaceRuntime, id int64, spaced bool) bool {
-	if !spaced {
-		return rt.id == 0
+// readBackEntity returns the entity a collision ReadBack of rt may write:
+// one that is in rt's space and not physics-attached there. With spaces in
+// use it reads the entity and its space under one registry lock.
+func (s *Server) readBackEntity(rt *spaceRuntime, id int64, spaced bool) (Entity, bool) {
+	if rt.physicsAttached(id) {
+		return nil, false
 	}
-	space, _ := s.reg.Space(id)
-	return space == rt.id
+	if !spaced {
+		if rt.id != 0 {
+			return nil, false
+		}
+		return s.reg.Get(id)
+	}
+	e, space, ok := s.reg.GetSpaced(id)
+	return e, ok && space == rt.id
 }
 
+// eachSpacedRuntime calls fn once for every entity of the phase snapshot with
+// the runtime of its space, skipping entities whose space has no runtime. One
+// pass serves every space, so the cost does not grow with the number of
+// spaces.
+func (s *Server) eachSpacedRuntime(spaced []registry.SpacedEntity, fn func(*spaceRuntime, Entity)) {
+	// Entities of one space often follow each other; remember the last lookup.
+	last, lastSpace := &s.space0, SpaceID(0)
+	for _, se := range spaced {
+		if se.Space != lastSpace {
+			last, lastSpace = s.runtime(se.Space), se.Space
+		}
+		if last != nil {
+			fn(last, se.Entity)
+		}
+	}
+}
+
+// mergeContacts adds one space's contacts to the phase's merged list. The
+// first non-empty list is used as is; from the second on the lists are copied
+// into scratch, which copied tracks.
+func mergeContacts[T any](merged []T, scratch *[]T, copied *bool, contacts []T) []T {
+	switch {
+	case len(contacts) == 0:
+		return merged
+	case merged == nil:
+		return contacts
+	}
+	if !*copied {
+		*scratch = append((*scratch)[:0], merged...)
+		*copied = true
+	}
+	*scratch = append(*scratch, contacts...)
+	return *scratch
+}
+
+// stepCollision2D syncs every space's 2D backend from its entities' positions,
+// then steps the backends in ascending space order and reads each back. A
+// ReadBack only writes entities of its own space, so syncing all backends
+// first gives every step the same positions as syncing each just before it.
 func (s *Server) stepCollision2D(dt float64) {
 	if s.space0.collision == nil && !s.anyCollision2D() {
 		return
 	}
 	all, spaced := s.collisionEntities()
 	defer s.releaseSpacedScratch(spaced)
+	update := func(rt *spaceRuntime, e Entity) {
+		if rt.collision == nil || rt.physicsAttached(e.EntityID()) {
+			return
+		}
+		x, y := e.Position()
+		rt.collision.Update(e.EntityID(), float64(x), float64(y))
+	}
+	if spaced != nil {
+		s.eachSpacedRuntime(spaced, update)
+	} else if b := s.space0.collision; b != nil {
+		// Without spaces: the plain list, as before spaces existed.
+		for _, e := range all {
+			if s.space0.physicsAttached(e.EntityID()) {
+				continue
+			}
+			x, y := e.Position()
+			b.Update(e.EntityID(), float64(x), float64(y))
+		}
+	}
 	var merged []collision.Contact
-	scratch := false
+	copied := false
 	step := func(rt *spaceRuntime) {
 		b := rt.collision
 		if b == nil {
 			return
 		}
-		if spaced == nil {
-			if rt.id == 0 {
-				for _, e := range all {
-					if rt.physicsAttached(e.EntityID()) {
-						continue
-					}
-					x, y := e.Position()
-					b.Update(e.EntityID(), float64(x), float64(y))
-				}
-			}
-		} else {
-			for _, se := range spaced {
-				if se.Space != rt.id || rt.physicsAttached(se.Entity.EntityID()) {
-					continue
-				}
-				x, y := se.Entity.Position()
-				b.Update(se.Entity.EntityID(), float64(x), float64(y))
-			}
-		}
 		contacts := b.Step(dt)
 		b.ReadBack(func(id int64, x, y float64) {
-			if rt.physicsAttached(id) || !s.inCollisionSpace(rt, id, spaced != nil) {
-				return
-			}
-			e, ok := s.reg.Get(id)
+			e, ok := s.readBackEntity(rt, id, spaced != nil)
 			if !ok {
 				return
 			}
@@ -620,18 +663,7 @@ func (s *Server) stepCollision2D(dt float64) {
 				pw.SetPosition(float32(x), float32(y))
 			}
 		})
-		switch {
-		case len(contacts) == 0:
-		case merged == nil:
-			merged = contacts
-		default:
-			if !scratch {
-				s.contactScratch = append(s.contactScratch[:0], merged...)
-				scratch = true
-			}
-			s.contactScratch = append(s.contactScratch, contacts...)
-			merged = s.contactScratch
-		}
+		merged = mergeContacts(merged, &s.contactScratch, &copied, contacts)
 	}
 	step(&s.space0)
 	for _, rt := range s.spaceOrder {
@@ -645,16 +677,15 @@ func (s *Server) stepCollision2D(dt float64) {
 	}
 }
 
+// stepCollision3D is stepCollision2D for the 3D backends.
 func (s *Server) stepCollision3D(dt float64) {
 	if s.space0.collision3D == nil && !s.anyCollision3D() {
 		return
 	}
 	all, spaced := s.collisionEntities()
 	defer s.releaseSpacedScratch(spaced)
-	var merged []collision3d.Contact
-	scratch := false
-	update := func(rt *spaceRuntime, b collision3d.Backend, e Entity) {
-		if rt.physicsAttached(e.EntityID()) {
+	update := func(rt *spaceRuntime, e Entity) {
+		if rt.collision3D == nil || rt.physicsAttached(e.EntityID()) {
 			return
 		}
 		sp, ok := e.(registry.Spatial3DEntity)
@@ -662,32 +693,25 @@ func (s *Server) stepCollision3D(dt float64) {
 			return
 		}
 		x, y, z := sp.Position3D()
-		b.Update(e.EntityID(), float64(x), float64(y), float64(z))
+		rt.collision3D.Update(e.EntityID(), float64(x), float64(y), float64(z))
 	}
+	if spaced != nil {
+		s.eachSpacedRuntime(spaced, update)
+	} else if s.space0.collision3D != nil {
+		for _, e := range all {
+			update(&s.space0, e)
+		}
+	}
+	var merged []collision3d.Contact
+	copied := false
 	step := func(rt *spaceRuntime) {
 		b := rt.collision3D
 		if b == nil {
 			return
 		}
-		if spaced == nil {
-			if rt.id == 0 {
-				for _, e := range all {
-					update(rt, b, e)
-				}
-			}
-		} else {
-			for _, se := range spaced {
-				if se.Space == rt.id {
-					update(rt, b, se.Entity)
-				}
-			}
-		}
 		contacts := b.Step(dt)
 		b.ReadBack(func(id int64, x, y, z float64) {
-			if rt.physicsAttached(id) || !s.inCollisionSpace(rt, id, spaced != nil) {
-				return
-			}
-			e, ok := s.reg.Get(id)
+			e, ok := s.readBackEntity(rt, id, spaced != nil)
 			if !ok {
 				return
 			}
@@ -695,18 +719,7 @@ func (s *Server) stepCollision3D(dt float64) {
 				pw.SetPosition3D(float32(x), float32(y), float32(z))
 			}
 		})
-		switch {
-		case len(contacts) == 0:
-		case merged == nil:
-			merged = contacts
-		default:
-			if !scratch {
-				s.contactScratch3D = append(s.contactScratch3D[:0], merged...)
-				scratch = true
-			}
-			s.contactScratch3D = append(s.contactScratch3D, contacts...)
-			merged = s.contactScratch3D
-		}
+		merged = mergeContacts(merged, &s.contactScratch3D, &copied, contacts)
 	}
 	step(&s.space0)
 	for _, rt := range s.spaceOrder {

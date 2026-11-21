@@ -29,6 +29,20 @@ func (r *Registry) Space(id int64) (SpaceID, bool) {
 	return r.spaces[id], true
 }
 
+// GetSpaced returns a published or provisional entity together with its
+// space under one lock, or (nil, 0, false) when the ID is unknown.
+func (r *Registry) GetSpaced(id int64) (Entity, SpaceID, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e, ok := r.entities[id]
+	if !ok {
+		if e, ok = r.provisional[id]; !ok {
+			return nil, 0, false
+		}
+	}
+	return e, r.spaces[id], true
+}
+
 // PublishedSpace returns the space of a published entity, or (0, false) when
 // the ID is unknown or still provisional.
 func (r *Registry) PublishedSpace(id int64) (SpaceID, bool) {

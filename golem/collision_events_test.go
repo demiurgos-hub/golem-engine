@@ -652,3 +652,62 @@ func TestCollision3DStaysWithinEachSpace(t *testing.T) {
 		t.Fatalf("space 0 OverlapSphere = %v", got)
 	}
 }
+
+// With many spaces, one pass over the entities feeds every backend: each
+// backend is updated with exactly its own entities, each steps once, and each
+// reads back only into its own entities. Entities in a space without a
+// backend are skipped.
+func TestCollisionManySpacesUpdateOnlyTheirOwnEntities(t *testing.T) {
+	const spaces = 7
+	s := NewServer(ServerConfig{})
+	backends := make([]*pointBackend2D, spaces)
+	for space := range backends {
+		b := newPointBackend2D()
+		backends[space] = b
+		sp := s.Space(SpaceID(space))
+		sp.SetCollisionBackend(b)
+		sp.SetCollisionLayers(NewCollisionLayers().Bind(b).Define("Body").SetCollides("Body", "Body"))
+	}
+	// Interleaved, so entities of one space do not follow each other.
+	want := make([][]int64, spaces)
+	colliders := map[int64]*spaceCollider{}
+	for id := int64(1); id <= 5*spaces; id++ {
+		space := int(id) % spaces
+		c := newSpaceCollider(id)
+		c.x = float32(id) * 10
+		colliders[id] = c
+		createIn(t, s, SpaceID(space), c)
+		want[space] = append(want[space], id)
+	}
+	stray := newSpaceCollider(1000)
+	createIn(t, s, 99, stray) // a space without collision services
+	for space, b := range backends {
+		// Each backend reports a neighbour space's entity too.
+		b.writeBack[want[space][0]] = [2]float64{float64(space), 1}
+		b.writeBack[want[(space+1)%spaces][1]] = [2]float64{-5, -5}
+	}
+
+	for tick := 1; tick <= 2; tick++ {
+		for _, b := range backends {
+			b.updated = nil
+		}
+		s.stepCollision(0.05)
+		for space, b := range backends {
+			if got := slices.Sorted(slices.Values(b.updated)); !slices.Equal(got, want[space]) {
+				t.Fatalf("tick %d: space %d backend updated %v, want %v", tick, space, got, want[space])
+			}
+			if b.steps != tick {
+				t.Fatalf("tick %d: space %d backend stepped %d times", tick, space, b.steps)
+			}
+			if first := colliders[want[space][0]]; first.x != float32(space) || first.y != 1 {
+				t.Fatalf("tick %d: space %d entity at (%g,%g), want its backend's (%d,1)", tick, space, first.x, first.y, space)
+			}
+			if second := colliders[want[space][1]]; second.x == -5 {
+				t.Fatalf("tick %d: space %d entity was moved by another space's backend", tick, space)
+			}
+		}
+	}
+	if stray.x != 0 || stray.y != 0 {
+		t.Fatal("an entity in a space without a backend was moved")
+	}
+}
