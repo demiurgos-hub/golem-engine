@@ -2,6 +2,7 @@ package net
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/demiurgos-hub/golem-engine/internal/netwire"
 )
@@ -14,8 +15,11 @@ import (
 // such an event describes a space the client has left. That includes records
 // on the reliable lanes: an event sent shortly before a space change whose
 // datagram is retransmitted, and so arrives after the change, is lost. Send
-// events that must survive a space change, such as inventory or chat, with
-// EventStream, which stays ordered with the transition.
+// events that must survive any space change, such as inventory or chat, with
+// EventStream, which stays ordered with the transition, or prepare the change
+// with golem.Server.PrepareSpaceChange, which moves the session's events to
+// the stream and waits until its earlier reliable datagrams are acknowledged
+// (BeginEventDrain, ReliableSettled).
 type EventDelivery uint8
 
 const (
@@ -145,6 +149,40 @@ func (l *Listener) SetSessionEventsStreamOnly(sessionID int64, on bool) {
 	}
 }
 
+// BeginEventDrain makes datagram-lane server events for a connected session
+// use the reliable stream from now on, like SetSessionEventsStreamOnly(on),
+// and returns a watermark for ReliableSettled. Switching lanes and reading the
+// watermark happen together under the session's datagram lock, which every
+// datagram-lane event also takes when it queues, so an event sent
+// concurrently is either older than the watermark or goes out on the stream.
+// reliable is false for sessions without reliable datagram lanes, whose
+// events already travel on the stream; ok is false for unknown sessions.
+func (l *Listener) BeginEventDrain(sessionID int64) (mark uint16, reliable, ok bool) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	s, ok := l.sessions[sessionID]
+	if !ok {
+		return 0, false, false
+	}
+	mark, reliable = s.beginEventDrain()
+	return mark, reliable, true
+}
+
+// ReliableSettled reports whether every reliable datagram queued for a
+// connected session before BeginEventDrain returned mark has been
+// acknowledged by the client. Raw reliable sends count as well as event
+// records. Sessions without reliable datagram lanes are always settled; ok is
+// false for unknown sessions.
+func (l *Listener) ReliableSettled(sessionID int64, mark uint16) (settled, ok bool) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	s, ok := l.sessions[sessionID]
+	if !ok {
+		return false, false
+	}
+	return s.reliableSettled(mark), true
+}
+
 // SetSessionEventTransition atomically sets a connected session's space
 // transition and stream-only flag (see SetSessionEventsStreamOnly). Once the
 // transition is non-zero, datagram event records for the session carry it, so
@@ -205,6 +243,51 @@ func (s *Session) setEventsStreamOnly(on bool) {
 			return
 		}
 	}
+}
+
+func (s *Session) beginEventDrain() (mark uint16, reliable bool) {
+	if s.protocol == nil {
+		s.setEventsStreamOnly(true)
+		return 0, false
+	}
+	s.protocolMu.Lock()
+	defer s.protocolMu.Unlock()
+	s.setEventsStreamOnly(true)
+	return s.protocol.nextMessageID, true
+}
+
+func (s *Session) reliableSettled(mark uint16) bool {
+	if s.protocol == nil {
+		return true
+	}
+	s.protocolMu.Lock()
+	defer s.protocolMu.Unlock()
+	return s.protocol.reliableSettledBefore(mark)
+}
+
+// queueReliableEvent queues one event record on a reliable datagram lane, or
+// reports that the session became stream-only after dispatchEvent read its
+// lane state. The stream-only bit is rechecked under protocolMu, which
+// beginEventDrain holds while it sets the bit and reads its watermark.
+func (s *Session) queueReliableEvent(lane datagramLane, record []byte) (stream bool, err error) {
+	if s.isClosing() {
+		return false, nil
+	}
+	s.protocolMu.Lock()
+	if s.eventLane.Load()&eventStreamOnlyBit != 0 {
+		s.protocolMu.Unlock()
+		return true, nil
+	}
+	err = s.protocol.enqueueReliable(lane, record, time.Now())
+	s.protocolMu.Unlock()
+	if err != nil {
+		if !s.closeOnQueueFailure(laneName(lane)+" datagram", -1) {
+			return false, nil
+		}
+		return false, err
+	}
+	s.signalWake()
+	return false, nil
 }
 
 func (s *Session) holdEvents() {
@@ -282,12 +365,16 @@ func (s *Session) dispatchEvent(delivery EventDelivery, event, record, streamFra
 			return streamFrame, nil
 		}
 	}
-	switch delivery {
-	case EventUnreliable:
+	if delivery == EventUnreliable {
 		return nil, s.SendUnreliable(record)
-	case EventReliableOrdered:
-		return nil, s.queueReliable(datagramLaneReliableOrdered, record)
-	default:
-		return nil, s.queueReliable(datagramLaneReliableUnordered, record)
 	}
+	queue := datagramLaneReliableUnordered
+	if delivery == EventReliableOrdered {
+		queue = datagramLaneReliableOrdered
+	}
+	stream, err := s.queueReliableEvent(queue, record)
+	if stream {
+		return streamFrame, nil
+	}
+	return nil, err
 }

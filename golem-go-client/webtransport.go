@@ -136,29 +136,50 @@ func (p *datagramProtocol) receive(data []byte, deliver func(uint8, []byte)) err
 		p.mu.Unlock()
 		return nil
 	}
-	accepted := p.recvPackets.Accept(packet.Sequence)
-	if accepted {
-		p.scheduleAckLocked(now)
+	reliable := packet.Lane == datagramLaneReliableUnordered || packet.Lane == datagramLaneReliableOrdered
+	var accepted bool
+	if reliable {
+		// A reliable packet is recorded, and so acknowledged, only after deliver
+		// handed its record on: a server that saw the ACK knows this client
+		// queued the record ahead of any frame sent later, which
+		// Server.PrepareSpaceChange relies on. One datagram loop calls receive,
+		// so nothing records the packet meanwhile.
+		accepted = p.recvPackets.Fresh(packet.Sequence)
+	} else {
+		accepted = p.recvPackets.Accept(packet.Sequence)
+		if accepted {
+			p.scheduleAckLocked(now)
+		}
 	}
 	p.mu.Unlock()
 	if !accepted {
 		return nil
 	}
-	switch packet.Lane {
-	case datagramLaneReliableUnordered, datagramLaneReliableOrdered:
-		p.mu.Lock()
-		accepted = p.recvReliableMsg.Accept(packet.MessageID)
-		p.mu.Unlock()
-		if !accepted {
-			return nil
+	if !reliable {
+		if deliver != nil {
+			deliver(packet.Lane, packet.Payload)
+		}
+		return nil
+	}
+	p.mu.Lock()
+	fresh := p.recvReliableMsg.Accept(packet.MessageID)
+	p.mu.Unlock()
+	if fresh {
+		if packet.Lane == datagramLaneReliableOrdered {
+			if err := p.deliverOrdered(packet, now, deliver); err != nil {
+				return err
+			}
+		} else if deliver != nil {
+			deliver(packet.Lane, packet.Payload)
 		}
 	}
-	if packet.Lane == datagramLaneReliableOrdered {
-		return p.deliverOrdered(packet, now, deliver)
+	// A resend of a message already delivered is acknowledged too, so the
+	// server stops sending it.
+	p.mu.Lock()
+	if p.recvPackets.Accept(packet.Sequence) {
+		p.scheduleAckLocked(now)
 	}
-	if deliver != nil {
-		deliver(packet.Lane, packet.Payload)
-	}
+	p.mu.Unlock()
 	return nil
 }
 

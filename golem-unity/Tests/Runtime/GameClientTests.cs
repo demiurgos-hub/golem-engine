@@ -568,7 +568,8 @@ namespace GolemEngine.Unity.Tests
         /// <summary>
         /// Events on a reliable datagram lane are reliable only within one space: a record sent before a
         /// space change that arrives after it, such as a retransmission, is dropped like any record of an
-        /// older transition. An event that must survive a space change belongs on the stream.
+        /// older transition. An event that must survive a space change belongs on the stream, or the server
+        /// prepares the change (Server.PrepareSpaceChange) so no such record is still on its way.
         /// </summary>
         [Test]
         public void DropsLateReliableLaneEventsOfOlderTransitionsButKeepsStreamEvents()

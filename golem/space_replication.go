@@ -169,7 +169,8 @@ func (s *Server) releaseSpaceGate(sessionID int64, transition uint64) bool {
 	if !ok || pending != transition {
 		return false
 	}
-	s.listener.SetSessionEventsStreamOnly(sessionID, false)
+	// Stays on the stream while a PrepareSpaceChange still waits.
+	s.refreshEventLane(sessionID)
 	if s.eventualTrackers != nil {
 		if t := s.eventualTrackers[sessionID]; t != nil {
 			t.releaseGated(func(id int64) bool {

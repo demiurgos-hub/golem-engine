@@ -181,6 +181,8 @@ namespace GolemEngine.Unity
                 return;
             }
 
+            var reliable = packet.Lane == GolemDatagramLane.ReliableUnordered ||
+                packet.Lane == GolemDatagramLane.ReliableOrdered;
             bool accepted;
             lock (_lock)
             {
@@ -191,10 +193,21 @@ namespace GolemEngine.Unity
                     return;
                 }
 
-                accepted = _recvPackets.Accept(packet.PacketSeq);
-                if (accepted)
+                if (reliable)
                 {
-                    ScheduleAckLocked(now);
+                    // A reliable packet is recorded, and so acknowledged, only after deliver handed its record on: a
+                    // server that saw the ACK knows this client queued the record ahead of any frame sent later, which
+                    // Server.PrepareSpaceChange relies on. One datagram loop calls Receive, so nothing records the
+                    // packet meanwhile.
+                    accepted = _recvPackets.IsFresh(packet.PacketSeq);
+                }
+                else
+                {
+                    accepted = _recvPackets.Accept(packet.PacketSeq);
+                    if (accepted)
+                    {
+                        ScheduleAckLocked(now);
+                    }
                 }
             }
             if (!accepted)
@@ -202,25 +215,37 @@ namespace GolemEngine.Unity
                 return;
             }
 
-            if (packet.Lane == GolemDatagramLane.ReliableUnordered || packet.Lane == GolemDatagramLane.ReliableOrdered)
+            if (!reliable)
             {
-                lock (_lock)
-                {
-                    accepted = _recvReliableMessages.Accept(packet.MessageId);
-                }
-                if (!accepted)
-                {
-                    return;
-                }
-            }
-
-            if (packet.Lane == GolemDatagramLane.ReliableOrdered)
-            {
-                DeliverOrdered(packet, now, deliver);
+                deliver?.Invoke(packet.Lane, CopyPayload(packet.Payload));
                 return;
             }
 
-            deliver?.Invoke(packet.Lane, CopyPayload(packet.Payload));
+            bool fresh;
+            lock (_lock)
+            {
+                fresh = _recvReliableMessages.Accept(packet.MessageId);
+            }
+            if (fresh)
+            {
+                if (packet.Lane == GolemDatagramLane.ReliableOrdered)
+                {
+                    DeliverOrdered(packet, now, deliver);
+                }
+                else
+                {
+                    deliver?.Invoke(packet.Lane, CopyPayload(packet.Payload));
+                }
+            }
+
+            // A resend of a message already delivered is acknowledged too, so the server stops sending it.
+            lock (_lock)
+            {
+                if (_recvPackets.Accept(packet.PacketSeq))
+                {
+                    ScheduleAckLocked(now);
+                }
+            }
         }
 
         public void SendDueAck(DateTime now)
@@ -675,6 +700,22 @@ namespace GolemEngine.Unity
             public uint[] Mask { get; } = new uint[AckMaskWordCount];
 
             public bool IsBehind(ushort seq) => Init && SequenceNewer(Latest, seq);
+
+            /// <summary>Reports whether Accept would record seq, without recording it.</summary>
+            public bool IsFresh(ushort seq)
+            {
+                if (!Init || SequenceNewer(seq, Latest))
+                {
+                    return true;
+                }
+                var diff = SequenceDistance(seq, Latest);
+                if (diff == 0 || diff > AckWindow)
+                {
+                    return false;
+                }
+                var bit = diff - 1;
+                return (Mask[bit / 32] & (1u << (bit % 32))) == 0;
+            }
 
             public bool Accept(ushort seq)
             {

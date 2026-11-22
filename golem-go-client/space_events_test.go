@@ -119,7 +119,8 @@ func TestGameClientFailedControlSendsCloseConnection(t *testing.T) {
 // record sent before a space change that arrives after it, such as a
 // retransmission, is dropped like any record of an older transition. An event
 // that must survive a space change belongs on the stream, which stays ordered
-// with the transition.
+// with the transition, or the server prepares the change
+// (Server.PrepareSpaceChange) so no such record is still on its way.
 func TestGameClientDropsLateReliableLaneEventsButKeepsStreamEvents(t *testing.T) {
 	channel := &spaceChannel{}
 	entities := newFencedEntities()

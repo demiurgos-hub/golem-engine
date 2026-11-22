@@ -381,6 +381,21 @@ func pruneReliableQueue(queue *[]*reliableDatagramMessage, ackSeq uint16, ackMas
 	return changed, nil
 }
 
+// reliableSettledBefore reports whether no reliable datagram older than mark
+// still waits for an acknowledgement. Message IDs are circular; the per-lane
+// queue cap keeps every live ID, and a mark taken while older ones are still
+// queued, within half the ID space of each other, so Newer orders them.
+func (p *datagramProtocolState) reliableSettledBefore(mark uint16) bool {
+	for _, queue := range [...][]*reliableDatagramMessage{p.pendingOrdered, p.pendingUnordered} {
+		for _, msg := range queue {
+			if seqGreater(mark, msg.messageID) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (p *datagramProtocolState) pendingQueue(lane datagramLane) *[]*reliableDatagramMessage {
 	if lane == datagramLaneReliableOrdered {
 		return &p.pendingOrdered

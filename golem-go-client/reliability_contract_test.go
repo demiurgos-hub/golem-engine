@@ -210,3 +210,54 @@ func TestGameClientUsesDynamicDatagramLimits(t *testing.T) {
 		}
 	}
 }
+
+// TestClientAcknowledgesReliablePacketsOnlyAfterDelivery pins the order
+// Server.PrepareSpaceChange relies on: a reliable packet enters the ACK window
+// only once deliver has handed its record on.
+func TestClientAcknowledgesReliablePacketsOnlyAfterDelivery(t *testing.T) {
+	p := newDatagramProtocol(func([]byte) error { return nil }, time.Millisecond)
+	acknowledged := func(seq uint16) bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		// Recorded in the window, so the next ACK reports it.
+		return !p.recvPackets.Fresh(seq)
+	}
+	receive := func(packet datagramPacket, deliver func(uint8, []byte)) {
+		t.Helper()
+		data, err := encodeDatagramPacket(packet)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.receive(data, deliver); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var delivered []string
+	for _, packet := range []datagramPacket{
+		{Sequence: 0, Lane: datagramLaneReliableUnordered, MessageID: 0, Payload: []byte("unordered")},
+		{Sequence: 1, Lane: datagramLaneReliableOrdered, MessageID: 1, OrderedSequence: 0, Payload: []byte("ordered")},
+	} {
+		receive(packet, func(_ uint8, payload []byte) {
+			if acknowledged(packet.Sequence) {
+				t.Fatalf("packet %d acknowledged before its record was delivered", packet.Sequence)
+			}
+			delivered = append(delivered, string(payload))
+		})
+		if !acknowledged(packet.Sequence) {
+			t.Fatalf("packet %d not acknowledged after delivery", packet.Sequence)
+		}
+	}
+	// A resend of a delivered message in a new packet is acknowledged without
+	// a second delivery, so the server stops resending it.
+	receive(datagramPacket{Sequence: 2, Lane: datagramLaneReliableOrdered, MessageID: 1, OrderedSequence: 0, Payload: []byte("ordered")},
+		func(_ uint8, payload []byte) { delivered = append(delivered, "again:"+string(payload)) })
+	if !acknowledged(2) || strings.Join(delivered, ",") != "unordered,ordered" {
+		t.Fatalf("resend: acknowledged=%v deliveries=%v", acknowledged(2), delivered)
+	}
+	// Unreliable packets keep acknowledging on receipt.
+	receive(datagramPacket{Sequence: 3, Lane: datagramLaneUnreliable, Payload: []byte("state")}, func(uint8, []byte) {
+		if !acknowledged(3) {
+			t.Fatal("unreliable packet must be acknowledged on receipt")
+		}
+	})
+}
