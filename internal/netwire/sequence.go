@@ -32,6 +32,15 @@ func (w *SequenceWindow) Behind(sequence uint16) bool {
 	return w.initialized && Newer(w.latest, sequence)
 }
 
+// Fresh reports whether Accept would record sequence, without recording it.
+func (w *SequenceWindow) Fresh(sequence uint16) bool {
+	if !w.initialized || Newer(sequence, w.latest) {
+		return true
+	}
+	distance := Distance(sequence, w.latest)
+	return distance > 0 && distance <= AckWindow && !w.mask.HasBit(int(distance)-1)
+}
+
 // Accept records a new sequence or previously unseen in-window predecessor.
 func (w *SequenceWindow) Accept(sequence uint16) bool {
 	if !w.initialized {

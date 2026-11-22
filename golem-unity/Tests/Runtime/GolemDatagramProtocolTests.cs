@@ -158,6 +158,48 @@ namespace GolemEngine.Unity.Tests
             Assert.That(frames[1], Is.EqualTo(new byte[] { 2, 3 }));
         }
 
+        [Test]
+        public void AcknowledgesReliablePacketsOnlyAfterDelivery()
+        {
+            // Server.PrepareSpaceChange relies on a reliable packet entering the ACK window only once its record was
+            // handed on. WrapStreamPayload piggybacks a pending ACK, so an unchanged payload means none is pending.
+            var protocol = new GolemDatagramProtocol(_ => { }, ackIntervalMilliseconds: 1000);
+            var delivered = new List<byte[]>();
+            protocol.Receive(
+                EncodePacket(5, 0, GolemDatagramLane.ReliableUnordered, new byte[] { 1 }, messageId: 0),
+                (_, payload) =>
+                {
+                    Assert.That(protocol.WrapStreamPayload(new byte[] { 9 }), Has.Length.EqualTo(1), "acknowledged before delivery");
+                    delivered.Add(payload);
+                });
+            var wrapped = protocol.WrapStreamPayload(new byte[] { 9 });
+            Assert.That(wrapped.Length, Is.GreaterThan(1));
+            Assert.That(wrapped[6], Is.EqualTo(5));
+
+            protocol.Receive(
+                EncodePacket(6, 0, GolemDatagramLane.ReliableOrdered, new byte[] { 2 }, messageId: 1, orderedSeq: 0),
+                (_, payload) =>
+                {
+                    Assert.That(protocol.WrapStreamPayload(new byte[] { 9 }), Has.Length.EqualTo(1), "acknowledged before delivery");
+                    delivered.Add(payload);
+                });
+            wrapped = protocol.WrapStreamPayload(new byte[] { 9 });
+            Assert.That(wrapped[6], Is.EqualTo(6));
+
+            // A resend of a delivered message is acknowledged without a second delivery.
+            protocol.Receive(
+                EncodePacket(7, 0, GolemDatagramLane.ReliableOrdered, new byte[] { 2 }, messageId: 1, orderedSeq: 0),
+                (_, payload) => delivered.Add(payload));
+            wrapped = protocol.WrapStreamPayload(new byte[] { 9 });
+            Assert.That(wrapped[6], Is.EqualTo(7));
+            Assert.That(delivered, Has.Count.EqualTo(2));
+
+            // Unreliable packets keep acknowledging on receipt.
+            protocol.Receive(
+                EncodePacket(8, 0, GolemDatagramLane.Unreliable, new byte[] { 3 }),
+                (_, _) => Assert.That(protocol.WrapStreamPayload(new byte[] { 9 }).Length, Is.GreaterThan(1)));
+        }
+
         private static byte[] Slice(byte[] data, int offset)
         {
             var outBytes = new byte[data.Length - offset];

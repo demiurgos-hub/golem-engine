@@ -929,6 +929,9 @@ func (s *Server) RestorePhysicsCheckpoint(c PhysicsCheckpoint, options PhysicsRe
 	s.spaceAnnouncing = make(map[int64]SpaceID)
 	s.foiOrphanKnown = make(map[int64]map[int64]uint64)
 	s.closedSessions = make(map[int64]struct{})
+	// Preparations made for the replaced world report ok=false on the next
+	// drain; their sessions' lanes are refreshed then.
+	s.failSpacePreparesLocked()
 	s.interestMu.Unlock()
 	s.avatarMu.Lock()
 	s.sessionAvatar = map[int64]int64{}

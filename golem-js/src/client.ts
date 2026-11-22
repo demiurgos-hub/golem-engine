@@ -1985,6 +1985,9 @@ class WebTransportDatagramProtocol {
     if (packet.lane === datagramLaneEventualState && this._recvPackets.behind(packet.packetSeq)) {
       return;
     }
+    // The packet is recorded for acknowledgement before its record is delivered, but this method runs in one turn of
+    // the event loop: an ACK can only leave once delivery has begun (from inside it) or after it, so a server that saw
+    // the ACK knows the record was handed on ahead of any frame it sends later (Server.PrepareSpaceChange relies on it).
     const accepted = this._recvPackets.accept(packet.packetSeq);
     if (accepted && !this._ackDirty) {
       // Preserve the first pending deadline even while packets keep arriving.

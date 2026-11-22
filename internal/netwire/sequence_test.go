@@ -111,3 +111,25 @@ func TestOrderedBufferWrap(t *testing.T) {
 		t.Fatal("wrap did not deliver")
 	}
 }
+
+func TestSequenceWindowFreshPredictsAcceptWithoutRecording(t *testing.T) {
+	for _, base := range []uint16{0, 1, 127, 32768, 65535} {
+		var window SequenceWindow
+		if !window.Fresh(base) {
+			t.Fatal("an empty window must report its first sequence as fresh")
+		}
+		window.Accept(base)
+		window.Accept(base - 3)
+		for _, offset := range []int{-200, -129, -128, -127, -3, -2, -1, 0, 1, 2, 128, 32767, 32768} {
+			seq := base + uint16(offset)
+			probe := window
+			fresh := probe.Fresh(seq)
+			if probe != window {
+				t.Fatalf("Fresh(%d) changed the window", seq)
+			}
+			if accepted := probe.Accept(seq); accepted != fresh {
+				t.Fatalf("base=%d offset=%d: Fresh=%v, Accept=%v", base, offset, fresh, accepted)
+			}
+		}
+	}
+}

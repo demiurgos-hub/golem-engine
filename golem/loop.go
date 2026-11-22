@@ -210,6 +210,18 @@ type Server struct {
 	spaceAckInbox  map[int64]uint64
 	spaceAckQueued atomic.Bool
 
+	// Space change preparations (space_prepare.go). eventLaneMu orders
+	// PrepareSpaceChange with refreshEventLane, the only code that moves a
+	// session's events back to their datagram lanes; lock order eventLaneMu
+	// before interestMu. spacePrepares, spaceLaneDirty and spacePrepareSeq are
+	// guarded by interestMu; spacePreparesActive lets quiet ticks skip the
+	// drain without a lock.
+	eventLaneMu         sync.Mutex
+	spacePrepares       map[int64][]*spacePrepare
+	spaceLaneDirty      map[int64]struct{}
+	spacePrepareSeq     uint64
+	spacePreparesActive atomic.Bool
+
 	// EntityResync requests waiting for the next replication pass: per
 	// session, the IDs of known entities whose held compact records the
 	// client evicted, kept outside msgQueue (entity_resync.go).
@@ -1392,7 +1404,8 @@ func (s *Server) enqueueDisconnect(sess *Session) {
 }
 
 // drainMessages processes all queued session events in FIFO order on the tick
-// goroutine, then the SpaceAcks stored meanwhile. Called once per tick before
+// goroutine, then the SpaceAcks stored meanwhile, then completes the space
+// change preparations whose sessions are ready (space_prepare.go). Called once per tick before
 // entity ticks so that handlers such as CreateEntity and DeleteEntity are safe
 // without additional synchronization. EntityResync requests are answered by
 // the replication pass instead (entity_resync.go).
@@ -1439,6 +1452,7 @@ func (s *Server) drainMessages() {
 			}
 		default:
 			s.applySpaceAcks()
+			s.drainPreparedSpaceChanges()
 			return
 		}
 	}
