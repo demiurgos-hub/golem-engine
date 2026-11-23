@@ -149,9 +149,16 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 - `Server.SetWebSocketCheckOrigin` / `Listener.SetWebSocketCheckOrigin` replace the WebSocket origin policy; `nil` restores the default.
 - `golem-bake --check` verifies that committed generated code matches the current schemas without writing to the project. It renders with the same templates, `gofmt` and TypeScript toolchain into a temporary directory and lists each `missing`, `stale` or `unexpected` (retired file still carrying the Golem generated header) path. CRLF and LF compare equal. Exit code 0 means up to date, 1 means differences were found, 2 means a usage or configuration error, so CI and `docker build` steps can tell stale code from a broken setup. All configured outputs must be inside the project.
 - Golem Inspector hub container images are published to `ghcr.io/demiurgos-hub/golem-inspector` for `linux/amd64` and `linux/arm64`. Release tags `vX.Y.Z` publish `X.Y.Z` and `latest` (prereleases publish only their version), and manual runs publish `edge` or a chosen tag.
+- `golem/host`: an operator-only admin HTTP listener (`RunOptions.Admin`) with `/live`, `/ready`, `/info`, `/stats`, `POST /snapshot` and `POST /reload-tls`, so deploy tooling can gate on readiness, read session, entity and tick statistics, request a snapshot before a backup and reload renewed certificates. Every endpoint except `/live` requires a bearer token; `host.Run` refuses a non-loopback admin address without one, and browser requests are rejected.
+- `golem/host`: `RunOptions.AfterServerStop` runs after `Server.Run` has returned and before `host.Run` returns, for example to take a final `Server.SaveSnapshot` on SIGTERM.
+- `golem/host`: the sidecar HTTPS certificate can be renewed without a restart, by `RunOptions.HTTPTLSReloadInterval` polling or the admin `/reload-tls` endpoint.
+- `golem/host`: `RunOptionsFromEnv` and `AdminOptionsFromEnv` read `GOLEM_HTTP_ADDR`, `GOLEM_ADMIN_ADDR` and `GOLEM_ADMIN_TOKEN`, and reuse `GOLEM_TLS_CERT_FILE`, `GOLEM_TLS_KEY_FILE` and `GOLEM_TLS_RELOAD_INTERVAL` for the sidecar.
+- `Server.TickStats()` reports tick timing (last and recent maximum duration, budget, overruns) from any goroutine; `Server.Transport()` returns the configured transport; `golem.EngineVersion()` returns the engine module version.
+- `golem/net`: `ReloadableCertificate`, a file-backed TLS certificate for `tls.Config.GetCertificate` with explicit and polled reload.
 
 ### Changed
 
+- `host.Run` now waits for every component to stop before returning, loads the sidecar certificate before the server starts (a bad pair fails before anything runs), and returns nil when cancelled during startup. When the sidecar certificate is reloadable, `HTTPServer.TLSConfig` is replaced by a clone that sets `GetCertificate`.
 - `golem-bake` now exits with code 2 (was 1) for unrecognized arguments and prints errors as `golem-bake: <error>` without a log timestamp. `golem-bake -h` prints the usage.
 - `Server.DetachNavigation` now returns an error: one wrapping `physics3d.ErrBusy` during a space transfer (`SpaceTransfer.RebuildPhysics` or `MoveShapes`), otherwise nil. Existing statement calls still compile. `Server.DetachPhysics` returns the same error during a transfer.
 

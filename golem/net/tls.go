@@ -59,13 +59,24 @@ func prepareWebTransportCertificate(cfg Config) (*servedCertificate, certificate
 // read, the next poll sees a different stamp and loads again, so a replacement
 // is never missed (at worst it is loaded twice).
 func loadServedCertificateFiles(certPath string, keyPath string) (*servedCertificate, certificateFileStamps, error) {
+	return loadNamedCertificateFiles(webTransportCertificateName, certPath, keyPath)
+}
+
+// webTransportCertificateName labels the integrated listener's certificate in
+// errors and logs.
+const webTransportCertificateName = "WebTransport"
+
+// loadNamedCertificateFiles is loadServedCertificateFiles with the label used
+// in its errors; name distinguishes the listener's certificate from other
+// ReloadableCertificate users.
+func loadNamedCertificateFiles(name string, certPath string, keyPath string) (*servedCertificate, certificateFileStamps, error) {
 	stamps, err := statCertificateFiles(certPath, keyPath)
 	if err != nil {
-		return nil, certificateFileStamps{}, fmt.Errorf("golem/net: loading WebTransport TLS certificate cert=%q key=%q: %w", certPath, keyPath, err)
+		return nil, certificateFileStamps{}, fmt.Errorf("golem/net: loading %s TLS certificate cert=%q key=%q: %w", name, certPath, keyPath, err)
 	}
 	certificate, err := loadWebTransportCertificateFiles(certPath, keyPath)
 	if err != nil {
-		return nil, certificateFileStamps{}, fmt.Errorf("golem/net: loading WebTransport TLS certificate cert=%q key=%q: %w", certPath, keyPath, err)
+		return nil, certificateFileStamps{}, fmt.Errorf("golem/net: loading %s TLS certificate cert=%q key=%q: %w", name, certPath, keyPath, err)
 	}
 	return newServedCertificate(certificate), stamps, nil
 }
@@ -134,7 +145,8 @@ func newServedCertificate(certificate tls.Certificate) *servedCertificate {
 }
 
 // certificateHolder serves the current certificate to TLS handshakes and is
-// swapped atomically while the listener runs. The zero value holds nothing.
+// swapped atomically while the listener (or a ReloadableCertificate) is in
+// use. The zero value holds nothing.
 type certificateHolder struct {
 	current atomic.Pointer[servedCertificate]
 }
@@ -148,7 +160,7 @@ func (h *certificateHolder) store(state *servedCertificate) { h.current.Store(st
 func (h *certificateHolder) getCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	state := h.current.Load()
 	if state == nil {
-		return nil, errors.New("golem/net: no WebTransport TLS certificate loaded")
+		return nil, errors.New("golem/net: no TLS certificate loaded")
 	}
 	return state.certificate, nil
 }

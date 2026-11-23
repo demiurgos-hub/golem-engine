@@ -194,6 +194,7 @@ type Server struct {
 	triggerPairs         map[[2]int64]struct{}
 	solidPairs           map[[2]int64]struct{}
 	tick                 uint64
+	tickStats            tickStatsRecorder // off-thread TickStats record (written by the tick goroutine)
 	onTickStart          []func(tick uint64)
 	onTickEnd            []func(tick uint64, wall time.Duration)
 	onTick               TickFunc
@@ -713,6 +714,89 @@ func (s *Server) OnTickEnd(fn func(tick uint64, wall time.Duration)) {
 // incremented at the start of each tick before OnTickStart fires.
 // Safe to read from OnTick, OnTickStart, and OnTickEnd.
 func (s *Server) Tick() uint64 { return s.tick }
+
+// TickStats is a point-in-time view of the tick loop's timing, returned by
+// Server.TickStats.
+type TickStats struct {
+	// Tick is the last completed tick (0 before the first tick completes).
+	Tick uint64
+	// TickRate is the configured ticks per second.
+	TickRate int
+	// Budget is the time available per tick, one second divided by TickRate.
+	Budget time.Duration
+	// LastDuration is the wall time of the last completed tick, measured like
+	// OnTickEnd's wall argument: from just before OnTickStart callbacks to just
+	// before OnTickEnd callbacks.
+	LastDuration time.Duration
+	// MaxDuration is the longest tick among the most recent TickRate to
+	// 2*TickRate completed ticks (about the last one to two seconds), so a
+	// single slow tick stays visible for at least a second and then ages out.
+	MaxDuration time.Duration
+	// Overruns counts completed ticks whose duration exceeded Budget since the
+	// server started.
+	Overruns uint64
+}
+
+// tickStatsRecorder publishes per-tick timing for TickStats. The tick
+// goroutine is the only writer: the window fields are tick-local and the
+// atomics are what other goroutines read. A tick costs three atomic stores
+// plus an add on overrun; there are no locks or allocations.
+type tickStatsRecorder struct {
+	tick     atomic.Uint64
+	last     atomic.Int64 // time.Duration
+	max      atomic.Int64 // time.Duration
+	overruns atomic.Uint64
+
+	windowMax     time.Duration // tick goroutine only
+	prevWindowMax time.Duration // tick goroutine only
+	windowTicks   int           // tick goroutine only
+}
+
+func (r *tickStatsRecorder) record(tick uint64, wall time.Duration, budget time.Duration, tickRate int) {
+	if wall > r.windowMax {
+		r.windowMax = wall
+	}
+	r.windowTicks++
+	recent := max(r.windowMax, r.prevWindowMax)
+	if r.windowTicks >= tickRate {
+		r.prevWindowMax = r.windowMax
+		r.windowMax = 0
+		r.windowTicks = 0
+	}
+	if wall > budget {
+		r.overruns.Add(1)
+	}
+	r.last.Store(int64(wall))
+	r.max.Store(int64(recent))
+	r.tick.Store(tick)
+}
+
+// TickStats returns the tick loop's latest timing. It is safe to call from any
+// goroutine at any time, including before Run and after it returns, and costs
+// a few atomic loads; the fields are read individually, so a concurrent tick
+// may make them describe adjacent ticks. Unlike Tick, which is only safe on
+// the tick goroutine, this is the off-thread path for monitoring endpoints.
+func (s *Server) TickStats() TickStats {
+	rate := s.config.TickRate
+	var budget time.Duration
+	if rate > 0 {
+		budget = time.Second / time.Duration(rate)
+	}
+	return TickStats{
+		Tick:         s.tickStats.tick.Load(),
+		TickRate:     rate,
+		Budget:       budget,
+		LastDuration: time.Duration(s.tickStats.last.Load()),
+		MaxDuration:  time.Duration(s.tickStats.max.Load()),
+		Overruns:     s.tickStats.overruns.Load(),
+	}
+}
+
+// Transport returns the integrated transport kind the server was configured
+// with after defaults were applied (TransportWebTransport when
+// ServerConfig.Transport was empty). It is immutable after NewServer and safe
+// to call from any goroutine.
+func (s *Server) Transport() Transport { return s.config.Transport }
 
 // OnUpdates registers a callback that receives all serialized entity updates
 // (spawns, deltas, and removals) after each tick. When integrated networking
@@ -1677,6 +1761,7 @@ func (s *Server) runLoop(ctx context.Context) error {
 			s.drainSnapshotRequests()
 
 			wall := time.Since(start)
+			s.tickStats.record(s.tick, wall, interval, s.config.TickRate)
 			for _, fn := range s.onTickEnd {
 				fn(s.tick, wall)
 			}
