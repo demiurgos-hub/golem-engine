@@ -358,10 +358,10 @@ func TestListenerCloseSessionsWaitsForPreAcceptHandler(t *testing.T) {
 
 func TestListenerCertificateHashesReturnsDeepCopy(t *testing.T) {
 	listener := NewListener(registry.NewRegistry(), Config{Transport: TransportWebTransport})
-	listener.certificateHashes = []CertificateHash{{
+	listener.tlsCertificate.store(&servedCertificate{hashes: []CertificateHash{{
 		Algorithm: "sha-256",
 		Value:     []byte{1, 2, 3},
-	}}
+	}}})
 
 	first := listener.CertificateHashes()
 	first[0].Algorithm = "changed"

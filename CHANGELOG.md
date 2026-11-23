@@ -144,6 +144,9 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 - `examples/threlte` demonstrates a real Go server, synchronized scene and HUD, typed commands/events, headless state, scene remounting, shared assets, and explicit transform ownership. The website Threlte guide documents the public contract and setup.
 - `golem-bake --remove-integration <name>` safely removes generated outputs for configured shared-only bridges such as Phaser before a renderer migration. It preserves authored files, rejects output paths outside the project and leaves configuration changes to the caller.
 - The JavaScript runtime exports `GolemConnectionLifecycle` and its configuration/status types for persistent connections in any renderer. Phaser retains its existing connection helper as a compatibility re-export.
+- `golem.ServerConfigFromEnv(base)` and `golem.RealtimeConfigOptionsFromEnv(base)` let containers and deploy tools configure a server from the environment. The variables are `GOLEM_ADDR`, `GOLEM_TLS_CERT_FILE`, `GOLEM_TLS_KEY_FILE`, `GOLEM_TLS_RELOAD_INTERVAL` (Go duration, `0` disables), `GOLEM_WT_ALLOWED_ORIGINS` (comma-separated, replaces the list), `GOLEM_TICK_RATE`, `GOLEM_PUBLIC_URL`, `GOLEM_WS_FALLBACK_URL` and `GOLEM_TLS_PINNED` (`1/true/yes/on` publishes `serverCertificateHashes` for a file certificate, `0/false/no/off` omits them). Unset or blank variables keep the value from code. Malformed values are logged and ignored.
+- WebTransport TLS certificates can be renewed without a restart. `Server.ReloadTLSCertificate()` (and `golem/net` `Listener.ReloadCertificate()`) re-reads `TLSCertFile`/`TLSKeyFile`, validates the pair and switches new handshakes to it. Existing sessions are unaffected, and if the new files are invalid the previous certificate keeps serving. `WebTransportCertificateHashes` and `RealtimeConfigHandler` publish the new hashes straight away. Setting `ServerConfig.TLSReloadInterval` makes the server watch both files and reload when either changes; a half-written pair is retried on the next check. Polling is off by default.
+- `Server.SetWebSocketCheckOrigin` / `Listener.SetWebSocketCheckOrigin` replace the WebSocket origin policy; `nil` restores the default.
 
 ### Changed
 
@@ -283,6 +286,10 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 - JavaScript generation emits a valid `never` synchronized-entity union for schemas without entities, including world-only and event-only clients.
 - Go and JavaScript WebTransport clients acknowledge sustained incoming state traffic within their configured coalescing interval. Continuous updates no longer postpone acknowledgements indefinitely and disconnect idle clients when the interval matches the server tick rate.
 - JavaScript WebTransport clients retain queued commands that have not been sent when an acknowledgement for an earlier packet arrives, preventing missing ordered commands and subsequent disconnections.
+
+### Security
+
+- The WebSocket endpoint now checks the browser `Origin`, as WebTransport already did. Before, any website could open a WebSocket to a Golem server from a visitor's browser. Allowed without configuration: native clients that send no `Origin`, same-origin pages, and a loopback page talking to a loopback server (for example a Vite dev server on another port). Other origins get HTTP 403 before `OnUpgrade` runs. `WebTransportAllowedOrigins` and `WebTransportAllowSameHostOrigin` now also apply to WebSocket; for WebSocket, same-host mode accepts `http` pages as well. **Migration:** if your web client is served from a different origin than the game server, add that page origin (for example `https://play.example.com`) to `ServerConfig.WebTransportAllowedOrigins`, or install your own check with `Server.SetWebSocketCheckOrigin`. A check that always returns `true` restores the old accept-everything behaviour.
 
 ## [0.3.0] - 2026-08-24
 

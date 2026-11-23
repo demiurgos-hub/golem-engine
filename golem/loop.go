@@ -73,11 +73,23 @@ type ServerConfig struct {
 	TLSCertFile       string             // PEM certificate file used by WebTransport / HTTP3
 	TLSKeyFile        string             // PEM private key file used by WebTransport / HTTP3
 	DevSelfSignedCert bool               // generate a short-lived self-signed certificate for WebTransport when no files are configured
-	// WebTransportAllowedOrigins lists exact browser origins allowed to connect
-	// to WebTransport, e.g. "https://game.example.com:8080".
+	// TLSReloadInterval, when positive, makes the integrated WebTransport
+	// listener check TLSCertFile and TLSKeyFile every interval and reload the
+	// pair when either file's size or modification time changed (see
+	// Server.ReloadTLSCertificate). Failed reloads are logged and retried on
+	// the next tick while the previous certificate keeps serving. Zero (the
+	// default) disables polling.
+	TLSReloadInterval time.Duration
+	// WebTransportAllowedOrigins lists exact browser origins allowed to
+	// connect, e.g. "https://game.example.com:8080". Despite its name it
+	// applies to both browser transports: the WebTransport endpoint and the
+	// WebSocket endpoint (primary or fallback). Same-origin requests, requests
+	// without an Origin header and loopback-to-loopback WebSocket requests do
+	// not need an entry.
 	WebTransportAllowedOrigins []string
-	// WebTransportAllowSameHostOrigin allows HTTPS origins whose hostname
-	// matches the WebTransport request host, regardless of port.
+	// WebTransportAllowSameHostOrigin allows origins whose hostname matches
+	// the request host, regardless of port. WebTransport requires an HTTPS
+	// origin; the WebSocket endpoint accepts any scheme.
 	WebTransportAllowSameHostOrigin bool
 	StaticDir                       string          // directory of static files served over HTTP (optional)
 	MapDir                          string          // directory of map files served at /maps/ over HTTP (optional)
@@ -403,6 +415,7 @@ func NewServer(cfg ServerConfig) *Server {
 		TLSCertFile:                     cfg.TLSCertFile,
 		TLSKeyFile:                      cfg.TLSKeyFile,
 		DevSelfSignedCert:               cfg.DevSelfSignedCert,
+		TLSReloadInterval:               cfg.TLSReloadInterval,
 		WebTransportAllowedOrigins:      cfg.WebTransportAllowedOrigins,
 		WebTransportAllowSameHostOrigin: cfg.WebTransportAllowSameHostOrigin,
 		StaticDir:                       cfg.StaticDir,
@@ -850,6 +863,19 @@ func (s *Server) SetWebTransportCheckOrigin(fn func(*http.Request) bool) {
 	s.listener.SetWebTransportCheckOrigin(fn)
 }
 
+// SetWebSocketCheckOrigin overrides the WebSocket origin policy used by
+// Handler and WebSocketHandler (and the integrated WebSocket listener).
+// Rejected requests receive HTTP 403 before the upgrade and before OnUpgrade.
+// Passing nil restores the policy built from ServerConfig, which accepts
+// requests without an Origin header, same-origin requests, origins listed in
+// WebTransportAllowedOrigins, same-hostname origins when
+// WebTransportAllowSameHostOrigin is set, and loopback-to-loopback requests.
+// Install a function that always returns true to accept any origin. Call it
+// before Run.
+func (s *Server) SetWebSocketCheckOrigin(fn func(*http.Request) bool) {
+	s.listener.SetWebSocketCheckOrigin(fn)
+}
+
 // OnConnect registers a hook called when a client connects and receives the
 // world-state snapshot. The hook fires on the tick goroutine, so it is safe
 // to call CreateEntity and other Server methods directly.
@@ -972,10 +998,39 @@ func (s *Server) BroadcastReliableOrdered(data []byte) error {
 	return s.listener.BroadcastReliableOrdered(data)
 }
 
-// WebTransportCertificateHashes returns the WebTransport certificate digests
-// known by the integrated listener.
+// WebTransportCertificateHashes returns the digests of the certificate the
+// integrated WebTransport listener is currently serving, or nil before it is
+// loaded. After ReloadTLSCertificate (or a TLSReloadInterval poll) succeeds it
+// reports the new certificate, so RealtimeConfigHandler publishes it at once.
 func (s *Server) WebTransportCertificateHashes() []golemnet.CertificateHash {
 	return s.listener.CertificateHashes()
+}
+
+// ErrTLSCertificateReloadUnsupported reports that the server has no integrated
+// WebTransport listener serving TLSCertFile/TLSKeyFile, so there is nothing to
+// reload (no Addr, WebSocket transport, or DevSelfSignedCert).
+var ErrTLSCertificateReloadUnsupported = golemnet.ErrTLSCertificateReloadUnsupported
+
+// ErrTLSCertificateNotLoaded reports that the integrated WebTransport listener
+// has not loaded its initial certificate yet; wait for WaitReady.
+var ErrTLSCertificateNotLoaded = golemnet.ErrTLSCertificateNotLoaded
+
+// ReloadTLSCertificate re-reads ServerConfig.TLSCertFile and TLSKeyFile,
+// validates the pair, and atomically switches the integrated WebTransport
+// listener to it. New handshakes get the new certificate and
+// WebTransportCertificateHashes reports its hashes; existing sessions are
+// unaffected. On error the previous certificate keeps serving.
+//
+// It returns an error wrapping ErrTLSCertificateReloadUnsupported when there is
+// no integrated WebTransport listener with certificate files (Addr empty,
+// WebSocket transport, DevSelfSignedCert, or a caller-owned HTTP/3 server), and
+// ErrTLSCertificateNotLoaded before Run has loaded the initial certificate
+// (wait for WaitReady). It is safe for concurrent use from any goroutine.
+func (s *Server) ReloadTLSCertificate() error {
+	if s.config.Addr == "" {
+		return fmt.Errorf("golem: no integrated listener (ServerConfig.Addr is empty): %w", ErrTLSCertificateReloadUnsupported)
+	}
+	return s.listener.ReloadCertificate()
 }
 
 // WaitReady blocks until the integrated listener has prepared its transport
