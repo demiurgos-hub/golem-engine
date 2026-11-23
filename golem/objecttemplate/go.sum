@@ -6,14 +6,12 @@ github.com/demiurgos-hub/golem-engine/golem/collision v0.3.1-0.20261115012239-c9
 github.com/demiurgos-hub/golem-engine/golem/collision v0.3.1-0.20261115012239-c9fd88dc8adc/go.mod h1:hXRsmSn8GeDFzsPqCEE5meFLruEPLecBKIm5qTgCOrI=
 github.com/demiurgos-hub/golem-engine/golem/geometry v0.0.0-20261115012239-c9fd88dc8adc h1:5uoYEYYF+0UAZtKYAYMwF2zkb0BUs2T3zzueTUHkB/g=
 github.com/demiurgos-hub/golem-engine/golem/geometry v0.0.0-20261115012239-c9fd88dc8adc/go.mod h1:r5JEDgAvE/+trShzySM2ksuKPetPvk006VIUcM53yZI=
-github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261115012239-c9fd88dc8adc h1:oaOmR8GXkhko53sbcBNB/ONKVrzdJavRr94xDy8hkok=
-github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261115012239-c9fd88dc8adc/go.mod h1:KASsltyLacjdk+f5HX3H3VzcbNxba21+r0oaqpEXTO4=
 github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261121202043-e7dc52314ca4 h1:/Jp7qnfEHJGp1EwgMT0ahH2WVzWogKRZX8P0pDA3NA4=
 github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261121202043-e7dc52314ca4/go.mod h1:KASsltyLacjdk+f5HX3H3VzcbNxba21+r0oaqpEXTO4=
 github.com/demiurgos-hub/golem-engine/golem/physics3d/box3d v0.0.0-20261115012239-c9fd88dc8adc h1:LKuyxjRpcY+ovmi/v4+73BAKUJYr0UdVe8pSm8quiXY=
 github.com/demiurgos-hub/golem-engine/golem/physics3d/box3d v0.0.0-20261115012239-c9fd88dc8adc/go.mod h1:rgxs6PkURaBU73RzUL3aubaeGPG5Ztsrky8etx0ZTDk=
-github.com/demiurgos-hub/navmesh-go v0.0.0-20261116105330-b17cd9f21c78 h1:2lh+woVUY1Lho9I47YufB9Nj3uue8Tphiqd4U0BqgTo=
-github.com/demiurgos-hub/navmesh-go v0.0.0-20261116105330-b17cd9f21c78/go.mod h1:AEAHRZLsr8qwXzT2Nof1Z5CeEnEQZzAsEdvSIO7COKc=
+github.com/demiurgos-hub/navmesh-go v0.0.0-20261123105935-5c3e2ef3235d h1:bZ7ZJzi2EN/x4EI0kAP+UB/sjL7F8soCPn5bq2jFKwA=
+github.com/demiurgos-hub/navmesh-go v0.0.0-20261123105935-5c3e2ef3235d/go.mod h1:AEAHRZLsr8qwXzT2Nof1Z5CeEnEQZzAsEdvSIO7COKc=
 github.com/go-logr/logr v1.4.3 h1:CjnDlHq8ikf6E492q6eKboGOC0T8CDaOvkHCIg8idEI=
 github.com/go-logr/logr v1.4.3/go.mod h1:9T104GzyrTigFIr8wt5mBrctHMim0Nb2HLGrmQ40KvY=
 github.com/go-task/slim-sprig/v3 v3.0.0 h1:sUs3vkvUymDpBKi3qH1YSqBQk9+9D/8M2mN1vB6EwHI=

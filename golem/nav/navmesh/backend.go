@@ -283,6 +283,20 @@ func (q *query) Raycast(ctx context.Context, a surface.Location, target surface.
 	r := q.query.Raycast(ctx, start, point(target), filter)
 	return surface.RaycastResult{Status: status(r.Status), Hit: r.Hit, Position: vector(r.Position), Normal: vector(r.Normal)}
 }
+
+// PathPossible compares the connected regions navmesh-go labels on every
+// snapshot, as A* IsPathPossible does, without running a search.
+func (q *query) PathPossible(a, b surface.Location) surface.Status {
+	from, ok := q.surface(a)
+	if !ok {
+		return stale()
+	}
+	to, ok := q.surface(b)
+	if !ok {
+		return stale()
+	}
+	return status(from.PathPossible(to))
+}
 func (q *query) RepairPath(ctx context.Context, previous surface.Route, current surface.Location, f surface.Filter) surface.PathResult {
 	path, ok := previous.(*route)
 	if !ok || path == nil || path.view.released.Load() {

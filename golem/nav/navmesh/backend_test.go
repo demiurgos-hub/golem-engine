@@ -205,3 +205,64 @@ func TestAdapterDynamicPublicationRetainsOldView(t *testing.T) {
 		t.Fatal("foreign view handle accepted")
 	}
 }
+
+func TestAdapterPathPossibleComparesRegions(t *testing.T) {
+	scene, cfg := adapterScene()
+	result, err := bake.Build(context.Background(), scene, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := navigation.NewSnapshot(result.Bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend, err := New(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Until this module requires the nav revision that declares
+	// surface.ReachabilityQuery, assert its method structurally.
+	type reachability interface {
+		PathPossible(from, to surface.Location) surface.Status
+	}
+	acquire := func() (surface.View, func(surface.Vec3) surface.Location, reachability) {
+		v, err := backend.Acquire(context.Background(), "human")
+		if err != nil {
+			t.Fatal(err)
+		}
+		q, err := v.NewQuery(surface.Limits{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reach, ok := q.(reachability)
+		if !ok {
+			t.Fatal("navmesh query does not report reachability")
+		}
+		return v, func(p surface.Vec3) surface.Location {
+			r := q.Project(context.Background(), p, surface.ProjectionOptions{Horizontal: .4, Up: .3, Down: .3}, surface.Filter{})
+			if r.Code != surface.Complete {
+				t.Fatalf("projection %+v: %+v", p, r.Status)
+			}
+			return r.Location
+		}, reach
+	}
+	v, project, reach := acquire()
+	west, east := project(surface.Vec3{X: -2, Y: 3.1}), project(surface.Vec3{X: 2, Y: 3.1})
+	ground := project(surface.Vec3{X: -2, Y: .1})
+	if got := reach.PathPossible(west, east).Code; got != surface.Complete {
+		t.Fatalf("same floor: %v", got)
+	}
+	// The stacked floors share no ramp or link.
+	if got := reach.PathPossible(west, ground).Code; got != surface.Unreachable {
+		t.Fatalf("stacked floors: %v", got)
+	}
+	other, otherProject, _ := acquire()
+	defer other.Release()
+	if got := reach.PathPossible(west, otherProject(surface.Vec3{X: 2, Y: 3.1})).Code; got != surface.Stale {
+		t.Fatalf("foreign view: %v", got)
+	}
+	v.Release()
+	if got := reach.PathPossible(west, east).Code; got != surface.Stale {
+		t.Fatalf("released view: %v", got)
+	}
+}

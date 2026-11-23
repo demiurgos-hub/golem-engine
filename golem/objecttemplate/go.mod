@@ -7,7 +7,7 @@ require (
 	github.com/demiurgos-hub/golem-engine/golem/geometry v0.0.0-20261115012239-c9fd88dc8adc
 	github.com/demiurgos-hub/golem-engine/golem/physics3d v0.0.0-20261121202043-e7dc52314ca4
 	github.com/demiurgos-hub/golem-engine/golem/physics3d/box3d v0.0.0-20261115012239-c9fd88dc8adc
-	github.com/demiurgos-hub/navmesh-go v0.0.0-20261116105330-b17cd9f21c78
+	github.com/demiurgos-hub/navmesh-go v0.0.0-20261123105935-5c3e2ef3235d
 )
 
 require github.com/gataengine/box3d-go v0.0.0-20261019212002-2a00e926a8d9 // indirect
