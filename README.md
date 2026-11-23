@@ -104,6 +104,14 @@ golem-bake
 
 This emits the `entities.proto` reference, server scaffolding, and typed clients for every integration you enabled. See [Minimal server wiring](https://golemengine.dev/docs/) for how to stand up the `Server` and tick loop.
 
+To verify in CI or a `docker build` that committed generated code matches the schemas, run:
+
+```bash
+golem-bake --check
+```
+
+It renders into a temporary directory with the same toolchain (`gofmt`, and TypeScript for `js-client`) and never writes to the project. Exit code 0 means up to date; 1 lists each `missing`, `stale` or `unexpected` (retired generated file still carrying the Golem header) path; 2 means a usage or configuration error. CRLF and LF line endings compare equal. `golem-bake -h` shows all modes.
+
 ## Client packages
 
 | Stack | Package | Install |

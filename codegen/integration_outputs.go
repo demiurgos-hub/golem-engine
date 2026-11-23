@@ -50,6 +50,9 @@ type integrationSpec struct {
 	defaultImport  string
 	defaultPackage string
 	outputs        []outputRule
+	// finalizeMirrored replaces hooks.Finalize when Check renders outDir away
+	// from the project; resolveDir is the project output it stands in for.
+	finalizeMirrored func(projectRoot, outDir, resolveDir string) error
 }
 
 // Keep the public integration description as a compatibility projection. Each
@@ -150,6 +153,7 @@ func init() {
 			hooks: Integration{GenerateExtra: func(outDir, golemImport, goPackage string, entities []schema.EntityData, commands []schema.CommandData, worldTypes []schema.WorldTypeData, events []schema.EventData, proto schema.ProtoTemplateData) error {
 				return generateJSProto(outDir, golemImport, entities, commands, worldTypes, events, proto)
 			}, Finalize: compileJSIntegration},
+			finalizeMirrored: compileJSIntegrationResolvingFrom,
 			outputs: []outputRule{
 				{role: entityOutput, entityName: func(name string) string { return name + "Synced.ts" }, template: "js/client.ts.tmpl", jsIntermediate: true},
 				{role: sharedOutput, file: "EntityManager.ts", template: "js/manager.ts.tmpl", condition: alwaysOutput, jsIntermediate: true},

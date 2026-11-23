@@ -3,9 +3,11 @@ package codegen
 import (
 	"embed"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"text/template"
 
 	"github.com/demiurgos-hub/golem-engine/schema"
@@ -14,8 +16,35 @@ import (
 //go:embed templates/*/*.tmpl
 var templateFS embed.FS
 
+// bakeLog receives progress lines; nil means os.Stdout at write time. Check
+// silences it while rendering into its scratch tree. bakeMu serializes bakes
+// so the swap cannot leak into a concurrent Bake.
+var (
+	bakeMu  sync.Mutex
+	bakeLog io.Writer
+)
+
+func logf(format string, args ...any) {
+	w := bakeLog
+	if w == nil {
+		w = os.Stdout
+	}
+	fmt.Fprintf(w, format, args...)
+}
+
 // Bake is the main entry point: reads golem.yaml + schemas, generates all output files.
 func Bake(projectRoot string) error {
+	bakeMu.Lock()
+	defer bakeMu.Unlock()
+	return bake(projectRoot, func(*schema.Config) (string, error) { return projectRoot, nil })
+}
+
+// bake reads every input relative to projectRoot and writes every output to the
+// same relative location under the root returned by output. output runs once,
+// after all inputs are loaded and validated and before the first write, so
+// Check can create its scratch tree only when generation can proceed (schema
+// loading may still terminate the process through log.Fatal).
+func bake(projectRoot string, output func(*schema.Config) (string, error)) error {
 	cfg, err := schema.LoadConfig(projectRoot)
 	if err != nil {
 		return err
@@ -114,7 +143,11 @@ func Bake(projectRoot string) error {
 		}
 	}
 
-	if err := generateProto(projectRoot, cfg, protoData); err != nil {
+	outputRoot, err := output(cfg)
+	if err != nil {
+		return err
+	}
+	if err := generateProto(outputRoot, cfg, protoData); err != nil {
 		return err
 	}
 
@@ -179,11 +212,11 @@ func Bake(projectRoot string) error {
 		for _, output := range selectIntegrationOutputs(integName, sd) {
 			switch output.role {
 			case entityOutput:
-				if err := generateIntegration(projectRoot, integCfg, integ, entities[output.entityIndex]); err != nil {
+				if err := generateIntegration(outputRoot, integCfg, integ, entities[output.entityIndex]); err != nil {
 					return err
 				}
 			case sharedOutput:
-				if err := generateShared(projectRoot, integCfg, integ, sd, SharedTemplateEntry{Template: output.template, File: output.file}); err != nil {
+				if err := generateShared(outputRoot, integCfg, integ, sd, SharedTemplateEntry{Template: output.template, File: output.file}); err != nil {
 					return err
 				}
 			case contentCodeOutput, contentBundleOutput:
@@ -191,7 +224,7 @@ func Bake(projectRoot string) error {
 				if output.role == contentBundleOutput {
 					data = contentData.BundleJSON
 				}
-				path := filepath.Join(projectRoot, integCfg.Out, output.file)
+				path := filepath.Join(outputRoot, integCfg.Out, output.file)
 				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 					return err
 				}
@@ -202,50 +235,57 @@ func Bake(projectRoot string) error {
 		}
 
 		if integ.GenerateExtra != nil {
-			outDir := filepath.Join(projectRoot, integCfg.Out)
+			outDir := filepath.Join(outputRoot, integCfg.Out)
 			if err := integ.GenerateExtra(outDir, golemImport, goPackage, entities, commands, worldTypes, events, protoData); err != nil {
 				return err
 			}
 		}
 
 		if integ.Finalize != nil {
-			outDir := filepath.Join(projectRoot, integCfg.Out)
-			if err := integ.Finalize(projectRoot, outDir); err != nil {
+			outDir := filepath.Join(outputRoot, integCfg.Out)
+			// Toolchain lookup stays on projectRoot. A mirrored finalizer also
+			// resolves packages as if its sources were in the project output.
+			if outputRoot != projectRoot && spec.finalizeMirrored != nil {
+				err = spec.finalizeMirrored(projectRoot, outDir, filepath.Join(projectRoot, integCfg.Out))
+			} else {
+				err = integ.Finalize(projectRoot, outDir)
+			}
+			if err != nil {
 				return err
 			}
-			fmt.Printf("  finalized %s in %s\n", integName, integCfg.Out)
+			logf("  finalized %s in %s\n", integName, integCfg.Out)
 		}
 	}
 
-	fmt.Printf("golem-bake: generated code for %d entity type(s), %d command(s), %d world type(s), %d event(s), %d custom type(s), and %d protocol constant set(s)\n", len(entities), len(commands), len(worldTypes), len(events), len(customTypesList), len(protocolConstantSets))
+	logf("golem-bake: generated code for %d entity type(s), %d command(s), %d world type(s), %d event(s), %d custom type(s), and %d protocol constant set(s)\n", len(entities), len(commands), len(worldTypes), len(events), len(customTypesList), len(protocolConstantSets))
 	return nil
 }
 
-func generateProto(projectRoot string, cfg *schema.Config, data schema.ProtoTemplateData) error {
+func generateProto(outputRoot string, cfg *schema.Config, data schema.ProtoTemplateData) error {
 	t, err := loadEmbeddedTemplate("templates/proto/entities.proto.tmpl")
 	if err != nil {
 		return err
 	}
-	outPath := filepath.Join(projectRoot, cfg.Proto.Out)
+	outPath := filepath.Join(outputRoot, cfg.Proto.Out)
 	if err := writeTemplate(outPath, t, data); err != nil {
 		return err
 	}
-	fmt.Printf("  wrote %s\n", outPath)
+	logf("  wrote %s\n", outPath)
 	return nil
 }
 
-func generateShared(projectRoot string, integCfg schema.IntegrationConfig, integ Integration, sd schema.SharedData, st SharedTemplateEntry) error {
+func generateShared(outputRoot string, integCfg schema.IntegrationConfig, integ Integration, sd schema.SharedData, st SharedTemplateEntry) error {
 	t, err := loadEmbeddedTemplate("templates/" + st.Template)
 	if err != nil {
 		return err
 	}
-	outDir := filepath.Join(projectRoot, integCfg.Out)
+	outDir := filepath.Join(outputRoot, integCfg.Out)
 	outPath := filepath.Join(outDir, st.File)
 
 	if err := writeTemplate(outPath, t, sd); err != nil {
 		return err
 	}
-	fmt.Printf("  wrote %s\n", outPath)
+	logf("  wrote %s\n", outPath)
 
 	if integ.PostProcess != nil {
 		if err := integ.PostProcess(outPath); err != nil {
@@ -255,18 +295,18 @@ func generateShared(projectRoot string, integCfg schema.IntegrationConfig, integ
 	return nil
 }
 
-func generateIntegration(projectRoot string, integCfg schema.IntegrationConfig, integ Integration, ent schema.EntityData) error {
+func generateIntegration(outputRoot string, integCfg schema.IntegrationConfig, integ Integration, ent schema.EntityData) error {
 	t, err := loadEmbeddedTemplate("templates/" + integ.Template)
 	if err != nil {
 		return err
 	}
-	outDir := filepath.Join(projectRoot, integCfg.Out)
+	outDir := filepath.Join(outputRoot, integCfg.Out)
 	outPath := filepath.Join(outDir, integ.FileNamer(ent.Name))
 
 	if err := writeTemplate(outPath, t, ent); err != nil {
 		return err
 	}
-	fmt.Printf("  wrote %s\n", outPath)
+	logf("  wrote %s\n", outPath)
 
 	if integ.PostProcess != nil {
 		if err := integ.PostProcess(outPath); err != nil {

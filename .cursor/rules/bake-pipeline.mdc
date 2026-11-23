@@ -83,6 +83,8 @@ After schema or codegen changes that affect bake output, verify `go build ./cmd/
 
 For shared codec changes, also compile/run generated C# against the standalone Unity codec sources, exercise generated Go full/public state behavior, and distinguish semantic equivalence, exact bytes and deterministic generated source. Do not impose sorted Go map wire order. Run representative generated consumers in temporary directories; a skipped required consumer check is not acceptance evidence. Preserve exact baseline fingerprints even where their current coverage is incomplete.
 
+`golem-bake --check` must produce exactly what a bake would write; when adding an output, finalizer or input, confirm `codegen/check_test.go` still covers it and that nothing is written outside the output root.
+
 Retire a configured shared-only bridge with `golem-bake --remove-integration <target>` before removing its integration stanza. Removal checks generated headers and confines known outputs to the project; it never deletes authored adapters or recursively removes an output directory.
 
 The `threlte` target emits raw `GolemThrelte.ts` compiled by the consumer's Svelte toolchain. It requires `js-client`, an explicit forward-slash module-prefix `protocol_import` (normalize a missing trailing `/`), and an output directory outside `js-client` output (whose finalizer recursively compiles TypeScript). Validate these requirements before writing any bake output. Keep empty entity/world/event sections valid in both generated JS and the Threlte adapter.

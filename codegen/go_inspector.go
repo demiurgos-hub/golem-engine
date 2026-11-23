@@ -35,7 +35,7 @@ func generateGoInspectorSchema(outDir, golemImport, goPackage string, entities [
 	if err := gofmtFile(outPath); err != nil {
 		return err
 	}
-	fmt.Printf("  wrote %s\n", outPath)
+	logf("  wrote %s\n", outPath)
 	return nil
 }
 

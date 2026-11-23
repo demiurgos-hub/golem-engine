@@ -1,0 +1,85 @@
+# Builds cmd/golem-inspector/Dockerfile from the repository root and publishes
+# the Golem Inspector hub image to ghcr.io/demiurgos-hub/golem-inspector.
+#
+#   tag push vX.Y.Z      -> X.Y.Z and latest
+#   tag push vX.Y.Z-rc.1 -> X.Y.Z-rc.1 (prereleases never move latest)
+#   manual dispatch      -> the "tag" input (default: edge)
+name: Inspector image
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag to publish
+        required: true
+        default: edge
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: inspector-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/demiurgos-hub/golem-inspector
+  # Put the OCI annotations on the multi-platform index as well as each manifest.
+  DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=match,pattern=^v(.+)$,group=1,enable=${{ github.event_name == 'push' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
+            type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+          labels: |
+            org.opencontainers.image.title=Golem Inspector
+            org.opencontainers.image.description=Golem Engine Inspector hub: read-only, schema-driven live entity inspection
+            org.opencontainers.image.licenses=Apache-2.0
+          annotations: |
+            org.opencontainers.image.title=Golem Inspector
+            org.opencontainers.image.description=Golem Engine Inspector hub: read-only, schema-driven live entity inspection
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: cmd/golem-inspector/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

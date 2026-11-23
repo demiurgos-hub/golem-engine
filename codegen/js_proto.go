@@ -108,7 +108,7 @@ func generateJSProto(
 	if err := os.WriteFile(outPath, []byte(b.String()), 0o644); err != nil {
 		return err
 	}
-	fmt.Printf("  wrote %s\n", outPath)
+	logf("  wrote %s\n", outPath)
 
 	for _, output := range selectIntegrationOutputs("js-client", schema.SharedData{WorldTypes: worldTypes, Events: events}) {
 		switch output.role {
@@ -494,7 +494,7 @@ func generateJSWorldProto(outDir, golemImport string, proto schema.ProtoTemplate
 	if err := os.WriteFile(outPath, []byte(b.String()), 0o644); err != nil {
 		return err
 	}
-	fmt.Printf("  wrote %s\n", outPath)
+	logf("  wrote %s\n", outPath)
 	return nil
 }
 
@@ -558,7 +558,7 @@ func generateJSEventProto(outDir, golemImport string, proto schema.ProtoTemplate
 	if err := os.WriteFile(outPath, []byte(b.String()), 0o644); err != nil {
 		return err
 	}
-	fmt.Printf("  wrote %s\n", outPath)
+	logf("  wrote %s\n", outPath)
 	return nil
 }
 
