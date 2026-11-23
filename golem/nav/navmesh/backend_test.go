@@ -220,12 +220,7 @@ func TestAdapterPathPossibleComparesRegions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Until this module requires the nav revision that declares
-	// surface.ReachabilityQuery, assert its method structurally.
-	type reachability interface {
-		PathPossible(from, to surface.Location) surface.Status
-	}
-	acquire := func() (surface.View, func(surface.Vec3) surface.Location, reachability) {
+	acquire := func() (surface.View, func(surface.Vec3) surface.Location, surface.ReachabilityQuery) {
 		v, err := backend.Acquire(context.Background(), "human")
 		if err != nil {
 			t.Fatal(err)
@@ -234,7 +229,7 @@ func TestAdapterPathPossibleComparesRegions(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		reach, ok := q.(reachability)
+		reach, ok := q.(surface.ReachabilityQuery)
 		if !ok {
 			t.Fatal("navmesh query does not report reachability")
 		}

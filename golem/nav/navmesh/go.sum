@@ -1,6 +1,6 @@
 github.com/demiurgos-hub/golem-engine/golem/geometry v0.0.0-20261113160310-d88e90435bea h1:vIbujjcicGgJJd+DqbgVMpTLoFlv2qxB+0t6+tXre1k=
 github.com/demiurgos-hub/golem-engine/golem/geometry v0.0.0-20261113160310-d88e90435bea/go.mod h1:r5JEDgAvE/+trShzySM2ksuKPetPvk006VIUcM53yZI=
-github.com/demiurgos-hub/golem-engine/golem/nav v0.3.1-0.20261113035633-0284df85bf3c h1:A2gjW/af0+GbJyegjSLJg9+6BjJ8hiYKCIEIFVXcej0=
-github.com/demiurgos-hub/golem-engine/golem/nav v0.3.1-0.20261113035633-0284df85bf3c/go.mod h1:5IYkLyK2Zkjb1nCwDnobSimNpPJ7XymjIe6PgpUXdE4=
+github.com/demiurgos-hub/golem-engine/golem/nav v0.3.1-0.20261123110735-59d80fb19b0f h1:dWLxaV1pTm14awLY8Ml3BoBPs6nq88JUnSh78x6GbOs=
+github.com/demiurgos-hub/golem-engine/golem/nav v0.3.1-0.20261123110735-59d80fb19b0f/go.mod h1:5IYkLyK2Zkjb1nCwDnobSimNpPJ7XymjIe6PgpUXdE4=
 github.com/demiurgos-hub/navmesh-go v0.0.0-20261123105935-5c3e2ef3235d h1:bZ7ZJzi2EN/x4EI0kAP+UB/sjL7F8soCPn5bq2jFKwA=
 github.com/demiurgos-hub/navmesh-go v0.0.0-20261123105935-5c3e2ef3235d/go.mod h1:AEAHRZLsr8qwXzT2Nof1Z5CeEnEQZzAsEdvSIO7COKc=

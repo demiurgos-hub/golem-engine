@@ -297,6 +297,9 @@ func (q *query) PathPossible(a, b surface.Location) surface.Status {
 	}
 	return status(from.PathPossible(to))
 }
+
+var _ surface.ReachabilityQuery = (*query)(nil)
+
 func (q *query) RepairPath(ctx context.Context, previous surface.Route, current surface.Location, f surface.Filter) surface.PathResult {
 	path, ok := previous.(*route)
 	if !ok || path == nil || path.view.released.Load() {
