@@ -389,3 +389,23 @@ func TestRunSidecarAdminReloadTLS(t *testing.T) {
 		t.Fatalf("failed reload replaced B: %x (err %v)", got, err)
 	}
 }
+
+// TestRunSidecarBindFailureFailsStartup: the sidecar binds before readiness, so
+// a taken port fails Run instead of serving a ready server without a sidecar.
+func TestRunSidecarBindFailureFailsStartup(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	srv := newTestServer()
+	h := startRun(t, RunOptions{
+		Server:     srv,
+		HTTPServer: &http.Server{Addr: occupied.Addr().String(), Handler: http.NotFoundHandler()},
+		Admin:      &AdminOptions{},
+	})
+	err = h.wait(t)
+	if err == nil || !strings.Contains(err.Error(), "golem/host: http:") {
+		t.Fatalf("Run = %v, want the sidecar bind error", err)
+	}
+}

@@ -35,8 +35,28 @@ message EntityUpdate {
   }
 }
 
+// Announces that the session now replicates the given space. Frames that
+// follow in the same stream belong to the new space until SpaceSettled.
+message SpaceChanged {
+  uint32 space = 1;
+  uint64 transition = 2;
+}
+
+// Ends the space transition started by the SpaceChanged with the same counter.
+message SpaceSettled {
+  uint64 transition = 1;
+}
+
+// Clears one world data type that the session's new space does not define.
+message WorldCleared {
+  string name = 1;
+}
+
 message ServerMessage {
   oneof payload {
     EntityUpdate entity_update = 1;
+    SpaceChanged space_changed = 4;
+    SpaceSettled space_settled = 5;
+    WorldCleared world_cleared = 6;
   }
 }

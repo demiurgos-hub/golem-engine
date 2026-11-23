@@ -24,6 +24,16 @@ const (
 	EnvHTTPAddr = "GOLEM_HTTP_ADDR"
 )
 
+// Environment variables read by SnapshotOptionsFromEnv.
+const (
+	// EnvSnapshotDir sets SnapshotOptions.Dir, the directory RunGame keeps
+	// SnapshotFileName in; setting it enables entity snapshots.
+	EnvSnapshotDir = "GOLEM_SNAPSHOT_DIR"
+	// EnvSnapshotInterval sets SnapshotOptions.Interval, the autosave period in
+	// Go duration syntax, e.g. "5m"; "0" disables autosave.
+	EnvSnapshotInterval = "GOLEM_SNAPSHOT_INTERVAL"
+)
+
 // AdminOptionsFromEnv returns base with Addr and Token overridden by
 // GOLEM_ADMIN_ADDR and GOLEM_ADMIN_TOKEN. A variable that is unset or blank
 // after trimming leaves its field unchanged. Values are not validated here:
@@ -88,6 +98,30 @@ func RunOptionsFromEnv(base RunOptions) RunOptions {
 	case base.Admin == nil && addrSet:
 		admin := AdminOptionsFromEnv(AdminOptions{})
 		opts.Admin = &admin
+	}
+	return opts
+}
+
+// SnapshotOptionsFromEnv returns base with Dir overridden by GOLEM_SNAPSHOT_DIR
+// and Interval by GOLEM_SNAPSHOT_INTERVAL (Go duration syntax; "0" disables
+// autosave). A variable that is unset or blank after trimming leaves its field
+// unchanged. A malformed interval (invalid syntax or negative) is logged with
+// its variable name and ignored. It never fails.
+func SnapshotOptionsFromEnv(base SnapshotOptions) SnapshotOptions {
+	opts := base
+	if v, ok := lookupEnvTrimmed(EnvSnapshotDir); ok {
+		opts.Dir = v
+	}
+	if v, ok := lookupEnvTrimmed(EnvSnapshotInterval); ok {
+		d, err := time.ParseDuration(v)
+		switch {
+		case err != nil:
+			logIgnoredEnv(EnvSnapshotInterval, v, "want a Go duration such as 5m, or 0 to disable autosave")
+		case d < 0:
+			logIgnoredEnv(EnvSnapshotInterval, v, "duration must not be negative")
+		default:
+			opts.Interval = d
+		}
 	}
 	return opts
 }

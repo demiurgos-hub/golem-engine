@@ -351,28 +351,9 @@ func Load(path, expectedFingerprint string) ([]Record, error) {
 // Returned records may borrow data; retain the bytes unchanged until
 // restoration completes.
 func Decode(data []byte, expectedFingerprint string) ([]Record, error) {
-	if len(data) < 4 {
-		return nil, fmt.Errorf("snapshot: file too short")
-	}
-	if data[0] != magic[0] || data[1] != magic[1] || data[2] != magic[2] || data[3] != magic[3] {
-		return nil, fmt.Errorf("snapshot: invalid magic bytes — not a Golem snapshot file")
-	}
-
-	r := &snapshotReader{data: data[4:]}
-	version := r.number()
-	if r.err != nil {
-		return nil, r.err
-	}
-	if version != uint64(fileFormatVersion) && version != uint64(spacedFileFormatVersion) {
-		return nil, fmt.Errorf("snapshot: unsupported format version %d (expected %d or %d)", version, fileFormatVersion, spacedFileFormatVersion)
-	}
-	spaced := version == uint64(spacedFileFormatVersion)
-
-	_ = r.number() // timestamp (informational; not validated)
-
-	storedFingerprint := string(r.bytes())
-	if r.err != nil {
-		return nil, r.err
+	r, spaced, storedFingerprint, err := decodeHeader(data)
+	if err != nil {
+		return nil, err
 	}
 	if storedFingerprint != expectedFingerprint {
 		return nil, ErrFingerprintMismatch
@@ -412,6 +393,47 @@ func Decode(data []byte, expectedFingerprint string) ([]Record, error) {
 		return nil, fmt.Errorf("snapshot: trailing data")
 	}
 	return records, nil
+}
+
+// ReadFingerprint returns the schema fingerprint stored in the header of the
+// snapshot file at path without decoding its records, for example to report
+// both fingerprints after Load returned ErrFingerprintMismatch.
+func ReadFingerprint(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("snapshot: reading file: %w", err)
+	}
+	_, _, fingerprint, err := decodeHeader(data)
+	return fingerprint, err
+}
+
+// decodeHeader validates the magic bytes and format version and returns a
+// reader positioned at the record count, whether records carry a space, and
+// the stored fingerprint.
+func decodeHeader(data []byte) (*snapshotReader, bool, string, error) {
+	if len(data) < 4 {
+		return nil, false, "", fmt.Errorf("snapshot: file too short")
+	}
+	if data[0] != magic[0] || data[1] != magic[1] || data[2] != magic[2] || data[3] != magic[3] {
+		return nil, false, "", fmt.Errorf("snapshot: invalid magic bytes — not a Golem snapshot file")
+	}
+
+	r := &snapshotReader{data: data[4:]}
+	version := r.number()
+	if r.err != nil {
+		return nil, false, "", r.err
+	}
+	if version != uint64(fileFormatVersion) && version != uint64(spacedFileFormatVersion) {
+		return nil, false, "", fmt.Errorf("snapshot: unsupported format version %d (expected %d or %d)", version, fileFormatVersion, spacedFileFormatVersion)
+	}
+
+	_ = r.number() // timestamp (informational; not validated)
+
+	fingerprint := string(r.bytes())
+	if r.err != nil {
+		return nil, false, "", r.err
+	}
+	return r, version == uint64(spacedFileFormatVersion), fingerprint, nil
 }
 
 type snapshotReader struct {

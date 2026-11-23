@@ -1,4 +1,6 @@
 entity: Actor
+# Actors are session avatars (SpawnAvatar); they are not kept in snapshots.
+persistent: false
 vars:
   display_name: { type: string, tag: 1 }
   pulse_count: { type: uint32, tag: 2 }

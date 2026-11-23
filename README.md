@@ -112,6 +112,22 @@ golem-bake --check
 
 It renders into a temporary directory with the same toolchain (`gofmt`, and TypeScript for `js-client`) and never writes to the project. Exit code 0 means up to date; 1 lists each `missing`, `stale` or `unexpected` (retired generated file still carrying the Golem header) path; 2 means a usage or configuration error. CRLF and LF line endings compare equal. `golem-bake -h` shows all modes.
 
+### Deploying
+
+Two calls adopt every deploy setting; with no `GOLEM_*` variables set the server runs exactly as before:
+
+```go
+srv, rt := synced.NewServer(golem.ServerConfigFromEnv(golem.ServerConfig{TickRate: 20}))
+err := rt.Host(ctx, synced.HostOptions{HTTPAddr: "127.0.0.1:8080", API: api, AssetsDir: "web/dist", AfterRestore: seed})
+```
+
+- `GOLEM_ADDR`, `GOLEM_TICK_RATE`, `GOLEM_WT_ALLOWED_ORIGINS`: realtime listen address, tick rate, allowed WebTransport origins.
+- `GOLEM_TLS_CERT_FILE`, `GOLEM_TLS_KEY_FILE`, `GOLEM_TLS_RELOAD_INTERVAL`: certificate pair for WebTransport and the sidecar, and its reload poll.
+- `GOLEM_HTTP_ADDR`: sidecar serving `/api/realtime-config`, the WebSocket endpoint `/api/ws`, the game API and assets.
+- `GOLEM_PUBLIC_URL`, `GOLEM_WS_FALLBACK_URL`, `GOLEM_TLS_PINNED`: what the realtime config advertises to clients.
+- `GOLEM_ADMIN_ADDR`, `GOLEM_ADMIN_TOKEN`: operator admin listener (`/live`, `/ready`, `/info`, `/stats`, `POST /snapshot`, `POST /reload-tls`).
+- `GOLEM_SNAPSHOT_DIR`, `GOLEM_SNAPSHOT_INTERVAL`: keep `world.snapshot` across restarts; `GOLEM_INSPECTOR_HUB_URL`, `GOLEM_INSPECTOR_TOKEN`: attach the inspector.
+
 ## Client packages
 
 | Stack | Package | Install |

@@ -118,9 +118,9 @@ func TestCheckAfterBakeIsUpToDate(t *testing.T) {
 	if !result.UpToDate() || result.Files == 0 {
 		t.Fatalf("want up to date with files, got %+v", result)
 	}
-	// proto, 4 go-server files, 4 csharp-client files, 1 unity bridge.
-	if result.Files != 10 {
-		t.Fatalf("files = %d, want 10", result.Files)
+	// proto, 5 go-server files, 4 csharp-client files, 1 unity bridge.
+	if result.Files != 11 {
+		t.Fatalf("files = %d, want 11", result.Files)
 	}
 	requireEmptyDir(t, tmp)
 }
@@ -208,7 +208,7 @@ func TestCheckIgnoresCRLFCheckouts(t *testing.T) {
 			converted++
 		}
 	}
-	if converted != 10 {
+	if converted != 11 {
 		t.Fatalf("converted %d files", converted)
 	}
 	result, err := checkUnchanged(t, dir)

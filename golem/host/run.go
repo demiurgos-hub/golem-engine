@@ -81,8 +81,9 @@ type componentError struct {
 // Startup: validate options (sidecar TLS pair and certificate, admin
 // fail-closed rule) → bind and serve the admin listener (/live answers from
 // here; /ready reports "starting") → start Server.Run → wait for
-// Server.WaitReady → mark ready → start the sidecar HTTP server and its
-// certificate poll.
+// Server.WaitReady → bind the sidecar listener and start serving it and its
+// certificate poll → mark ready. A sidecar bind failure starts shutdown
+// instead, so /ready never reports ready without a listening sidecar.
 //
 // Shutdown, once the first component exits, ctx is cancelled or a signal
 // arrives:
@@ -172,13 +173,13 @@ func Run(ctx context.Context, opts RunOptions) error {
 	}
 
 	var sideDone []chan struct{}
-	if ctx.Err() == nil {
-		if admin != nil {
-			admin.ready.Store(true)
-		}
-		if side != nil {
-			sideDone = side.start(ctx, r, opts)
-		}
+	if ctx.Err() == nil && side != nil {
+		sideDone = side.start(ctx, r, opts)
+	}
+	// Ready only once the sidecar accepts connections, so a deploy tool that
+	// routes traffic on /ready never sees a refused or unbound sidecar.
+	if ctx.Err() == nil && admin != nil {
+		admin.ready.Store(true)
 	}
 
 	<-ctx.Done()
@@ -347,11 +348,18 @@ func (s *sidecar) start(ctx context.Context, r *runner, opts RunOptions) []chan 
 			r.addShutdownError(fmt.Errorf("golem/host: http shutdown: %w", err))
 		}
 	}()
+	// Bind before returning so readiness implies a listening sidecar; a bind
+	// failure is the sidecar's exit and starts shutdown.
+	ln, err := net.Listen("tcp", s.listenAddr())
+	if err != nil {
+		r.record("http", err)
+		return []chan struct{}{shutdownDone}
+	}
 	serveDone := r.start("http", func() error {
 		if s.tls {
-			return s.srv.ListenAndServeTLS(s.certFile, s.keyFile)
+			return s.srv.ServeTLS(ln, s.certFile, s.keyFile)
 		}
-		return s.srv.ListenAndServe()
+		return s.srv.Serve(ln)
 	})
 	done := []chan struct{}{shutdownDone, serveDone}
 	if s.cert != nil && opts.HTTPTLSReloadInterval > 0 {
@@ -363,6 +371,19 @@ func (s *sidecar) start(ctx context.Context, r *runner, opts RunOptions) []chan 
 		done = append(done, watchDone)
 	}
 	return done
+}
+
+// listenAddr is the sidecar's bind address with net/http's defaults for an
+// empty Addr (":http" or ":https").
+func (s *sidecar) listenAddr() string {
+	switch {
+	case s.srv.Addr != "":
+		return s.srv.Addr
+	case s.tls:
+		return ":https"
+	default:
+		return ":http"
+	}
 }
 
 // shutdownHTTP shuts srv down gracefully within timeout and force-closes it

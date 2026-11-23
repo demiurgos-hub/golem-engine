@@ -73,6 +73,15 @@ func (s *Server) RealtimeConfigHandler(opts RealtimeConfigOptions) http.Handler 
 	})
 }
 
+// IncludesServerCertificateHashes reports whether RealtimeConfigHandler(opts)
+// publishes the WebTransport certificate hashes for serverCertificateHashes
+// pinning: opts.IncludeServerCertificateHashes when set, otherwise true only
+// for a generated development self-signed certificate. Deploy tooling reports
+// it (for example host.AdminInfo.CertificateHashesPublished).
+func (s *Server) IncludesServerCertificateHashes(opts RealtimeConfigOptions) bool {
+	return s.shouldIncludeServerCertificateHashes(opts)
+}
+
 func (s *Server) shouldIncludeServerCertificateHashes(opts RealtimeConfigOptions) bool {
 	if opts.IncludeServerCertificateHashes != nil {
 		return *opts.IncludeServerCertificateHashes
