@@ -119,7 +119,7 @@ func newWebTransportServerTLSConfig(certificate tls.Certificate) *tls.Config {
 
 // newReloadableWebTransportServerTLSConfig prepares an HTTP/3 TLS config that
 // serves the holder's current certificate on every handshake.
-// http3.ConfigureTLSConfig (quic-go v0.59) clones the config, which keeps
+// http3.ConfigureTLSConfig clones the config, which keeps
 // GetCertificate, and sets NextProtos to h3; it only wraps GetConfigForClient,
 // which is not used here. quic-go's own server setup also preserves
 // GetCertificate (it only wraps it to populate ClientHelloInfo.Conn).

@@ -3,7 +3,7 @@
 //
 // Locally it needs no configuration: npm run server listens on
 // 127.0.0.1:8080 (-addr) and serves -assets. Deployments configure it from
-// GOLEM_* environment variables through golem.ServerConfigFromEnv and the
+// GOLEM_* environment variables through host.LocalDevelopment and the
 // generated Runtime.Host: GOLEM_HTTP_ADDR replaces -addr, GOLEM_TLS_CERT_FILE
 // and GOLEM_TLS_KEY_FILE serve HTTPS, GOLEM_ADMIN_ADDR/GOLEM_ADMIN_TOKEN open
 // the admin listener, GOLEM_SNAPSHOT_DIR keeps the world across restarts and
@@ -45,7 +45,6 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "HTTP and WebSocket address ("+host.EnvHTTPAddr+" overrides)")
 	assets := flag.String("assets", "web/dist", "built browser assets directory")
 	flag.Parse()
-	d := newUnseededDemo()
 	api := http.NewServeMux()
 	api.HandleFunc("/api/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -56,33 +55,39 @@ func main() {
 		listen = v
 	}
 	log.Printf("Signal Garden: http://%s (WebSocket %s)", listen, host.DefaultWebSocketPath)
-	if err := d.runtime.Host(context.Background(), generated.HostOptions{
-		Name:         "signal-garden",
-		HTTPAddr:     *addr,
-		API:          api,
-		AssetsDir:    *assets,
-		AfterRestore: d.afterRestore,
-	}); err != nil {
+	cfg, opts := host.LocalDevelopment(demoServerConfig(), generated.HostOptions{
+		Name:      "signal-garden",
+		HTTPAddr:  *addr,
+		API:       api,
+		AssetsDir: *assets,
+	})
+	d := newUnseededDemo(cfg)
+	opts.AfterRestore = d.afterRestore
+	if err := d.runtime.Host(context.Background(), opts); err != nil {
 		log.Fatal(err)
 	}
 }
 
 // newDemo returns a demo with its initial world, as a fresh start creates it.
 func newDemo() *demo {
-	d := newUnseededDemo()
+	d := newUnseededDemo(demoServerConfig())
 	d.seed()
 	return d
 }
 
-// newUnseededDemo wires the server and its hooks without creating entities, so
-// a snapshot can be restored before the world is seeded.
-func newUnseededDemo() *demo {
-	srv, rt := generated.NewServer(golem.ServerConfigFromEnv(golem.ServerConfig{
+func demoServerConfig() golem.ServerConfig {
+	return golem.ServerConfig{
 		TickRate:        20,
 		Transport:       golem.TransportWebSocket,
 		StateUpdateLane: golem.StateUpdateLaneStream,
 		Path:            host.DefaultWebSocketPath,
-	}))
+	}
+}
+
+// newUnseededDemo wires the server and its hooks without creating entities, so
+// a snapshot can be restored before the world is seeded.
+func newUnseededDemo(cfg golem.ServerConfig) *demo {
+	srv, rt := generated.NewServer(cfg)
 	d := &demo{
 		server: srv, runtime: rt,
 		actors: make(map[int64]*actorState),

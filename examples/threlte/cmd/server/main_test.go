@@ -71,7 +71,7 @@ func TestSnapshotRestoreAdoptsWorldWithoutActors(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restored := newUnseededDemo()
+	restored := newUnseededDemo(demoServerConfig())
 	ok, err := restored.runtime.LoadSnapshotIfExists(path)
 	if err != nil || !ok {
 		t.Fatalf("LoadSnapshotIfExists = %v, %v", ok, err)

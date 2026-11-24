@@ -53,7 +53,7 @@ function fakeClient({ notifyOnDisconnect = false } = {}) {
     },
     open() {
       this.connected = true;
-      publish({ type: "connected" });
+      publish({ type: "connected", transport: "websocket" });
       connectHandler?.();
     },
     close(info) {
@@ -123,7 +123,7 @@ describe("GolemConnectionLifecycle", () => {
 
     client.open();
     assert.equal(lifecycle.connected, true);
-    assert.deepEqual(statuses.at(-1), { type: "connected" });
+    assert.deepEqual(statuses.at(-1), { type: "connected", transport: "websocket" });
   });
 
   it("forwards a fallback connection plan as one lifecycle attempt", () => {
@@ -148,7 +148,7 @@ describe("GolemConnectionLifecycle", () => {
     assert.deepEqual(statuses, [{ type: "connecting", attempt: 1 }]);
 
     client.open();
-    assert.deepEqual(statuses.at(-1), { type: "connected" });
+    assert.deepEqual(statuses.at(-1), { type: "connected", transport: "websocket" });
   });
 
   it("refreshes options and applies exponential reconnect delays", () => {

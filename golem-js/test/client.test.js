@@ -350,7 +350,21 @@ test("GameClient pending plan cancellation becomes observable idle without a leg
   assert.equal(channels.length, 0);
 });
 
-test("GameClient state follows one logical fallback attempt", async () => {
+test("GameClient logs normal direct and fallback dials at debug level", (t) => {
+  const debug = t.mock.method(console, "debug", () => {});
+  const warn = t.mock.method(console, "warn", () => {});
+  const client = fallbackClient((options) => new ControlledChannel(options.transport));
+  client.connect("ws://localhost/api/ws?ticket=example-secret");
+  client.connect(fallbackPlan());
+  client.disconnect();
+  assert.equal(debug.mock.callCount(), 2);
+  assert.match(debug.mock.calls[0].arguments[0], /connecting transport=websocket/);
+  assert.match(debug.mock.calls[1].arguments[0], /connecting transport=webtransport/);
+  assert.doesNotMatch(debug.mock.calls[0].arguments[0], /example-secret/);
+  assert.equal(warn.mock.callCount(), 0);
+});
+
+test("GameClient state follows one logical fallback attempt and reports the open transport", async () => {
   const channels = [];
   const client = fallbackClient((options) => {
     const channel = new ControlledChannel(options.transport);
@@ -359,15 +373,32 @@ test("GameClient state follows one logical fallback attempt", async () => {
   });
   const states = [];
   client.subscribeConnectionState((state) => states.push(state.type));
+  assert.equal(client.connectedTransport, undefined);
   client.connect(fallbackPlan());
   channels[0].fail();
   await flushMicrotasks();
+  assert.equal(client.connectedTransport, undefined);
   assert.deepEqual(states, ["idle", "connecting"]);
   assert.equal(channels.length, 2);
   channels[1].open();
+  assert.equal(client.connectedTransport, "websocket");
+  assert.deepEqual(client.connectionState, { type: "connected", transport: "websocket" });
   channels[1].fail({ wasClean: false, reason: "network lost" });
   assert.deepEqual(states, ["idle", "connecting", "connected", "disconnected"]);
   assert.equal(client.connectionState.info.wasClean, false);
+  assert.equal(client.connectedTransport, undefined);
+
+  client.connect(fallbackPlan());
+  assert.equal(client.connectedTransport, undefined);
+  channels[2].open();
+  assert.equal(client.connectedTransport, "websocket");
+
+  client.connect({ transport: "webtransport", url: "https://example.test/another" });
+  assert.equal(client.connectedTransport, undefined);
+  channels[3].open();
+  assert.equal(client.connectedTransport, "webtransport");
+  client.disconnect();
+  assert.equal(client.connectedTransport, undefined);
 });
 
 test("GameClient reports setup failure snapshots while retaining synchronous throw semantics", () => {

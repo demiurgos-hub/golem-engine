@@ -201,6 +201,7 @@ test('provider borrows a started lifecycle and destroys only an explicitly owned
   owned.channels.at(-1).open();
   await tick();
   expect(second.target.querySelector('[data-testid="status"]')?.textContent).toBe('connected');
+  expect(second.target.querySelector('[data-testid="status"]')?.getAttribute('data-transport')).toBe('websocket');
   await unmount(second.app);
   expect(owned.closeCalls).toBe(before + 1);
   expect(owned.listenerCount()).toBe(0);

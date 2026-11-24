@@ -237,7 +237,7 @@ export interface DisconnectInfo {
 export type GameClientConnectionState =
   | { type: "idle" }
   | { type: "connecting" }
-  | { type: "connected" }
+  | { type: "connected"; transport: TransportKind }
   | { type: "disconnected"; info: DisconnectInfo };
 
 class SanitizedTransportError extends Error {
@@ -691,7 +691,7 @@ export class GameClient {
     const options: ConnectOptions = typeof input === "string"
       ? { transport: "websocket", url: input }
       : input;
-    console.warn(
+    console.debug(
       `golem-js: connecting transport=${options.transport} url=${redactURL(options.url)}`,
     );
     let channel: ReliableMessageChannel;
@@ -727,7 +727,7 @@ export class GameClient {
     channel.onOpen(() => {
       if (this._isCurrentChannel(generation, channel)) {
         this._connectionOpened = true;
-        this._setConnectionState({ type: "connected" });
+        this._setConnectionState({ type: "connected", transport: options.transport });
         if (this._isCurrentChannel(generation, channel)) this._onConnect?.();
       }
     });
@@ -915,7 +915,7 @@ export class GameClient {
       ),
       [suppressTransportLogs]: true,
     };
-    console.warn(
+    console.debug(
       `golem-js: connecting transport=${options.transport} url=${redactURL(options.url)}`,
     );
 
@@ -1051,7 +1051,7 @@ export class GameClient {
       if (options.transport === "websocket" && this._planAffinityKey === affinityKey) {
         this._stickyWebSocket = true;
       }
-      this._setConnectionState({ type: "connected" });
+      this._setConnectionState({ type: "connected", transport: options.transport });
       if (this._isCurrentChannel(generation, channel)) this._onConnect?.();
     });
 
@@ -1195,6 +1195,12 @@ export class GameClient {
 
   get connected(): boolean {
     return this._channel?.connected ?? false;
+  }
+
+  /** The open transport, including after fallback or reconnect. Undefined until open and after disconnect. */
+  get connectedTransport(): TransportKind | undefined {
+    const state = this._connectionState;
+    return this.connected && state.type === "connected" ? state.transport : undefined;
   }
 
   /** Current transport state; cancelling a pending connection returns to idle. */

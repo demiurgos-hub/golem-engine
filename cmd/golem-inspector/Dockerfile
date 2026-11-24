@@ -14,7 +14,7 @@ COPY golem-inspector/ golem-inspector/
 COPY cmd/golem-inspector/web/ cmd/golem-inspector/web/
 RUN cd golem-inspector && npm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.25 AS build
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src

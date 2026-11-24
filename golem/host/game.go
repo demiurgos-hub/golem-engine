@@ -156,10 +156,10 @@ type GameOptions struct {
 // The sidecar, when an address is configured, serves Realtime at
 // RealtimeConfigPath (503 while no public URL is configured, because clients
 // require one), srv.WebSocketHandler at WebSocketPath, and API plus assets
-// through SPAHandler for every other path. RunGame never invents realtime
-// URLs: without GOLEM_WS_FALLBACK_URL (or Realtime.WebSocketFallbackURL) no
-// fallback is advertised, and a fallback with a non-WebTransport primary fails
-// startup.
+// through SPAHandler for every other path. Use LocalDevelopment to supply
+// loopback defaults for Realtime. Without GOLEM_WS_FALLBACK_URL or a base
+// Realtime.WebSocketFallbackURL no fallback is advertised. A fallback with
+// a non-WebTransport primary fails startup.
 func RunGame(ctx context.Context, srv *golem.Server, b GameBindings, opts GameOptions) error {
 	if srv == nil {
 		return errors.New("golem/host: RunGame requires a server")
@@ -246,13 +246,7 @@ func (g *game) sidecar() (*http.Server, error) {
 	if opts.HTTPServer != nil && opts.HTTPServer.Handler != nil {
 		return nil, errors.New("golem/host: GameOptions.HTTPServer.Handler must be nil; pass routes as API and assets")
 	}
-	addr := opts.HTTPAddr
-	if addr == "" && opts.HTTPServer != nil {
-		addr = opts.HTTPServer.Addr
-	}
-	if v, ok := lookupEnvTrimmed(EnvHTTPAddr); ok {
-		addr = v
-	}
+	addr := opts.sidecarAddr()
 	if addr == "" {
 		if opts.API != nil || opts.Assets != nil || opts.AssetsDir != "" {
 			log.Printf("golem/host: no sidecar address (%s); API and assets are not served", EnvHTTPAddr)
@@ -263,10 +257,7 @@ func (g *game) sidecar() (*http.Server, error) {
 	if realtimePath == "" {
 		realtimePath = DefaultRealtimeConfigPath
 	}
-	wsPath := opts.WebSocketPath
-	if wsPath == "" {
-		wsPath = DefaultWebSocketPath
-	}
+	wsPath := opts.webSocketPath()
 	for _, p := range []string{realtimePath, wsPath} {
 		if !strings.HasPrefix(p, "/") || strings.ContainsAny(p, " {}") {
 			return nil, fmt.Errorf("golem/host: sidecar path %q must be an absolute URL path", p)
@@ -433,4 +424,21 @@ func (g *game) logStartup(opts RunOptions, inspectorAttached bool) {
 	}
 	log.Printf("golem/host: starting game=%q transport=%q sidecar=%q admin=%q snapshot=%q autosave=%s inspector=%t",
 		g.name, g.srv.Transport(), sidecar, admin, g.path, g.snaps.Interval, inspectorAttached)
+}
+
+func (opts GameOptions) sidecarAddr() string {
+	if addr, ok := lookupEnvTrimmed(EnvHTTPAddr); ok {
+		return addr
+	}
+	if opts.HTTPAddr == "" && opts.HTTPServer != nil {
+		return opts.HTTPServer.Addr
+	}
+	return opts.HTTPAddr
+}
+
+func (opts GameOptions) webSocketPath() string {
+	if opts.WebSocketPath == "" {
+		return DefaultWebSocketPath
+	}
+	return opts.WebSocketPath
 }

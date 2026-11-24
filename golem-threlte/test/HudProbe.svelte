@@ -9,7 +9,7 @@
 </script>
 
 <div data-testid="hud">
-  <span data-testid="status">{$status.type}</span>
+  <span data-testid="status" data-transport={$status.type === 'connected' ? $status.transport : undefined}>{$status.type}</span>
   <span data-testid="space">{$space}</span>
   <span data-testid="world">{$world.label}:{$world.tick}</span>
   {#each $actors as snapshot (snapshot.entity)}

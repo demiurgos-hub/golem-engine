@@ -1,9 +1,9 @@
-import type { ConnectInput, DisconnectInfo, GameClient } from "./client.js";
+import type { ConnectInput, DisconnectInfo, GameClient, TransportKind } from "./client.js";
 
 /** Connection lifecycle status emitted by the persistent client. */
 export type GolemConnectionStatus =
   | { type: "connecting"; attempt: number }
-  | { type: "connected" }
+  | { type: "connected"; transport: TransportKind }
   | { type: "reconnecting"; attempt: number; delayMs: number }
   | { type: "disconnected"; info: DisconnectInfo }
   | { type: "failed"; attempts: number };
@@ -133,7 +133,7 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
     const connectionAttempt = this.connectionAttempt;
     const unsubscribe = client.subscribeConnectionState((state) => {
       if (state.type === "connected") {
-        this.handleConnect();
+        this.handleConnect(state.transport);
       } else if (state.type === "disconnected") {
         this.handleDisconnect(state.info);
       } else if (state.type === "idle") {
@@ -237,10 +237,10 @@ export class GolemConnectionLifecycle<C extends GameClient = GameClient> {
     this.snapshotListeners.clear();
   }
 
-  private handleConnect(): void {
+  private handleConnect(transport: TransportKind): void {
     this.reconnectAttempts = 0;
     this.cancelReconnect();
-    this.emit({ type: "connected" });
+    this.emit({ type: "connected", transport });
   }
 
   private handleDisconnect(info: DisconnectInfo): void {
