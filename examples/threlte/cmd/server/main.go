@@ -1,3 +1,13 @@
+// Command server runs the Signal Garden example: the browser client from
+// web/dist and the game over WebSocket at /api/ws on one address.
+//
+// Locally it needs no configuration: npm run server listens on
+// 127.0.0.1:8080 (-addr) and serves -assets. Deployments configure it from
+// GOLEM_* environment variables through golem.ServerConfigFromEnv and the
+// generated Runtime.Host: GOLEM_HTTP_ADDR replaces -addr, GOLEM_TLS_CERT_FILE
+// and GOLEM_TLS_KEY_FILE serve HTTPS, GOLEM_ADMIN_ADDR/GOLEM_ADMIN_TOKEN open
+// the admin listener, GOLEM_SNAPSHOT_DIR keeps the world across restarts and
+// GOLEM_INSPECTOR_HUB_URL attaches the Golem Inspector.
 package main
 
 import (
@@ -7,6 +17,8 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/demiurgos-hub/golem-engine/golem"
 	"github.com/demiurgos-hub/golem-engine/golem/host"
@@ -30,45 +42,61 @@ type demo struct {
 }
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:8080", "HTTP and WebSocket address")
+	addr := flag.String("addr", "127.0.0.1:8080", "HTTP and WebSocket address ("+host.EnvHTTPAddr+" overrides)")
 	assets := flag.String("assets", "web/dist", "built browser assets directory")
 	flag.Parse()
-	d := newDemo()
-	mux := http.NewServeMux()
-	mux.Handle("/api/ws", d.server.Handler())
-	mux.HandleFunc("/api/health", func(w http.ResponseWriter, _ *http.Request) {
+	d := newUnseededDemo()
+	api := http.NewServeMux()
+	api.HandleFunc("/api/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("ready\n"))
 	})
-	log.Printf("Signal Garden: http://%s (WebSocket /api/ws)", *addr)
-	if err := host.Run(context.Background(), host.RunOptions{
-		Server: d.server,
-		HTTPServer: &http.Server{
-			Addr: *addr,
-			Handler: host.SPAHandler(host.SPAOptions{
-				APIHandler: mux,
-				DiskDir:    *assets,
-			}),
-		},
+	listen := *addr
+	if v := strings.TrimSpace(os.Getenv(host.EnvHTTPAddr)); v != "" {
+		listen = v
+	}
+	log.Printf("Signal Garden: http://%s (WebSocket %s)", listen, host.DefaultWebSocketPath)
+	if err := d.runtime.Host(context.Background(), generated.HostOptions{
+		Name:         "signal-garden",
+		HTTPAddr:     *addr,
+		API:          api,
+		AssetsDir:    *assets,
+		AfterRestore: d.afterRestore,
 	}); err != nil {
 		log.Fatal(err)
 	}
 }
 
+// newDemo returns a demo with its initial world, as a fresh start creates it.
 func newDemo() *demo {
-	srv, rt := generated.NewServer(golem.ServerConfig{
+	d := newUnseededDemo()
+	d.seed()
+	return d
+}
+
+// newUnseededDemo wires the server and its hooks without creating entities, so
+// a snapshot can be restored before the world is seeded.
+func newUnseededDemo() *demo {
+	srv, rt := generated.NewServer(golem.ServerConfigFromEnv(golem.ServerConfig{
 		TickRate:        20,
 		Transport:       golem.TransportWebSocket,
 		StateUpdateLane: golem.StateUpdateLaneStream,
-		Path:            "/api/ws",
-	})
+		Path:            host.DefaultWebSocketPath,
+	}))
 	d := &demo{
 		server: srv, runtime: rt,
 		actors: make(map[int64]*actorState),
-		stats:  generated.NewSyncedSessionStats(0, 0, 0, 0, 0),
 	}
-	must(srv.CreateEntity(d.stats))
-	d.toggleBeacon()
+	// Restored entities come back through these wrappers; actors are not
+	// persistent (schemas/entities/actor.yaml) because they belong to sessions.
+	generated.RegisterSessionStatsWrapper(func(stats *generated.SyncedSessionStats) golem.Entity {
+		d.stats = stats
+		return stats
+	})
+	generated.RegisterBeaconWrapper(func(beacon *generated.SyncedBeacon) golem.Entity {
+		d.beacon = beacon
+		return beacon
+	})
 	srv.OnConnect(d.connect)
 	srv.OnDisconnect(func(sess *golem.Session) {
 		delete(d.actors, sess.ID)
@@ -96,6 +124,31 @@ func newDemo() *demo {
 		log.Printf("session %d command: %v", sess.ID, err)
 	})
 	return d
+}
+
+// seed creates the initial world: session statistics and the beacon.
+func (d *demo) seed() {
+	d.stats = generated.NewSyncedSessionStats(0, 0, 0, 0, 0)
+	must(d.server.CreateEntity(d.stats))
+	d.toggleBeacon()
+}
+
+// afterRestore seeds a fresh world, or adopts the restored statistics and
+// beacon (captured by the restore wrappers) when a snapshot was loaded.
+func (d *demo) afterRestore(restored bool) error {
+	if !restored {
+		d.seed()
+		return nil
+	}
+	if d.stats == nil {
+		d.stats = generated.NewSyncedSessionStats(0, 0, 0, 0, 0)
+		if err := d.server.CreateEntity(d.stats); err != nil {
+			return err
+		}
+	}
+	d.stats.SetConnectedCount(0)
+	d.publishArena()
+	return nil
 }
 
 func (d *demo) connect(sess *golem.Session) {

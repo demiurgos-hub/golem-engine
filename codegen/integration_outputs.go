@@ -50,6 +50,9 @@ type integrationSpec struct {
 	defaultImport  string
 	defaultPackage string
 	outputs        []outputRule
+	// finalizeMirrored replaces hooks.Finalize when Check renders outDir away
+	// from the project; resolveDir is the project output it stands in for.
+	finalizeMirrored func(projectRoot, outDir, resolveDir string) error
 }
 
 // Keep the public integration description as a compatibility projection. Each
@@ -127,6 +130,7 @@ func init() {
 			outputs: []outputRule{
 				{role: entityOutput, entityName: func(name string) string { return schema.ToSnakeCase(name) + "_synced.go" }, template: "go_server/server.go.tmpl"},
 				{role: sharedOutput, file: "golem_helpers.go", template: "go_server/shared.go.tmpl", condition: alwaysOutput},
+				{role: sharedOutput, file: "golem_host.go", template: "go_server/host.go.tmpl", condition: alwaysOutput},
 				{role: entityCodecOutput, file: "entities_pb.go", condition: alwaysOutput},
 				{role: inspectorSchemaOutput, file: "inspector_schema.go", condition: alwaysOutput},
 				{role: worldCodecOutput, file: "world_pb.go", condition: withWorld},
@@ -150,6 +154,7 @@ func init() {
 			hooks: Integration{GenerateExtra: func(outDir, golemImport, goPackage string, entities []schema.EntityData, commands []schema.CommandData, worldTypes []schema.WorldTypeData, events []schema.EventData, proto schema.ProtoTemplateData) error {
 				return generateJSProto(outDir, golemImport, entities, commands, worldTypes, events, proto)
 			}, Finalize: compileJSIntegration},
+			finalizeMirrored: compileJSIntegrationResolvingFrom,
 			outputs: []outputRule{
 				{role: entityOutput, entityName: func(name string) string { return name + "Synced.ts" }, template: "js/client.ts.tmpl", jsIntermediate: true},
 				{role: sharedOutput, file: "EntityManager.ts", template: "js/manager.ts.tmpl", condition: alwaysOutput, jsIntermediate: true},

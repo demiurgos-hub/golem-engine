@@ -111,7 +111,7 @@ func generateCSharpEntitiesProto(outDir, golemImport, namespace string, entities
 	if err := os.WriteFile(outPath, []byte(b.String()), 0o644); err != nil {
 		return err
 	}
-	fmt.Printf("  wrote %s\n", outPath)
+	logf("  wrote %s\n", outPath)
 	return nil
 }
 
@@ -489,7 +489,7 @@ func generateCSharpWorldProto(outDir, golemImport, namespace string, proto schem
 	if err := os.WriteFile(outPath, []byte(b.String()), 0o644); err != nil {
 		return err
 	}
-	fmt.Printf("  wrote %s\n", outPath)
+	logf("  wrote %s\n", outPath)
 	return nil
 }
 
@@ -536,7 +536,7 @@ func generateCSharpEventProto(outDir, golemImport, namespace string, proto schem
 	if err := os.WriteFile(outPath, []byte(b.String()), 0o644); err != nil {
 		return err
 	}
-	fmt.Printf("  wrote %s\n", outPath)
+	logf("  wrote %s\n", outPath)
 	return nil
 }
 

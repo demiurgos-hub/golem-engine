@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -56,8 +57,24 @@ func removeGeneratedJSIntermediates(outDir string) error {
 // compileJSIntegration recursively compiles TypeScript in outDir, then removes
 // marked top-level intermediates and the temporary compiler config on success.
 func compileJSIntegration(projectRoot, outDir string) error {
+	return compileJSIntegrationResolvingFrom(projectRoot, outDir, outDir)
+}
+
+// compileJSIntegrationResolvingFrom compiles outDir as if its sources lived in
+// resolveDir. When they differ (Check renders into a scratch tree), the
+// temporary config maps bare imports and @types roots to the node_modules
+// directories visible from resolveDir, and pins rootDir so tsc refuses to emit
+// any source outside outDir rather than writing next to it.
+func compileJSIntegrationResolvingFrom(projectRoot, outDir, resolveDir string) error {
+	config := []byte(jsBakeTSConfig)
+	if filepath.Clean(outDir) != filepath.Clean(resolveDir) {
+		var err error
+		if config, err = mirroredJSBakeTSConfig(resolveDir); err != nil {
+			return err
+		}
+	}
 	cfgPath := filepath.Join(outDir, "tsconfig.golem-bake.json")
-	if err := os.WriteFile(cfgPath, []byte(jsBakeTSConfig), 0o644); err != nil {
+	if err := os.WriteFile(cfgPath, config, 0o644); err != nil {
 		return fmt.Errorf("write tsconfig.golem-bake.json: %w", err)
 	}
 
@@ -86,4 +103,44 @@ func compileJSIntegration(projectRoot, outDir string) error {
 		return err
 	}
 	return nil
+}
+
+// mirroredJSBakeTSConfig extends jsBakeTSConfig with the module and @types
+// lookup that TypeScript would perform from resolveDir: every ancestor
+// node_modules directory, nearest first.
+func mirroredJSBakeTSConfig(resolveDir string) ([]byte, error) {
+	var base struct {
+		CompilerOptions map[string]any `json:"compilerOptions"`
+		Include         []string       `json:"include"`
+	}
+	if err := json.Unmarshal([]byte(jsBakeTSConfig), &base); err != nil {
+		return nil, err
+	}
+	dir, err := filepath.Abs(resolveDir)
+	if err != nil {
+		return nil, err
+	}
+	modules, typeRoots := []string{}, []string{}
+	for {
+		if filepath.Base(dir) != "node_modules" {
+			candidate := filepath.Join(dir, "node_modules")
+			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+				modules = append(modules, filepath.ToSlash(candidate)+"/*")
+				if info, err := os.Stat(filepath.Join(candidate, "@types")); err == nil && info.IsDir() {
+					typeRoots = append(typeRoots, filepath.ToSlash(filepath.Join(candidate, "@types")))
+				}
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	base.CompilerOptions["rootDir"] = "."
+	base.CompilerOptions["typeRoots"] = typeRoots
+	if len(modules) > 0 {
+		base.CompilerOptions["paths"] = map[string][]string{"*": modules}
+	}
+	return json.MarshalIndent(base, "", "  ")
 }

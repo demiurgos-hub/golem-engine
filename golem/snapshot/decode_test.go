@@ -2,6 +2,9 @@ package snapshot
 
 import (
 	"encoding/hex"
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -127,3 +130,27 @@ func (e *snapshotTestEntity) IsGlobal() bool               { return false }
 func (e *snapshotTestEntity) FlushUpdate() ([]byte, error) { return nil, nil }
 func (e *snapshotTestEntity) FullUpdate() ([]byte, error)  { return []byte{byte(e.id)}, nil }
 func (e *snapshotTestEntity) IsPersistent() bool           { return !e.transient }
+
+func TestReadFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "world.snapshot")
+	data := (&pb.Writer{}).Raw(magic[:]).Uint32(2).Int64(0).String("stored-schema").Uint32(0).Finish()
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadFingerprint(path); err != nil || got != "stored-schema" {
+		t.Fatalf("ReadFingerprint = %q, %v", got, err)
+	}
+	if _, err := Load(path, "other"); !errors.Is(err, ErrFingerprintMismatch) {
+		t.Fatalf("Load = %v, want ErrFingerprintMismatch", err)
+	}
+	if err := os.WriteFile(path, []byte("nope"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFingerprint(path); err == nil {
+		t.Fatal("accepted a non-snapshot file")
+	}
+	if _, err := ReadFingerprint(filepath.Join(dir, "missing")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing file error = %v", err)
+	}
+}

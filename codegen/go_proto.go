@@ -101,7 +101,7 @@ func generateGoProto(
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("gofmt %s: %w\n%s", outPath, err, out)
 	}
-	fmt.Printf("  wrote %s\n", outPath)
+	logf("  wrote %s\n", outPath)
 
 	for _, output := range selectIntegrationOutputs("go-client", schema.SharedData{WorldTypes: worldTypes, Events: events}) {
 		switch output.role {
@@ -265,7 +265,7 @@ func generateGoEventProto(outDir, golemImport, goPackage string, proto schema.Pr
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("gofmt %s: %w\n%s", outPath, err, out)
 	}
-	fmt.Printf("  wrote %s\n", outPath)
+	logf("  wrote %s\n", outPath)
 	return nil
 }
 
@@ -368,7 +368,7 @@ func generateGoWorldProto(outDir, golemImport, goPackage string, proto schema.Pr
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("gofmt %s: %w\n%s", outPath, err, out)
 	}
-	fmt.Printf("  wrote %s\n", outPath)
+	logf("  wrote %s\n", outPath)
 	return nil
 }
 

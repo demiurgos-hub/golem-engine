@@ -9,3 +9,5 @@ alwaysApply: false
 The **`golem` binary**: parses args and calls `codegen.Bake` with the current working directory as the project root. No schema logic, templates, or runtime code—keep it minimal. New commands belong here with a small `main` and delegation to the right package.
 
 `golem-bake --remove-integration <name>` delegates to `codegen.RemoveIntegration` for explicit retirement of configured shared-only bridges. It does not bake or modify configuration in removal mode.
+
+`golem-bake --check` delegates to `codegen.Check` and only formats its result. Exit codes are a caller contract: 0 success/up to date, 1 bake or removal failure or check drift, 2 usage errors and any check failure other than drift. `run` holds the logic so `main_test.go` can test exit codes without a subprocess; schema errors that the `schema` package reports through `log.Fatal` still exit 1 in every mode.

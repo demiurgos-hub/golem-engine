@@ -3,6 +3,7 @@ description: cmd/golem-inspector — thin hub binary embedding the built inspect
 globs:
   - cmd/golem-inspector/**/*
   - scripts/build-golem-inspector.*
+  - .github/workflows/inspector-image.yml
 alwaysApply: false
 ---
 
@@ -11,3 +12,5 @@ alwaysApply: false
 Thin entrypoint over `golem/inspector/hub`: flags with `GOLEM_INSPECTOR_*` environment fallbacks, TLS validation, graceful shutdown and a `hash-password` helper. Keep hub behavior in the hub package, not here, and do not import the `golem` runtime.
 
 The UI is embedded from `web/dist`, which `npm run build` in `golem-inspector/` writes. Only `web/dist/.gitkeep` is committed; without a UI build the binary serves `placeholder/index.html`. Release builds and the Dockerfile run the UI build before `go build`.
+
+`.github/workflows/inspector-image.yml` publishes the Dockerfile's image to `ghcr.io/demiurgos-hub/golem-inspector` for linux/amd64 and linux/arm64: `v*` tags publish the version without `v` (plus `latest` unless it contains `-`), manual runs publish their `tag` input (default `edge`). Keep the Dockerfile buildable from the repository root with only the packages it copies.

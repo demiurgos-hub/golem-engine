@@ -51,12 +51,24 @@ type Listener struct {
 	entitySnapshotFunc      func(sessionID int64) ([]EntitySnapshot, error)
 	entitySnapshotComplete  func(sessionID int64, entityIDs []int64)
 
-	wtServer          *webtransport.Server
-	certificateHashes []CertificateHash
-	wtCheckOrigin     func(*http.Request) bool
-	readyOnce         sync.Once
-	readyCh           chan struct{}
-	readyErr          error
+	wtServer      *webtransport.Server
+	wtCheckOrigin func(*http.Request) bool
+	// wsCheckOrigin is the WebSocket origin policy; wsCheckOriginCustom is
+	// true when it was installed by SetWebSocketCheckOrigin.
+	wsCheckOrigin       func(*http.Request) bool
+	wsCheckOriginCustom bool
+	readyOnce           sync.Once
+	readyCh             chan struct{}
+	readyErr            error
+
+	// tlsCertificate is the certificate served by the integrated WebTransport
+	// listener. tlsReloadMu serializes reloads and guards tlsFileStamps, the
+	// file stamps observed for the last successful load.
+	tlsCertificate certificateHolder
+	tlsReloadMu    sync.Mutex
+	tlsFileStamps  certificateFileStamps
+	// boundAddr records the integrated listener's bound local address (string).
+	boundAddr atomic.Value
 
 	// Deltas for OutboundBacklogForLog: previous cumulative wire counters per session.
 	outboundLogMu sync.Mutex
@@ -82,6 +94,7 @@ func NewListener(reg *registry.Registry, cfg Config) *Listener {
 		trafficPrev:     make(map[int64]trafficCounters),
 		pendingSessions: make(map[*Session]struct{}),
 		wtCheckOrigin:   newWebTransportCheckOrigin(cfg),
+		wsCheckOrigin:   newWebSocketCheckOrigin(cfg),
 		readyCh:         make(chan struct{}),
 	}
 }
@@ -140,6 +153,25 @@ func (l *Listener) SetWebTransportCheckOrigin(fn func(*http.Request) bool) {
 	if l.wtServer != nil {
 		l.wtServer.CheckOrigin = l.wtCheckOrigin
 	}
+}
+
+// SetWebSocketCheckOrigin overrides the WebSocket origin policy used by
+// Handler and WebSocketHandler. fn returns true to accept the upgrade request;
+// rejected requests receive HTTP 403 before the upgrade and before OnUpgrade
+// runs. Passing nil restores the policy built from Config: requests without an
+// Origin header, same-origin requests, origins listed in
+// WebTransportAllowedOrigins, same-hostname origins when
+// WebTransportAllowSameHostOrigin is set, and loopback-to-loopback requests are
+// accepted. Install a function that always returns true to accept any origin.
+// Call it before the listener starts serving.
+func (l *Listener) SetWebSocketCheckOrigin(fn func(*http.Request) bool) {
+	if fn == nil {
+		l.wsCheckOrigin = newWebSocketCheckOrigin(l.config)
+		l.wsCheckOriginCustom = false
+		return
+	}
+	l.wsCheckOrigin = fn
+	l.wsCheckOriginCustom = true
 }
 
 // OnConnect registers a hook called after a new client receives
@@ -212,19 +244,12 @@ func (l *Listener) SetEntitySnapshotCompleteFunc(fn func(sessionID int64, entity
 	l.entitySnapshotComplete = fn
 }
 
-// CertificateHashes returns the WebTransport certificate hashes known by the listener.
+// CertificateHashes returns the SHA-256 hashes of the certificate chain the
+// integrated WebTransport listener is currently serving, or nil before the
+// certificate is loaded. After ReloadCertificate succeeds it reports the new
+// certificate. The result is a deep copy and safe for concurrent use.
 func (l *Listener) CertificateHashes() []CertificateHash {
-	if len(l.certificateHashes) == 0 {
-		return nil
-	}
-	out := make([]CertificateHash, len(l.certificateHashes))
-	for i, hash := range l.certificateHashes {
-		out[i] = CertificateHash{
-			Algorithm: hash.Algorithm,
-			Value:     append([]byte(nil), hash.Value...),
-		}
-	}
-	return out
+	return l.tlsCertificate.hashes()
 }
 
 // BroadcastRaw sends a single pre-wrapped frame to every connected session.
@@ -688,16 +713,15 @@ func (l *Listener) listenAndServeWebTransport(ctx context.Context, mux *http.Ser
 		Handler: mux,
 	}
 	server := l.WebTransportServer(h3)
-	certificate, hashes, cleanup, err := prepareWebTransportTLS(l.config)
+	certificate, stamps, err := prepareWebTransportCertificate(l.config)
 	if err != nil {
 		l.signalReady(err)
 		return err
 	}
-	defer cleanup()
-	l.certificateHashes = hashes
-	h3.TLSConfig = newWebTransportServerTLSConfig(certificate)
-	if l.config.DevSelfSignedCert && len(hashes) > 0 {
-		log.Printf("golem/net: webtransport dev self-signed certificate ready addr=%q hashes=%s", l.config.Addr, formatCertificateHashes(hashes))
+	l.installInitialCertificate(certificate, stamps)
+	h3.TLSConfig = newReloadableWebTransportServerTLSConfig(&l.tlsCertificate)
+	if l.config.DevSelfSignedCert && len(certificate.hashes) > 0 {
+		log.Printf("golem/net: webtransport dev self-signed certificate ready addr=%q hashes=%s", l.config.Addr, formatCertificateHashes(certificate.hashes))
 	}
 	packetConn, err := net.ListenPacket("udp", l.config.Addr)
 	if err != nil {
@@ -705,10 +729,13 @@ func (l *Listener) listenAndServeWebTransport(ctx context.Context, mux *http.Ser
 		return err
 	}
 	defer packetConn.Close()
+	l.boundAddr.Store(packetConn.LocalAddr().String())
 	go func() {
 		<-ctx.Done()
 		_ = server.Close()
 	}()
+	stopReloadPoll := l.startCertificateReloadPoll(ctx)
+	defer stopReloadPoll()
 	log.Printf("golem/net: listening transport=%q addr=%q path=%q", l.config.Transport, l.config.Addr, l.config.Path)
 	l.signalReady(nil)
 	err = server.Serve(packetConn)
@@ -752,6 +779,13 @@ func (l *Listener) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer l.sessionHandlers.Done()
+	// Check the browser origin before OnUpgrade so cross-site pages cannot
+	// trigger auth hooks. websocket.Accept below skips its own origin check
+	// because this policy replaces it.
+	if !l.checkWebSocketOrigin(r) {
+		http.Error(w, "websocket origin not allowed", http.StatusForbidden)
+		return
+	}
 	sessionData, ok := l.authorizeSessionRequest(w, r, TransportWebSocket)
 	if !ok {
 		return
@@ -1043,40 +1077,121 @@ func (l *Listener) ensureWebTransportServer(h3 *http3.Server) *webtransport.Serv
 	return l.wtServer
 }
 
-func newWebTransportCheckOrigin(cfg Config) func(*http.Request) bool {
-	allowedOrigins := make(map[string]struct{}, len(cfg.WebTransportAllowedOrigins))
-	for _, origin := range cfg.WebTransportAllowedOrigins {
+// newAllowedOriginSet canonicalizes WebTransportAllowedOrigins. Invalid
+// entries are skipped, and logged when logInvalid is set (the WebTransport
+// policy logs them, so the WebSocket policy built from the same list does not
+// repeat the warning).
+func newAllowedOriginSet(origins []string, logInvalid bool) map[string]struct{} {
+	allowed := make(map[string]struct{}, len(origins))
+	for _, origin := range origins {
 		canonical, ok := canonicalWebTransportOrigin(origin)
 		if !ok {
-			log.Printf("golem/net: ignoring invalid WebTransport allowed origin %q", origin)
+			if logInvalid {
+				log.Printf("golem/net: ignoring invalid WebTransport allowed origin %q", origin)
+			}
 			continue
 		}
-		allowedOrigins[canonical] = struct{}{}
+		allowed[canonical] = struct{}{}
 	}
+	return allowed
+}
+
+// originInSet reports whether the Origin header exactly matches a configured
+// allowed origin (scheme and host compared case-insensitively).
+func originInSet(origin string, allowed map[string]struct{}) bool {
+	canonical, ok := canonicalWebTransportOrigin(origin)
+	if !ok {
+		return false
+	}
+	_, found := allowed[canonical]
+	return found
+}
+
+// parseRequestOrigin parses a non-empty Origin header. When the value is not a
+// usable origin it returns nil and the rejection reason.
+func parseRequestOrigin(origin string) (*url.URL, string) {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return nil, fmt.Sprintf("invalid Origin header: %v", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return nil, "missing origin scheme or host"
+	}
+	return u, ""
+}
+
+func (l *Listener) checkWebSocketOrigin(r *http.Request) bool {
+	if l.wsCheckOrigin(r) {
+		return true
+	}
+	if l.wsCheckOriginCustom {
+		logSessionRequest("rejected websocket origin", r, TransportWebSocket, "policy=custom")
+	}
+	return false
+}
+
+// newWebSocketCheckOrigin builds the default WebSocket origin policy. It
+// accepts requests without an Origin header (native clients), same-origin
+// requests (Origin host:port equals Host), origins listed in
+// WebTransportAllowedOrigins, any-scheme same-hostname origins when
+// WebTransportAllowSameHostOrigin is set, and requests where both the origin
+// and the request host are loopback. DevSelfSignedCert does not affect it.
+func newWebSocketCheckOrigin(cfg Config) func(*http.Request) bool {
+	allowedOrigins := newAllowedOriginSet(cfg.WebTransportAllowedOrigins, false)
+	allowSameHost := cfg.WebTransportAllowSameHostOrigin
 
 	return func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
 			return true
 		}
-		u, err := url.Parse(origin)
-		if err != nil {
-			log.Printf("golem/net: rejected WebTransport origin %q for host %q: invalid Origin header: %v", origin, r.Host, err)
-			return false
-		}
-		if u.Scheme == "" || u.Host == "" {
-			log.Printf("golem/net: rejected WebTransport origin %q for host %q: missing origin scheme or host", origin, r.Host)
+		u, reason := parseRequestOrigin(origin)
+		if u == nil {
+			log.Printf("golem/net: rejected WebSocket origin %q for host %q: %s", origin, r.Host, reason)
 			return false
 		}
 		if equalASCIIFold(u.Host, r.Host) {
 			return true
 		}
+		if originInSet(origin, allowedOrigins) {
+			return true
+		}
+		originHost := u.Hostname()
+		// url.URL.Hostname strips the port and IPv6 brackets from Host.
+		requestHost := (&url.URL{Host: r.Host}).Hostname()
+		if allowSameHost && equalASCIIFold(originHost, requestHost) {
+			return true
+		}
+		if isLoopbackHost(originHost) && isLoopbackHost(requestHost) {
+			return true
+		}
+		if allowSameHost {
+			log.Printf("golem/net: rejected WebSocket origin %q for host %q: origin hostname %q does not match request hostname %q and origin does not match WebTransportAllowedOrigins", origin, r.Host, originHost, requestHost)
+			return false
+		}
+		log.Printf("golem/net: rejected WebSocket origin %q for host %q: origin is not same host and does not match WebTransportAllowedOrigins", origin, r.Host)
+		return false
+	}
+}
 
-		canonical, ok := canonicalWebTransportOrigin(origin)
-		if ok {
-			if _, allowed := allowedOrigins[canonical]; allowed {
-				return true
-			}
+func newWebTransportCheckOrigin(cfg Config) func(*http.Request) bool {
+	allowedOrigins := newAllowedOriginSet(cfg.WebTransportAllowedOrigins, true)
+
+	return func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		u, reason := parseRequestOrigin(origin)
+		if u == nil {
+			log.Printf("golem/net: rejected WebTransport origin %q for host %q: %s", origin, r.Host, reason)
+			return false
+		}
+		if equalASCIIFold(u.Host, r.Host) {
+			return true
+		}
+		if originInSet(origin, allowedOrigins) {
+			return true
 		}
 
 		originHost := u.Hostname()

@@ -46,12 +46,13 @@ type SyncedWanderer struct {
 }
 
 func NewSyncedWanderer(posX float32, posY float32, posZ float32, name string, hp int32, gold uint32, tags []string, stats map[string]int32, bag []Item, entityID ...int64) *SyncedWanderer {
-	id := int64(0)
+	// _id cannot clash with a var parameter: SnakeToCamel never emits '_'.
+	var _id int64
 	if len(entityID) > 0 {
-		id = entityID[0]
+		_id = entityID[0]
 	}
 	return &SyncedWanderer{
-		entityID: id,
+		entityID: _id,
 		posX:     posX,
 		posY:     posY,
 		posZ:     posZ,
@@ -95,6 +96,15 @@ func (s *SyncedWanderer) StateRevision() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.revision
+}
+
+// BumpStateRevision advances the state revision without marking any field
+// dirty. golem.Server.SetOwner calls it on an owner change so the next owner
+// or public full state outranks records serialized for the previous view.
+func (s *SyncedWanderer) BumpStateRevision() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.revision++
 }
 
 // IsGlobal reports whether this entity bypasses field-of-interest checks.

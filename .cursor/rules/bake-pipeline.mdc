@@ -23,7 +23,7 @@ alwaysApply: false
 
 # `bake` pipeline
 
-The go-server target also writes `inspector_schema.go` (`InspectorSchema()`), built by `codegen/go_inspector.go` from the same resolved wire layout and envelope tags as the codecs, so field tags and dirty bits cannot drift from the encoders. `examples/inspector-demo` checks the baked descriptor against baked encoders.
+The go-server target also writes `golem_host.go` (`Runtime.Host`, a thin binding to `golem/host.RunGame`) and `inspector_schema.go` (`InspectorSchema()`), built by `codegen/go_inspector.go` from the same resolved wire layout and envelope tags as the codecs, so field tags and dirty bits cannot drift from the encoders. `examples/inspector-demo` checks the baked descriptor against baked encoders.
 
 Navigation `Settings.ClearancePrecision` is omitted for legacy binary64 arithmetic and set to `binary32` by Unity Scribe because its profile/cell fields are authored as floats. Quantize height/radius upward and climb downward after rounding operands and quotient in the selected precision; do not use epsilon snapping. Validation, tile padding, baking and artifact validation share this policy. Binary32 artifacts require feature bit 1; default artifact/fingerprint bytes stay compatible. C# validation forces stored IEEE binary32 values even on Mono. This setting never changes geometry, transforms, terrain samples or map coverage.
 
@@ -82,6 +82,8 @@ Be careful with nested formatting in generators: code that emits `fmt` strings o
 After schema or codegen changes that affect bake output, verify `go build ./cmd/golem-bake` and targeted generator tests. For cross-target changes, confirm both Go and JS generated outputs still compile.
 
 For shared codec changes, also compile/run generated C# against the standalone Unity codec sources, exercise generated Go full/public state behavior, and distinguish semantic equivalence, exact bytes and deterministic generated source. Do not impose sorted Go map wire order. Run representative generated consumers in temporary directories; a skipped required consumer check is not acceptance evidence. Preserve exact baseline fingerprints even where their current coverage is incomplete.
+
+`golem-bake --check` must produce exactly what a bake would write; when adding an output, finalizer or input, confirm `codegen/check_test.go` still covers it and that nothing is written outside the output root.
 
 Retire a configured shared-only bridge with `golem-bake --remove-integration <target>` before removing its integration stanza. Removal checks generated headers and confines known outputs to the project; it never deletes authored adapters or recursively removes an output directory.
 

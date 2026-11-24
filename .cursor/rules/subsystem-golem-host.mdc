@@ -1,13 +1,23 @@
 ---
-description: golem/host — optional process, sidecar HTTP, and browser SPA hosting helpers.
+description: golem/host — optional process, sidecar HTTP, browser SPA, admin listener and deploy-contract (RunGame) hosting helpers.
 globs: golem/host/**/*.go
 alwaysApply: false
 ---
 
 # `golem/host`
 
-**Hosting helpers:** `Run` is optional scaffolding for binaries that run a `golem.Server` plus a caller-owned sidecar `net/http.Server`. It owns signal cancellation, `Server.WaitReady`, first-error propagation, graceful sidecar shutdown, and HTTP TLS cert/key pair validation. It must not own app policy such as DB setup, auth, route definitions, gameplay systems, collision/nav configuration, or entity spawning.
+**Hosting helpers:** `Run` is optional scaffolding for binaries that run a `golem.Server` plus a caller-owned sidecar `net/http.Server`. It owns signal cancellation, `Server.WaitReady`, first-error propagation, graceful sidecar shutdown, and HTTP TLS cert/key pair validation. The sidecar listener is bound before `/ready` turns true; a bind failure is a component exit, never a ready server without a sidecar. It must not own app policy such as DB setup, auth, route definitions, gameplay systems, collision/nav configuration, or entity spawning.
 
 **Static SPA serving:** `SPAHandler` serves a configured API prefix first, then static assets from either disk or an `fs.FS`, with `index.html` fallback for browser client routes. Disk assets can override embedded assets for local iteration.
 
-**Boundaries:** `golem/host` may import `golem` and standard-library HTTP/FS/process packages. Keep simulation, networking protocols, generated-schema knowledge, and debug/profiling helpers out of this package.
+**Shutdown order:** `Run` waits for every component. After the first exit, cancellation or signal: `/ready` fails, `Server.Run` returns, an in-flight admin snapshot finishes, `RunOptions.AfterServerStop` runs once (the place for a final `Server.SaveSnapshot`; `SaveSnapshotOnTick` no longer works there), then the sidecar and finally the admin listener stop. Timeouts and hook errors are joined into the returned error.
+
+**Reloadable sidecar certificate:** with `HTTPTLSCertFile`/`HTTPTLSKeyFile` and no caller-owned certificate configuration, the sidecar serves through `golem/net.ReloadableCertificate`; `HTTPTLSReloadInterval` polls the files and a failed reload keeps the previous certificate.
+
+**Admin listener (`admin.go`):** `RunOptions.Admin` starts a separate operator-only HTTP listener (`/live`, `/ready`, `/info`, `/stats`, `POST /snapshot`, `POST /reload-tls`). It is operations tooling, not a debug surface: no pprof, no static files. Every endpoint except `/live` needs the bearer token (constant-time compare, never logged); `Run` refuses a non-loopback address without a token; requests with an `Origin` header, and tokenless requests with a non-loopback `Host`, are rejected. Its JSON shapes are a contract with deploy tooling: change them additively.
+
+**Environment (`env.go`):** `RunOptionsFromEnv` / `AdminOptionsFromEnv` overlay `GOLEM_HTTP_ADDR`, `GOLEM_ADMIN_ADDR`, `GOLEM_ADMIN_TOKEN` and reuse the `GOLEM_TLS_*` variables for the sidecar; `SnapshotOptionsFromEnv` reads `GOLEM_SNAPSHOT_DIR` / `GOLEM_SNAPSHOT_INTERVAL`. Unset variables leave code values unchanged; malformed values are logged and ignored. Parse new deploy variables here, never in templates.
+
+**Deploy contract (`game.go`):** `RunGame(ctx, srv, GameBindings, GameOptions)` is what the generated go-server `Runtime.Host` calls (`HostOptions` is an alias of `GameOptions`, so new fields need no re-bake). `GameBindings` carries the generated facts (fingerprint, `InspectorSchema()`, the `Runtime` snapshot wrappers) as plain values; keep schema knowledge in codegen. Zero options plus no environment must stay equivalent to `Run(ctx, RunOptions{Server: srv})`. Order: env overlay and validation → mkdir + load `Dir/world.snapshot` (any load error fails startup; a fingerprint mismatch names both fingerprints via `snapshot.ReadFingerprint`) → `AfterRestore(restored)` → `inspector.Attach` (no-op without a hub URL) → autosave goroutine (restarts after a failed save, ends on `ErrServerNotRunning`) → `Run`. `AfterServerStop` stops autosave, then `SaveSnapshot` (the final save). The sidecar mux has exact `DefaultRealtimeConfigPath` (`/api/realtime-config`, 503 without a public URL) and `DefaultWebSocketPath` (`/api/ws`, `Server.WebSocketHandler`) routes, then `SPAHandler` for API and assets. Never invent realtime URLs; a fallback URL with a non-WebTransport primary fails startup. Paths, file name and `AdminExtra*` keys are a contract with deploy tooling.
+
+**Boundaries:** `golem/host` may import `golem`, `golem/net` (for `ReloadableCertificate`), `golem/snapshot` (errors and header reads), `golem/inspector` (+ `wire`, for `RunGame`) and standard-library HTTP/FS/process packages. Keep simulation, networking protocols, generated-schema knowledge, and debug/profiling helpers out of this package.

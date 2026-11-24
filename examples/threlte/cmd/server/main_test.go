@@ -2,6 +2,7 @@ package main
 
 import (
 	"math"
+	"path/filepath"
 	"testing"
 
 	"example.com/golem-threlte/internal/generated"
@@ -54,5 +55,34 @@ func TestActorMovementUsesElapsedSeconds(t *testing.T) {
 	}
 	if d.stats.UptimeSeconds() != 1 {
 		t.Fatal("headless session statistics did not update")
+	}
+}
+
+func TestSnapshotRestoreAdoptsWorldWithoutActors(t *testing.T) {
+	d := newDemo()
+	actor := generated.NewSyncedActor(0, 0, 0, "test", 0, 0)
+	if err := d.server.CreateEntity(actor, 42); err != nil {
+		t.Fatal(err)
+	}
+	d.stats.SetConnectedCount(1)
+	d.beacon.SetIntensity(0.25)
+	path := filepath.Join(t.TempDir(), "world.snapshot")
+	if err := <-d.runtime.SaveSnapshot(path); err != nil {
+		t.Fatal(err)
+	}
+
+	restored := newUnseededDemo()
+	ok, err := restored.runtime.LoadSnapshotIfExists(path)
+	if err != nil || !ok {
+		t.Fatalf("LoadSnapshotIfExists = %v, %v", ok, err)
+	}
+	if err := restored.afterRestore(true); err != nil {
+		t.Fatal(err)
+	}
+	if restored.server.Len() != 2 {
+		t.Fatalf("restored %d entities, want stats and beacon only", restored.server.Len())
+	}
+	if restored.beacon == nil || restored.beacon.Intensity() != 0.25 || restored.stats == nil || restored.stats.ConnectedCount() != 0 {
+		t.Fatal("restored world was not adopted")
 	}
 }
