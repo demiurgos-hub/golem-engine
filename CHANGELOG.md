@@ -8,6 +8,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Added
 
+- The admin listener can serve Go profiles of the running game. Set `AdminOptions.Profiling` or `GOLEM_ADMIN_PROFILING=1`, then fetch `GET /profile/cpu?seconds=N` (at most 60), `/profile/trace?seconds=N` (at most 15), `/profile/heap`, `/profile/allocs` or `/profile/goroutine` with the admin token. One CPU or trace capture runs at a time, captures also work while the server starts, and they end when the server stops. It is off by default, and `/info` reports it as `profiling`.
 - `host.LocalDevelopment` configures a loopback game and its sidecar with local realtime URLs and an in-memory WebTransport certificate. Deploy environment overrides still take precedence.
 - Read the negotiated transport using `GameClient.connectedTransport` in TypeScript or `Session.TransportKind()` on the Go server. The Phaser and Threlte connected status also carries the transport.
 

@@ -20,6 +20,9 @@ const (
 	// EnvAdminToken sets AdminOptions.Token, the admin bearer token. Its value
 	// is never logged.
 	EnvAdminToken = "GOLEM_ADMIN_TOKEN"
+	// EnvAdminProfiling sets AdminOptions.Profiling: 1/true/yes/on serves
+	// GET /profile/{kind} on the admin listener, 0/false/no/off does not.
+	EnvAdminProfiling = "GOLEM_ADMIN_PROFILING"
 	// EnvHTTPAddr sets the sidecar RunOptions.HTTPServer.Addr, e.g. ":8080".
 	EnvHTTPAddr = "GOLEM_HTTP_ADDR"
 )
@@ -34,9 +37,12 @@ const (
 	EnvSnapshotInterval = "GOLEM_SNAPSHOT_INTERVAL"
 )
 
-// AdminOptionsFromEnv returns base with Addr and Token overridden by
-// GOLEM_ADMIN_ADDR and GOLEM_ADMIN_TOKEN. A variable that is unset or blank
-// after trimming leaves its field unchanged. Values are not validated here:
+// AdminOptionsFromEnv returns base with Addr, Token and Profiling overridden by
+// GOLEM_ADMIN_ADDR, GOLEM_ADMIN_TOKEN and GOLEM_ADMIN_PROFILING. A variable
+// that is unset or blank after trimming leaves its field unchanged.
+// GOLEM_ADMIN_PROFILING accepts 1/true/yes/on or 0/false/no/off,
+// case-insensitively; other values are logged and ignored. Addresses and
+// tokens are not validated here:
 // Run applies the token length and fail-closed address rules at startup, so a
 // too-short token makes Run fail instead of silently disabling authentication.
 // It never logs the token and never fails.
@@ -47,6 +53,16 @@ func AdminOptionsFromEnv(base AdminOptions) AdminOptions {
 	}
 	if v, ok := lookupEnvTrimmed(EnvAdminToken); ok {
 		opts.Token = v
+	}
+	if v, ok := lookupEnvTrimmed(EnvAdminProfiling); ok {
+		switch strings.ToLower(v) {
+		case "1", "true", "yes", "on":
+			opts.Profiling = true
+		case "0", "false", "no", "off":
+			opts.Profiling = false
+		default:
+			logIgnoredEnv(EnvAdminProfiling, v, "want 1/true/yes/on or 0/false/no/off")
+		}
 	}
 	return opts
 }
@@ -60,9 +76,10 @@ func AdminOptionsFromEnv(base AdminOptions) AdminOptions {
 //     HTTPTLSKeyFile, and GOLEM_TLS_RELOAD_INTERVAL sets HTTPTLSReloadInterval
 //     (Go duration syntax; "0" disables polling), the same variables
 //     golem.ServerConfigFromEnv reads for the WebTransport listener.
-//   - GOLEM_ADMIN_ADDR and GOLEM_ADMIN_TOKEN overlay a copy of base.Admin as
-//     AdminOptionsFromEnv does; when base.Admin is nil and GOLEM_ADMIN_ADDR is
-//     set, a new AdminOptions is created. base.Admin itself is not modified.
+//   - GOLEM_ADMIN_ADDR, GOLEM_ADMIN_TOKEN and GOLEM_ADMIN_PROFILING overlay a
+//     copy of base.Admin as AdminOptionsFromEnv does; when base.Admin is nil
+//     and GOLEM_ADMIN_ADDR is set, a new AdminOptions is created. base.Admin
+//     itself is not modified.
 //
 // A variable that is unset or blank after trimming leaves its field unchanged.
 // A malformed reload interval (invalid syntax or negative) is logged with its
@@ -91,8 +108,9 @@ func RunOptionsFromEnv(base RunOptions) RunOptions {
 	}
 	_, addrSet := lookupEnvTrimmed(EnvAdminAddr)
 	_, tokenSet := lookupEnvTrimmed(EnvAdminToken)
+	_, profilingSet := lookupEnvTrimmed(EnvAdminProfiling)
 	switch {
-	case base.Admin != nil && (addrSet || tokenSet):
+	case base.Admin != nil && (addrSet || tokenSet || profilingSet):
 		admin := AdminOptionsFromEnv(*base.Admin)
 		opts.Admin = &admin
 	case base.Admin == nil && addrSet:

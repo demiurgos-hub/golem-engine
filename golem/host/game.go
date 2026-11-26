@@ -114,8 +114,9 @@ type GameOptions struct {
 	// WebSocketPath overrides DefaultWebSocketPath.
 	WebSocketPath string
 
-	// Admin is the base admin listener configuration; GOLEM_ADMIN_ADDR and
-	// GOLEM_ADMIN_TOKEN overlay Addr and Token. Info.Name,
+	// Admin is the base admin listener configuration; GOLEM_ADMIN_ADDR,
+	// GOLEM_ADMIN_TOKEN and GOLEM_ADMIN_PROFILING overlay Addr, Token and
+	// Profiling. Info.Name,
 	// Info.SchemaFingerprint and Info.CertificateHashesPublished are always
 	// filled in by RunGame. When snapshots are enabled and Snapshot is nil,
 	// POST /snapshot saves the snapshot file on the tick goroutine.

@@ -13,7 +13,7 @@ import (
 
 func clearHostEnv(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{EnvAdminAddr, EnvAdminToken, EnvHTTPAddr, golem.EnvTLSCertFile, golem.EnvTLSKeyFile, golem.EnvTLSReloadInterval} {
+	for _, name := range []string{EnvAdminAddr, EnvAdminToken, EnvAdminProfiling, EnvHTTPAddr, golem.EnvTLSCertFile, golem.EnvTLSKeyFile, golem.EnvTLSReloadInterval} {
 		t.Setenv(name, "")
 	}
 }
@@ -34,9 +34,10 @@ func captureLog(t *testing.T) *bytes.Buffer {
 func TestAdminOptionsFromEnv(t *testing.T) {
 	base := AdminOptions{Addr: "127.0.0.1:1", Token: "base-token-0123456789", Info: AdminInfo{Name: "game"}}
 	tests := []struct {
-		name string
-		env  map[string]string
-		want AdminOptions
+		name    string
+		env     map[string]string
+		want    AdminOptions
+		wantLog string
 	}{
 		{name: "unset keeps base", want: base},
 		{name: "blank keeps base", env: map[string]string{EnvAdminAddr: "  ", EnvAdminToken: " "}, want: base},
@@ -44,6 +45,9 @@ func TestAdminOptionsFromEnv(t *testing.T) {
 			want: AdminOptions{Addr: ":9090", Token: "env-token-0123456789", Info: AdminInfo{Name: "game"}}},
 		{name: "short token passes through for Run to reject", env: map[string]string{EnvAdminToken: "short"},
 			want: AdminOptions{Addr: "127.0.0.1:1", Token: "short", Info: AdminInfo{Name: "game"}}},
+		{name: "profiling on", env: map[string]string{EnvAdminProfiling: " ON "},
+			want: AdminOptions{Addr: "127.0.0.1:1", Token: "base-token-0123456789", Info: AdminInfo{Name: "game"}, Profiling: true}},
+		{name: "malformed profiling ignored", env: map[string]string{EnvAdminProfiling: "maybe"}, want: base, wantLog: EnvAdminProfiling},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -53,13 +57,24 @@ func TestAdminOptionsFromEnv(t *testing.T) {
 				t.Setenv(k, v)
 			}
 			got := AdminOptionsFromEnv(base)
-			if got.Addr != tt.want.Addr || got.Token != tt.want.Token || got.Info.Name != tt.want.Info.Name {
+			if got.Addr != tt.want.Addr || got.Token != tt.want.Token || got.Info.Name != tt.want.Info.Name || got.Profiling != tt.want.Profiling {
 				t.Fatalf("AdminOptionsFromEnv = %+v, want %+v", got, tt.want)
+			}
+			if tt.wantLog != "" && !strings.Contains(logs.String(), tt.wantLog) {
+				t.Fatalf("log %q does not name %s", logs.String(), tt.wantLog)
 			}
 			if strings.Contains(logs.String(), "token-0123456789") || strings.Contains(logs.String(), "short") {
 				t.Fatalf("token logged: %q", logs.String())
 			}
 		})
+	}
+}
+
+func TestAdminProfilingFromEnvTurnsOff(t *testing.T) {
+	clearHostEnv(t)
+	t.Setenv(EnvAdminProfiling, "false")
+	if AdminOptionsFromEnv(AdminOptions{Profiling: true}).Profiling {
+		t.Fatalf("%s=false kept profiling on", EnvAdminProfiling)
 	}
 }
 
@@ -70,6 +85,7 @@ func TestRunOptionsFromEnv(t *testing.T) {
 		interval         time.Duration
 		adminNil         bool
 		adminAddr, token string
+		profiling        bool
 	}
 	tests := []struct {
 		name      string
@@ -97,6 +113,10 @@ func TestRunOptionsFromEnv(t *testing.T) {
 			want: result{httpAddr: ":80", cert: "base.crt", key: "base.key", interval: time.Minute, adminNil: true}},
 		{name: "token overlays base admin", baseAdmin: &AdminOptions{Addr: "127.0.0.1:9", Token: "base-token-0123456789"}, env: map[string]string{EnvAdminToken: "env-token-0123456789"},
 			want: result{httpAddr: ":80", cert: "base.crt", key: "base.key", interval: time.Minute, adminAddr: "127.0.0.1:9", token: "env-token-0123456789"}},
+		{name: "profiling overlays base admin", baseAdmin: &AdminOptions{Addr: "127.0.0.1:9"}, env: map[string]string{EnvAdminProfiling: "1"},
+			want: result{httpAddr: ":80", cert: "base.crt", key: "base.key", interval: time.Minute, adminAddr: "127.0.0.1:9", profiling: true}},
+		{name: "profiling alone does not create admin", env: map[string]string{EnvAdminProfiling: "1"},
+			want: result{httpAddr: ":80", cert: "base.crt", key: "base.key", interval: time.Minute, adminNil: true}},
 		{name: "base admin kept", baseAdmin: &AdminOptions{Addr: "127.0.0.1:9"},
 			want: result{httpAddr: ":80", cert: "base.crt", key: "base.key", interval: time.Minute, adminAddr: "127.0.0.1:9"}},
 	}
@@ -122,12 +142,12 @@ func TestRunOptionsFromEnv(t *testing.T) {
 			}
 			r := result{httpAddr: httpAddr, cert: got.HTTPTLSCertFile, key: got.HTTPTLSKeyFile, interval: got.HTTPTLSReloadInterval, adminNil: got.Admin == nil}
 			if got.Admin != nil {
-				r.adminAddr, r.token = got.Admin.Addr, got.Admin.Token
+				r.adminAddr, r.token, r.profiling = got.Admin.Addr, got.Admin.Token, got.Admin.Profiling
 			}
 			if r != tt.want {
 				t.Fatalf("RunOptionsFromEnv = %+v, want %+v", r, tt.want)
 			}
-			if tt.baseAdmin != nil && (tt.baseAdmin.Addr != baseAdminCopy.Addr || tt.baseAdmin.Token != baseAdminCopy.Token) {
+			if tt.baseAdmin != nil && (tt.baseAdmin.Addr != baseAdminCopy.Addr || tt.baseAdmin.Token != baseAdminCopy.Token || tt.baseAdmin.Profiling != baseAdminCopy.Profiling) {
 				t.Fatal("RunOptionsFromEnv modified base.Admin")
 			}
 			if tt.wantLog != "" && !strings.Contains(logs.String(), tt.wantLog) {
