@@ -93,7 +93,9 @@ func newSession(id int64, reliable reliableMessageChannel, datagrams datagramCha
 	return sess
 }
 
-func (s *Session) transportKind() Transport {
+// TransportKind returns the physical transport negotiated for the session.
+// It is set before OnConnect and stays the same for the session's lifetime.
+func (s *Session) TransportKind() Transport {
 	if s.actualTransport != "" {
 		return s.actualTransport
 	}
@@ -156,7 +158,7 @@ func (s *Session) writePump(ctx context.Context) {
 		}
 		if err := s.drainOutbound(ctx); err != nil {
 			if !s.isExpectedSessionCloseError(err) {
-				log.Printf("golem/net: session %d write pump closing reason=%s remote=%q transport=%q error=%v", s.ID, classifySessionError(err), s.RemoteAddr, s.transportKind(), err)
+				log.Printf("golem/net: session %d write pump closing reason=%s remote=%q transport=%q error=%v", s.ID, classifySessionError(err), s.RemoteAddr, s.TransportKind(), err)
 			}
 			return
 		}
@@ -448,10 +450,10 @@ func (s *Session) readPump(
 			return
 		}
 		if readPumpErr != nil {
-			log.Printf("golem/net: session %d read pump closing reason=%s remote=%q transport=%q error=%v", s.ID, classifySessionError(readPumpErr), s.RemoteAddr, s.transportKind(), readPumpErr)
+			log.Printf("golem/net: session %d read pump closing reason=%s remote=%q transport=%q error=%v", s.ID, classifySessionError(readPumpErr), s.RemoteAddr, s.TransportKind(), readPumpErr)
 			return
 		}
-		log.Printf("golem/net: session %d read pump closing reason=%q remote=%q transport=%q", s.ID, readPumpReason, s.RemoteAddr, s.transportKind())
+		log.Printf("golem/net: session %d read pump closing reason=%q remote=%q transport=%q", s.ID, readPumpReason, s.RemoteAddr, s.TransportKind())
 	}()
 
 	var wg sync.WaitGroup

@@ -332,7 +332,7 @@ func (l *Listener) SessionTransport(sessionID int64) (Transport, bool) {
 	if !ok {
 		return "", false
 	}
-	return s.transportKind(), true
+	return s.TransportKind(), true
 }
 
 // CloseSessions stops session admission and closes every pending or connected
@@ -729,24 +729,46 @@ func (l *Listener) listenAndServeWebTransport(ctx context.Context, mux *http.Ser
 		return err
 	}
 	defer packetConn.Close()
-	l.boundAddr.Store(packetConn.LocalAddr().String())
-	go func() {
-		<-ctx.Done()
+	transport := &quic.Transport{Conn: packetConn}
+	defer transport.Close()
+	config := h3.QUICConfig.Clone()
+	config.EnableDatagrams = true
+	config.EnableStreamResetPartialDelivery = true
+	ln, err := transport.ListenEarly(h3.TLSConfig, config)
+	if err != nil {
+		l.signalReady(err)
+		return err
+	}
+
+	// Own acceptance so shutdown cannot race webtransport.Server.Serve startup.
+	// Close active connections while the socket can still send their close frames.
+	var connections sync.WaitGroup
+	defer func() {
+		_ = ln.Close()
 		_ = server.Close()
+		connections.Wait()
 	}()
+	l.boundAddr.Store(ln.Addr().String())
 	stopReloadPoll := l.startCertificateReloadPoll(ctx)
 	defer stopReloadPoll()
 	log.Printf("golem/net: listening transport=%q addr=%q path=%q", l.config.Transport, l.config.Addr, l.config.Path)
 	l.signalReady(nil)
-	err = server.Serve(packetConn)
-	if err == http.ErrServerClosed || errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
-		return nil
+	for {
+		conn, err := ln.Accept(ctx)
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, quic.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			log.Printf("golem/net: listener stopped transport=%q addr=%q path=%q error=%v", l.config.Transport, l.config.Addr, l.config.Path, err)
+			return err
+		}
+		connections.Go(func() {
+			defer conn.CloseWithError(0, "")
+			if err := server.ServeQUICConn(conn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("golem/net: error serving WebTransport connection: %v", err)
+			}
+		})
 	}
-	if err != nil {
-		l.signalReady(err)
-		log.Printf("golem/net: listener stopped transport=%q addr=%q path=%q error=%v", l.config.Transport, l.config.Addr, l.config.Path, err)
-	}
-	return err
 }
 
 func formatCertificateHashes(hashes []CertificateHash) string {
@@ -1010,7 +1032,7 @@ func (l *Listener) serveAcceptedSession(ctx context.Context, sess *Session, r *h
 	defer l.removeSession(sess)
 
 	if err := l.sendSnapshot(ctx, sess); err != nil {
-		log.Printf("golem/net: session %d setup failed: snapshot remote=%q transport=%q error=%v", sess.ID, sess.RemoteAddr, sess.transportKind(), err)
+		log.Printf("golem/net: session %d setup failed: snapshot remote=%q transport=%q error=%v", sess.ID, sess.RemoteAddr, sess.TransportKind(), err)
 		sess.Close()
 		return
 	}
@@ -1024,13 +1046,13 @@ func (l *Listener) serveAcceptedSession(ctx context.Context, sess *Session, r *h
 		sess.Close()
 		return
 	}
-	log.Printf("golem/net: session %d accepted remote=%q origin=%q host=%q transport=%q", sess.ID, sess.RemoteAddr, origin, host, sess.transportKind())
+	log.Printf("golem/net: session %d accepted remote=%q origin=%q host=%q transport=%q", sess.ID, sess.RemoteAddr, origin, host, sess.TransportKind())
 	if l.onConnect != nil {
 		l.onConnect(sess)
 	}
 	go sess.writePump(ctx)
 	sess.readPump(ctx, l.onMessage, l.onDatagram, l.onReliableUnordered, l.onReliableOrdered, l.onEventualStateFeedback, l.onSpaceAck, l.onEntityResync)
-	log.Printf("golem/net: session %d disconnected remote=%q transport=%q", sess.ID, sess.RemoteAddr, sess.transportKind())
+	log.Printf("golem/net: session %d disconnected remote=%q transport=%q", sess.ID, sess.RemoteAddr, sess.TransportKind())
 	if l.onDisconnect != nil {
 		l.onDisconnect(sess)
 	}
@@ -1067,7 +1089,6 @@ func (l *Listener) ensureWebTransportServer(h3 *http3.Server) *webtransport.Serv
 		if h3 != nil {
 			l.wtServer.H3 = ConfigureWebTransportHTTP3Server(h3)
 		}
-		l.wtServer.CheckOrigin = l.wtCheckOrigin
 		return l.wtServer
 	}
 	l.wtServer = &webtransport.Server{

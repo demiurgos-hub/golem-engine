@@ -1,6 +1,6 @@
 module github.com/demiurgos-hub/golem-engine/examples/navigation-server
 
-go 1.25.4
+go 1.26.0
 
 require (
 	github.com/demiurgos-hub/golem-engine v0.4.0
@@ -15,10 +15,10 @@ require (
 	github.com/demiurgos-hub/golem-engine/golem/collision v0.3.1-0.20261013153120-49b2e72c189a // indirect
 	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.59.0 // indirect
-	github.com/quic-go/webtransport-go v0.10.0 // indirect
-	golang.org/x/crypto v0.41.0 // indirect
-	golang.org/x/net v0.43.0 // indirect
-	golang.org/x/sys v0.36.0 // indirect
-	golang.org/x/text v0.29.0 // indirect
+	github.com/quic-go/quic-go v0.60.0 // indirect
+	github.com/quic-go/webtransport-go v0.11.1 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 )

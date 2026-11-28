@@ -71,12 +71,8 @@ func Attach(ctx context.Context, srv *golem.Server, schema *wire.Schema, opts Op
 	if err := schema.Validate(); err != nil {
 		return nil, fmt.Errorf("inspector: %w", err)
 	}
-	u, err := url.Parse(opts.HubURL)
-	if err != nil || (u.Scheme != "ws" && u.Scheme != "wss" && u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return nil, fmt.Errorf("inspector: hub URL must be an absolute ws:// or wss:// URL")
-	}
-	if u.User != nil || u.Query().Has("token") {
-		return nil, fmt.Errorf("inspector: pass the hub token in Options.Token, not the URL")
+	if err := validateHubURL(opts.HubURL); err != nil {
+		return nil, err
 	}
 	if strings.TrimSpace(opts.Token) == "" {
 		return nil, fmt.Errorf("inspector: Options.Token is required when HubURL is set")

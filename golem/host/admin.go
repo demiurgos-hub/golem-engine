@@ -38,7 +38,10 @@ const adminMaxBodyBytes = 4 << 10
 // The admin listener is a separate, small JSON API for the operator or a
 // deploy tool (health checks, stats, pre-backup snapshots, certificate
 // reloads); it is not part of the game's public sidecar and should be bound
-// to a private interface or port. It serves no static files and no pprof.
+// to a private interface or port. It serves no static files. With Profiling
+// set it also serves GET /profile/{kind}: cpu and trace captures (?seconds,
+// see AdminProfileCPUMaxSeconds and AdminProfileTraceMaxSeconds; one at a
+// time) and heap, allocs and goroutine profiles, as downloadable files.
 //
 // Security: every endpoint except GET /live requires
 // "Authorization: Bearer <Token>", compared in constant time on SHA-256
@@ -66,6 +69,11 @@ type AdminOptions struct {
 	// running after the timeout response, and later requests get 409 until it
 	// returns.
 	SnapshotTimeout time.Duration
+	// Profiling enables GET /profile/{kind}, behind the same token as every
+	// other endpoint. It is off by default; a capture costs what the same
+	// net/http/pprof request would, and nothing while none runs. Captures
+	// work while the server is starting, so a slow start can be profiled.
+	Profiling bool
 
 	// listening, when set (tests), receives the bound address.
 	listening func(net.Addr)
@@ -159,7 +167,9 @@ type adminServer struct {
 	// snapshotSem holds a token while a snapshot runs; shutdown takes it for
 	// good (waitSnapshotIdle).
 	snapshotSem chan struct{}
-	http        *http.Server
+	// profileSem holds a token while a cpu or trace capture runs.
+	profileSem chan struct{}
+	http       *http.Server
 }
 
 func newAdminServer(ctx context.Context, cfg *adminConfig, server *golem.Server, sidecarCert *golemnet.ReloadableCertificate) *adminServer {
@@ -170,6 +180,7 @@ func newAdminServer(ctx context.Context, cfg *adminConfig, server *golem.Server,
 		ctx:         ctx,
 		started:     time.Now(),
 		snapshotSem: make(chan struct{}, 1),
+		profileSem:  make(chan struct{}, 1),
 	}
 	a.http = &http.Server{
 		Addr:              cfg.opts.Addr,
@@ -243,6 +254,12 @@ func (a *adminServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			a.handleReloadTLS(w)
 		}
 	default:
+		if name, ok := strings.CutPrefix(r.URL.Path, adminProfilePrefix); ok && name != "" && !strings.Contains(name, "/") {
+			if requireMethod(w, r, http.MethodGet) {
+				a.handleProfile(w, r, name)
+			}
+			return
+		}
 		writeAdminError(w, http.StatusNotFound, "not_found", "unknown admin endpoint")
 	}
 }
@@ -289,6 +306,7 @@ type adminInfoResponse struct {
 	WebTransportCertificateHashes []adminCertificateHash `json:"webtransport_certificate_hashes"`
 	HTTPTLSReloadable             bool                   `json:"http_tls_reloadable"`
 	HTTPCertificateHashes         []adminCertificateHash `json:"http_certificate_hashes"`
+	Profiling                     bool                   `json:"profiling"`
 	Extra                         map[string]string      `json:"extra"`
 }
 
@@ -306,6 +324,7 @@ func (a *adminServer) handleInfo(w http.ResponseWriter) {
 		WebTransportCertificateHashes: adminHashes(a.server.WebTransportCertificateHashes()),
 		HTTPTLSReloadable:             a.sidecarCert != nil,
 		HTTPCertificateHashes:         []adminCertificateHash{},
+		Profiling:                     a.cfg.opts.Profiling,
 		Extra:                         info.Extra,
 	}
 	if a.sidecarCert != nil {

@@ -52,3 +52,5 @@ Private message callback binding shares only the four receive routes. Direct con
 Private `visitServerMessage` owns outer fields 1-6 traversal, separate from generated envelope codecs; `unwrapServerMessage` still exposes only fields 1-3. Live consumers apply every occurrence immediately; `unwrapServerMessage` retains the last per field. Preserve borrowed views, partial effects before later failures and reader skip behavior for wrong-wire, unknown or unhandled fields.
 
 Private `scanReliableFrames` shares length/cap/copy scanning. Batch parsing rejects every unconsumed suffix before returning any frames; stream parsing retains it for later pushes. Keep oversized-header rejection before the body arrives, zero-length frames and owned frame copies.
+
+`GameClient.connectedTransport` reads the open transport. The connected state and persistent lifecycle status carry the same transport. Publish it only after the channel opens and clear it through the existing state transitions.

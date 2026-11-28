@@ -126,7 +126,24 @@ err := rt.Host(ctx, synced.HostOptions{HTTPAddr: "127.0.0.1:8080", API: api, Ass
 - `GOLEM_HTTP_ADDR`: sidecar serving `/api/realtime-config`, the WebSocket endpoint `/api/ws`, the game API and assets.
 - `GOLEM_PUBLIC_URL`, `GOLEM_WS_FALLBACK_URL`, `GOLEM_TLS_PINNED`: what the realtime config advertises to clients.
 - `GOLEM_ADMIN_ADDR`, `GOLEM_ADMIN_TOKEN`: operator admin listener (`/live`, `/ready`, `/info`, `/stats`, `POST /snapshot`, `POST /reload-tls`).
-- `GOLEM_SNAPSHOT_DIR`, `GOLEM_SNAPSHOT_INTERVAL`: keep `world.snapshot` across restarts; `GOLEM_INSPECTOR_HUB_URL`, `GOLEM_INSPECTOR_TOKEN`: attach the inspector.
+- Set `GOLEM_SNAPSHOT_DIR` and optionally `GOLEM_SNAPSHOT_INTERVAL` to keep `world.snapshot` across restarts.
+- Set `GOLEM_INSPECTOR_HUB_URL`, `GOLEM_INSPECTOR_TOKEN`, `GOLEM_INSPECTOR_TARGET_ID` and `GOLEM_INSPECTOR_LABELS` to attach and identify the Inspector agent.
+- `GOLEM_INSPECTOR_RATE_HZ` caps the number of coalesced Inspector updates per second while viewed. It accepts finite positive numbers and defaults to 10. Malformed Inspector values are logged by variable name and ignored.
+
+Call `host.LocalDevelopment` before constructing the server to enable loopback WebTransport and advertise the sidecar's WebSocket fallback.
+
+```go
+cfg, opts := host.LocalDevelopment(
+    golem.ServerConfig{Addr: "127.0.0.1:8080"},
+    synced.HostOptions{HTTPAddr: "127.0.0.1:8080", AssetsDir: "web/dist"},
+)
+_, rt := synced.NewServer(cfg)
+err := rt.Host(ctx, opts)
+```
+
+This fills missing realtime URLs for loopback listen addresses without TLS files. The in-memory WebTransport certificate is generated on loopback, and its hash is published for pinning by default. The WebSocket sidecar uses plain HTTP for local development. Deploy variables override these defaults, including the addresses, URLs and pinning. A WebTransport listener on a non-loopback address requires TLS files.
+
+Read the negotiated transport from `client.connectedTransport` in TypeScript, `client.ConnectedTransport()` in Go, or `session.TransportKind()` from a Go server session. The TypeScript client returns `undefined` until a connection opens and after it closes. Its connected state and the Phaser and Threlte connection status also expose the selected `transport`.
 
 ## Client packages
 

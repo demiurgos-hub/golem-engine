@@ -1,13 +1,20 @@
 package inspector
 
 import (
+	"errors"
 	"log"
+	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/net/http/httpguts"
 )
 
 // Environment variables read by OptionsFromEnv.
@@ -54,34 +61,85 @@ type Options struct {
 
 // OptionsFromEnv reads agent options from GOLEM_INSPECTOR_HUB_URL,
 // GOLEM_INSPECTOR_TOKEN, GOLEM_INSPECTOR_TARGET_ID, GOLEM_INSPECTOR_LABELS
-// ("k=v,k=v") and GOLEM_INSPECTOR_RATE_HZ. Unset variables leave defaults.
+// ("k=v,k=v") and GOLEM_INSPECTOR_RATE_HZ (a finite positive number).
+// Blank variables leave defaults. Malformed values are logged by name and
+// ignored. Valid label pairs are kept when another pair is malformed.
 func OptionsFromEnv() Options {
 	opts := Options{
 		HubURL:   strings.TrimSpace(os.Getenv(EnvHubURL)),
 		Token:    strings.TrimSpace(os.Getenv(EnvToken)),
 		TargetID: strings.TrimSpace(os.Getenv(EnvTargetID)),
-		Labels:   ParseLabels(os.Getenv(EnvLabels)),
 	}
-	if v, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv(EnvRateHz)), 64); err == nil && v > 0 {
-		opts.RateHz = v
+	if opts.HubURL != "" {
+		if err := validateHubURL(opts.HubURL); err != nil {
+			logIgnoredEnv(EnvHubURL, err.Error())
+			opts.HubURL = ""
+		}
+	}
+	if !httpguts.ValidHeaderFieldValue(opts.Token) {
+		logIgnoredEnv(EnvToken, "want a valid Authorization header value")
+		opts.Token = ""
+	}
+	if len(opts.TargetID) > 128 || !utf8.ValidString(opts.TargetID) || strings.ContainsFunc(opts.TargetID, unicode.IsControl) {
+		logIgnoredEnv(EnvTargetID, "want a UTF-8 identifier of at most 128 bytes without control characters")
+		opts.TargetID = ""
+	}
+	var malformedLabels bool
+	opts.Labels, malformedLabels = parseLabels(os.Getenv(EnvLabels))
+	if malformedLabels {
+		logIgnoredEnv(EnvLabels, "want comma-separated key=value pairs")
+	}
+	if raw := strings.TrimSpace(os.Getenv(EnvRateHz)); raw != "" {
+		if v, err := strconv.ParseFloat(raw, 64); err == nil && v > 0 && !math.IsInf(v, 0) {
+			opts.RateHz = v
+		} else {
+			logIgnoredEnv(EnvRateHz, "want a finite positive number")
+		}
 	}
 	return opts
 }
 
+func validateHubURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "ws" && u.Scheme != "wss" && u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return errors.New("inspector: hub URL must be an absolute ws:// or wss:// URL")
+	}
+	if u.User != nil || u.Query().Has("token") {
+		return errors.New("inspector: pass the hub token in Options.Token, not the URL")
+	}
+	return nil
+}
+
+// Log the variable name only. A malformed URL or another field can contain a secret.
+func logIgnoredEnv(name, reason string) {
+	log.Printf("golem/inspector: ignoring %s: %s", name, reason)
+}
+
 // ParseLabels parses "k=v,k=v" into a map, ignoring empty or malformed pairs.
 func ParseLabels(s string) map[string]string {
+	labels, _ := parseLabels(s)
+	return labels
+}
+
+func parseLabels(s string) (map[string]string, bool) {
 	out := map[string]string{}
+	malformed := false
 	for _, pair := range strings.Split(s, ",") {
+		if strings.TrimSpace(pair) == "" {
+			continue
+		}
 		k, v, ok := strings.Cut(pair, "=")
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if ok && k != "" {
+		if ok && k != "" && utf8.ValidString(pair) {
 			out[k] = v
+		} else {
+			malformed = true
 		}
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, malformed
 	}
-	return out
+	return out, malformed
 }
 
 func (o Options) withDefaults() Options {

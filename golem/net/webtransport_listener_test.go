@@ -72,7 +72,7 @@ func startTestWebTransportListener(t *testing.T, listener *Listener) string {
 
 	t.Cleanup(func() {
 		cleanupCert()
-		_ = server.Close()
+		defer server.Close()
 		_ = packetConn.Close()
 
 		select {

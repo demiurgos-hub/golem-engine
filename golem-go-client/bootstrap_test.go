@@ -576,7 +576,7 @@ func startPinnedWebTransportServer(t *testing.T) (string, CertificateHash) {
 		serveErr <- wtServer.Serve(packetConn)
 	}()
 	t.Cleanup(func() {
-		_ = wtServer.Close()
+		defer wtServer.Close()
 		_ = packetConn.Close()
 		select {
 		case err := <-serveErr:
@@ -610,7 +610,7 @@ func startGolemNetWebTransportListener(t *testing.T, listener *golemnet.Listener
 		serveErr <- server.Serve(packetConn)
 	}()
 	t.Cleanup(func() {
-		_ = server.Close()
+		defer server.Close()
 		_ = packetConn.Close()
 		select {
 		case err := <-serveErr:
