@@ -208,7 +208,8 @@ func (w *World) CreateBody(d p.BodyDesc) (p.BodyHandle, error) {
 	def.IsAwake = d.Awake
 	def.EnableSleep = d.AllowSleep
 	def.IsBullet = d.Continuous
-	def.Name = string(d.ID)
+	// Leave def.Name empty: Box3D's debug name cache never forgets a name, so naming bodies by their IDs grows it
+	// for every body ever created. The ID lives in BodyDesc.
 	l := d.Locks
 	def.MotionLocks = b.MotionLocks{LinearX: l.LinearX, LinearY: l.LinearY, LinearZ: l.LinearZ, AngularX: l.AngularX, AngularY: l.AngularY, AngularZ: l.AngularZ}
 	if d.Mode == p.DrivenCharacter {

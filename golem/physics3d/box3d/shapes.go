@@ -87,7 +87,7 @@ func containsMesh(s p.ShapeDesc) bool {
 }
 func backendShapeDefinition(c *collider) b.ShapeDef {
 	d := b.DefaultShapeDef()
-	d.Name = string(c.desc.ID)
+	// No d.Name, as with bodies: Box3D's name cache would keep every collider ID forever.
 	d.Density = c.desc.Density
 	d.Filter = b.Filter{CategoryBits: c.desc.Filter.Category, MaskBits: c.desc.Filter.Mask, GroupIndex: c.desc.Filter.Group}
 	d.IsSensor = !c.desc.Roles.Solid

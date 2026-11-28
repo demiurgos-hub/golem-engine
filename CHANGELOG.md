@@ -205,6 +205,7 @@ This project follows the changelog categories from Keep a Changelog: Added, Chan
 
 ### Fixed
 
+- The Box3D physics backend no longer keeps the ID of every body and collider ever created. It passed each ID to Box3D as a debug name, and Box3D's name cache never forgets one, so a server that keeps creating and removing bodies with unique IDs grew its memory by about 100 bytes per collider and eventually logged `Box3D: Hash collision on …` lines. Native bodies and shapes are now unnamed; their IDs remain on the physics3d descriptors.
 - The Go and Unity clients acknowledge a reliable datagram only after handing its record to the client, so an acknowledgement proves the record is queued ahead of any later stream frame (the JS client already behaved this way).
 - The physics step no longer panics when a physics-attached entity is a non-comparable value (such as a struct holding a slice); it identifies entities by their registry incarnation.
 - A `DeleteEntity` deferred from a physics callback no longer deletes a different entity registered under the same ID before the deferred deletion runs, and repeated `DeleteEntity` calls for one entity from physics callbacks queue a single deletion instead of filling the command queue.
